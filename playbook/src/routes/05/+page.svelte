@@ -6,9 +6,10 @@
 
 <PageHead num="05" />
 <p class="lede">
-	<strong>Draft — not part of the fall registration.</strong>
 	The lineage-versus-content split this study measures for disks reappears, unmeasured, in the
-	hottest cache in computing: the KV cache inside LLM serving fleets.
+	hottest cache in computing: 
+
+  the KV cache inside LLM serving fleets.
 	This page explains the object from zero, maps the storage vocabulary onto it, reports a
 	four-way literature sweep (2026-09-01), and drafts the follow-on study.
 </p>
