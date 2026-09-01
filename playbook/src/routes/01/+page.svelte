@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { base } from '$app/paths';
 	import PageHead from '$lib/components/PageHead.svelte';
 	import PageNav from '$lib/components/PageNav.svelte';
 	import { Diagram, Node, Edge, Group, Note } from '$lib/components/diagram';
@@ -7,170 +6,205 @@
 
 <PageHead num="01" />
 <p class="lede">
-	<mark>Phase 1 is the paper.</mark>
-	Offline analysis of images at rest, requiring neither root nor a guest, producing the split
-	on page 00 as a curve against fleet age.
-	Six weeks, because corpora are the whole risk.
+	<strong>Invariant.</strong>
+	The network is on the read path only, only for cold chunks, and never on the write or flush path.
+	Every choice below serves that sentence.
 </p>
 
-<h2>Corpora, in priority order</h2>
+<h2>One host</h2>
 <p>
-	<strong>Real fleets first.</strong>
-	Every VM redundancy study people still cite measured a real fleet (DeDe, 113 VMs; Jayaram et
-	al., 525 images).
-	A scripted fleet gives clean numbers that say what it was designed to say, and a reviewer will
-	say so.
-	The target is at least two real fleets (gate G2): candidates are a university lab or department
-	VM host, a Proxmox homelab donor, CloudLab's image library, and the author's own machines.
-	The ask is hashes with ancestry metadata, not images; the pipeline runs at the donor's site and
-	no image byte leaves it, so the privacy conversation is short.
-	The first ask goes out in week 1.
+	The guest sees a virtio-blk device on stock QEMU.
+	QEMU connects it over vhost-user-blk to one process per host, the daemon.
+	All new code lives there.
+	Guest memory is shared with the daemon, so requests are read in place, and storage IO goes through io_uring.
 </p>
 
 <Diagram
-	w={960}
-	h={230}
-	label="The donor protocol. Inside the donor's site, disk images and an ancestry file feed the census pipeline, which runs there. Only per-chunk hashes, offsets, sizes, and ancestry cross the site boundary to the analysis; no image byte leaves."
-	caption="The donor protocol. The census runs where the images are; only chunk hashes, offsets, sizes, and the ancestry file cross the boundary. Published with the pipeline so a donor can audit it."
+	w={1000}
+	h={420}
+	label="The per-host datapath. A guest on stock QEMU reaches the daemon over vhost-user. Writes append to a local staging log and are acknowledged at FLUSH after fdatasync. A background compactor chunks settled extents, hashes them, and either appends unique chunks to the local store or ships them to their owner on another host, waiting for a durable ack. Reads check staging, then the local store, then the chunk cache, then fetch by name from the owner."
+	caption="One host. The write path ends at the staging log. The compactor is the only thing that talks to other hosts on the write side, and it does so after the ack."
 >
-	<Group x={20} y={20} w={560} h={190} label="donor's site" />
-	<Node x={50} y={70} w={170} h={52} title="disk images" sub="+ ancestry file" />
-	<Note x={135} y={150} anchor="middle" tone="muted" text="never leave the site" />
-	<Edge points={[[220, 96], [300, 96]]} />
-	<Node x={300} y={70} w={230} h={52} title="census pipeline" sub="runs here · one binary · no root" tone="accent" />
-	<Edge points={[[530, 96], [640, 96]]} label="hashes only" labelDy={-9} />
-	<Node x={640} y={60} w={290} h={72} title="per-chunk hashes" sub={['offsets · sizes · ancestry', 'no image bytes']} tone="outline" />
-	<Edge points={[[785, 132], [785, 160]]} tone="muted" />
-	<Node x={700} y={160} w={170} h={44} title="analysis" sub="on the testbed" tone="muted" />
+	<Node x={20} y={40} w={130} h={52} title="guest" sub="virtio-blk" tone="muted" />
+	<Node x={20} y={112} w={130} h={44} title="stock QEMU" sub="vhost-user-blk" tone="muted" />
+	<Edge points={[[150, 134], [200, 134]]} label="shared memory" labelDy={-8} />
+
+	<Group x={200} y={20} w={780} h={380} label="daemon · one per host" tone="accent" />
+
+	<Node x={230} y={60} w={220} h={64} title="staging log" sub={['append-only · local NVMe', 'FLUSH → fdatasync → ack']} tone="accent" />
+	<Note x={340} y={145} anchor="middle" tone="muted" size={9.5} text="no hashing, no chunking, no network" />
+
+	<Edge points={[[340, 124], [340, 190]]} label="settled extents" labelDx={64} labelDy={4} />
+	<Node x={230} y={190} w={220} h={64} title="compactor" sub={['fixed 4K or FastCDC · BLAKE3', 'owner = rendezvous(hash)']} tone="outline" />
+
+	<Edge points={[[450, 210], [520, 210]]} label="owner = self" labelDy={-8} />
+	<Node x={520} y={190} w={200} h={64} title="local store" sub={['append-only chunks', 'hole-punch GC']} />
+	<Edge points={[[450, 238], [520, 300]]} label="owner = peer" labelDy={14} labelDx={-10} tone="accent" />
+	<Node x={520} y={280} w={200} h={64} title="PUT to owner" sub={['batched · durable ack', 'then mark compacted']} tone="accent" />
+	<Edge points={[[720, 312], [960, 312]]} tone="accent" label="to host B" labelDy={-8} />
+
+	<Node x={760} y={60} w={200} h={52} title="index" sub="hash → offset · RAM · rebuildable" />
+	<Node x={760} y={130} w={200} h={52} title="chunk cache" sub="hash → bytes · RAM · bounded" tone="outline" />
+	<Node x={760} y={200} w={200} h={52} title="maps" sub="offset → hash · one per image" />
+
+	<Note x={230} y={330} tone="muted" size={10} text={['read: staging → local store → cache → GET(hash) from owner', 'prefetch: next chunks from the map on sequential reads']} />
 </Diagram>
 
+<h2>Write path</h2>
 <p>
-	<strong>Synthetic controls second.</strong>
-	Cloned fleet (golden image, N clones, scripted drift over simulated months; lineage's best case)
-	and convergent installs (N independent installs updated to the same package set; lineage's
-	structural blind spot).
-	These bracket the real fleets: a real fleet's curve should fall between them, and where it does
-	not is a finding.
+	Guest writes append at block granularity to a staging log on local NVMe.
+	FLUSH is <code>fdatasync</code> of the log, then the acknowledgment.
+	The hot path hashes nothing and chunks nothing, so large writes proceed at sequential-append speed.
 </p>
 <p>
-	<strong>Non-VM classes third.</strong>
-	A model family (base, fine-tunes, quantizations; where whole-file dedup collapses) and Nix store
-	generations (successive closures of one flake; tvix-castore deploys FastCDC and BLAKE3 over the
-	store, so the class has a shipped system and no published numbers).
-	These are where H2 predicts CDC-only dominates; without them the study cannot show the axis
-	move.
-	Container layer stacks are dropped: DupHunter covered the class and it adds a week for a
-	footnote.
+	Durability belongs to the log alone.
+	The page cache never holds the only copy of anything, and every file is opened O_DIRECT.
+	Staging is finite; when ingest outruns compaction, back-pressure throttles the guest, and the point where it engages is measured.
 </p>
 
-<h2>Method</h2>
+<h2>Compactor</h2>
 <p>
-	Chunk every image at whole-file, CDC (FastCDC, 8K–64K, 16K mean), and fixed 4K and 16K aligned
-	granularities, and compute duplicate bytes.
-	Against each corpus's declared ancestry, split them by the tree below.
-	<a class="term" href="{base}/00#term-lineage-capturable">Lineage-capturable</a> means identical and
-	in-place relative to an ancestor, the ceiling for any COW system; a simulated COW at realistic
-	record sizes and a declared snapshot cadence gives the practical figure, since sibling sharing
-	depends on when snapshots were taken.
-	The remainder is <a class="term" href="{base}/00#term-cross-lineage">cross-lineage</a>, split into
-	<a class="term" href="{base}/00#term-block-capturable">block-capturable</a> (coincident at 4K and at
-	16K alignment, reported at both) and <a class="term" href="{base}/00#term-cdc-only">CDC-only</a>.
-	Block-capturable at the matching volblocksize is R1's ceiling and R2's; the sum is R4's.
+	A background pass reads settled extents from staging, cuts them into chunks, hashes each with BLAKE3, and drops any hash already in the local index.
+	Chunking is fixed 4K or FastCDC, chosen per arm on page 02.
+	Extents overwritten in staging are never compacted.
 </p>
 <p>
-	Duplicates within a single image are counted in these leaves and also reported as their own
-	column, as Meyer and Bolosky and Jayaram et al. did, since a fleet study that hides them
-	overstates cross-image sharing.
-	CDC is computed whole-image and also extent-wise over the write pattern a guest block path would
-	present, since that is what a post-process compactor sees (page 03); the gap between the two is
-	reported.
-	Compression in both orders and zeros excluded, per A7.
-	A sample of every hash match is verified byte-for-byte and the sample size reported, per A3.
-</p>
-
-<Diagram
-	w={1060}
-	h={362}
-	label="The census decision tree, left to right. A byte range is first tested for zeros or unallocated space, which are excluded. Non-zero bytes are tested for duplication in the corpus; unique bytes are one leaf. Duplicates identical and in-place against a declared ancestor are lineage-capturable. The rest are cross-lineage, and split by whether they coincide at an aligned fixed block into block-capturable, which an aligned dedup table finds, and CDC-only, which only content-defined chunking finds."
-	caption="The census, per byte range. Gate G1 requires the leaves to sum to 100% of non-zero bytes at every time point. The two amber leaves together are the headline; their ratio is the week-6 gate."
->
-	<Node x={20} y={144} w={110} title="byte range" />
-	<Note x={75} y={210} anchor="middle" tone="muted" size={9.5} text={['per corpus,', 'per time point']} />
-
-	<Edge points={[[130, 166], [148, 166], [148, 104], [165, 104]]} />
-	<Node x={165} y={88} w={160} h={32} kind="question" title="zeros or unallocated?" />
-	<Edge points={[[325, 104], [340, 104], [340, 42], [870, 42]]} label="yes" labelSeg={2} labelDy={-7} tone="muted" />
-	<Edge points={[[245, 120], [245, 166], [355, 166]]} label="no" labelSeg={0} labelDx={14} labelDy={4} />
-
-	<Node x={355} y={150} w={150} h={32} kind="question" title="duplicated in corpus?" />
-	<Edge points={[[505, 166], [520, 166], [520, 104], [870, 104]]} label="no" labelSeg={2} labelDy={-7} tone="muted" />
-	<Edge points={[[430, 182], [430, 228], [535, 228]]} label="yes" labelSeg={0} labelDx={16} labelDy={4} />
-
-	<Node x={535} y={212} w={165} h={32} kind="question" title="in-place vs an ancestor?" />
-	<Edge points={[[700, 228], [720, 228], [720, 166], [870, 166]]} label="yes" labelSeg={2} labelDy={-7} />
-	<Edge points={[[617, 244], [617, 259], [735, 259]]} label="no" labelSeg={0} labelDx={14} labelDy={4} />
-
-	<Node x={735} y={243} w={110} h={32} kind="question" title="aligned block?" tone="accent" />
-	<Edge points={[[790, 243], [790, 228], [870, 228]]} label="yes" labelSeg={1} labelDy={-6} tone="accent" />
-	<Edge points={[[790, 275], [790, 290], [870, 290]]} label="no" labelSeg={1} labelDy={14} tone="accent" />
-
-	<Node x={870} y={20} w={170} title="excluded" sub="zeros · reported apart" tone="muted" />
-	<Node x={870} y={82} w={170} title="unique" tone="muted" />
-	<Node x={870} y={144} w={170} title="lineage-capturable" sub="a clone shares it free" />
-	<Node x={870} y={206} w={170} title="block-capturable" sub="aligned table · R1–R3" tone="outline" />
-	<Node x={870} y={268} w={170} title="CDC-only" sub="chunking only · R4" tone="accent" />
-	<Note x={1040} y={334} anchor="end" tone="accent" size={10} text={['amber = cross-lineage, the headline', 'their ratio = the week-6 gate']} />
-</Diagram>
-
-<h2>The time axis</h2>
-<p>
-	Cross-lineage fraction is a function of time since clone.
-	A freshly cloned fleet is all lineage; a fleet a year into independent update cycles is mostly
-	content.
-	The operator's question is when their fleet crosses over, so <mark>every leaf is computed at
-	several points along each corpus's timeline</mark> and the output is a curve per corpus, not a
-	number.
+	For each new chunk, the owner is the first k hosts in rendezvous order of its hash.
+	If the owner is this host, the chunk is appended to the local store and fdatasync'd.
+	Otherwise it goes in a batch to the owner, which appends, fdatasyncs once per batch, and acks.
+	<mark>Only after the ack does the extent count as compacted.</mark>
+	Staging is the write-ahead log for the whole fleet.
 </p>
 <p>
-	For real fleets the time axis is image age since its recorded clone or install, from the
-	ancestry file, aggregated across images.
-	For synthetic fleets it is scripted drift at declared intervals.
-	Snapshot cadence enters as a second axis on the lineage leaf: the practical COW figure is
-	computed at daily, weekly, and never cadences.
+	Two costs come with this and both are measured.
+	Every surviving byte is written at least twice, staging then store, plus journal traffic.
+	Compaction reads and writes the same device the guest is using, so guest p99 is measured with the compactor active and idle.
+</p>
+<p class="note">
+	CDC over a dirty extent re-chunks from the last settled boundary before it to the first boundary after it that agrees with the existing cut.
+	This is the standard resynchronization rule (LBFS locality; Xet's boundary reset), and it is why CDC never runs on the hot path: one aligned write can move every boundary in its neighborhood.
 </p>
 
-<h2>The week-6 gate</h2>
+<h2>Read path</h2>
 <p>
-	The H2 verdict is written down at the end of week 6, before any system work starts.
-	<mark>If block-capturable at 4K is at least 90% of cross-lineage on the VM corpora, phase 3 is
-	cancelled</mark> and the paper says why: an aligned dedup table already reaches what a
-	chunk-addressed backend would, and the cost table on page 02 is the whole cost side.
-	The 90% is a choice, chosen before the data arrives so it cannot move afterward.
+	Reads check staging, then the local store, then the chunk cache, then send <code>GET(hash)</code> to the owner.
+	The owner answers from its cache if the chunk is hot, otherwise from its store.
+	Fresh data never pays indirection; settled data pays the map walk, the index lookup, and, if the owner is remote, one round trip.
 </p>
 <p>
-	If the gate opens, the CDC-only residue is large enough that a system is worth building to
-	price it, and the census has given that system its scope: the corpora where the residue lives
-	and the chunk size that found it.
-	If the gate stays closed, weeks 11 and 12 go to a third real fleet and tighter curves.
+	The chunk cache is daemon-owned RAM keyed by hash, LRU, with a size that is a parameter.
+	Because every file is O_DIRECT, the kernel page cache is out of the picture on every host, and the cache size can be bounded equal to ARC on the ZFS rung.
+</p>
+<p>
+	Prefetch is the daemon issuing the next D hashes from the map when it sees sequential reads, and optionally replaying a recorded boot profile.
+	D is swept on page 04.
 </p>
 
-<h2>Standing claims settled as a side effect</h2>
-<ul class="plain">
-	<li>Whether compression captures most of dedup's win (the despairlabs position).</li>
-	<li>Whether fixed blocks still approximate CDC on VM images (Jin and Miller 2009, retested at 4K and 16K).</li>
-	<li>Whether whole-file dedup collapses on model corpora (ZipLLM, Xet).</li>
-	<li>What fraction of observed sharing an explicit copy signal could ever have declared.</li>
-	<li>How the intra-image column compares to the 2011 IBM numbers.</li>
-</ul>
-
-<h2>Pipeline</h2>
+<h2>Capacity tier</h2>
 <p>
-	A few thousand lines over the <code>blake3</code> and <code>fastcdc</code> crates, one binary,
-	no root, runs on one node or on a donor's laptop.
-	Input is a directory of images and an ancestry file (image, parent, clone date, snapshot dates).
-	Output is one ndjson row per chunk and one decomposition table per corpus per time point.
-	Analysis is <code>uv run</code> Python over the ndjson.
-	First numbers on the synthetic controls in week 2.
+	The local store is an append-only log of records (length, hash, flags, bytes) and is authoritative for the chunks this host owns.
+	The index maps hash to offset, lives in RAM, and is rebuilt by scanning the store; its bytes per TB is the constant the chunk-size arms measure.
+	The map, one per image, is a journaled offset tree from disk offset to chunk hash.
+	It lives with the guest's host and moves when the guest does.
+</p>
+
+<h2>Protocol</h2>
+<div class="table-scroll">
+	<table class="spec">
+		<thead>
+			<tr><th>Message</th><th>Reply</th><th>Used by</th></tr>
+		</thead>
+		<tbody>
+			<tr><td class="k">GET(hash)</td><td>bytes</td><td>cold read, prefetch</td></tr>
+			<tr><td class="k">PUT(batch of chunks)</td><td>ack after one fdatasync</td><td>compactor shipping to an owner</td></tr>
+			<tr><td class="k">HAS(hashes)</td><td>bitmap</td><td>provisioning, migration, sync</td></tr>
+			<tr><td class="k">LIVE(epoch, hashes)</td><td>ack</td><td>garbage collection</td></tr>
+		</tbody>
+	</table>
+</div>
+<p>
+	Length-prefixed messages over kernel TCP, one connection per core, <code>TCP_NODELAY</code>, driven by io_uring.
+	The daemon runs spinning or sleeping; page 04 measures both, because the wakeup is part of the price.
+	Rendezvous hashing means a reader already knows the owner of every hash; nobody looks up anyone else's index.
+</p>
+<p>
+	RDMA and NVMe-oF exports appear on page 04 as probes that show what the kernel stack costs.
+	The architecture does not depend on either.
+</p>
+
+<h2>Placement and k</h2>
+<p>
+	Owner set = the first k hosts in rendezvous order of the chunk's hash.
+	k is the one cross-host parameter.
+	On two hosts, k = 2 means every chunk is on both (replicated) and k = 1 means each chunk lives on exactly one (partitioned).
+	Page 03 measures both; a deployment would run k ≥ 2 on N ≥ 3 hosts.
+</p>
+
+<h2>Durability</h2>
+<div class="table-scroll">
+	<table class="spec">
+		<thead>
+			<tr><th>Failure</th><th>What survives</th><th>Against R0 and R1</th></tr>
+		</thead>
+		<tbody>
+			<tr><td class="k">daemon crash</td><td>everything: replay the staging log, re-run incomplete compaction epochs</td><td>gate G2, <code>fio --verify</code> after <code>kill -9</code></td></tr>
+			<tr><td class="k">host crash, power loss</td><td>everything acked: FLUSH was fdatasync on local NVMe</td><td>same contract as a local disk</td></tr>
+			<tr><td class="k">host lost</td><td>acked bytes not yet shipped are gone; with k = 1, chunks it owned are gone fleet-wide</td><td>R0 and R1 lose everything too; the window is measured, and k ≥ 2 closes the second half</td></tr>
+		</tbody>
+	</table>
+</div>
+<p>
+	Two rules follow.
+	Bytes are durable on local NVMe before they go on the wire, always.
+	Shipping is two-phase: the owner fdatasyncs and acks before the sender marks anything compacted or reclaimable.
+</p>
+<p>
+	The window between a local ack and the chunk being durable on its owner is the compaction lag, measured in seconds under the fleet replay.
+	One optional arm closes it: mirror the staging tail to the peer on every FLUSH and wait for its fdatasync before acking.
+	That is what every production system in this space does, and the arm measures what it costs: one round trip per FLUSH.
+</p>
+
+<h2>Crash consistency</h2>
+<p>
+	Two logs, staging and the map journal, must agree after a crash.
+	Staging is senior.
+	Compaction is idempotent and every batch carries an epoch recorded in both logs.
+	Recovery replays staging, discards map records from any epoch whose extents were not marked compacted, and re-runs compaction from the oldest incomplete epoch.
+	<code>kill -9</code> at any point, then this replay, must pass <code>fio --verify</code> before any number from the daemon is reported.
+</p>
+
+<h2>Garbage</h2>
+<p>
+	A chunk is live if any staging log or any map on any host references it.
+	Each host sends its owner the live set for an epoch with <code>LIVE</code>; the owner sweeps with <code>FALLOC_FL_PUNCH_HOLE</code> over dead records.
+	No reference counts.
+	The sweep runs once after the fleet replay to report reclaimed bytes; concurrent collection is out of scope.
+</p>
+
+<h2>Out of scope</h2>
+<p>
+	Membership changes, failure detection, rebalancing when a host joins or leaves, authentication and encryption on the wire, more than two hosts, and concurrent garbage collection.
+	Each is named in future work on page 05, and none of them affects a number this study reports.
+</p>
+
+<h2>Provenance</h2>
+<div class="table-scroll">
+	<table class="spec">
+		<thead>
+			<tr><th>Component</th><th>Source</th><th>License</th></tr>
+		</thead>
+		<tbody>
+			<tr><td class="k">hypervisor</td><td>stock QEMU, unmodified, vhost-user-blk front end</td><td>GPL-2.0</td></tr>
+			<tr><td class="k">vhost-user protocol</td><td>rust-vmm <code>vhost-user-backend</code>, <code>vm-memory</code>, <code>virtio-queue</code>; Cloud Hypervisor's <code>vhost_user_block</code> read as reference</td><td>Apache-2.0 / BSD-3-Clause</td></tr>
+			<tr><td class="k">hashing</td><td><code>blake3</code> crate</td><td>CC0 / Apache-2.0</td></tr>
+			<tr><td class="k">chunking</td><td><code>fastcdc</code> crate</td><td>MIT</td></tr>
+			<tr><td class="k">host filesystem</td><td>XFS on the dedicated NVMe, O_DIRECT, hole punching; ZFS never sits under the daemon</td><td></td></tr>
+			<tr><td class="k">staging, compactor, store, index, maps, cache, protocol, GC</td><td>this study</td><td>new code</td></tr>
+		</tbody>
+	</table>
+</div>
+<p>
+	Because the hypervisor is unmodified, no result can be an artifact of a patched QEMU, and the raw-file control runs the identical binary.
 </p>
 
 <PageNav num="01" />

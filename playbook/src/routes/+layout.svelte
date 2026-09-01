@@ -13,7 +13,7 @@
 	const nums = pages.map((p) => p.num);
 
 	function current(): string | null {
-		const m = page.url.pathname.slice(base.length).match(/^\/(0[0-5])\/?$/);
+		const m = page.url.pathname.slice(base.length).match(/^\/(0[0-6])\/?$/);
 		return m ? m[1] : null;
 	}
 
@@ -52,7 +52,7 @@
 
 <main>
 	<header class="site">
-		<a class="site-title" href="{base}/">content, not lineage</a>
+		<a class="site-title" href="{base}/">content addressing across hosts</a>
 		<a
 			class="site-gh"
 			href={repo}

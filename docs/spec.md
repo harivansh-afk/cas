@@ -1,548 +1,774 @@
-# The half-life of a clone: measuring the duplicate data copy-on-write cannot reach in VM fleets
+# Content addressing across hosts
 
-[[Alternates: "Duplicate data that copy-on-write cannot reach: a measurement on VM fleets." Or "How fast does a clone drift? Copy-on-write sharing, dedup, and time in VM fleets." Pick the one you can say out loud.]]
+CS 4993, fall 2026. Research spec, v8.
 
-CS 4993, fall 2026. Research spec, v7.
+This file mirrors `playbook/src/routes/00–06` for review and hand edits.
+Edits here are ported back into the pages.
+Figures are described in brackets where the pages draw them.
 
-Supersedes v6 and the playbook spec. The phase 3 daemon design and the distribution pages move to `docs/history/`.
+---
 
-Review that drove this version: `docs/review/`. Your v6 edits are backed up in the session scratchpad.
+# 00 Thesis
 
-## Summary
+**Thesis.**
 
-Copy-on-write filesystems share data along a clone's history.
+A dedup table shares duplicate data within one host.
 
-Two disks that started as copies of one image share blocks until each one writes over them.
+Content addressing shares it across hosts.
 
-Two disks that were installed separately and then updated to the same package set hold identical bytes too, but no snapshot or clone can share them, because neither copy descends from the other.
+On Linux VM fleets the first is already solved by ZFS.
 
-We will call the second kind cross-lineage redundancy.
+So the case for content addressing is what a name does that an address cannot: move only unique bytes between hosts, store each chunk k times across a fleet instead of once per host, and serve a chunk from whichever host holds it in memory.
 
-Published dedup ratios on VM fleets do not separate the two, leading to measurement bias: an operator reading a ratio cannot tell how much of it clones would have given them for free.
+This study builds that backend on a stock hypervisor and measures what those buy and what they cost.
 
-This study isolates the two concepts.
+## Where dedup stops
 
-For a fleet of clones under a normal update cadence, we measure how fast copy-on-write sharing decays with time since clone, how much of what it loses an aligned dedup table (ZFS dedup, dm-vdo) recovers, and how much is left that ONLY content-defined matching could ever reach.
+Two VMs each run `apt upgrade` and download the same packages.
 
-The time axis is built from dated public images and package archives, so the curve is longitudinal and anyone can rebuild it.
+Their disks now hold the same bytes.
 
-Real fleets validate the curve and we measure what the aligned tier costs on stock backends under identical guests and workloads.
+No clone can share them, because neither copy descends from the other.
 
-No new storage system is built for this study and the output is a curve an operator can read against their own fleet's age, and a rule for what to turn on.
+A dedup table can.
 
-## 1. The question
+ZFS dedup and dm-vdo hash every block and share equal ones, at a fixed aligned block size.
 
-Take two VMs.
+On a Linux guest everything is 4K aligned: ext4 uses 4K blocks, partitions start at 1 MiB, and package managers write whole files.
 
-Each runs `apt upgrade` and downloads the same packages.
+So at 4K a dedup table reaches nearly all of it, which is why Jin and Miller found fixed blocks match content-defined chunking on VM images in 2009.
 
-Their disks now contain the same bytes.
+**On one host, content addressing has no capacity win over ZFS at 4K.**
 
-If they were cloned from a common image, the unchanged parts of that image are still shared, but the new package files are not, since each VM wrote them independently.
+Part 1 measures this instead of assuming it.
 
-Copy-on-write shares data that was copied.
+Every stock mechanism stops at the host boundary.
 
-It by design cannot share data that became equal afterward.
+The DDT is per pool.
 
-Stock systems can reach some of that data.
+`zfs send` dropped deduplicated streams in 2.0.
 
-OpenZFS dedup, dm-vdo, bees, and duperemove all attach a content hash to each block and share blocks with equal hashes, regardless of where they came from.
+dm-vdo has no replication.
 
-They work at a fixed, aligned block size (4K, or the zvol's volblocksize), so they catch duplicates that land on the same block boundary in both copies and miss the ones that do not.
+Reflinks do not survive rsync.
 
-Content-defined chunking (CDC) cuts boundaries from the data itself and catches the shifted ones, at the cost of a different storage design.
+A clone on host B shares nothing with host A.
 
-So a fleet's duplicate bytes fall into three groups, each needing a different mechanism:
+A fleet of N hosts each running dedup stores every shared chunk N times and moves it whole every time a guest moves.
 
-1. Reachable by copy-on-write. Identical and in place relative to the base image. Free with clones and snapshots.
-2. Cross-lineage, aligned. Identical at a fixed block boundary in both copies. Reachable by an aligned dedup table.
-3. Cross-lineage, shifted. Identical content at a different offset. Reachable only by content-defined matching.
+[figure: left, two hosts each with a DDT and no link between them, shared chunk stored twice, migration moves the full logical size; right, two hosts whose chunks are owned by hash, one namespace, chunk stored k times, map moves and chunks stay, cold read fetches by name from the owner]
 
-The ZFS community already knows the first group exists.
+## What a name buys
 
-Its advice (despairlabs, 2024) is to use clones and block cloning for the copy case, and dedup only when clients cannot send a copy signal.
+A chunk named by its hash has the same name on every host, so placement is a function of the name.
 
-What nobody has is the number: how large each group is on a real fleet, and how the sizes move as the fleet ages.
+Provisioning a guest moves its map, a few MB of offset to hash pairs, and no chunks.
 
-Klara's fast-dedup article gives the anecdote: a server's dedup ratio falling from 5x to 1.15x "in a couple of months" as identical VMs diverged.
+Migrating a guest moves the map plus whatever it wrote since the last compaction.
 
-That is the curve this study measures.
+A fleet stores each chunk k times, not once per host.
 
-## 2. Why the sizes matter
+A chunk that is hot anywhere is in some host's memory, and **a peer's memory over 100 GbE is closer than local NVMe**: about 20 µs against about 80.
 
-Raw capacity is cheap most years.
+## The price
 
-Consumer NVMe averaged about $60 per TB in mid-2023 and bottomed near $40 per TB that November; the 2025–26 NAND shortage put the cheapest NVMe at $105 per TB on 2026-09-01, and Micron's CEO expects tightness into 2027.
+The network sits on the read path for cold chunks and nowhere else.
 
-[[Sources in docs/review/citations.md item 19.]]
+Never on the write path, never on FLUSH.
 
-At either price, halving a small fleet's bytes saves little money at rest, and this study does not depend on the price cycle.
+Part 3 prices a cold read on TCP and on RDMA, from a peer's RAM and from its NVMe, and shows how much of it prefetch hides.
 
-The result an operator acts on is different.
+The rest is what every dedup design pays and this one measures: write amplification, compactor interference with the guest, index memory, and the window between a local ack and the chunk being durable on its owner.
 
-If clone sharing decays to a floor within months, template rebuild cadence matters more than any dedup setting.
+## Hypotheses
 
-If an aligned table at 4K recovers nearly everything COW loses but the same table at 16K does not, volblocksize is the decision, and it is one operators currently make by default.
+**H1. One host is a tie.**
+The daemon stores within 10% of the bytes ZFS fast dedup stores at the same block size, with guest p99 within 20% of a raw file on XFS.
+Index bytes per TB fall in proportion to chunk size.
 
-If the shifted group is small on Linux guests, no content-defined system is worth building for that class, and the study says so with the number.
+**H2. Crossing hosts is where the name pays.**
+Provisioning and migrating a guest between hosts move the map plus the uncompacted tail, within 10% of that bound.
+With one copy per chunk, two hosts store at most 55% of what two per-host dedup stores hold.
 
-The cost side reports what the aligned tier costs in latency, memory, and write amplification, so the rule comes with its price.
+**H3. The price is a cold read, and a peer's RAM beats local disk.**
+A chunk served from the owner's memory arrives faster than a local NVMe read on both TCP and RDMA.
+From the owner's NVMe it costs at most 30% over local on TCP and 15% on RDMA.
+With enough reads in flight, remote sequential throughput matches local.
 
-## 3. Related work
+Thresholds come from the transport literature on page 04 and the census prediction on page 02.
 
-[[Every citation was verified on 2026-09-01; see docs/review/citations.md and novelty.md for URLs and what was actually opened. Jayaram's body text and CLB's full text were not opened. Read them before this section is final.]]
+They are frozen at the end of week 2 and do not move.
 
-### Nearest precedents
+## What comes out
 
-Zhang et al. (IEEE CLOUD '12; MSST '15) decomposed backup duplicates from about 2500 Alibaba VMs by mechanism: dirty bits against the parent snapshot took 10 TB per machine to 24%, similarity search against the parent to 12%, cross-VM dedup to 8.6%.
+- A working content-addressed block backend under unmodified QEMU, on a stock kernel, over kernel TCP.
+- A single-host table against ZFS fast dedup: capture, p99, write amplification, index memory, as a function of chunk size.
+- Two numbers no stock backend can produce: bytes moved to provision and migrate a guest, and fleet bytes stored with one copy per chunk.
+- The first microsecond-scale measurement of a content-addressed chunk fetched from a peer under a VM block device, on four transports.
 
-That is a lineage-versus-content split on a real fleet.
+## Scope
 
-It differs from this study in four ways: lineage there is one VM's own snapshot chain rather than clone siblings; it measures backup streams rather than images at rest; chunking is variable, so there is no aligned tier; and there is no time axis.
+A1. Hosts serving guests from local flash, homelab to rack scale. Array economics are out of scope.
 
-Atkinson et al. (NSDI '14) measured in-place similarity of 267 Emulab images to an inferred base image, with most images above 50% and a peak at 60 to 80%.
+A2. Two hosts with static membership. No failure detection, rebalancing, or authentication. One copy per chunk on two hosts is a measurement configuration; a deployment runs k ≥ 2 on N ≥ 3.
 
-Lin et al. (TridentCom '15) measured global dedup on an overlapping Emulab corpus at 3 to 5x on top of 3x compression.
+A3. One image, one writer. Disk migration only; memory migration is QEMU's.
 
-Between them both halves of this study's subtraction exist on one image catalog; nobody subtracted, and neither has a time axis.
+A4. The guest contract is virtio-blk with a volatile write cache: an acknowledged FLUSH is durable and nothing else is. Every rung runs under the same QEMU cache mode.
 
-### Dedup ratio studies
+A5. Equal BLAKE3 implies equal bytes. A sample of matches is verified byte for byte and the sample size reported.
 
-Meyer and Bolosky (FAST '11) compared whole-file and block-level dedup on 857 desktops.
+A6. The store is trusted infrastructure. Dedup side channels are documented and excluded.
 
-Jin and Miller (SYSTOR '09) measured VM disk images, including independently installed images with the same packages, and found fixed-size blocks nearly match variable-size chunking.
+A7. Experiments run at single-digit TB. Larger figures are formulas with measured constants and are labeled as such.
 
-DeDe (ATC '09) ran out-of-band fixed-4K dedup on VMFS and reported 80% of a 113-VM VDI footprint as duplicate.
+A8. RDMA is a measurement arm on page 04. Nothing in the architecture requires it.
 
-Jayaram et al. (Middleware '11) measured similarity within and across 525 production cloud images and report that image creation time affects similarity.
+---
 
-El-Shimi et al. (ATC '12) describe Windows Server's post-process CDC dedup with a 15-server corpus study.
+# 01 Architecture
 
-Zhao et al. (IEEE CLUSTER '19) measured Docker Hub after factoring out layer sharing and found about 97% of files duplicate; that is the lineage-versus-content split for containers, at file level.
+**Invariant.**
 
-Sun et al. (MSST '16) tracked dedup ratios over 21 months of daily home-directory snapshots, which is a time axis without a mechanism split.
+The network is on the read path only, only for cold chunks, and never on the write or flush path.
 
-None of these separates what a clone would have shared from what arose independently on VM images, and the VM corpora are from 2009 to 2011.
+Every choice below serves that sentence.
 
-### Dedup cost studies
+## One host
 
-iDedup (FAST '12), Dmdedup (OLS '14), and dm-vdo (mainline since Linux 6.9) measure what inline fixed-block dedup costs on primary storage.
+The guest sees a virtio-blk device on stock QEMU.
 
-None compares capture against a copy-on-write baseline.
+QEMU connects it over vhost-user-blk to one process per host, the daemon.
 
-No controlled p99 comparison of dm-vdo against ZFS fast dedup exists in print; Red Hat's VDO guide tells you to watch p99 on 4K random write and publishes no numbers.
+All new code lives there.
 
-### Systems
+Guest memory is shared with the daemon, so requests are read in place, and storage IO goes through io_uring.
 
-OpenZFS has had clones since its first release, dedup since 2009, block cloning since 2.2, and fast dedup since 2.3.
+[figure: guest → stock QEMU → vhost-user → daemon. Inside the daemon: staging log (append-only, local NVMe, FLUSH → fdatasync → ack); compactor (fixed 4K or FastCDC, BLAKE3, owner = rendezvous(hash)) fed by settled extents; owner = self → local store; owner = peer → PUT to owner, batched, durable ack, then mark compacted; index (hash → offset, RAM, rebuildable); chunk cache (hash → bytes, RAM, bounded); maps (offset → hash, one per image). Read: staging → local store → cache → GET(hash) from owner.]
 
-There is no published split of what clones and the dedup table each capture.
+## Write path
 
-NetApp ONTAP reports snapshot, FlexClone, dedup, and compression efficiency as separate ratios per aggregate, so the split is an operational concept in one vendor's stack, with no public dataset.
+Guest writes append at block granularity to a staging log on local NVMe.
 
-Chunk-level content-addressed stores exist at scale: TiDedup (ATC '23) in Ceph, HYDRAstor (FAST '09), casync, restic, borg, Xet, snix-castore.
+FLUSH is `fdatasync` of the log, then the acknowledgment.
 
-They report production ratios (Replit: a 6 TB Nix store to 1.2 TB; nixbuild.net: 6.55x chunked against 2.69x zstd) and none has a copy-on-write baseline to subtract.
+The hot path hashes nothing and chunks nothing, so large writes proceed at sequential-append speed.
 
-ZipLLM (NSDI '26) measured dedup granularity across all public Hugging Face model repositories: whole-file dedup saves 8.2%, chunk-level far more.
+Durability belongs to the log alone.
 
-The model class is therefore already measured and is not a corpus here.
+The page cache never holds the only copy of anything, and every file is opened O_DIRECT.
 
-### The gap
+Staging is finite; when ingest outruns compaction, back-pressure throttles the guest, and the point where it engages is measured.
 
-Filesystem developers ship clones and a dedup table and publish neither's share.
+## Compactor
 
-Backup tools ship chunking and never had a clone baseline.
+A background pass reads settled extents from staging, cuts them into chunks, hashes each with BLAKE3, and drops any hash already in the local index.
 
-The measurement in between, on VM images, against time, has not been done.
+Chunking is fixed 4K or FastCDC, chosen per arm on page 02.
 
-## 4. Hypotheses
+Extents overwritten in staging are never compacted.
 
-H1. Under a normal monthly update cadence, the share of a Linux clone's non-zero bytes still shared with its base image falls below half within twelve months of clone, and the decay has a floor set by the packages the cadence never touches.
+For each new chunk, the owner is the first k hosts in rendezvous order of its hash.
 
-[[Twelve months and half are chosen, not derived. They are written down here before any data exists and do not move. If you want a defensible origin, tie them to the LTS point-release cadence.]]
+If the owner is this host, the chunk is appended to the local store and fdatasync'd.
 
-H2. On Linux guests, an aligned dedup table at 4K recovers at least 90% of the bytes copy-on-write lost, so the shifted residue is under 10% of cross-lineage bytes.
+Otherwise it goes in a batch to the owner, which appends, fdatasyncs once per batch, and acks.
 
-At 16K, the OpenZFS zvol default, the same table recovers materially less, and the 4K-to-16K gap is the result.
+**Only after the ack does the extent count as compacted.**
 
-[[The 4K half of H2 is close to foregone on ext4 and XFS guests: 4K blocks, 1 MiB partition alignment, whole-file package writes. Say so in the paper. The 16K half is not known and is what operators actually run.]]
+Staging is the write-ahead log for the whole fleet.
 
-H3. On encrypted guests (LUKS, BitLocker), cross-lineage sharing is zero at every granularity.
+Two costs come with this and both are measured.
 
-Stated so the paper can say which fleet classes the rule does not apply to; costs nothing to measure.
+Every surviving byte is written at least twice, staging then store, plus journal traffic.
 
-A flat curve, a small 4K-to-16K gap, or a large shifted residue each reverses a recommendation and still stands as a result.
+Compaction reads and writes the same device the guest is using, so guest p99 is measured with the compactor active and idle.
 
-## 5. Method: the census
+CDC over a dirty extent re-chunks from the last settled boundary before it to the first boundary after it that agrees with the existing cut.
 
-The census is offline analysis of disk images at rest.
+This is the standard resynchronization rule (LBFS locality; Xet's boundary reset), and it is why CDC never runs on the hot path: one aligned write can move every boundary in its neighborhood.
 
-It needs no running guest and no root on the analysis node; guest filesystems are read with libguestfs or e2fsprogs in read-only mode for allocation maps and file boundaries.
+## Read path
 
-It produces the split from section 1 for each corpus at several points along the corpus's timeline.
+Reads check staging, then the local store, then the chunk cache, then send `GET(hash)` to the owner.
 
-### 5.1 Decomposition
+The owner answers from its cache if the chunk is hot, otherwise from its store.
 
-Every byte range in every image is classified into exactly one of five categories.
+Fresh data never pays indirection; settled data pays the map walk, the index lookup, and, if the owner is remote, one round trip.
 
-- Zero or unallocated. Excluded from every ratio and reported separately. Unallocated comes from the guest filesystem's allocation map, not from a zero test, so deleted-file remnants do not inflate the other categories.
-- Unique. Appears once in the corpus.
-- Reachable by copy-on-write. Identical and in place relative to the image's dated base. The ceiling for any clone or snapshot system.
-- Cross-lineage, aligned. Not reachable by COW; identical at an aligned block boundary in another image. Reported at 4K and at 16K.
-- Cross-lineage, shifted. Not reachable by COW and not aligned; the same 4K of content appears at some other byte offset in another image.
+The chunk cache is daemon-owned RAM keyed by hash, LRU, with a size that is a parameter.
 
-The shifted category is defined by a rolling-window oracle (rsync-style weak checksum at every offset, strong hash on candidate hits), not by running a chunker.
+Because every file is O_DIRECT, the kernel page cache is out of the picture on every host, and the cache size can be bounded equal to ARC on the ZFS rung.
 
-That is the ceiling of any content-defined scheme.
+Prefetch is the daemon issuing the next D hashes from the map when it sees sequential reads, and optionally replaying a recorded boot profile.
 
-FastCDC at 8K and 16K mean is run as well and reported as a practical figure beneath the ceiling.
+D is swept on page 04.
 
-[[The v6 definition, "found by CDC but not by 4K aligned," with CDC at 16K mean, was coarser than the aligned arm and could go negative per region. This fixes it.]]
+## Capacity tier
 
-Gate G1 is that the five categories sum to 100% of bytes for every corpus at every time point.
+The local store is an append-only log of records (length, hash, flags, bytes) and is authoritative for the chunks this host owns.
 
-Duplicates within a single image are included in the categories above and also reported as their own column, as Meyer and Bolosky and Jayaram et al. did.
+The index maps hash to offset, lives in RAM, and is rebuilt by scanning the store; its bytes per TB is the constant the chunk-size arms measure.
 
-Compression is zstd, measured in both orders relative to dedup (A7).
+The map, one per image, is a journaled offset tree from disk offset to chunk hash.
 
-A sample of every hash match is verified byte for byte and the sample size is reported (A3).
+It lives with the guest's host and moves when the guest does.
 
-### 5.2 The time axis
+## Protocol
 
-The share reachable by copy-on-write is a function of time since clone.
-
-A freshly cloned fleet is entirely lineage.
-
-A fleet a year into independent update cycles is mostly cross-lineage.
-
-The operator's question is when their fleet crosses over, so every category is computed at each point along the timeline and the output per corpus is a curve.
-
-The axis is longitudinal, not a cross-section: the same image is followed through its own history.
-
-[[v6 aggregated real-fleet images by age at one instant. Old VMs are different VMs from young ones. A reviewer kills that curve.]]
-
-A second axis is template rebuild cadence.
-
-Sibling clones share only what the base held at clone time, so a base that is rebuilt every k months and re-cloned changes the curve.
-
-The census runs it at never, 6 months, and 3 months.
-
-Snapshot cadence on the clones themselves does not enter; snapshots taken after the clone never create sharing between siblings.
-
-### 5.3 Corpora
-
-Longitudinal Linux fleets, built from dated archives.
-
-Ubuntu publishes dated cloud images and keeps them for years; snapshot.debian.org serves the archive as of any date.
-
-An image installed as of T0 and upgraded monthly against the archive as of T1, T2, and so on replays a real update history exactly, with the base image at T0 kept as the declared ancestor.
-
-N such clones with scripted per-VM drift (distinct hostnames, logs, a few installed packages) form a fleet.
-
-This corpus is the primary source of the H1 and H2 curves, because it is longitudinal, dated, and rebuildable by anyone with one command (gate G2).
-
-Convergent installs, as the control.
-
-N independent installs of the same release updated to the same package set, with no common ancestor.
-
-This is Jin and Miller's setup and lineage's structural blind spot; the aligned and shifted categories here bound what any fleet can show.
-
-Real fleets, as validation.
-
-The curve from dated archives predicts what a real fleet at a given age should show; real fleets test the prediction at single points.
-
-Candidates, in order of how likely they are to say yes: the author's own machines; one or two Proxmox homelab donors; a research lab's Proxmox host where a student holds root; a university OpenStack or Proxmox cloud on Ceph RBD, where every VM is an `rbd clone` and `rbd info` records the parent and creation time.
-
-Full clones on Proxmox, libvirt, and VMware record no ancestry, so a real fleet's base is reconstructed as the dated cloud image of its release, the same way the longitudinal corpus does it.
-
-Encrypted guests, one pair, to state H3 with a number.
-
-Windows guests are a stretch corpus: one Windows Server evaluation image pair updated across months, since WinSxS hardlinks and delta compression make the result far less predictable than apt.
-
-Model corpora are dropped; ZipLLM measured them.
-
-Nix store generations are dropped from the plan and listed in the cut order as the first thing to add back if hours remain; Nix has no copy-on-write lineage, so its split is whole-file versus chunk, a different axis.
-
-### 5.4 Phase 0: the cheap answer first
-
-Before the pipeline exists, `zdb -S` on a ZFS pool holding the cloned fleet gives the aligned cross-lineage figure at recordsize in one command.
-
-Pool traversal starts each dataset at its previous-snapshot txg (`traverse_pool` in `dmu_traverse.c`), so blocks a clone inherited from its origin are counted once, and the simulated dedup ratio is duplicates beyond what clones already share.
-
-[[Verified in source on 2026-09-01. Confirm with the five-minute test: clone twice, write the same file into both, `zdb -S`.]]
-
-`duperemove --dry-run` gives the same on XFS.
-
-Phase 0 runs in week 1 on the synthetic fleets, gives the first number, and is the tool a ZFS donor runs themselves.
-
-### 5.5 Donor protocol
-
-The census runs at the donor's site, as root, against a consistent snapshot of each image.
-
-What crosses the boundary is the decomposition table: byte totals per category per time point.
-
-No image bytes and no chunk hashes leave, because the census never needs cross-donor matching; every match is within one fleet.
-
-[[Chunk hashes of a disk fingerprint every installed package version. v6 shipped hashes and called the privacy conversation short. It is not.]]
-
-The pipeline and the protocol are published so a donor can audit what runs.
-
-For ZFS donors the ask is the phase 0 command, which needs no new binary on their host.
-
-If no external donor lands, the study stands on the longitudinal corpus, the control, and the author's machines, and says so.
-
-### 5.6 Pipeline
-
-A few thousand lines over the `blake3` and `fastcdc` crates.
-
-Output is one aligned-hash stream per image (about 8 GB per TB at 4K with 32-byte hashes), matched by external sort-merge rather than an in-memory table, so a 10 TB fleet fits on one node.
-
-The shifted oracle is the expensive step: one rolling checksum per byte offset checked against the aligned-hash set, roughly three core-hours per TB, parallel across the node.
-
-[[Unmeasured; from arithmetic at 10^8 lookups per second per core. Measure in week 2 and replace.]]
-
-Analysis is `uv run` Python over per-corpus tables.
-
-First numbers from phase 0 in week 1; first pipeline curves in week 3.
-
-### 5.7 Side results
-
-The census also settles, on its corpora: whether compression captures most of dedup's win; whether fixed blocks still approximate CDC on Linux VM images (Jin and Miller 2009, retested at 4K and 16K); what fraction of observed sharing an explicit copy signal could ever have declared; and how the intra-image column compares to Jayaram et al.
-
-## 6. Cost of aligned dedup on stock backends
-
-Phase 2 writes no new code.
-
-Same stock QEMU, same guest, same NVMe device, three backends an operator can turn on today.
-
-### 6.1 Why stock systems
-
-The aligned tier is exactly what shipping systems reach.
-
-Measuring it on those systems answers the operator's question directly.
-
-A research daemon would measure a design nobody deploys.
-
-### 6.2 Backends
-
-Same QEMU configuration and cache mode (A4) for all three; only the storage behind the virtio-blk device changes.
-
-R0. Raw file on XFS on the dedicated NVMe, through QEMU's raw driver. The control. No dedup anywhere in the path.
-
-R1. Zvol on a ZFS pool on the same NVMe device, created and destroyed per run, opened directly by QEMU as a block device. Stock OpenZFS 2.3 or later with fast dedup, which replaces the legacy DDT's random writes with a sorted log flush and adds a quota and pruning. Configuration: `feature@fast_dedup` enabled; `dedup=blake3` (not `dedup=on`, which silently uses SHA-256 regardless of the checksum property); `volblocksize=16K` as the primary arm and `4K` as the second; `dedup_table_quota` unset and `zpool ddtprune` never run during a measurement, both recorded; `compression=zle` outside the labeled compression arm, so zero blocks do not collapse onto one DDT entry with a refcount in the millions; DDT memory from `zpool status -D`. OpenZFS direct IO does not apply to zvols or with dedup, so R1 is ARC-backed in every arm, and the paper says so.
-
-R2. Raw file on XFS on top of dm-vdo on the same NVMe. Inline fixed-4K dedup and compression in the kernel, mainline since 6.9. Dedup on, compression off outside the compression arm, index memory from `vdostats`. The cleanest comparison in the set: the same file and filesystem type as R0 with one device-mapper layer added. R2's XFS is its own filesystem instance on the vdo device, not R0's.
-
-R3, optional. Raw file on R0's XFS with post-process duperemove at `-b 4k --dedupe-options=partial`, since the default is 128K extent matching. After the pass, guest writes into shared extents pay XFS copy-on-write, and that post-pass write latency is the honest price of the "free" option. R3 is in the cut order, not the plan.
-
-R0 against R2 is the cost of inline aligned dedup with everything else held constant.
-
-R1, read against the census at the matching volblocksize, shows how much of the aligned tier a deployed dedup table reaches against what the census says it could, and the 16K arm is the number operators run today.
-
-R1 differs from R0 and R2 in kernel boundary, caching, and allocation, so it is a case study beside the controlled pair, and the paper attributes deltas accordingly.
-
-### 6.3 Workloads
-
-fio: 4K random write and read at QD1 and QD32, 128K sequential.
-
-N-clone boot storm at N = 4, 16, 32.
-
-Replay of one longitudinal fleet from the census onto N guests, at two points on its curve.
-
-No kernel build, no synthetic stress workload.
-
-### 6.4 Metrics
-
-Latency. Guest p50 and p99 write and read against R0, at least five repetitions, variance beside every number. Reported first. A backend that captures everything and doubles p99 is a different result from one that captures everything at parity, and the table shows which before it shows how much was captured.
-
-Storage. Consumed after ingest, against the census's prediction for the same images at the backend's block size.
-
-Index memory. DDT or vdo index bytes per stored TB.
-
-Write amplification. Device bytes written per guest byte written, from NVMe counters. For R1 this includes the dedup log flush; for R2 the index and block map.
-
-Cache, as one paragraph rather than a column. The Linux page cache is keyed per inode, so on R0 and R2 identical blocks in two files occupy two sets of pages regardless of what the block layer dedups, and dm-vdo has no read cache. ZFS's ARC is keyed by physical block, so deduped blocks share one entry. R1 is the only backend in the set whose host cache shares anything, and the paper states that as an operator fact and measures host device reads per guest byte in the boot storm to show it.
-
-Transfer is not a phase 2 metric. OpenZFS removed deduplicated send in 2.0, dm-vdo has no replication, and reflinks do not survive rsync. Moving unique bytes only is a property of content-addressed stores (casync, restic, Xet) and belongs in future work.
-
-### 6.5 Instrumentation and controls
-
-All backends are observed at the guest boundary (fio's own latency histograms, guest-side blktrace for the boot storm) plus host device counters.
-
-`zpool` statistics and `vdostats` are supplementary.
-
-Controls: pinned vCPUs, performance governor, discarded warm-up, fresh filesystem or pool per repetition, page cache and ARC bounded to the same size by cgroup and `zfs_arc_max`, at least five repetitions.
-
-Gate G3 is a complete table: three backends, identical workloads, no empty cells.
-
-### 6.6 What phase 2 cannot say
-
-Nothing here reaches the shifted category.
-
-If the census says it is small on Linux guests, which H2 predicts, this table is the whole cost side and the study is complete.
-
-If it is large, the paper says a content-defined block backend is worth building and stops there.
-
-## 7. Plan
-
-### 7.1 Hardware
-
-x86-64 bare metal.
-
-Phase 1 needs one node and no root; phase 2 needs one node with a dedicated NVMe device.
-
-Primary testbed: CloudLab c6525-100g (Utah), one node at a time.
-
-Per node: one AMD EPYC 7402P (24 cores, 2.80 GHz), 128 GB ECC DDR4-3200, two 1.6 TB PCIe 4.0 NVMe SSDs.
-
-One NVMe device holds the system and results; the second is dedicated to the store under test.
-
-CloudLab is free for research; a project is started by a faculty member and reviewed by CloudLab staff, and the faculty lead then approves members.
-
-[[The faculty sponsor has to open the project. Ask before Sep 9.]]
-
-Reservations expire at 16 hours by default with extensions on request, so every phase 2 run is scripted to complete inside one reservation.
-
-dm-vdo needs a 6.9 or later kernel and OpenZFS 2.3 is a source build; both are done once and imaged in week 7.
-
-Fallback: one OVHcloud Advance-4 2026 bare-metal server, AMD EPYC 4585PX, 16 cores, 64 GB DDR5 ECC base, 2 × 960 GB NVMe.
-
-No phase uses the network for data.
-
-Every figure in the paper is measured on the testbed.
-
-### 7.2 Schedule
-
-Fourteen weeks at roughly eight hours each is about 110 hours.
-
-The plan below fits that number because the pipeline is scoped to three categories plus the oracle, phase 2 is three backends, and there is no system to build.
-
-| Weeks | Phase | Result |
+| Message | Reply | Used by |
 |---|---|---|
-| 1–2 | 0 | thresholds written (G4); synthetic fleets built; `zdb -S` and `duperemove --dry-run` numbers; donor asks sent |
-| 3–5 | 1 | pipeline; longitudinal corpus from dated archives; first curves; shifted oracle measured |
-| 6–7 | 1 | convergent control; encrypted pair; own machines and any donor; H1, H2, H3 verdicts |
-| 8–10 | 2 | R0, R1 at 16K, R2; fio, boot storm, fleet replay; cost table (G3) |
-| 11–12 | 2 or 1 | R1 at 4K, then R3, then Nix, in that order, as hours allow; otherwise another real fleet |
-| 13–14 | | report; reproducibility pack (G5) |
+| GET(hash) | bytes | cold read, prefetch |
+| PUT(batch of chunks) | ack after one fdatasync | compactor shipping to an owner |
+| HAS(hashes) | bitmap | provisioning, migration, sync |
+| LIVE(epoch, hashes) | ack | garbage collection |
 
-### 7.3 Gates
+Length-prefixed messages over kernel TCP, one connection per core, `TCP_NODELAY`, driven by io_uring.
 
-G1. The decomposition is exhaustive and disjoint: categories sum to 100% of bytes per corpus at every time point.
+The daemon runs spinning or sleeping; page 04 measures both, because the wakeup is part of the price.
 
-G2. One command rebuilds the longitudinal corpus from dated public archives on any machine.
+Rendezvous hashing means a reader already knows the owner of every hash; nobody looks up anyone else's index.
 
-G3. The cost table is complete: three backends, identical workloads, latency, storage, index, and amplification columns, no empty cells, variance beside every number.
+RDMA and NVMe-oF exports appear on page 04 as probes that show what the kernel stack costs.
 
-G4. H1, H2, and H3 thresholds are written at the end of week 2 and do not move.
+The architecture does not depend on either.
 
-G5. One command reruns the census on any directory of images with an ancestry file; one command reruns the cost table on a second node.
+## Placement and k
 
-### 7.4 Cut order
+Owner set = the first k hosts in rendezvous order of the chunk's hash.
 
-If the schedule slips, items come off from the top.
+k is the one cross-host parameter.
 
-Nix corpus.
+On two hosts, k = 2 means every chunk is on both (replicated) and k = 1 means each chunk lives on exactly one (partitioned).
 
-R3.
+Page 03 measures both; a deployment would run k ≥ 2 on N ≥ 3 hosts.
 
-R1 at 4K.
+## Durability
 
-The Windows pair.
+| Failure | What survives | Against R0 and R1 |
+|---|---|---|
+| daemon crash | everything: replay the staging log, re-run incomplete compaction epochs | gate G2, `fio --verify` after `kill -9` |
+| host crash, power loss | everything acked: FLUSH was fdatasync on local NVMe | same contract as a local disk |
+| host lost | acked bytes not yet shipped are gone; with k = 1, chunks it owned are gone fleet-wide | R0 and R1 lose everything too; the window is measured, and k ≥ 2 closes the second half |
 
-Never the longitudinal corpus, never the control, never R0 against R2.
+Two rules follow.
 
-### 7.5 Risks
+Bytes are durable on local NVMe before they go on the wire, always.
 
-No external donor.
+Shipping is two-phase: the owner fdatasyncs and acks before the sender marks anything compacted or reclaimable.
 
-The longitudinal corpus does not depend on one; donors are validation points.
+The window between a local ack and the chunk being durable on its owner is the compaction lag, measured in seconds under the fleet replay.
 
-The ask goes out in week 1 to several candidates at once, and the author's own machines are the floor.
+One optional arm closes it: mirror the staging tail to the peer on every FLUSH and wait for its fdatasync before acking.
 
-Corpus realism.
+That is what every production system in this space does, and the arm measures what it costs: one round trip per FLUSH.
 
-Scripted drift is not real drift.
+## Crash consistency
 
-The mitigation is the dated-archive replay, which reproduces real update history, plus every real fleet that lands, plus publishing the scripts so the classes can be criticized (A8).
+Two logs, staging and the map journal, must agree after a crash.
 
-Pipeline overrun.
+Staging is senior.
 
-The oracle is the only expensive step and is measured in week 2; if it is too slow, it runs on a sample of images and says so.
+Compaction is idempotent and every batch carries an epoch recorded in both logs.
 
-Novelty.
+Recovery replays staging, discards map records from any epoch whose extents were not marked compacted, and re-runs compaction from the oldest incomplete epoch.
 
-Swept on 2026-09-01 (docs/review/novelty.md).
+`kill -9` at any point, then this replay, must pass `fio --verify` before any number from the daemon is reported.
 
-Nearest precedents are Zhang et al. and the Emulab pair, both cited in section 3.
+## Garbage
 
-OpenZFS developer summit talks were checked by title only; mailing lists and the issue tracker were not swept and must be before related work is final.
+A chunk is live if any staging log or any map on any host references it.
 
-### 7.6 Logistics
+Each host sends its owner the live set for an epoch with `LIVE`; the owner sweeps with `FALLOC_FL_PUNCH_HOLE` over dead records.
+
+No reference counts.
+
+The sweep runs once after the fleet replay to report reclaimed bytes; concurrent collection is out of scope.
+
+## Out of scope
+
+Membership changes, failure detection, rebalancing when a host joins or leaves, authentication and encryption on the wire, more than two hosts, and concurrent garbage collection.
+
+Each is named in future work on page 05, and none of them affects a number this study reports.
+
+## Provenance
+
+| Component | Source | License |
+|---|---|---|
+| hypervisor | stock QEMU, unmodified, vhost-user-blk front end | GPL-2.0 |
+| vhost-user protocol | rust-vmm `vhost-user-backend`, `vm-memory`, `virtio-queue`; Cloud Hypervisor's `vhost_user_block` read as reference | Apache-2.0 / BSD-3-Clause |
+| hashing | `blake3` crate | CC0 / Apache-2.0 |
+| chunking | `fastcdc` crate | MIT |
+| host filesystem | XFS on the dedicated NVMe, O_DIRECT, hole punching; ZFS never sits under the daemon | |
+| staging, compactor, store, index, maps, cache, protocol, GC | this study | new code |
+
+Because the hypervisor is unmodified, no result can be an artifact of a patched QEMU, and the raw-file control runs the identical binary.
+
+---
+
+# 02 One host
+
+**Part 1.**
+
+Same stock QEMU, same guest, same NVMe device, storage behind the device varies.
+
+The prediction is a tie on capture between the daemon and ZFS fast dedup.
+
+It is measured anyway, because the chunk-size curve under it is the single-host design result, and because a reviewer will ask why not ZFS.
+
+## Rungs
+
+**R0. Raw file on XFS.**
+QEMU's raw driver on the dedicated NVMe.
+The control; no dedup anywhere in the path.
+
+**R1. Zvol on ZFS 2.3 fast dedup.**
+Own pool on the same device, created and destroyed per run, opened by QEMU as a block device.
+`feature@fast_dedup`; `dedup=blake3`, since `dedup=on` silently uses SHA-256 regardless of the checksum property; `volblocksize=16K` primary and `4K` second arm; `compression=zle` outside the compression arm so zero blocks do not collapse onto one DDT entry; `dedup_table_quota` unset and `zpool ddtprune` never run during a measurement; DDT memory from `zpool status -D`.
+OpenZFS direct IO does not apply to zvols or with dedup, so R1 is ARC-backed in every arm and the paper says so.
+
+**R2. Raw file on XFS over dm-vdo.** (optional)
+Inline fixed-4K dedup in the kernel, mainline since 6.9.
+Its own XFS instance on the vdo device.
+Index memory from `vdostats`.
+
+**R4. The daemon, one host.**
+Local store only, k not in play.
+Three chunk-size arms below.
+
+R0 against R4 is the cost of the daemon with everything else held constant.
+
+R1 is the deployed state of the art and differs in kernel boundary, caching, and allocation, so it is a case study beside the controlled pair, and the paper attributes deltas accordingly.
+
+## Chunk size
+
+Fixed 4K captures everything a Linux guest offers, and costs an index entry per 4K: about 250 million entries per TB, roughly 10 GB of RAM per TB at 40 bytes each.
+
+That is the DDT memory problem the daemon is supposed to escape.
+
+FastCDC at a 16K mean cuts the index four times over and loses some aligned matches.
+
+Three arms: fixed 4K, fixed 16K, FastCDC 8K to 64K with a 16K mean.
+
+Reported per arm: bytes stored, index bytes per TB, guest p99, write amplification.
+
+**Capture against index memory as a function of chunk size is the curve this page exists for.**
+
+The census below predicts the capture column before any run.
+
+## Workloads
+
+- fio: 4K random write and read at QD1 and QD32; 128K sequential.
+- Boot storm: N clones of one image booted together, N = 4, 16, 32.
+- Fleet replay: the synthetic fleet below written onto N guests, at two points on its timeline.
+
+No kernel build and no synthetic stress workload that exists only to exercise the daemon.
+
+## Metrics
+
+- Guest p50 and p99 write and read latency against R0, compactor active and idle. Reported first.
+- Bytes stored after compaction settles, against the census prediction at the rung's block size.
+- Index or DDT bytes per stored TB.
+- Write amplification: device bytes written per guest byte, from NVMe counters.
+- Sustainable ingest and the back-pressure point.
+- Recovery: `kill -9`, replay, `fio --verify`.
+
+## Controls
+
+Pinned vCPUs, performance governor, discarded warm-up, fresh filesystem or pool per repetition, at least five repetitions, variance beside every number.
+
+Cache bounded equal across rungs: cgroup memory limit for the page cache on R0 and R2, `zfs_arc_max` on R1, the daemon's cache size on R4.
+
+All rungs are observed at the guest boundary (fio's histograms, guest-side blktrace for the boot storm) plus host device counters.
+
+The daemon adds per-request stage timestamps drained to ndjson, cross-checked once against bpftrace with the delta reported.
+
+`zpool` and `vdostats` figures are supplementary.
+
+## Prediction
+
+A small census supplies two numbers the rest of the study is measured against: how many unique bytes a fleet holds at a given block size, and how many bytes copy-on-write would already have shared.
+
+**Phase 0.**
+`zdb -S` on a ZFS pool holding the cloned fleet.
+Pool traversal starts each dataset at its previous snapshot's txg, so blocks a clone inherited from its origin are counted once, and the simulated ratio is duplicates beyond what clones already share.
+Verified in `dmu_traverse.c`; confirmed by a five-minute test before it is cited.
+
+**The fleet.**
+Ubuntu publishes dated cloud images and snapshot.debian.org serves the archive as of any date.
+An image installed as of T0 and upgraded monthly against the archive as of T1, T2, and on replays a real update history.
+N such clones with scripted drift (hostnames, logs, a few packages each) form the fleet.
+It is rebuilt by one command, dated, and is also the replay workload above.
+
+**The split.**
+Per byte range: zero or unallocated (from the guest allocation map, excluded), unique, shared with the T0 base in place, duplicate at an aligned 4K or 16K boundary elsewhere in the fleet, or duplicate only at a shifted offset.
+The aligned column predicts R1 and the fixed arms; aligned plus shifted predicts the CDC arm.
+Nothing more: no donors, no real fleets, no time-axis claims.
+
+---
+
+# 03 Two hosts
+
+**Part 2.**
+
+Same daemon, a second host, one parameter.
+
+Everything a stock backend cannot do is on this page.
+
+## Two modes
+
+k is the number of owners per chunk.
+
+On two hosts it takes two values, and they are two different experiments.
+
+[figure: left, replicated k = 2: host A and host B each hold all chunks, PUT new chunks both ways, each unique chunk crosses the wire once, every read is local, capacity = one store twice. Right, partitioned k = 1: host A holds chunks with hash → A, host B holds hash → B, PUT and GET both ways, each chunk stored once fleet-wide, about half of cold reads are remote, capacity = one store once.]
+
+k = 2 buys transfer and keeps every read local.
+
+k = 1 buys capacity and pays in remote reads.
+
+Two hosts with k = 1 is the worst case for remote reads and is run for exactly that reason.
+
+## Provision
+
+A new guest on host B from an image whose chunks exist anywhere: copy the map, a few MB, and `HAS` its hashes.
+
+In replicated mode nothing else moves.
+
+In partitioned mode nothing else moves either; chunks are fetched on first read.
+
+**Provisioning cost is the size of the map.**
+
+Baseline: `qemu-img convert` or `scp` of the raw file, and `zfs send | zfs recv` of the zvol, each moving the full logical size.
+
+## Migrate
+
+Move a guest from A to B: stop, copy the map and the staging extents not yet compacted, start.
+
+A 40 GB guest that compacted recently moves in MB.
+
+Memory migration is QEMU's and is out of scope; this is the disk.
+
+Baseline: rsync of the raw file, `zfs send` of the zvol.
+
+Since 2.0 `zfs send` emits no deduplicated stream; the bytes are the logical size regardless of the DDT.
+
+## Sync after drift
+
+Two guests, one on each host, cloned from the same image, each updated independently to the same package set.
+
+Compaction on each host ships only chunks the owner lacks.
+
+Bytes on the wire are read against the census's unique-byte count for the pair.
+
+This is the `apt upgrade` case from page 00, measured.
+
+## Capacity
+
+Partitioned mode stores each chunk once across the fleet.
+
+Measured: bytes on both stores after the fleet replay settles, against two per-host ZFS pools holding the same guests.
+
+Predicted: about half.
+
+Also measured: what fraction of a guest's cold reads went to the other host, which on two hosts with k = 1 should be about half and is the worst case any fleet would see.
+
+## The window
+
+Between a local FLUSH ack and the chunk being durable on its owner sits the compaction lag.
+
+It is reported in seconds under the fleet replay, as a distribution, with the compactor's ship batch size as the knob.
+
+Optional arm: mirror the staging tail to the peer on every FLUSH and wait for the peer's fdatasync before acking.
+
+Every production system in this space does this.
+
+The arm reports the write p99 it costs on TCP, which is one round trip per FLUSH.
+
+## Measured
+
+| Flow | Daemon | Baseline | Read against |
+|---|---|---|---|
+| provision | bytes on the wire, both modes | scp of raw file; zfs send | map size |
+| migrate | bytes on the wire, both modes | rsync; zfs send | map size + staging tail |
+| sync after drift | bytes shipped by compaction | rsync; zfs send | census unique bytes |
+| capacity | bytes stored, partitioned | two per-host ZFS pools | census prediction |
+| remote fraction | cold reads served by the peer | | about half, worst case |
+| window | seconds from ack to owner-durable | mirror arm: write p99 with mirroring | one RTT per FLUSH |
+
+## The locality objection
+
+Dong et al. (FAST '11) rejected per-chunk hash placement for backup because it destroys read locality and routed 1 MB super-chunks instead.
+
+This is primary storage with a local cache, and the fragmentation cost they argued about is measured directly on page 04 instead of argued.
+
+If it is large, placement by super-chunk is the knob, noted here and measured only if time remains.
+
+---
+
+# 04 Remote read
+
+**Part 3.**
+
+A cold read whose chunk lives on the other host is the only place the network enters guest latency.
+
+This page prices it, and pushes it down.
+
+## Where the time goes
+
+Every read has about 80 µs of NVMe media time under it.
+
+On 100 GbE the transport sits on top: raw RDMA adds 3 to 5 µs, kernel nvme-rdma about 12, kernel nvme-tcp about 21, a userspace daemon over kernel TCP 20 to 30.
+
+Those are the SPDK 24.05 and Systor '17 numbers on ConnectX-5; the testbed replaces them.
+
+So RDMA against TCP is a 10 µs question on an 80 µs read.
+
+The 4x question is whether the chunk is in the owner's memory or on its disk.
+
+**A chunk from a peer's RAM over TCP is faster than a chunk from local NVMe.**
+
+With hash placement, a chunk shared across the fleet is hot at exactly one owner, and every host's read of it hits that owner's cache.
+
+[figure: horizontal bars in µs from the literature. local NVMe ≈ 80. peer RAM: RDMA ≈ 12, nvme-tcp ≈ 21, daemon TCP 20–30, all shorter than local NVMe. peer NVMe: RDMA ≈ 92, nvme-tcp ≈ 101, daemon TCP ≈ 110, 10 to 30% over local.]
+
+## Probes
+
+The architecture's transport is the daemon over kernel TCP.
+
+The other rows exist to show what the kernel stack and the userspace hop each cost; nothing depends on them.
+
+| Probe | What it isolates | Code |
+|---|---|---|
+| `ib_read_lat -s 4096` | the hardware floor | none |
+| nvme-rdma export | kernel block path over RDMA; owner's store exported by `nvmet` as a file-backed namespace, `buffered_io` on for RAM, off for media | configuration |
+| nvme-tcp export | same over kernel TCP | configuration |
+| daemon, TCP, spinning | the architecture, without the wakeup | the daemon |
+| daemon, TCP, sleeping | the architecture as deployed; the wakeup is the price | the daemon |
+| daemon, ibverbs two-sided (stretch) | the userspace hop without the kernel stack | ~40 h |
+
+The nvmet export is a probe and not the architecture: it exposes the raw store, needs the reader to know offsets, and has no place for authentication.
+
+It is in the table because the difference between it and the daemon over the same TCP is the cost of the userspace hop, with SPDK's 1 µs kernel-versus-userspace target delta as the reference point.
+
+## Method
+
+- Same two hosts, NIC, drive, and kernel for every row. Kernel, firmware, MTU, IRQ affinity, interrupt moderation, C-states, busy-poll, and PFC state recorded.
+- Two far ends per row: a null device for fabric plus stack alone, and the real file for end to end. Each from the owner's RAM and from its NVMe.
+- 4K, 16K, 64K. p50, p99, p99.9. Five runs of 30 s, caches dropped between, medians with spread.
+- QD sweep 1, 4, 16, 64 for throughput and CPU per IOPS on both ends; TCP costs about 2.5x the CPU of RDMA at equal IOPS and the paper shows the ratio it measures.
+- RoCE hardware counters (`out_of_sequence`, `packet_seq_err`, `local_ack_timeout_err`) printed beside every RDMA number, proving zero retransmits on a fabric with no PFC.
+
+## Prefetch
+
+The map tells the daemon what comes next.
+
+Depth sweep: sequential reads through the map with 1, 2, 4, 8, 16, 32 chunks in flight, at 4K and 64K.
+
+The bandwidth-delay point is about 250 KB for the fabric and about 1 MB with media under it, so roughly 20 chunks of 64K or 300 of 4K outstanding should hide the remote entirely.
+
+Success is remote sequential throughput within the error bars of local.
+
+Profile prefetch: record the chunk sequence of one boot, replay it on later boots.
+
+Every lazy-loading system that has published numbers does this and reports it removing most of the miss cost; DADI says 95%.
+
+It is the consensus mitigation and it costs about a day.
+
+## Under a guest
+
+Partitioned boot storm at N = 16, with and without profile prefetch, against the same storm in replicated mode.
+
+Reported: guest p99 and host device reads per guest byte.
+
+**The gap between partitioned with prefetch and replicated is the residual price of one copy per chunk.**
+
+## RDMA is a probe
+
+The CloudLab fabric is lossy; no PFC or ECN is documented on the shared switches, and published work on this node type ran RoCE that way.
+
+Adaptive retransmission is enabled on the NIC and the counters above prove the runs were clean.
+
+ConnectX-5 cannot do io_uring zero-copy receive, so that lever is out.
+
+None of this touches the architecture, which runs on kernel TCP and would run on any Ethernet.
+
+## H3, restated
+
+- A chunk from the owner's RAM arrives faster than a local NVMe read, on TCP and on RDMA.
+- From the owner's NVMe it costs at most 30% over local on TCP and 15% on RDMA, at QD1, 4K.
+- At depth at or above the bandwidth-delay point, remote sequential throughput is within 10% of local.
+- Partitioned boot storm p99 with profile prefetch is within 25% of replicated.
+
+---
+
+# 05 Plan
+
+**Fourteen weeks, about 320 hours.**
+
+That is 23 a week.
+
+The credit says 8.
+
+The plan is sized to the work, and the cut order says what goes when it slips.
+
+## Hardware
+
+Two CloudLab c6525-100g nodes (Utah), reserved as a pair.
+
+Per node: AMD EPYC 7402P, 24 cores at 2.80 GHz; 128 GB ECC DDR4-3200; two 1.6 TB PCIe 4.0 NVMe SSDs; ConnectX-5 Ex 100 GbE, one port on the experiment network.
+
+One NVMe holds the system and results; the other is the device under test.
+
+The pair is one hop through a single switch.
+
+RoCE between two of these nodes works and has been used in published work on this exact hardware, on a lossy fabric.
+
+Self-built kernels are routine there; the Ubuntu 24.04 image ships 6.8, dm-vdo needs 6.9, and OpenZFS 2.3 is a source build, so a kernel and ZFS are built once in week 1 and snapshotted as an image.
+
+Reservations expire at 16 hours by default, so every run is scripted to complete inside one.
+
+CloudLab is free for research.
+
+A project is opened by a faculty member and reviewed by CloudLab staff; the sponsor opens it before Sep 9.
+
+Fallback: two OVHcloud Advance-4 2026 servers (EPYC 4585PX, 16 cores, 64 GB DDR5 ECC, 2 × 960 GB NVMe) on a 25 Gbps private link, which loses the RDMA arm and nothing else.
+
+## Schedule
+
+| Weeks | Build | Measure |
+|---|---|---|
+| 1–2 | vhost-user-blk daemon in passthrough: staging log, FLUSH, replay. Kernel and ZFS image. | R0; passthrough within 10% of R0 p99 (G1). Thresholds frozen. `zdb -S` phase 0 on the synthetic fleet. |
+| 3–5 | Compactor, store, index, maps, epochs, recovery. Three chunk-size arms. | `kill -9` recovery passes (G2). First capture numbers. |
+| 6–7 | R1 configured, both volblocksize arms. R2 if hours allow. | Part 1 table complete (G3). |
+| 8–9 | Protocol, rendezvous placement, k, PUT with durable ack, HAS, one-shot GC. Provision and migrate scripts. | Replicated mode on two nodes. |
+| 10 | Partitioned mode. Mirror arm if hours allow. | Part 2 table complete (G4). |
+| 11–12 | nvmet exports, RoCE bring-up, spinning and sleeping daemon, depth prefetch, profile prefetch. | Transport matrix and prefetch sweeps (G5). Partitioned boot storm. |
+| 13–14 | | Report; reproducibility pack (G6). |
+
+## Gates
+
+G1. Passthrough daemon under stock QEMU within 10% of R0 p99 by the end of week 2. If this slips, everything slips, and the sponsor hears it that week.
+
+G2. `kill -9` at arbitrary points, replay, `fio --verify` passes, before any daemon number is reported.
+
+G3. Part 1 table complete: R0, R1 at two block sizes, R4 at three chunk sizes; latency, capture, index, amplification; variance beside every number.
+
+G4. Part 2 table complete: both modes, every flow, bytes on the wire against the census bound.
+
+G5. Transport matrix complete for the four non-stretch probes, null and file, RAM and NVMe, with RoCE counters at zero.
+
+G6. One command rebuilds the fleet from dated archives; one command reruns every table on a fresh pair.
+
+## Cut order
+
+When the schedule slips, items come off from the top.
+
+Never the item at the bottom.
+
+1. ibverbs daemon arm.
+2. Super-chunk placement.
+3. Mirror-on-FLUSH arm.
+4. R2 dm-vdo.
+5. Profile prefetch (depth prefetch stays).
+6. Partitioned mode. Replicated mode alone still gives H2's transfer result.
+7. Never: part 1, the nvmet TCP and RDMA probes, the daemon over TCP.
+
+## Risks
+
+**Daemon overrun.** The largest risk and the reason G1 is at week 2. Protocol plumbing comes from maintained crates so the hours go to the five components the study is about.
+
+**RoCE bring-up.** GID selection, MTU, adaptive retransmission on a lossy fabric. Budgeted at 8 hours; if it eats 20, the RDMA rows go and the TCP rows stand.
+
+**Node availability.** 36 nodes of this type exist. Reserve the pair in week 1 for every measurement week.
+
+**Configuration traps already known.** `dedup=on` means SHA-256; direct IO does nothing on zvols; the 100G interface stays down unless the profile declares a link on it.
+
+**Census realism.** Scripted drift is not real drift. The fleet is built from real dated archives, the scripts are published, and the numbers it supplies are bounds the daemon is read against, not claims about fleets in the wild.
+
+## Logistics
 
 CS 4993, 1 credit.
 
-Planned effort is roughly 8 hours a week; the credit understates the work.
-
 Expectations in writing before Sep 9.
 
-Thirty minutes of sponsor time every two weeks, with the week-2 threshold sign-off as a scheduled meeting.
+Thirty minutes of sponsor time every two weeks, with G1 as a scheduled meeting.
 
-## 8. Scope and assumptions
+## Future work
 
-A1. Workload class is hosts serving multiple guests from local flash, homelab to rack scale. Array economics are out of scope.
+**Availability.**
+The mirror arm is the seed of replication before ack; with it and k ≥ 2 on N ≥ 3 the system has a failure model, which needs membership, failure detection, and rebalancing, none of which this study touches.
 
-A2. Experiments run at single-digit TB. Index and amplification costs are reported as formulas with measured constants; any 100 TB figure is labeled an extrapolation.
+**Placement.**
+Super-chunk placement for locality, and a cache policy that weighs a chunk's owner distance.
 
-A3. Equal BLAKE3 (256-bit) implies equal bytes. The census verifies a sample of matches byte for byte and reports the sample (Henson, HotOS '03).
+**The same split elsewhere.**
+Prefix caching in LLM serving (vLLM, SGLang, Mooncake) names cached KV blocks by a hash chain over the whole token history, so two requests share only along a common prefix; that is lineage.
+The same document after two different preambles is computed twice; that is the cross-host case here, and nobody has measured its size on a real trace.
 
-A4. The guest contract is virtio-blk with a volatile write cache: an acknowledged FLUSH is durable and nothing else is. Every backend runs under the same QEMU cache mode.
+---
 
-A5. One image, one writer. Shared-disk clustering is out of scope.
+# 06 Prior work
 
-A6. Dedup side channels and convergent-encryption probing are documented and excluded. The donor protocol (5.5) moves tables, not hashes, so this assumption does not extend to donors.
+Swept on 2026-09-01; sources and what was actually opened are in `docs/review/`.
 
-A7. Compression is zstd, measured in both orders relative to dedup. All-zero and unallocated ranges are excluded from every ratio and reported separately.
+No prior system is a local-only write log with no network on the write path, a fleet-wide hash-placed chunk store, and remote cold reads under a stock hypervisor.
 
-A8. Corpora represent their declared classes only. Build scripts and the donor protocol are published; results are per class; no universal ratio is claimed.
+Three are close enough that a reviewer would write a sentence if they were missing.
 
-## 9. What comes out
+## Nearest systems
 
-A measurement paper with a curve an operator can read against their own fleet's age and a rule for what to turn on: rebuild templates every N months, pick 4K or 16K, skip dedup on encrypted fleets.
+| Work | What it is | How this differs |
+|---|---|---|
+| Datrium DVX (2016), US20170031994A1 | host-side fingerprinting, host flash as read cache, global dedup on a shared data-node pool; the patent lists host-only ack as an alternative | peers as owners by hash instead of a shared pool; open implementation on stock QEMU; the cold read priced per transport |
+| Nutanix AOS | local OpLog on SSD, mirrored to another node before ack; cluster-wide post-process dedup at 16K; per-node cache | no mirror on the write path, with the window measured and the mirror as an arm; placement by hash instead of by vDisk locality; numbers published |
+| Fossil + Venti (2002) | a disk write buffer in front of a content-addressed archive; the two-tier shape | block device under a VM instead of a filesystem; primary capacity instead of archival; more than one owner |
+| Ceph + TiDedup (ATC '23) | post-process CDC into a chunk pool placed by CRUSH on the fingerprint; promotes on a cold miss | writes never cross the network; a host cache instead of promotion; a guest block path; latency numbers, which TiDedup does not report |
+| vSAN ESA global dedup (2025) | cluster-wide post-process 4K dedup, mirrored writes, 3 to 16 hosts, no published numbers | the per-host to cluster-wide change this study measures, in the open |
+| HYDRAstor (FAST '09) | content-addressed blocks placed by DHT across a grid, global dedup | secondary storage with network writes; no guest path |
+| DeDe (ATC '09) | hosts hash in-band, dedup out-of-band against a shared index on a SAN, no coordinator | local disks instead of a SAN; chunks move to owners instead of pointers on shared storage |
+| Liquid (TPDS '14) | fingerprint-keyed VM image filesystem, P2P fetch across hosts, copy-on-read local cache | block device under a stock hypervisor instead of a filesystem; owner by hash instead of P2P; full text not yet read |
 
-A cost table for ZFS fast dedup and dm-vdo on identical hardware and workloads, which as far as we can find has not been published side by side.
+## Remote fetch
 
-A published pipeline and a dated-archive corpus builder so the measurement can be rerun on any fleet or any release.
+| Work | What it measured | What it leaves open |
+|---|---|---|
+| DADI (ATC '20) | block-level lazy loading with tree P2P; 10,000 containers on 1,000 hosts in 4 s; trace prefetch removes 95% of the cold gap; reads from a parent's page cache beat local disk | no per-read miss latency; not content-addressed |
+| Slacker (FAST '16) | only 6.4% of a container image is read at startup; lazy fetch over NFS; run phase 17% slower | no per-block miss cost; centralized |
+| VMTorrent (CoNEXT '12), VMThunder (TPDS '14) | demand-priority P2P VM image streaming with recorded profiles | startup seconds only |
+| FaaSnap (EuroSys '22), REAP (ASPLOS '21) | lazy page faults from local disk at 13 µs; userfaultfd over 128 µs uncached; working set 9% of footprint | memory, not disk; local |
+| SnowFlock (EuroSys '09) | 275 µs per page fetched over gigabit, 82% of it in the network stack | the only in-VM remote per-unit number, and it is from 2009 |
+| Dahlin et al. (OSDI '94) | cooperative caching: remote client memory at 1.25 ms beats disk at 15 ms; N-chance forwarding | the argument this study remakes at 100 GbE with content names |
+| CLB (VEE '17), Satori (ATC '09) | content-keyed sharing of VM disk reads across guests on one host; 95 to 98% of boot reads eliminated | single host; no store |
 
-An answer, from data, to whether content-defined matching on Linux guest images reaches enough beyond an aligned table to justify building for it.
+**Nobody has measured a content-addressed chunk fetched from a peer inside a VM block read path at microsecond scale.**
 
-## 10. Future work
+Every lazy-loading system reports startup seconds, admits a per-read penalty, and hides it with a recorded prefetch profile.
 
-Content-defined block storage.
+## Transport
 
-If the shifted residue is large on some class, the two-tier design in `docs/history/` (staging log ahead of a content-addressing compactor, over vhost-user-blk) is the instrument to price it, and transfer becomes measurable there because a content-addressed store moves unique bytes only.
+i10 (NSDI '20) and blk-switch (OSDI '21) showed kernel TCP can match RDMA on throughput per core with batching, at a latency cost of 50 to 100 µs at low load.
 
-Distribution of that store is a known property (HYDRAstor, Ceph's chunk pool) and follows from it.
+The SPDK 24.05 reports on ConnectX-5 put kernel nvme-rdma at 12.1 µs and kernel nvme-tcp at 21.4 µs for a 4K read against a null device.
 
-KV caches.
+Homa (ATC '21) and eRPC (NSDI '19) put kernel bypass at 2 to 4 µs and attribute the rest of kernel TCP to wakeups and core selection.
 
-The same split appears in LLM serving.
+No storage paper measured a non-spinning userspace daemon over kernel TCP as a remote read target; that row is estimated on page 04 and measured here.
 
-Prefix caching in vLLM, SGLang, Mooncake, and LMCache names cached KV blocks by a hash chain over the whole token history, so two requests share KV only along a common prefix; that is lineage.
+## Objections already in print
 
-The same document after two different preambles is computed twice; that is the cross-lineage case.
+**Dong et al. (FAST '11)** rejected per-chunk hash placement for backup streams on locality grounds and routed 1 MB super-chunks; page 03 answers with a local cache and page 04 measures the cost.
 
-Position-independent caching (EPIC, ICML '25, and successors) is the mechanism that would reach it, at a recompute cost nobody has bounded, and no trace study has decomposed prefix reuse from non-prefix reuse.
+**Meyer and Bolosky (FAST '11)** already showed dedup savings grow with the log of the number of machines in one domain, which is the capacity half of H2 stated for desktops.
 
-That census is the next study.
+**Jin and Miller (SYSTOR '09)** found fixed blocks match CDC on VM images, which is why part 1 predicts a tie.
 
-## Editor's notes
+**despairlabs (2024)** tells ZFS operators to use clones and block cloning for the copy case and dedup rarely; the study agrees on one host and disagrees across hosts.
 
-- Title.
-- H1 numbers (twelve months, half). H2's 90%. Written down by week 2 and then frozen.
-- Read Jayaram et al. and CLB in full; both were verified from abstracts only.
-- Run the `zdb -S` five-minute test before citing the traversal behavior.
-- Measure the oracle's cost in week 2 and replace the arithmetic estimate.
-- Ask the sponsor to open the CloudLab project.
-- Move `playbook/SPEC.md`, `SPEC-v1.md`, and page 03's daemon design to `docs/history/`; fix the README.
+## What remains
+
+Datrium's patent and Nutanix's design are cited by name.
+
+Fossil and Venti are cited as the origin of the two-tier shape.
+
+The study's claim is the measurement: what a name buys across hosts on commodity hardware under a stock hypervisor, and what the cold read costs, per transport, with the numbers.

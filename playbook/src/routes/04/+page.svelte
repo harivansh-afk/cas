@@ -1,144 +1,123 @@
 <script lang="ts">
 	import PageHead from '$lib/components/PageHead.svelte';
 	import PageNav from '$lib/components/PageNav.svelte';
+	import { Diagram, Node, Note, Bracket } from '$lib/components/diagram';
 </script>
 
 <PageHead num="04" />
 <p class="lede">
-	<mark>Three phases, each ending in something true.</mark>
-	The census is the deliverable; the cost table is the second; the instrument is conditional on
-	the first and labeled preliminary.
-	Fourteen weeks at roughly eight hours each is about 110 hours, and the plan is sized to that
-	number rather than to the ambition.
+	<strong>Part 3.</strong>
+	A cold read whose chunk lives on the other host is the only place the network enters guest latency.
+	This page prices it, and pushes it down.
 </p>
 
-<h2>Hardware</h2>
+<h2>Where the time goes</h2>
 <p>
-	The study runs on x86-64 bare metal, the architecture of every system in the comparison
-	literature, so results compare directly to prior work.
-	Phase 1 needs one node and no root; phases 2 and 3 need one node with a dedicated NVMe device.
+	Every read has about 80 µs of NVMe media time under it.
+	On 100 GbE the transport sits on top: raw RDMA adds 3 to 5 µs, kernel nvme-rdma about 12, kernel nvme-tcp about 21, a userspace daemon over kernel TCP 20 to 30.
+	Those are the SPDK 24.05 and Systor '17 numbers on ConnectX-5; the testbed replaces them.
 </p>
 <p>
-	Primary testbed: <a href="https://docs.cloudlab.us/hardware.html">CloudLab c6525-100g</a>
-	nodes (Utah cluster), one at a time.
-	Per node: one AMD EPYC 7402P, 24 cores at 2.80 GHz, Zen 2; 128 GB ECC DDR4-3200; two 1.6 TB
-	NVMe SSDs, PCIe 4.0; one 25 GbE and one 100 GbE experiment link.
-	One NVMe device holds the system and results; the second is dedicated to the store under test,
-	so guest IO and any dedup pass never share a device with the OS.
-	CloudLab allocations are free for sponsored academic research; the sponsor approves the project.
-</p>
-<p>
-	Fallback if CloudLab access is not granted: one
-	<a href="https://corporate.ovhcloud.com/en/newsroom/news/adv-gen3-announcement/">OVHcloud
-	Advance</a> bare-metal server (2026 line), AMD EPYC 4005-series, 16 cores/32 threads, DDR5
-	ECC, 2 × 960 GB NVMe.
-</p>
-<p>
-	The CloudLab NICs are ConnectX-5 and therefore RoCE-capable; no phase uses the network for data.
-	Neither testbed has persistent memory or accelerators; the commodity restriction is part of the
-	claim.
-	Every figure in the paper is measured on the testbed rather than quoted.
+	So RDMA against TCP is a 10 µs question on an 80 µs read.
+	The 4x question is whether the chunk is in the owner's memory or on its disk.
+	<mark>A chunk from a peer's RAM over TCP is faster than a chunk from local NVMe.</mark>
+	With hash placement, a chunk shared across the fleet is hot at exactly one owner, and every host's read of it hits that owner's cache.
 </p>
 
-<h2>Schedule</h2>
+<Diagram
+	w={960}
+	h={260}
+	label="Horizontal bars, one per case, length proportional to latency from the literature. Local NVMe about 80 microseconds. Peer RAM over RDMA about 12, over TCP about 21, over the daemon on TCP 20 to 30. Peer NVMe over RDMA about 92, over TCP about 101, over the daemon about 110. The peer RAM bars are all shorter than the local NVMe bar."
+	caption="Latency stack for one 4K read, literature values in microseconds, before the testbed measures them. A peer's memory is closer than the local disk on every transport; the transport tier moves the bar by 10 to 30%."
+>
+	<Note x={20} y={36} tone="muted" size={10} text="local NVMe" />
+	<Node x={170} y={22} w={320} h={20} title="≈ 80" tone="muted" />
+
+	<Note x={20} y={80} tone="accent" size={10} text="peer RAM · RDMA" />
+	<Node x={170} y={66} w={48} h={20} title="≈ 12" tone="accent" />
+	<Note x={20} y={110} tone="accent" size={10} text="peer RAM · nvme-tcp" />
+	<Node x={170} y={96} w={84} h={20} title="≈ 21" tone="accent" />
+	<Note x={20} y={140} tone="accent" size={10} text="peer RAM · daemon TCP" />
+	<Node x={170} y={126} w={100} h={20} title="20–30" tone="accent" />
+	<Bracket x={290} y1={66} y2={146} label={['faster than local disk', 'the case hash placement makes common']} tone="accent" />
+
+	<Note x={20} y={184} size={10} text="peer NVMe · RDMA" />
+	<Node x={170} y={170} w={368} h={20} title="≈ 92" tone="outline" />
+	<Note x={20} y={214} size={10} text="peer NVMe · nvme-tcp" />
+	<Node x={170} y={200} w={404} h={20} title="≈ 101" tone="outline" />
+	<Note x={20} y={244} size={10} text="peer NVMe · daemon TCP" />
+	<Node x={170} y={230} w={440} h={20} title="≈ 110" tone="outline" />
+	<Bracket x={650} y1={170} y2={250} label={['10 to 30% over local', 'the cold case prefetch hides']} />
+</Diagram>
+
+<h2>Probes</h2>
+<p>
+	The architecture's transport is the daemon over kernel TCP.
+	The other rows exist to show what the kernel stack and the userspace hop each cost; nothing depends on them.
+</p>
 <div class="table-scroll">
 	<table class="spec">
 		<thead>
-			<tr><th>Weeks</th><th>Phase</th><th>Result</th></tr>
+			<tr><th>Probe</th><th>What it isolates</th><th>Code</th></tr>
 		</thead>
 		<tbody>
-			<tr><td class="k">1–2</td><td>1</td><td>census pipeline; synthetic controls run; first real-fleet ask sent</td></tr>
-			<tr><td class="k">3–4</td><td>1</td><td>first real fleet hashed on site; model and Nix corpora; first curves</td></tr>
-			<tr><td class="k">5–6</td><td>1</td><td>second real fleet; curves final; H1 verdict; <strong>week-6 gate written down</strong> (G2, G4)</td></tr>
-			<tr><td class="k">7–8</td><td>2</td><td>R0 and R1 configured; fio, kernel build, boot storm</td></tr>
-			<tr><td class="k">9–10</td><td>2</td><td>R2 dm-vdo and R3 duperemove; fleet replay; cost table complete (G3)</td></tr>
-			<tr><td class="k">11–12</td><td>3 or 1</td><td>gate open: passthrough, staging, compactor, verify, R4 row · gate closed: third fleet, tighter curves</td></tr>
-			<tr><td class="k">13–14</td><td>—</td><td>report; reproducibility pack (G5)</td></tr>
+			<tr><td class="k"><code>ib_read_lat -s 4096</code></td><td>the hardware floor</td><td>none</td></tr>
+			<tr><td class="k">nvme-rdma export</td><td>kernel block path over RDMA; owner's store exported by <code>nvmet</code> as a file-backed namespace, <code>buffered_io</code> on for RAM, off for media</td><td>configuration</td></tr>
+			<tr><td class="k">nvme-tcp export</td><td>same over kernel TCP</td><td>configuration</td></tr>
+			<tr><td class="k">daemon, TCP, spinning</td><td>the architecture, without the wakeup</td><td>the daemon</td></tr>
+			<tr><td class="k">daemon, TCP, sleeping</td><td>the architecture as deployed; the wakeup is the price</td><td>the daemon</td></tr>
+			<tr><td class="k">daemon, ibverbs two-sided<span class="tag-stretch">stretch</span></td><td>the userspace hop without the kernel stack</td><td>~40 h</td></tr>
 		</tbody>
 	</table>
 </div>
+<p>
+	The nvmet export is a probe and not the architecture: it exposes the raw store, needs the reader to know offsets, and has no place for authentication.
+	It is in the table because the difference between it and the daemon over the same TCP is the cost of the userspace hop, with SPDK's 1 µs kernel-versus-userspace target delta as the reference point.
+</p>
 
-<h2>Gates</h2>
-<ul class="reqs">
-	<li>
-		<span class="rid">G1</span>The census decomposition is exhaustive and disjoint: leaves sum to
-		100% of non-zero bytes per corpus at every time point.
-	</li>
-	<li>
-		<span class="rid">G2</span>At least two real fleets in the census, hashed on site under the
-		published donor protocol.
-	</li>
-	<li>
-		<span class="rid">G3</span>The cost table is complete: four stock rungs, identical workloads,
-		latency, amplification, storage, index, transfer, and cache columns, no empty cells, variance
-		beside every number.
-	</li>
-	<li>
-		<span class="rid">G4</span>The phase-3 decision is written at the end of week 6 with its
-		threshold (block-capturable at 4K ≥ 90% of cross-lineage on VM corpora cancels it) and cannot
-		move afterward. If phase 3 runs, <code>kill -9</code> recovery passes
-		<code>fio --verify</code> before any R4 number is reported.
-	</li>
-	<li>
-		<span class="rid">G5</span>One command reruns the census on any directory of images with an
-		ancestry file; one command reruns the cost table on a second node.
-	</li>
+<h2>Method</h2>
+<ul class="plain">
+	<li>Same two hosts, NIC, drive, and kernel for every row. Kernel, firmware, MTU, IRQ affinity, interrupt moderation, C-states, busy-poll, and PFC state recorded.</li>
+	<li>Two far ends per row: a null device for fabric plus stack alone, and the real file for end to end. Each from the owner's RAM and from its NVMe.</li>
+	<li>4K, 16K, 64K. p50, p99, p99.9. Five runs of 30 s, caches dropped between, medians with spread.</li>
+	<li>QD sweep 1, 4, 16, 64 for throughput and CPU per IOPS on both ends; TCP costs about 2.5x the CPU of RDMA at equal IOPS and the paper shows the ratio it measures.</li>
+	<li>RoCE hardware counters (<code>out_of_sequence</code>, <code>packet_seq_err</code>, <code>local_ack_timeout_err</code>) printed beside every RDMA number, proving zero retransmits on a fabric with no PFC.</li>
 </ul>
 
-<h2>Cut order, fixed now</h2>
+<h2>Prefetch</h2>
 <p>
-	Phase 3 first.
-	Then the Nix corpus.
-	Then R2 and R3, keeping R0 and R1.
-	Never a real fleet, never the time axis, never the R0/R1 table.
-	The order is the order the hours are spent, and a slip removes items from the top of this list,
-	not from the bottom.
+	The map tells the daemon what comes next.
+	Depth sweep: sequential reads through the map with 1, 2, 4, 8, 16, 32 chunks in flight, at 4K and 64K.
+	The bandwidth-delay point is about 250 KB for the fabric and about 1 MB with media under it, so roughly 20 chunks of 64K or 300 of 4K outstanding should hide the remote entirely.
+	Success is remote sequential throughput within the error bars of local.
+</p>
+<p>
+	Profile prefetch: record the chunk sequence of one boot, replay it on later boots.
+	Every lazy-loading system that has published numbers does this and reports it removing most of the miss cost; DADI says 95%.
+	It is the consensus mitigation and it costs about a day.
 </p>
 
-<h2>Logistics</h2>
+<h2>Under a guest</h2>
 <p>
-	CS 4993, 1 credit for registration. Planned effort is roughly 8 hours weekly; the credit
-	understates the work and this document does not. Expectations in writing before Sep 9; thirty
-	minutes of sponsor time biweekly, with the week-6 gate as a scheduled meeting.
+	Partitioned boot storm at N = 16, with and without profile prefetch, against the same storm in replicated mode.
+	Reported: guest p99 and host device reads per guest byte.
+	<mark>The gap between partitioned with prefetch and replicated is the residual price of one copy per chunk.</mark>
 </p>
 
-<h2>Risks</h2>
+<h2>RDMA is a probe</h2>
 <p>
-	<strong>No donor.</strong>
-	The principal threat to the study. Two real fleets is a gate, so the ask goes out in week 1 to
-	several candidates at once, the protocol moves hashes rather than images, and the author's own
-	machines are the floor.
-	If only one real fleet lands, the paper reports one and says so; if none, the census stands on
-	synthetic controls and the paper's claims shrink to the classes it measured.
-</p>
-<p>
-	<strong>Corpus bias.</strong>
-	A8 is the mitigation; corpus scripts and the donor protocol are published so the classes
-	themselves can be criticized, and the synthetic controls bracket every real curve.
-</p>
-<p>
-	<strong>Phase-3 overrun.</strong>
-	Contained by construction: it runs only if the gate opens, it is two weeks, its numbers are
-	labeled preliminary, and it is first in the cut order.
-</p>
-<p>
-	<strong>Novelty.</strong>
-	The lineage-versus-content claim was checked against the open web on 2026-09-01; that sweep
-	added DeDe, Jayaram et al., El-Shimi et al., TiDedup, and HYDRAstor to related work and found no
-	split measurement. OpenZFS development talks and mailing lists are not yet swept; they are,
-	before related work is final.
+	The CloudLab fabric is lossy; no PFC or ECN is documented on the shared switches, and published work on this node type ran RoCE that way.
+	Adaptive retransmission is enabled on the NIC and the counters above prove the runs were clean.
+	ConnectX-5 cannot do io_uring zero-copy receive, so that lever is out.
+	None of this touches the architecture, which runs on kernel TCP and would run on any Ethernet.
 </p>
 
-<h2>What comes out</h2>
-<p>
-	A measurement paper with a decision rule an operator can apply to their own fleet using the
-	published pipeline.
-	A four-backend cost table on identical hardware with numbers nobody has published side by side.
-	A data-backed answer to whether content-defined chunking on a guest block path deserves a
-	system, and if it does, a scoped instrument and preliminary numbers for the next study.
-	The shape is a strong undergraduate thesis and a credible workshop submission; it is not a
-	half-built daemon beside a rushed census, which is what the same hours spent the other way
-	around would produce.
-</p>
+<h2>H3, restated</h2>
+<ul class="reqs">
+	<li>A chunk from the owner's RAM arrives faster than a local NVMe read, on TCP and on RDMA.</li>
+	<li>From the owner's NVMe it costs at most 30% over local on TCP and 15% on RDMA, at QD1, 4K.</li>
+	<li>At depth at or above the bandwidth-delay point, remote sequential throughput is within 10% of local.</li>
+	<li>Partitioned boot storm p99 with profile prefetch is within 25% of replicated.</li>
+</ul>
 
 <PageNav num="04" />

@@ -8,7 +8,7 @@
 </script>
 
 <svelte:head>
-	<title>content, not lineage · {num} {title}</title>
+	<title>across hosts · {num} {title}</title>
 </svelte:head>
 
 <div class="pagehead">

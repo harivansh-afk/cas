@@ -1,128 +1,112 @@
 <script lang="ts">
-	import { base } from '$app/paths';
 	import PageHead from '$lib/components/PageHead.svelte';
 	import PageNav from '$lib/components/PageNav.svelte';
 </script>
 
 <PageHead num="02" />
 <p class="lede">
-	<mark>Zero new code.</mark>
-	Same stock QEMU, same guest, same NVMe device, four backends an operator can turn on today.
-	This is what makes the cost table a decision rule rather than a curiosity.
+	<strong>Part 1.</strong>
+	Same stock QEMU, same guest, same NVMe device, storage behind the device varies.
+	The prediction is a tie on capture between the daemon and ZFS fast dedup.
+	It is measured anyway, because the chunk-size curve under it is the single-host design result, and because a reviewer will ask why not ZFS.
 </p>
 
-<h2>Why stock systems</h2>
-<p>
-	The census's middle tier, block-capturable bytes, is exactly what shipping systems reach: an
-	inline dedup table at aligned granularity, or a post-process pass over reflinks.
-	Pricing that tier on the systems people actually run answers the operator's question directly.
-	A research daemon would price a design nobody deploys, and its constants would generalize only
-	by argument.
-	Constants for stock systems generalize by being the thing itself.
-</p>
-
-<h2>The rungs</h2>
-<p>
-	Same stock QEMU configuration and cache mode (A4) for all four; only the storage behind the
-	virtio-blk device varies.
-	R0, R2, and R3 share one XFS filesystem on the dedicated NVMe; R1 has its own pool on the same
-	device, created and destroyed per run.
-</p>
+<h2>Rungs</h2>
 <ul class="reqs">
 	<li>
-		<span class="rid">R0</span><strong>Raw file on XFS.</strong> The control, through QEMU's
-		built-in raw driver. Dedup nowhere in the path.
+		<span class="rid">R0</span><strong>Raw file on XFS.</strong>
+		QEMU's raw driver on the dedicated NVMe.
+		The control; no dedup anywhere in the path.
 	</li>
 	<li>
-		<span class="rid">R1</span><strong>Raw file on a ZFS zvol, stock OpenZFS ≥ 2.3 with fast
-		dedup.</strong>
-		The incumbent block-pointer design with content-hash identity.
-		Fast dedup is required, not optional: it replaces the legacy DDT's random writes with a
-		sorted log flush and adds a quota and pruning, and a comparison against the pre-2.3 DDT would
-		be against a design its own maintainers call obsolete.
-		Configuration: <code>feature@fast_dedup</code> enabled; <code>checksum=blake3, dedup=on</code>;
-		<code>volblocksize</code> arms at 4K and 16K, since zvol dedup granularity is the volblocksize
-		and the census's fixed-block result decides which is headline; <code>dedup_table_quota</code>
-		unset and <code>zpool ddtprune</code> never run during a measurement, both recorded;
-		compression off outside the labeled compression arm; DDT memory read from
-		<code>zpool status -D</code>.
-		Whether OpenZFS direct IO applies to a zvol with dedup on is checked and recorded before the
-		media-honest run.
+		<span class="rid">R1</span><strong>Zvol on ZFS 2.3 fast dedup.</strong>
+		Own pool on the same device, created and destroyed per run, opened by QEMU as a block device.
+		<code>feature@fast_dedup</code>; <code>dedup=blake3</code>, since <code>dedup=on</code> silently uses SHA-256 regardless of the checksum property; <code>volblocksize=16K</code> primary and <code>4K</code> second arm; <code>compression=zle</code> outside the compression arm so zero blocks do not collapse onto one DDT entry; <code>dedup_table_quota</code> unset and <code>zpool ddtprune</code> never run during a measurement; DDT memory from <code>zpool status -D</code>.
+		OpenZFS direct IO does not apply to zvols or with dedup, so R1 is ARC-backed in every arm and the paper says so.
 	</li>
 	<li>
-		<span class="rid">R2</span><strong>Raw file on XFS over dm-vdo.</strong>
-		Inline fixed-4K dedup and compression in the kernel, mainline since 6.9.
-		Configuration: dedup on, compression off outside the compression arm, index memory from
-		<code>vdostats</code>.
-		The cleanest controlled comparison in the set: identical filesystem and file to R0, one
-		device-mapper layer added.
+		<span class="rid">R2</span><strong>Raw file on XFS over dm-vdo.</strong><span class="tag-stretch">optional</span>
+		Inline fixed-4K dedup in the kernel, mainline since 6.9.
+		Its own XFS instance on the vdo device.
+		Index memory from <code>vdostats</code>.
 	</li>
 	<li>
-		<span class="rid">R3</span><strong>Raw file on XFS with post-process
-		<code>duperemove</code>.</strong>
-		Fixed-block dedup by <code>FIDEDUPERANGE</code> at a declared cadence, on the control
-		filesystem itself.
-		The zero-cost-on-the-write-path point: no inline hashing, no table on the hot path, capture
-		deferred to a batch job.
-		Storage and transfer are read after the pass settles; the pass's own device traffic is
-		reported as its write amplification.
+		<span class="rid">R4</span><strong>The daemon, one host.</strong>
+		Local store only, k not in play.
+		Three chunk-size arms below.
 	</li>
 </ul>
 <p>
-	R0 versus R2 prices inline aligned content identity with everything else held constant.
-	R0 versus R3 prices post-process aligned content identity the same way.
-	R1 anchors both against the deployed state of the art and, read against the census at the
-	matching volblocksize, shows how much of the cross-lineage segment a dedup table reaches in
-	practice against what the census says it could.
-	R1 is a case study rather than a controlled comparison: it differs from the others in kernel
-	boundary, caching, and allocation, and the paper attributes cross-rung deltas accordingly.
+	R0 against R4 is the cost of the daemon with everything else held constant.
+	R1 is the deployed state of the art and differs in kernel boundary, caching, and allocation, so it is a case study beside the controlled pair, and the paper attributes deltas accordingly.
+</p>
+
+<h2>Chunk size</h2>
+<p>
+	Fixed 4K captures everything a Linux guest offers, and costs an index entry per 4K: about 250 million entries per TB, roughly 10 GB of RAM per TB at 40 bytes each.
+	That is the DDT memory problem the daemon is supposed to escape.
+	FastCDC at a 16K mean cuts the index four times over and loses some aligned matches.
+</p>
+<p>
+	Three arms: fixed 4K, fixed 16K, FastCDC 8K to 64K with a 16K mean.
+	Reported per arm: bytes stored, index bytes per TB, guest p99, write amplification.
+	<mark>Capture against index memory as a function of chunk size is the curve this page exists for.</mark>
+	The census below predicts the capture column before any run.
 </p>
 
 <h2>Workloads</h2>
+<ul class="plain">
+	<li>fio: 4K random write and read at QD1 and QD32; 128K sequential.</li>
+	<li>Boot storm: N clones of one image booted together, N = 4, 16, 32.</li>
+	<li>Fleet replay: the synthetic fleet below written onto N guests, at two points on its timeline.</li>
+</ul>
 <p>
-	fio, 4K random write and read at QD1 and QD32, 128K sequential; kernel build in the guest;
-	N-clone boot storm, N at 4, 16, and 32; replay of one real fleet from the census onto N guests,
-	which is the workload the whole study is about.
-	Synthetic stress workloads that exist only to exercise a daemon are not in this phase.
+	No kernel build and no synthetic stress workload that exists only to exercise the daemon.
 </p>
 
-<h2>Measured per rung</h2>
+<h2>Metrics</h2>
+<ul class="plain">
+	<li>Guest p50 and p99 write and read latency against R0, compactor active and idle. Reported first.</li>
+	<li>Bytes stored after compaction settles, against the census prediction at the rung's block size.</li>
+	<li>Index or DDT bytes per stored TB.</li>
+	<li>Write amplification: device bytes written per guest byte, from NVMe counters.</li>
+	<li>Sustainable ingest and the back-pressure point.</li>
+	<li>Recovery: <code>kill -9</code>, replay, <code>fio --verify</code>.</li>
+</ul>
+
+<h2>Controls</h2>
 <p>
-	Two headline metrics and their preconditions.
-	<mark>Transfer</mark>: bytes that had to move to provision the N clones and to replay the fleet,
-	from device write counters, against the census's unique-byte count for the same images.
-	<mark>Cache</mark>: host device reads per guest byte read during the boot storm, so N guests
-	reading one shared block show up as one read.
-	Preconditions: guest p50 and p99 write and read latency against R0, at least five repetitions,
-	variance beside every number; write amplification, device bytes written per guest byte, from
-	NVMe counters; storage consumed after ingest and after any post-process pass settles; index or
-	DDT memory per stored TB.
+	Pinned vCPUs, performance governor, discarded warm-up, fresh filesystem or pool per repetition, at least five repetitions, variance beside every number.
+	Cache bounded equal across rungs: cgroup memory limit for the page cache on R0 and R2, <code>zfs_arc_max</code> on R1, the daemon's cache size on R4.
 </p>
 <p>
-	Latency parity is a precondition and reported first.
-	A backend that captures everything and doubles p99 has a different cost than one that captures
-	everything at parity, and the table says which is which before it says how much was captured.
+	All rungs are observed at the guest boundary (fio's histograms, guest-side blktrace for the boot storm) plus host device counters.
+	The daemon adds per-request stage timestamps drained to ndjson, cross-checked once against bpftrace with the delta reported.
+	<code>zpool</code> and <code>vdostats</code> figures are supplementary.
 </p>
 
-<h2>Instrumentation and controls</h2>
+<h2>Prediction</h2>
 <p>
-	All rungs are observed at the guest boundary (fio's own latency histograms, guest-side
-	<code>blktrace</code> for the build and boot storm) plus host device counters, so no rung is
-	favored by internal tracing the others lack.
-	ZFS adds <code>zpool</code> statistics and dm-vdo adds <code>vdostats</code>, reported as
-	supplementary.
-	Controls: pinned vCPUs, performance governor, discarded warm-up, fresh filesystem or pool per
-	repetition, at least five repetitions.
-	Gate G3 is a complete table: four rungs, identical workloads, no empty cells.
+	A small census supplies two numbers the rest of the study is measured against: how many unique bytes a fleet holds at a given block size, and how many bytes copy-on-write would already have shared.
 </p>
-
-<h2>What this phase cannot say</h2>
 <p>
-	Nothing here reaches the <a class="term" href="{base}/00#term-cdc-only">CDC-only</a> leaf.
-	Every backend in this phase is aligned, so the table prices two of the three tiers.
-	If the census says the third tier is small on VM images, the table is the whole cost side and
-	the study is complete.
-	If it says the third tier is large, page 03 builds the instrument that prices it.
+	<strong>Phase 0.</strong>
+	<code>zdb -S</code> on a ZFS pool holding the cloned fleet.
+	Pool traversal starts each dataset at its previous snapshot's txg, so blocks a clone inherited from its origin are counted once, and the simulated ratio is duplicates beyond what clones already share.
+	Verified in <code>dmu_traverse.c</code>; confirmed by a five-minute test before it is cited.
+</p>
+<p>
+	<strong>The fleet.</strong>
+	Ubuntu publishes dated cloud images and snapshot.debian.org serves the archive as of any date.
+	An image installed as of T0 and upgraded monthly against the archive as of T1, T2, and on replays a real update history.
+	N such clones with scripted drift (hostnames, logs, a few packages each) form the fleet.
+	It is rebuilt by one command, dated, and is also the replay workload above.
+</p>
+<p>
+	<strong>The split.</strong>
+	Per byte range: zero or unallocated (from the guest allocation map, excluded), unique, shared with the T0 base in place, duplicate at an aligned 4K or 16K boundary elsewhere in the fleet, or duplicate only at a shifted offset.
+	The aligned column predicts R1 and the fixed arms; aligned plus shifted predicts the CDC arm.
+	Nothing more: no donors, no real fleets, no time-axis claims.
 </p>
 
 <PageNav num="02" />
