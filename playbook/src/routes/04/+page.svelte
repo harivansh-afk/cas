@@ -17,11 +17,11 @@
 			<tr><th>Component</th><th>Source</th><th>License</th></tr>
 		</thead>
 		<tbody>
-			<tr><td class="k">Hypervisor</td><td>stock QEMU, unmodified (vhost-user-blk front end)</td><td>GPL-2.0</td></tr>
-			<tr><td class="k">vhost-user protocol handling</td><td>rust-vmm <code>vhost-user-backend</code>, <code>vm-memory</code>, <code>virtio-queue</code> crates</td><td>Apache-2.0</td></tr>
-			<tr><td class="k">Hashing</td><td>official <code>blake3</code> crate</td><td>Apache-2.0/CC0</td></tr>
-			<tr><td class="k">Content-defined chunking</td><td><code>fastcdc</code> crate, or reimplemented from the FastCDC paper if the crate falls short</td><td>MIT</td></tr>
-			<tr><td class="k">R1 baseline</td><td>stock OpenZFS ≥ 2.2, unmodified</td><td>CDDL</td></tr>
+			<tr><td class="k">Hypervisor</td><td>stock <a href="https://www.qemu.org">QEMU</a>, unmodified (vhost-user-blk front end)</td><td>GPL-2.0</td></tr>
+			<tr><td class="k">vhost-user protocol handling</td><td><a href="https://github.com/rust-vmm">rust-vmm</a> <code>vhost-user-backend</code>, <code>vm-memory</code>, <code>virtio-queue</code> crates</td><td>Apache-2.0</td></tr>
+			<tr><td class="k">Hashing</td><td>official <a href="https://github.com/BLAKE3-team/BLAKE3">blake3</a> crate</td><td>Apache-2.0/CC0</td></tr>
+			<tr><td class="k">Content-defined chunking</td><td><a href="https://crates.io/crates/fastcdc">fastcdc</a> crate, or reimplemented from the FastCDC paper if the crate falls short</td><td>MIT</td></tr>
+			<tr><td class="k">R1 baseline</td><td>stock <a href="https://github.com/openzfs/zfs">OpenZFS</a> ≥ 2.2, unmodified</td><td>CDDL</td></tr>
 			<tr><td class="k">Staging log, compactor, chunk store, index, maps, GC</td><td>written for this study</td><td>new code</td></tr>
 			<tr><td class="k">Census pipeline, harness, analysis</td><td>written for this study</td><td>new code</td></tr>
 		</tbody>

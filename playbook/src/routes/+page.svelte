@@ -23,8 +23,6 @@
 	{/each}
 </nav>
 
-<p class="homefoot">spec v4 · thesis · model · distribution · measurement · implementation</p>
-
 <style>
 	.toc {
 		margin-top: 0.875rem;
@@ -61,11 +59,6 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
-	}
-	.homefoot {
-		margin-top: 1.5rem;
-		font-size: 0.6875rem;
-		color: var(--text-quaternary);
 	}
 	@media (max-width: 640px) {
 		.toc a {

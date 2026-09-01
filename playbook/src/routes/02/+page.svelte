@@ -25,7 +25,7 @@
 </p>
 <p>
 	Compaction ships a chunk only if the owning shard lacks it. Cluster ingest traffic is therefore
-	proportional to unique bytes, not written bytes.
+	<mark>proportional to unique bytes, not written bytes</mark>.
 </p>
 
 <figure>
@@ -121,8 +121,8 @@
 	</li>
 	<li>
 		A cold read whose chunk lives remotely pays a network round trip inside guest latency.
-		Staging absorbs writes and recent reads; caching absorbs part of the remainder; the residue
-		is the true cost of disaggregation and is the designated follow-on study.
+		Staging absorbs writes and recent reads; caching absorbs part of the remainder; what is
+		left is the real cost of disaggregation, measured in the follow-on study.
 	</li>
 	<li>
 		Partitioning places the index; it does not shrink it. Cluster-scale honesty depends on the
@@ -142,7 +142,7 @@
 </p>
 <p>
 	Choosing among them requires the per-stage measurement methodology this study builds, applied
-	at the fabric, which is why the transport question is deferred rather than guessed.
+	at the fabric, so the choice waits until it can be measured.
 </p>
 
 <h2>Scope</h2>

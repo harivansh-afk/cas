@@ -147,8 +147,8 @@
 </p>
 <p>
 	The design buys its write path with two known costs.
-	Write amplification: every surviving byte is written at least twice, staging then chunk store,
-	plus map-journal traffic; the WA factor is reported as a headline result.
+	Write amplification: <mark>every surviving byte is written at least twice</mark>, staging then
+	chunk store, plus map-journal traffic; the WA factor is reported as a headline result.
 	Interference: compaction reads staging and writes the store on the device the guest is using;
 	S2 measures guest p99 with the compactor active and idle and reports the delta.
 </p>
@@ -184,7 +184,7 @@
 <h2>Crash consistency</h2>
 <p>
 	Two logs exist, staging and the map journal, and they must agree after a crash. Ordering rule:
-	staging is senior. Compaction is idempotent (re-chunking the same extents yields the same
+	<mark>staging is senior</mark>. Compaction is idempotent (re-chunking the same extents yields the same
 	hashes), and every compaction batch carries an epoch number recorded in both logs. On recovery:
 	replay the staging log; discard map-journal records from any epoch whose staging extents were
 	not yet marked compacted; re-run compaction from the oldest incomplete epoch.

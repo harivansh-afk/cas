@@ -13,7 +13,7 @@
 <h2>S1 — Redundancy census (H1, weeks 1–4)</h2>
 <p>
 	Offline analysis of images at rest, requiring neither the daemon nor a guest.
-	First numbers in two weeks.
+	<mark>First numbers in two weeks.</mark>
 </p>
 <p>
 	Corpora (A8 scripts for each): cloned fleet (golden image, N clones, scripted drift; lineage's

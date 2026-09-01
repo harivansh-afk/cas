@@ -160,7 +160,7 @@ strong {
 	color: var(--text-primary);
 }
 
-/* key-term highlight: one phrase per page, no more */
+/* key-term highlight: the skim layer — a handful of phrases per page */
 mark {
 	background: color-mix(in srgb, #d97706 16%, transparent);
 	color: var(--text-primary);
@@ -326,6 +326,14 @@ table.spec td.k {
 	color: var(--text-primary);
 	font-weight: var(--weight-strong);
 	white-space: nowrap;
+}
+table.spec a {
+	color: var(--text-primary);
+	border-bottom: 1px solid var(--border);
+	transition: border-color 0.15s ease;
+}
+table.spec a:hover {
+	border-bottom-color: var(--text-tertiary);
 }
 
 figure {
