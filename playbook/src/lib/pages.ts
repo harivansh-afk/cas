@@ -5,8 +5,9 @@ export interface Page {
 }
 
 export const pages: Page[] = [
-	{ num: '00', title: 'Thesis', description: 'The claim · hypotheses H1–H3 · hardware class · assumptions A1–A8' },
-	{ num: '01', title: 'The model', description: 'An LSM tree whose compaction step is content addressing · the comparison ladder' },
-	{ num: '02', title: 'Distribution', description: 'Local write, global dedup · what distributes for free · what stays hard' },
-	{ num: '03', title: 'Measurement', description: 'Census, comparison, demonstration · gates G1–G4 · schedule' }
+	{ num: '00', title: 'Thesis', description: 'Goal · the structural gap · hypotheses H1–H3 · hardware · assumptions A1–A8' },
+	{ num: '01', title: 'The model', description: 'An LSM tree whose compaction step is content addressing · rungs R0–R3' },
+	{ num: '02', title: 'Distribution', description: 'Local write, global dedup · what stays hard · the transport slot' },
+	{ num: '03', title: 'Measurement', description: 'Census, comparison, demonstration · gates G1–G5 · schedule' },
+	{ num: '04', title: 'Implementation', description: 'What is stock and what is new · repository layout · build order' }
 ];

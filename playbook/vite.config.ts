@@ -15,7 +15,7 @@ export default defineConfig({
 			adapter: adapter(),
 
 			// Set by the GitHub Pages workflow (e.g. /playbook); empty for local dev.
-			paths: { base: process.env.BASE_PATH || '' }
+			paths: { base: (process.env.BASE_PATH || '') as '' | `/${string}` }
 		})
 	]
 });

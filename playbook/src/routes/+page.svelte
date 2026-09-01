@@ -7,16 +7,17 @@
 	<title>Chunk pointers, not block pointers</title>
 	<meta
 		name="description"
-		content="A storage system that names data by content, at chunk granularity, captures redundancy that block-pointer systems structurally cannot."
+		content="Measure whether chunk-level content addressing finds enough duplicate data that copy-on-write systems structurally miss to justify its runtime costs."
 	/>
 </svelte:head>
 
 <span class="eyebrow">CS 4993 · fall 2026</span>
 <h1>Chunk pointers, not block pointers</h1>
 <p class="lede">
-	<strong>A storage system that names data by content, at chunk granularity, captures redundancy
-	that block-pointer systems structurally cannot.</strong> At fleet scale, that capture dominates
-	the costs of hashing, indexing, and compaction. This study asserts that claim and measures it.
+	<strong>Goal of the study.</strong> Measure whether chunk-level content addressing finds enough
+	duplicate data that copy-on-write systems structurally miss to justify its runtime costs. The
+	instrument is a purpose-built two-tier storage backend; the baseline is stock ZFS; the evidence
+	is a redundancy census over real corpora and a four-rung system comparison.
 </p>
 
 <nav class="toc" aria-label="Pages">
@@ -29,7 +30,7 @@
 	{/each}
 </nav>
 
-<p class="homefoot">spec v3 · thesis · model · distribution · measurement</p>
+<p class="homefoot">spec v4 · thesis · model · distribution · measurement · implementation</p>
 
 <style>
 	.toc {

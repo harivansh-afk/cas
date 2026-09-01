@@ -2,7 +2,7 @@
 
 Source of truth for the playbook app. Five pages: thesis, model, distribution, measurement, implementation. Typeset verbatim. Labels: hypotheses (H), assumptions (A), rungs (R), stages (S), gates (G).
 
-v4 changes from v3: no ix.dev IP anywhere, so the hypervisor is stock and all new code lives in a vhost-user-blk daemon; ZFS reframed as an uncontrolled case study with a new raw-file control rung; the prolly tree replaced by a Merkle-paged map for the dense-key block map, prolly deferred to distribution metadata; write amplification, compactor interference, crash consistency, and the read-heavy aged workload added; the storage-economics objection stated on page 00; register tightened to technical prose.
+v4 changes from v3: no reused private code, so the hypervisor is stock and all new code lives in a vhost-user-blk daemon; ZFS reframed as an uncontrolled case study with a new raw-file control rung; the prolly tree replaced by a Merkle-paged map for the dense-key block map, prolly deferred to distribution metadata; write amplification, compactor interference, crash consistency, and the read-heavy aged workload added; the storage-economics objection stated on page 00; register tightened to technical prose.
 
 ---
 
@@ -91,12 +91,16 @@ Staging is finite. If sustained ingest exceeds compaction bandwidth, staged byte
 
 A chunk is live if staging or any map references it. Collection is mark-and-sweep: scan the maps, build a live set, punch holes (`FALLOC_FL_PUNCH_HOLE`) over dead records. No reference counts; refcount maintenance is the classic dedup write tax, and the maps are small enough to scan. No reclamation inside an open snapshot epoch.
 
+### Host filesystem
+
+The daemon's files (staging log, chunk store, maps, journals) reside on XFS on the dedicated NVMe device, opened with O_DIRECT in the media-honest arms. XFS is required, not preferred: garbage collection is `FALLOC_FL_PUNCH_HOLE`, so the backing filesystem must support hole punching with extent-based allocation, and the store needs working O_DIRECT and io_uring semantics. A raw partition would remove filesystem interference but removes hole punching with it. ZFS never sits under the daemon; stacking two copy-on-write systems would confound every measurement.
+
 ### The rungs
 
-Same stock QEMU configuration for all four; only the storage behind the device varies.
+Same stock QEMU configuration for all four; only the storage behind the device varies. R0, R2, and R3 share one XFS filesystem on the dedicated NVMe.
 
-- **R0 — raw file on xfs.** The control. No dedup, no ZFS, no daemon features beyond passthrough.
-- **R1 — raw file on a ZFS zvol, `checksum=blake3, dedup=on`, stock OpenZFS.** The incumbent block-pointer design with content-hash identity. R1 is a case study, not a controlled comparison: it differs from the daemon in kernel boundary, caching, and allocation, and the paper attributes cross-rung deltas accordingly. Patching ZFS is out of scope; a fork would consume the schedule and demonstrate nothing stock ZFS does not.
+- **R0 — raw file on XFS.** The control. No dedup, no ZFS, no daemon features beyond passthrough.
+- **R1 — raw file on a ZFS zvol, stock OpenZFS, its own pool on the same NVMe device.** Configuration: `checksum=blake3, dedup=on`; `volblocksize` matched to the daemon's chunk-size arm, because zvol dedup granularity is the volblocksize; compression off outside the labeled compression arm; DDT memory read from `zpool status -D` and reported in the same index-cost column as the daemon's. The incumbent block-pointer design with content-hash identity. R1 is a case study, not a controlled comparison: it differs from the daemon in kernel boundary, caching, and allocation, and the paper attributes cross-rung deltas accordingly. Patching ZFS is out of scope; a fork would consume the schedule and demonstrate nothing stock ZFS does not.
 - **R2 — the daemon, offset-tree map.** Chunk-level content addressing, conventional metadata.
 - **R3 — the daemon, Merkle-paged map.** Chunk-level content addressing, history-independent metadata.
 
@@ -202,9 +206,9 @@ Risks. Corpus bias is the principal threat to H1; A8 is the mitigation, and the 
 
 ## PAGE 04 — Implementation
 
-### Provenance
+### What is stock and what is new
 
-No code, documents, or designs from ix.dev are used or consulted. The system is built from public components and new code, as follows.
+Every line the study's claims depend on is either a stock upstream release or new code in one repository. The hypervisor is never forked: QEMU speaks vhost-user-blk to an external process, so all new code lives in that process, the daemon.
 
 | Component | Source | License |
 |---|---|---|
@@ -216,7 +220,7 @@ No code, documents, or designs from ix.dev are used or consulted. The system is 
 | Staging log, compactor, chunk store, index, maps, GC | written for this study | ours |
 | Census pipeline, harness, analysis | written for this study | ours |
 
-The daemon route exists precisely because of the provenance constraint: with vhost-user-blk, the hypervisor needs no changes at all, so no fork of QEMU, Firecracker, or cloud-hypervisor is required, and every line the study depends on for its claims is either a stock upstream release or new code in one repository.
+This split is what makes the measurements defensible. Because the hypervisor is unmodified, no result can be an artifact of a patched QEMU, and the R0 control runs the identical binary. It also bounds the build: the protocol plumbing comes from maintained crates, so the engineering budget is spent entirely on the five components the paper is about.
 
 ### Repository
 

@@ -189,20 +189,37 @@
 	enough to scan. No reclamation inside an open snapshot epoch.
 </p>
 
+<h2>Host filesystem</h2>
+<p>
+	The daemon's files (staging log, chunk store, maps, journals) reside on XFS on the dedicated
+	NVMe device, opened with O_DIRECT in the media-honest arms. XFS is required, not preferred:
+	garbage collection is <code>FALLOC_FL_PUNCH_HOLE</code>, so the backing filesystem must support
+	hole punching with extent-based allocation, and the store needs working O_DIRECT and io_uring
+	semantics. A raw partition would remove filesystem interference but removes hole punching with
+	it. ZFS never sits under the daemon; stacking two copy-on-write systems would confound every
+	measurement.
+</p>
+
 <h2>The rungs</h2>
-<p>Same stock QEMU configuration for all four; only the storage behind the device varies.</p>
+<p>
+	Same stock QEMU configuration for all four; only the storage behind the device varies. R0, R2,
+	and R3 share one XFS filesystem on the dedicated NVMe.
+</p>
 <ul class="reqs">
 	<li>
-		<span class="rid">R0</span><strong>Raw file on xfs.</strong> The control. No dedup, no ZFS, no
+		<span class="rid">R0</span><strong>Raw file on XFS.</strong> The control. No dedup, no ZFS, no
 		daemon features beyond passthrough.
 	</li>
 	<li>
-		<span class="rid">R1</span><strong>Raw file on a ZFS zvol, <code>checksum=blake3,
-		dedup=on</code>, stock OpenZFS.</strong> The incumbent block-pointer design with content-hash
-		identity. R1 is a case study, not a controlled comparison: it differs from the daemon in
-		kernel boundary, caching, and allocation, and the paper attributes cross-rung deltas
-		accordingly. Patching ZFS is out of scope; a fork would consume the schedule and demonstrate
-		nothing stock ZFS does not.
+		<span class="rid">R1</span><strong>Raw file on a ZFS zvol, stock OpenZFS, its own pool on the
+		same NVMe device.</strong> Configuration: <code>checksum=blake3, dedup=on</code>;
+		<code>volblocksize</code> matched to the daemon's chunk-size arm, because zvol dedup
+		granularity is the volblocksize; compression off outside the labeled compression arm; DDT
+		memory read from <code>zpool status -D</code> and reported in the same index-cost column as
+		the daemon's. The incumbent block-pointer design with content-hash identity. R1 is a case
+		study, not a controlled comparison: it differs from the daemon in kernel boundary, caching,
+		and allocation, and the paper attributes cross-rung deltas accordingly. Patching ZFS is out of
+		scope; a fork would consume the schedule and demonstrate nothing stock ZFS does not.
 	</li>
 	<li>
 		<span class="rid">R2</span><strong>The daemon, offset-tree map.</strong> Chunk-level content
@@ -316,7 +333,7 @@
 		<text x="780" y="338" text-anchor="middle" font-size="10.5" fill="#d97706">identical bytes · stored once</text>
 
 		<!-- by-hash label -->
-		<text x="760" y="180" text-anchor="middle" font-size="10" fill="currentColor" opacity="0.6">pointers by hash · no dedup table · no refcounts</text>
+		<text x="760" y="180" text-anchor="middle" font-size="10" fill="currentColor" opacity="0.6">pointers by hash · no refcounts · liveness by map scan</text>
 	</svg>
 	<figcaption>
 		Block pointers versus chunk pointers. The left structure shares what was copied; the right
