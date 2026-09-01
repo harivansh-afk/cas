@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { base } from '$app/paths';
 	import { pages } from '$lib/pages';
 
 	let { num }: { num: string } = $props();
@@ -10,15 +11,15 @@
 
 <nav class="pagenav">
 	{#if prev}
-		<a href="/{prev.num}">← {prev.num} {prev.title}</a>
+		<a href="{base}/{prev.num}">← {prev.num} {prev.title}</a>
 	{:else}
-		<a href="/">← index</a>
+		<a href="{base}/">← index</a>
 	{/if}
 	<span class="spacer"></span>
 	{#if next}
-		<a href="/{next.num}">{next.num} {next.title} →</a>
+		<a href="{base}/{next.num}">{next.num} {next.title} →</a>
 	{:else}
-		<a href="/">index →</a>
+		<a href="{base}/">index →</a>
 	{/if}
 </nav>
 

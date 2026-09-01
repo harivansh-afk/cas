@@ -5,10 +5,8 @@ export interface Page {
 }
 
 export const pages: Page[] = [
-	{ num: '00', title: 'Overview', description: 'Claims, functional bar, scope, novelty' },
-	{ num: '01', title: 'CAS store', description: 'Chunk log, index, block map, integrity, liveness' },
-	{ num: '02', title: 'VMM integration', description: 'virtio-blk contract, batching, comparison arms' },
-	{ num: '03', title: 'Hot paths', description: 'Write, read, FLUSH, DISCARD · stages T0–T7 · diagram' },
-	{ num: '04', title: 'Measurement system', description: 'Instrumentation, arms, benchmarks, validation gates' },
-	{ num: '05', title: 'Repo and plan', description: 'Tree, milestones, stretch goals, risks' }
+	{ num: '00', title: 'Thesis', description: 'The claim · hypotheses H1–H3 · hardware class · assumptions A1–A8' },
+	{ num: '01', title: 'The model', description: 'An LSM tree whose compaction step is content addressing · the comparison ladder' },
+	{ num: '02', title: 'Distribution', description: 'Local write, global dedup · what distributes for free · what stays hard' },
+	{ num: '03', title: 'Measurement', description: 'Census, comparison, demonstration · gates G1–G4 · schedule' }
 ];

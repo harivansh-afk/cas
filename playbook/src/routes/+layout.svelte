@@ -4,6 +4,7 @@
 	import berkeleyMono from '$lib/assets/fonts/BerkeleyMono-Variable.woff2';
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
+	import { base } from '$app/paths';
 	import { pages } from '$lib/pages';
 
 	let { children } = $props();
@@ -11,7 +12,7 @@
 	const nums = pages.map((p) => p.num);
 
 	function current(): string | null {
-		const m = page.url.pathname.match(/^\/(0[0-5])\/?$/);
+		const m = page.url.pathname.slice(base.length).match(/^\/(0[0-5])\/?$/);
 		return m ? m[1] : null;
 	}
 
@@ -23,19 +24,19 @@
 		}
 		const cur = current();
 		if (e.key === 'Escape' && cur !== null) {
-			goto('/');
+			goto(`${base}/`);
 		} else if (e.key === 'ArrowRight') {
 			if (cur === null) {
-				goto('/00');
+				goto(`${base}/00`);
 			} else {
 				const i = nums.indexOf(cur);
-				if (i < nums.length - 1) goto(`/${nums[i + 1]}`);
+				if (i < nums.length - 1) goto(`${base}/${nums[i + 1]}`);
 			}
 		} else if (e.key === 'ArrowLeft') {
 			if (cur === '00') {
-				goto('/');
+				goto(`${base}/`);
 			} else if (cur !== null) {
-				goto(`/${nums[nums.indexOf(cur) - 1]}`);
+				goto(`${base}/${nums[nums.indexOf(cur) - 1]}`);
 			}
 		}
 	}

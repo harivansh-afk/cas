@@ -12,7 +12,10 @@ export default defineConfig({
 			},
 
 			// Fully prerendered: every route is static HTML.
-			adapter: adapter()
+			adapter: adapter(),
+
+			// Set by the GitHub Pages workflow (e.g. /playbook); empty for local dev.
+			paths: { base: process.env.BASE_PATH || '' }
 		})
 	]
 });

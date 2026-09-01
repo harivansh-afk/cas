@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { base } from '$app/paths';
 	import { pages } from '$lib/pages';
 
 	let { num }: { num: string } = $props();
@@ -7,12 +8,12 @@
 </script>
 
 <svelte:head>
-	<title>casblk · {num} {title}</title>
+	<title>chunk pointers · {num} {title}</title>
 </svelte:head>
 
 <div class="pagehead">
-	<span class="eyebrow">casblk · page {num}</span>
-	<a class="backlink" href="/">← index</a>
+	<span class="eyebrow">chunk pointers · page {num}</span>
+	<a class="backlink" href="{base}/">← index</a>
 </div>
 <h1>{title}</h1>
 

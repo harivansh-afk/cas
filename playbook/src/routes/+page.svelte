@@ -1,25 +1,27 @@
 <script lang="ts">
+	import { base } from '$app/paths';
 	import { pages } from '$lib/pages';
 </script>
 
 <svelte:head>
-	<title>casblk</title>
+	<title>Chunk pointers, not block pointers</title>
 	<meta
 		name="description"
-		content="casblk measures the latency cost of content-addressed storage on the guest disk path."
+		content="A storage system that names data by content, at chunk granularity, captures redundancy that block-pointer systems structurally cannot."
 	/>
 </svelte:head>
 
-<span class="eyebrow">CS 4993 · measurement study · fall 2026</span>
-<h1>casblk</h1>
+<span class="eyebrow">CS 4993 · fall 2026</span>
+<h1>Chunk pointers, not block pointers</h1>
 <p class="lede">
-	<strong>casblk measures the latency cost of content-addressed storage on the guest disk path.</strong>
-	The system is the instrument. The paper is the product.
+	<strong>A storage system that names data by content, at chunk granularity, captures redundancy
+	that block-pointer systems structurally cannot.</strong> At fleet scale, that capture dominates
+	the costs of hashing, indexing, and compaction. This study asserts that claim and measures it.
 </p>
 
 <nav class="toc" aria-label="Pages">
 	{#each pages as { num, title, description } (num)}
-		<a href="/{num}">
+		<a href="{base}/{num}">
 			<span class="toc-n">{num}</span>
 			<span class="toc-t">{title}</span>
 			<span class="toc-d">{description}</span>
@@ -27,10 +29,7 @@
 	{/each}
 </nav>
 
-<p class="homefoot">
-	spec v1 · ASD-STE100 principles: active voice, present tense, one instruction per sentence ·
-	requirement IDs are stable
-</p>
+<p class="homefoot">spec v3 · thesis · model · distribution · measurement</p>
 
 <style>
 	.toc {
