@@ -5,9 +5,9 @@
 
 <PageHead num="01" />
 <p class="lede">
-	<strong>The system is an LSM tree whose compaction step is content addressing.</strong> Writes
-	land in a tier that ignores content. A background pass moves settled data into a tier organized
-	by nothing else.
+	The system is <mark>an LSM tree whose compaction step is content addressing</mark>.
+	Writes land in a tier that ignores content.
+	A background pass moves settled data into a tier organized by nothing else.
 </p>
 
 <figure>

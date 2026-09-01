@@ -5,9 +5,10 @@
 
 <PageHead num="02" />
 <p class="lede">
-	<strong>Local write, global dedup.</strong> The write path never crosses the network: staging is
-	a local log on the host running the guest, so ingest latency is a local NVMe property at any
-	cluster size. Content addressing becomes global at compaction, which is already asynchronous.
+	<mark>Local write, global dedup.</mark>
+	The write path never crosses the network: staging is a local log on the host running the
+	guest, so ingest latency is a local NVMe property at any cluster size.
+	Content addressing becomes global at compaction, which is already asynchronous.
 </p>
 
 <h2>What the name buys</h2>

@@ -11,8 +11,7 @@
 	/>
 </svelte:head>
 
-<span class="eyebrow">CS 4993 · fall 2026</span>
-<h1>Chunk pointers, not block pointers</h1>
+<span class="eyebrow">CS 4993 · fall 2026 · research spec</span>
 
 <nav class="toc" aria-label="Pages">
 	{#each pages as { num, title, description } (num)}
@@ -28,15 +27,15 @@
 
 <style>
 	.toc {
-		margin-top: 1.5rem;
+		margin-top: 0.875rem;
 		border-top: 1px solid var(--border);
 	}
 	.toc a {
 		display: grid;
-		grid-template-columns: 2.5rem 1fr;
+		grid-template-columns: 2.25rem max-content 1fr;
 		gap: 0 1rem;
-		padding: 0.55rem 0.5rem;
-		border-bottom: 1px solid var(--border);
+		padding: 0.5rem 0.375rem;
+		border-bottom: 1px solid var(--border-subtle);
 		color: var(--text-secondary);
 		align-items: baseline;
 	}
@@ -44,25 +43,36 @@
 		background: var(--background-secondary);
 	}
 	.toc-n {
-		font-size: 0.8125rem;
-		font-weight: var(--weight-strong);
+		font-size: 0.75rem;
+		font-weight: var(--weight-medium);
 		color: var(--text-quaternary);
 		font-variant-numeric: tabular-nums;
 	}
 	.toc-t {
-		font-size: 0.9375rem;
+		font-size: 0.875rem;
 		font-weight: var(--weight-strong);
 		color: var(--text-primary);
+		white-space: nowrap;
 	}
 	.toc-d {
-		grid-column: 2;
-		font-size: 0.8125rem;
+		font-size: 0.75rem;
 		color: var(--text-tertiary);
-		margin-top: 0.125rem;
+		text-align: right;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 	.homefoot {
 		margin-top: 1.5rem;
 		font-size: 0.6875rem;
 		color: var(--text-quaternary);
+	}
+	@media (max-width: 640px) {
+		.toc a {
+			grid-template-columns: 2.25rem 1fr;
+		}
+		.toc-d {
+			display: none;
+		}
 	}
 </style>

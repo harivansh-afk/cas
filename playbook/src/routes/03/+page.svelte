@@ -5,7 +5,9 @@
 
 <PageHead num="03" />
 <p class="lede">
-	<strong>Three stages.</strong> Each gates the next and ends with a standalone result.
+	<mark>Three stages, each gating the next.</mark>
+	Every stage ends with a standalone result, so the study can stop after any of them and still
+	report something true.
 </p>
 
 <h2>S1 — Redundancy census (H1, weeks 1–4)</h2>

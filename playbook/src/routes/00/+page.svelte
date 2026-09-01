@@ -29,8 +29,9 @@
 <h2>Prior art</h2>
 <p>
 	Every published dedup study answers one question: how much duplicate data exists.
-	This study answers a different one: how much duplicate data requires content addressing to
-	capture, given that clones and reflinks already capture the history-shaped part for free.
+	This study answers a different one: <mark>how much duplicate data requires content addressing
+	to capture</mark>, given that clones and reflinks already capture the history-shaped part for
+	free.
 	The second question is the one that decides deployment, and no study on record asks it.
 </p>
 

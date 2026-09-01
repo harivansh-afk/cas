@@ -5,9 +5,10 @@
 
 <PageHead num="04" />
 <p class="lede">
-	<strong>Every line the study's claims depend on is either a stock upstream release or new code
-	in one repository.</strong> The hypervisor is never forked: QEMU speaks vhost-user-blk to an
-	external process, so all new code lives in that process, the daemon.
+	Every line the study's claims depend on is either <mark>a stock upstream release or new code
+	in one repository</mark>.
+	The hypervisor is never forked: QEMU speaks vhost-user-blk to an external process, so all new
+	code lives in that process, the daemon.
 </p>
 
 <div class="table-scroll">

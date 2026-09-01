@@ -1,35 +1,15 @@
 <script lang="ts">
-	import { base } from '$app/paths';
 	import { pages } from '$lib/pages';
 
 	let { num }: { num: string } = $props();
 
 	const title = pages.find((p) => p.num === num)!.title;
+	const last = pages[pages.length - 1].num;
 </script>
 
 <svelte:head>
 	<title>chunk pointers · {num} {title}</title>
 </svelte:head>
 
-<div class="pagehead">
-	<span class="eyebrow">chunk pointers · page {num}</span>
-	<a class="backlink" href="{base}/">← index</a>
-</div>
+<span class="eyebrow">page {num} / {last}</span>
 <h1>{title}</h1>
-
-<style>
-	.pagehead {
-		display: flex;
-		justify-content: space-between;
-		align-items: baseline;
-		gap: 0.75rem;
-	}
-	.backlink {
-		font-size: 0.75rem;
-		color: var(--text-tertiary);
-		white-space: nowrap;
-	}
-	.backlink:hover {
-		color: var(--text-primary);
-	}
-</style>
