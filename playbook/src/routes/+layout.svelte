@@ -51,7 +51,7 @@
 
 <main>
 	<header class="site">
-		<a class="site-title" href="{base}/">chunk pointers</a>
+		<a class="site-title" href="{base}/">content, not lineage</a>
 		<a
 			class="site-gh"
 			href="https://github.com/harivansh-afk/cas"

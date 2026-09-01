@@ -8,7 +8,7 @@
 </script>
 
 <svelte:head>
-	<title>chunk pointers · {num} {title}</title>
+	<title>content, not lineage · {num} {title}</title>
 </svelte:head>
 
 <div class="pagehead">

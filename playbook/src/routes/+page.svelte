@@ -4,17 +4,18 @@
 </script>
 
 <svelte:head>
-	<title>Chunk pointers, not block pointers</title>
+	<title>Content, not lineage</title>
 	<meta
 		name="description"
-		content="Every published dedup ratio counts bytes that copy-on-write clones would have shared for free; this study subtracts them and measures what content addressing alone is worth."
+		content="Every published dedup ratio counts bytes that clones would have shared for free. This study subtracts them, splits the rest between what an aligned dedup table reaches and what only content-defined chunking reaches, and prices both on stock systems."
 	/>
 </svelte:head>
 
 <span class="eyebrow">CS 4993 · fall 2026 · research spec</span>
 <p class="lede">
-	<mark>Every published dedup ratio counts bytes that copy-on-write clones would have shared for
-	free</mark>; this study subtracts them and measures what content addressing alone is worth.
+	<mark>Every published dedup ratio counts bytes that clones would have shared for free.</mark>
+	This study subtracts them, splits the rest between what an aligned dedup table reaches and what
+	only content-defined chunking reaches, and prices both on systems an operator can turn on today.
 </p>
 
 <nav class="toc" aria-label="Pages">
