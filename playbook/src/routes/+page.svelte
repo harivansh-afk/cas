@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { base } from '$app/paths';
-	import { pages } from '$lib/pages';
+	import { pages, source } from '$lib/pages';
 </script>
 
 <svelte:head>
@@ -19,12 +19,17 @@
 </p>
 
 <nav class="toc" aria-label="Pages">
-	{#each pages as { num, title, description } (num)}
-		<a href="{base}/{num}">
-			<span class="toc-n">{num}</span>
-			<span class="toc-t">{title}</span>
-			<span class="toc-d">{description}</span>
-		</a>
+	{#each pages as { num, title, description, draft } (num)}
+		<div class="row" class:draft>
+			<a class="page" href="{base}/{num}">
+				<span class="toc-n">{num}</span>
+				<span class="toc-t">{title}{#if draft}<span class="tag">draft</span>{/if}</span>
+				<span class="toc-d">{description}</span>
+			</a>
+			<a class="src" href={source(num)} target="_blank" rel="noopener" aria-label="source of page {num} on GitHub" title="source on GitHub">
+				<img src="https://github.com/harivansh-afk.png?size=64" alt="" width="16" height="16" loading="lazy" />
+			</a>
+		</div>
 	{/each}
 </nav>
 
@@ -33,17 +38,44 @@
 		margin-top: 0.875rem;
 		border-top: 1px solid var(--border);
 	}
-	.toc a {
+	.row {
+		display: flex;
+		align-items: stretch;
+		border-bottom: 1px solid var(--border-subtle);
+	}
+	.row:hover {
+		background: var(--background-secondary);
+	}
+	.page {
+		flex: 1;
+		min-width: 0;
 		display: grid;
 		grid-template-columns: 2.25rem max-content 1fr;
 		gap: 0 1rem;
 		padding: 0.5rem 0.375rem;
-		border-bottom: 1px solid var(--border-subtle);
 		color: var(--text-secondary);
 		align-items: baseline;
 	}
-	.toc a:hover {
-		background: var(--background-secondary);
+	.src {
+		display: inline-flex;
+		align-items: center;
+		padding: 0 0.5rem 0 0.75rem;
+		color: var(--text-quaternary);
+		transition: color 0.12s ease;
+	}
+	.src img {
+		display: block;
+		border-radius: 50%;
+		opacity: 0.8;
+		transition: opacity 0.12s ease;
+	}
+	.src:hover img,
+	.src:focus-visible img {
+		opacity: 1;
+	}
+	.draft .src img {
+		opacity: 0.35;
+		filter: grayscale(1);
 	}
 	.toc-n {
 		font-size: 0.75rem;
@@ -65,8 +97,31 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
+
+	/* draft rows: same shape, one shade down everywhere, no bold */
+	.draft .toc-n,
+	.draft .toc-t,
+	.draft .toc-d {
+		color: var(--text-quaternary);
+	}
+	.draft .toc-t {
+		font-weight: var(--weight-medium);
+	}
+	.tag {
+		margin-left: 0.5rem;
+		font-size: 0.625rem;
+		font-weight: var(--weight-medium);
+		text-transform: uppercase;
+		letter-spacing: 0.1em;
+		color: var(--text-quaternary);
+		border: 1px solid var(--border);
+		border-radius: 3px;
+		padding: 0.05rem 0.3rem;
+		vertical-align: 0.1em;
+	}
+
 	@media (max-width: 640px) {
-		.toc a {
+		.page {
 			grid-template-columns: 2.25rem 1fr;
 		}
 		.toc-d {
