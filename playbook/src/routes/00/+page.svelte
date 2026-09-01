@@ -5,11 +5,11 @@
 
 <PageHead num="00" />
 <p class="lede">
-	<mark>Every published dedup ratio counts bytes that copy-on-write clones would have shared for
-	free</mark>; this study subtracts them and measures what content addressing alone is worth.
+	<strong>Goal.</strong> Split a fleet's raw dedup ratio into the sharing clones already provide
+	and the remainder only content addressing can reach, then price capturing that remainder.
 </p>
 <p>
-	The subtraction has never been performed: dedup's value has only ever been reported raw, with
+	That subtraction has never been performed: dedup's value has only ever been reported raw, with
 	no baseline for the sharing a fleet already gets from snapshots, clones, and reflinks.
 	The instrument is a two-tier storage backend; the baseline is stock ZFS; the evidence is a
 	redundancy census over real corpora and a four-rung system comparison.
@@ -24,7 +24,7 @@
 <p>
 	Copy-on-write shares data that was copied.
 	<mark>It cannot share data that became equal.</mark>
-	This study calls the difference cross-lineage redundancy.
+	This study calls the difference <a class="term" href="#term-cross-lineage">cross-lineage redundancy</a>.
 	A content-addressed store captures it because the address is the content; a block-pointer store
 	cannot, regardless of tuning.
 </p>
@@ -237,5 +237,53 @@
 		published; results are per class; no universal ratio is claimed.
 	</li>
 </ul>
+
+<h2>Appendix — terms this study defines</h2>
+<p>Underlined terms across the pages are vocabulary coined here, collected in one place.</p>
+<dl class="terms">
+	<dt id="term-cross-lineage">cross-lineage redundancy</dt>
+	<dd>
+		Duplicate bytes whose copies share no ancestor, so no snapshot, clone, or reflink can ever
+		share them. Reachable by content addressing only. The census's headline number.
+	</dd>
+	<dt id="term-lineage-capturable">lineage-capturable</dt>
+	<dd>
+		Bytes identical and in-place relative to a declared ancestor: the ceiling of what any
+		copy-on-write system can share. The census also computes a practical figure via simulated COW
+		at real record sizes.
+	</dd>
+	<dt id="term-chunking-debt">chunking debt</dt>
+	<dd>
+		Staged bytes awaiting compaction. Grows when sustained ingest outruns compactor bandwidth;
+		bounded by back-pressure. Its ceiling is measured in S2.
+	</dd>
+	<dt id="term-merkle-paged-map">Merkle-paged map</dt>
+	<dd>
+		The R3 map structure: a flat offset-to-hash array hashed page by page, with a hash tree over
+		the pages. Gives diffs proportional to changed pages and whole-image verification by root
+		hash.
+	</dd>
+	<dt id="term-rung">rung</dt>
+	<dd>
+		One configuration of the system comparison (R0–R3): identical QEMU and workloads, different
+		storage behind the device.
+	</dd>
+</dl>
+
+<style>
+	dl.terms dt {
+		scroll-margin-top: 1.5rem;
+		font-weight: var(--weight-strong);
+		color: var(--text-primary);
+		text-decoration: underline dotted;
+		text-decoration-color: color-mix(in srgb, #d97706 55%, transparent);
+		text-decoration-thickness: 1px;
+		text-underline-offset: 0.2em;
+	}
+	dl.terms dd {
+		margin: 0.25rem 0 0.875rem;
+		color: var(--text-secondary);
+	}
+</style>
 
 <PageNav num="00" />

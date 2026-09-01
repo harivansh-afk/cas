@@ -1,6 +1,22 @@
 <script lang="ts">
+	import { base } from '$app/paths';
 	import PageHead from '$lib/components/PageHead.svelte';
 	import PageNav from '$lib/components/PageNav.svelte';
+	import Mermaid from '$lib/components/Mermaid.svelte';
+
+	const compactionFlow = `flowchart TD
+	W[guest write] --> S[append to staging log]
+	S --> A[ack]
+	F[guest FLUSH] --> FD[fdatasync staging log]
+	FD --> FA[ack · durable]
+	S -. settled .-> RE
+	subgraph background compaction
+		RE[read settled extents] --> CC[FastCDC chunks · BLAKE3 hash]
+		CC --> IX{hash in index?}
+		IX -- hit --> MP[map points at existing chunk]
+		IX -- miss --> AP[append to chunk store · insert index]
+		AP --> MP
+	end`;
 </script>
 
 <PageHead num="01" />
@@ -153,6 +169,11 @@
 	S2 measures guest p99 with the compactor active and idle and reports the delta.
 </p>
 
+<Mermaid
+	code={compactionFlow}
+	caption="Hot path and compaction. The hot path never hashes; the hit/miss decision, where dedup happens, sits off the guest's latency path."
+/>
+
 <h2>Capacity tier</h2>
 <p>
 	Three structures. The chunk store is an append-only log of records (length, hash, flags, bytes)
@@ -164,7 +185,7 @@
 <p>
 	<strong>Map arms.</strong> The controlled experiment inside the daemon is the map structure. R2
 	uses a conventional offset tree, the same shape as a block-pointer tree, pointing at chunks. R3
-	uses a Merkle-paged map: the flat offset array is divided into fixed pages, each page hashed,
+	uses a <a class="term" href="{base}/00#term-merkle-paged-map">Merkle-paged map</a>: the flat offset array is divided into fixed pages, each page hashed,
 	with a hash tree over the pages. Because block-map keys are dense integers, this structure
 	delivers the two properties history-independent metadata is for, diffs proportional to the
 	changed pages and whole-image verification by root hash, without a prolly tree's machinery. A
@@ -192,7 +213,7 @@
 	<code>fio --verify</code> (gate G4).
 </p>
 
-<h2>Chunking debt</h2>
+<h2><a class="term" href="{base}/00#term-chunking-debt">Chunking debt</a></h2>
 <p>
 	Staging is finite. If sustained ingest exceeds compaction bandwidth, staged bytes accumulate
 	until back-pressure throttles the guest. The sustainable ingest ceiling and the point where

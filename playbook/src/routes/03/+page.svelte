@@ -1,6 +1,17 @@
 <script lang="ts">
+	import { base } from '$app/paths';
 	import PageHead from '$lib/components/PageHead.svelte';
 	import PageNav from '$lib/components/PageNav.svelte';
+	import Mermaid from '$lib/components/Mermaid.svelte';
+
+	const censusFlow = `flowchart TD
+	B[byte range] --> Z{zeros or unallocated?}
+	Z -- yes --> ZE[excluded · reported separately]
+	Z -- no --> D{duplicated elsewhere in the corpus?}
+	D -- no --> U[unique]
+	D -- yes --> L{identical and in-place vs a declared ancestor?}
+	L -- yes --> LC[lineage-capturable · COW shares it free]
+	L -- no --> XL[cross-lineage · only content addressing finds it]`;
 </script>
 
 <PageHead num="03" />
@@ -25,13 +36,20 @@
 <p>
 	Method.
 	Chunk every image at whole-file, CDC, and fixed granularities, and compute duplicate bytes.
-	Against each corpus's declared ancestry, split them into lineage-capturable and cross-lineage.
+	Against each corpus's declared ancestry, split them into
+	<a class="term" href="{base}/00#term-lineage-capturable">lineage-capturable</a> and
+	<a class="term" href="{base}/00#term-cross-lineage">cross-lineage</a>.
 	Lineage-capturable means identical and in-place relative to an ancestor, the ceiling for any
 	COW system; a simulated COW at realistic record sizes and a declared snapshot cadence gives the
 	practical figure, since sibling sharing depends on when snapshots were taken.
 	The remainder is cross-lineage, reachable only by content.
 	Compression in both orders and zeros excluded, per A7.
 </p>
+
+<Mermaid
+	code={censusFlow}
+	caption="The census, per byte range. Gate G1 requires the leaves to sum to 100% of non-zero bytes. The cross-lineage leaf is the study's headline number."
+/>
 <p>
 	The census settles standing claims as a side effect: whether compression captures most of
 	dedup's win; whether fixed blocks still approximate CDC on VM images (the 2009 result,
