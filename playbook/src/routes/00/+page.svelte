@@ -5,11 +5,14 @@
 
 <PageHead num="00" />
 <p class="lede">
-	<strong>Goal.</strong> Measure whether chunk-level content addressing finds enough duplicate
-	data that copy-on-write systems structurally miss to justify its runtime costs.
-	The instrument is a two-tier storage backend.
-	The baseline is stock ZFS.
-	The evidence is a redundancy census over real corpora and a four-rung system comparison.
+	<mark>Every published dedup ratio counts bytes that copy-on-write clones would have shared for
+	free</mark>; this study subtracts them and measures what content addressing alone is worth.
+</p>
+<p>
+	The subtraction has never been performed: dedup's value has only ever been reported raw, with
+	no baseline for the sharing a fleet already gets from snapshots, clones, and reflinks.
+	The instrument is a two-tier storage backend; the baseline is stock ZFS; the evidence is a
+	redundancy census over real corpora and a four-rung system comparison.
 </p>
 
 <h2>The structural gap</h2>

@@ -7,11 +7,15 @@
 	<title>Chunk pointers, not block pointers</title>
 	<meta
 		name="description"
-		content="Measure whether chunk-level content addressing finds enough duplicate data that copy-on-write systems structurally miss to justify its runtime costs."
+		content="Every published dedup ratio counts bytes that copy-on-write clones would have shared for free; this study subtracts them and measures what content addressing alone is worth."
 	/>
 </svelte:head>
 
 <span class="eyebrow">CS 4993 · fall 2026 · research spec</span>
+<p class="lede">
+	<mark>Every published dedup ratio counts bytes that copy-on-write clones would have shared for
+	free</mark>; this study subtracts them and measures what content addressing alone is worth.
+</p>
 
 <nav class="toc" aria-label="Pages">
 	{#each pages as { num, title, description } (num)}
