@@ -12,12 +12,15 @@
 
 <h2>What the name buys</h2>
 <p>
-	Chunks are immutable and named by content, so placement is a function of the name: rendezvous or
-	CRUSH-style hashing from chunk hash to k owner nodes. No allocation tables, no rebalancing
-	metadata, no coordinator on the data path. The index partitions by the same function, so the
-	shard owning a chunk owns its index entry; routing and lookup are one computation. Any node may
-	cache any chunk, and caches converge cluster-wide because names are global. Scrub is re-hash; a
-	corrupt replica is detected by name and repaired from any peer.
+	Chunks are immutable and named by content, so placement is a function of the name: rendezvous
+	or CRUSH-style hashing from chunk hash to k owner nodes.
+	The data path carries no allocation tables, rebalancing metadata, or coordinator.
+</p>
+<p>
+	The index partitions by the same function, so the shard owning a chunk owns its index entry;
+	routing and lookup are one computation.
+	Any node may cache any chunk, and caches converge cluster-wide because names are global.
+	Scrub is re-hash; a corrupt replica is detected by name and repaired from any peer.
 </p>
 <p>
 	Compaction ships a chunk only if the owning shard lacks it. Cluster ingest traffic is therefore
@@ -92,7 +95,7 @@
 
 		<!-- transport slot -->
 		<rect x="330" y="340" width="340" height="72" rx="4" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="5 4" />
-		<text x="500" y="362" text-anchor="middle" font-size="10.5" font-weight="600" fill="currentColor">transport · phase 2: measured, not guessed</text>
+		<text x="500" y="362" text-anchor="middle" font-size="10.5" font-weight="600" fill="currentColor">transport · open slot · decided in phase 2</text>
 		<text x="500" y="382" text-anchor="middle" font-size="10" fill="currentColor" opacity="0.75">per-core TCP lanes (i10) · nvme-tcp · QUIC, one stream per chunk</text>
 		<text x="500" y="400" text-anchor="middle" font-size="10" fill="currentColor" opacity="0.5">the wire above plugs into this slot</text>
 		<line x1="500" y1="336" x2="500" y2="215" stroke="currentColor" stroke-width="1" stroke-dasharray="3 4" opacity="0.5" />
@@ -128,14 +131,17 @@
 
 <h2>Transport</h2>
 <p>
-	The transport is a phase-2 decision and the follow-on study's subject. Candidates, with the
-	tradeoff each represents: kernel TCP with per-core connections and batched submissions, the i10
-	design (NSDI '20), which reached RDMA-class CPU efficiency without kernel bypass; nvme-tcp, its
-	standardized kernel descendant, which presents remote chunks as block namespaces; QUIC with one
-	stream per in-flight chunk, which removes head-of-line blocking across concurrent fetches at a
-	userspace per-byte CPU cost. Choosing among them requires exactly the per-stage measurement
-	methodology this study builds, applied at the fabric, which is why the transport question is
-	deferred rather than guessed.
+	The transport is a phase-2 decision and the follow-on study's subject.
+	Three candidates, each representing a distinct tradeoff.
+	Kernel TCP with per-core connections and batched submissions is the i10 design (NSDI '20),
+	which reached RDMA-class CPU efficiency without kernel bypass.
+	nvme-tcp is its standardized kernel descendant and presents remote chunks as block namespaces.
+	QUIC with one stream per in-flight chunk removes head-of-line blocking across concurrent
+	fetches, at a userspace per-byte CPU cost.
+</p>
+<p>
+	Choosing among them requires the per-stage measurement methodology this study builds, applied
+	at the fabric, which is why the transport question is deferred rather than guessed.
 </p>
 
 <h2>Scope</h2>

@@ -30,8 +30,8 @@
 <p>
 	This split is what makes the measurements defensible. Because the hypervisor is unmodified, no
 	result can be an artifact of a patched QEMU, and the R0 control runs the identical binary. It
-	also bounds the build: the protocol plumbing comes from maintained crates, so the semester's
-	engineering budget is spent entirely on the five components the paper is about.
+	also bounds the build: the protocol plumbing comes from maintained crates, so the engineering
+	budget is spent entirely on the components the paper is about.
 </p>
 
 <h2>Repository</h2>

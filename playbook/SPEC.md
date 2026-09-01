@@ -1,5 +1,7 @@
 # Chunk pointers, not block pointers — research spec v4
 
+NOTE: as of v4.1 the app pages (`src/routes/00–04`) are the authoritative text; this file is design history and no longer tracks wording changes.
+
 Source of truth for the playbook app. Five pages: thesis, model, distribution, measurement, implementation. Typeset verbatim. Labels: hypotheses (H), assumptions (A), rungs (R), stages (S), gates (G).
 
 v4 changes from v3: no reused private code, so the hypervisor is stock and all new code lives in a vhost-user-blk daemon; ZFS reframed as an uncontrolled case study with a new raw-file control rung; the prolly tree replaced by a Merkle-paged map for the dense-key block map, prolly deferred to distribution metadata; write amplification, compactor interference, crash consistency, and the read-heavy aged workload added; the storage-economics objection stated on page 00; register tightened to technical prose.

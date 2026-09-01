@@ -100,21 +100,40 @@
 	</figcaption>
 </figure>
 
+<h2>A conventional design, on purpose</h2>
+<p>
+	Nothing in this architecture is new, and the paper says so.
+	Post-process dedup ships in Windows Server; a durable write buffer ahead of a reduction
+	pipeline is how VAST is built; the append-only store with a rebuildable index is Venti; the
+	compaction pattern is the LSM tree's.
+</p>
+<p>
+	The assembly is deliberate.
+	A conventional design keeps every measurement attributable to the idea under test rather than
+	to an implementation trick.
+	The system's job is to make the comparison possible, to keep capture off the guest's write
+	path, and to produce constants the literature lacks.
+</p>
+
 <h2>Datapath</h2>
 <p>
-	The guest sees a virtio-blk device. The hypervisor is stock QEMU; it connects the device to an
-	external process over the vhost-user-blk protocol. All new code lives in that process, the
-	daemon. Guest memory is shared with the daemon, so requests are read in place. The daemon issues
-	storage IO through io_uring. No hypervisor is forked or patched (provenance on page 04).
+	The guest sees a virtio-blk device.
+	The hypervisor is stock QEMU, connected to an external process over the vhost-user-blk
+	protocol; all new code lives in that process, the daemon (page 04).
+	Guest memory is shared with the daemon, so requests are read in place.
+	The daemon issues storage IO through io_uring.
 </p>
 
 <h2>Write tier</h2>
 <p>
-	Guest writes append at block granularity to a staging log on NVMe. The hot path performs no
-	hashing and no chunking; large writes proceed at sequential-append speed. FLUSH is fdatasync of
-	the staging log, then the acknowledgment. Durability belongs to the staging log alone: the page
-	cache may serve reads, but it is never the durability mechanism, and host RAM is never the write
-	buffer. The log is disk-backed, so the buffer is durable and has a defined size.
+	Guest writes append at block granularity to a staging log on NVMe.
+	The hot path performs neither hashing nor chunking, so large writes proceed at
+	sequential-append speed.
+</p>
+<p>
+	FLUSH is fdatasync of the staging log, then the acknowledgment (A4).
+	The page cache may serve reads, but durability belongs to the log alone, which makes the write
+	buffer disk-backed, durable, and bounded.
 </p>
 
 <h2>Compactor</h2>
@@ -127,11 +146,11 @@
 	slow.
 </p>
 <p>
-	The design buys its write path with two known costs. First, write amplification: every surviving
-	byte is written at least twice (staging, then chunk store) plus map-journal traffic; the measured
-	WA factor is a headline number, not a footnote. Second, interference: compaction reads staging
-	and writes the store on the same device the guest is using; the S2 benchmarks measure guest p99
-	with the compactor active and idle, and the delta is reported.
+	The design buys its write path with two known costs.
+	Write amplification: every surviving byte is written at least twice, staging then chunk store,
+	plus map-journal traffic; the WA factor is reported as a headline result.
+	Interference: compaction reads staging and writes the store on the device the guest is using;
+	S2 measures guest p99 with the compactor active and idle and reports the delta.
 </p>
 
 <h2>Capacity tier</h2>
@@ -169,8 +188,8 @@
 	hashes), and every compaction batch carries an epoch number recorded in both logs. On recovery:
 	replay the staging log; discard map-journal records from any epoch whose staging extents were
 	not yet marked compacted; re-run compaction from the oldest incomplete epoch.
-	<code>kill -9</code> at any point followed by this replay must pass <code>fio --verify</code>;
-	that is gate G4, not an aspiration.
+	<code>kill -9</code> at any point, followed by this replay, must pass
+	<code>fio --verify</code> (gate G4).
 </p>
 
 <h2>Chunking debt</h2>
@@ -207,19 +226,20 @@
 </p>
 <ul class="reqs">
 	<li>
-		<span class="rid">R0</span><strong>Raw file on XFS.</strong> The control. No dedup, no ZFS, no
-		daemon features beyond passthrough.
+		<span class="rid">R0</span><strong>Raw file on XFS.</strong> The control: passthrough only,
+		with dedup nowhere in the path.
 	</li>
 	<li>
 		<span class="rid">R1</span><strong>Raw file on a ZFS zvol, stock OpenZFS, its own pool on the
-		same NVMe device.</strong> Configuration: <code>checksum=blake3, dedup=on</code>;
-		<code>volblocksize</code> matched to the daemon's chunk-size arm, because zvol dedup
-		granularity is the volblocksize; compression off outside the labeled compression arm; DDT
-		memory read from <code>zpool status -D</code> and reported in the same index-cost column as
-		the daemon's. The incumbent block-pointer design with content-hash identity. R1 is a case
-		study, not a controlled comparison: it differs from the daemon in kernel boundary, caching,
-		and allocation, and the paper attributes cross-rung deltas accordingly. Patching ZFS is out of
-		scope; a fork would consume the schedule and demonstrate nothing stock ZFS does not.
+		same NVMe device.</strong> The incumbent block-pointer design with content-hash identity.
+		Configuration: <code>checksum=blake3, dedup=on</code>; <code>volblocksize</code> matched to
+		the daemon's chunk-size arm, since zvol dedup granularity is the volblocksize; compression
+		off outside the labeled compression arm; DDT memory read from <code>zpool status -D</code>
+		and reported in the same index-cost column as the daemon's.
+		R1 is a case study rather than a controlled comparison: it differs from the daemon in kernel
+		boundary, caching, and allocation, and the paper attributes cross-rung deltas accordingly.
+		Patching ZFS is out of scope; a fork would consume the schedule and demonstrate nothing
+		stock ZFS does not.
 	</li>
 	<li>
 		<span class="rid">R2</span><strong>The daemon, offset-tree map.</strong> Chunk-level content

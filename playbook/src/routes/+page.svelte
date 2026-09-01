@@ -13,12 +13,6 @@
 
 <span class="eyebrow">CS 4993 · fall 2026</span>
 <h1>Chunk pointers, not block pointers</h1>
-<p class="lede">
-	<strong>Goal of the study.</strong> Measure whether chunk-level content addressing finds enough
-	duplicate data that copy-on-write systems structurally miss to justify its runtime costs. The
-	instrument is a purpose-built two-tier storage backend; the baseline is stock ZFS; the evidence
-	is a redundancy census over real corpora and a four-rung system comparison.
-</p>
 
 <nav class="toc" aria-label="Pages">
 	{#each pages as { num, title, description } (num)}
@@ -34,14 +28,14 @@
 
 <style>
 	.toc {
-		margin-top: 2.5rem;
+		margin-top: 1.5rem;
 		border-top: 1px solid var(--border);
 	}
 	.toc a {
 		display: grid;
 		grid-template-columns: 2.5rem 1fr;
 		gap: 0 1rem;
-		padding: 1rem 0.5rem;
+		padding: 0.55rem 0.5rem;
 		border-bottom: 1px solid var(--border);
 		color: var(--text-secondary);
 		align-items: baseline;
@@ -67,7 +61,7 @@
 		margin-top: 0.125rem;
 	}
 	.homefoot {
-		margin-top: 2.5rem;
+		margin-top: 1.5rem;
 		font-size: 0.6875rem;
 		color: var(--text-quaternary);
 	}

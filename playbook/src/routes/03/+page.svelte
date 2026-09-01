@@ -10,7 +10,8 @@
 
 <h2>S1 — Redundancy census (H1, weeks 1–4)</h2>
 <p>
-	Offline analysis of images at rest. No VMM, no daemon, no root. First numbers in two weeks.
+	Offline analysis of images at rest, requiring neither the daemon nor a guest.
+	First numbers in two weeks.
 </p>
 <p>
 	Corpora (A8 scripts for each): cloned fleet (golden image, N clones, scripted drift; lineage's
@@ -20,12 +21,14 @@
 	dedup collapses). Nix store generations (successive closures of one flake; no published study).
 </p>
 <p>
-	Method. Chunk every image at whole-file, CDC, and fixed granularities. Compute duplicate bytes.
-	Against each corpus's declared ancestry, split them: lineage-capturable, defined as identical
-	and in-place relative to an ancestor (the ceiling for any COW system), plus a simulated COW at
-	realistic record sizes and a declared snapshot cadence, since sibling sharing depends on when
-	snapshots were taken; the remainder is cross-lineage, reachable only by content. Compression in
-	both orders per A7; zeros excluded per A7.
+	Method.
+	Chunk every image at whole-file, CDC, and fixed granularities, and compute duplicate bytes.
+	Against each corpus's declared ancestry, split them into lineage-capturable and cross-lineage.
+	Lineage-capturable means identical and in-place relative to an ancestor, the ceiling for any
+	COW system; a simulated COW at realistic record sizes and a declared snapshot cadence gives the
+	practical figure, since sibling sharing depends on when snapshots were taken.
+	The remainder is cross-lineage, reachable only by content.
+	Compression in both orders and zeros excluded, per A7.
 </p>
 <p>
 	The census settles standing claims as a side effect: whether compression captures most of
