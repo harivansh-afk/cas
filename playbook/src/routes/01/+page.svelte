@@ -8,7 +8,7 @@
 <p class="lede">
 	<strong>Invariant.</strong><br />
 	The network is on the read path only, only for cold chunks, and never on the write or flush path.<br />
-	Every choice below serves that sentence.
+	Every design choice below follows from it.
 </p>
 
 <h2>One host</h2>
@@ -89,7 +89,7 @@
 <p>
 	Reads check staging, then the local store, then the chunk cache, then send <code>GET(hash)</code> to the owner.<br />
 	The owner answers from its cache if the chunk is hot, otherwise from its store.<br />
-	Fresh data never pays indirection; settled data pays the map walk, the index lookup, and, if the owner is remote, one round trip.
+	Fresh data is served without indirection; settled data incurs the map walk, the index lookup, and, if the owner is remote, one round trip.
 </p>
 <p>
 	The chunk cache is daemon-owned RAM keyed by hash, LRU, with a size that is a parameter.<br />
@@ -124,7 +124,7 @@
 </div>
 <p>
 	Length-prefixed messages over kernel TCP, one connection per core, <code>TCP_NODELAY</code>, driven by io_uring.<br />
-	The daemon runs spinning or sleeping; page 04 measures both, because the wakeup is part of the price.<br />
+	The daemon runs spinning or sleeping; page 04 measures both, because the wakeup is part of the cost.<br />
 	Rendezvous hashing means a reader already knows the owner of every hash; nobody looks up anyone else's index.
 </p>
 <p>
@@ -161,7 +161,7 @@
 <p>
 	The window between a local ack and the chunk being durable on its owner is the compaction lag, measured in seconds under the fleet replay.<br />
 	One optional arm closes it: mirror the staging tail to the peer on every FLUSH and wait for its fdatasync before acking.<br />
-	That is what every production system in this space does, and the arm measures what it costs: one round trip per FLUSH.
+	Every production system in this space does this, and the arm measures its cost: one round trip per FLUSH.
 </p>
 
 <h2>Crash consistency</h2>

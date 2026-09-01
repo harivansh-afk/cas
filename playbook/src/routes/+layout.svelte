@@ -17,6 +17,8 @@
 		return m ? m[1] : null;
 	}
 
+	const inPage = $derived(current() !== null);
+
 	function onkeydown(e: KeyboardEvent) {
 		if (e.metaKey || e.ctrlKey || e.altKey) return;
 		const t = e.target;
@@ -52,7 +54,11 @@
 
 <main>
 	<header class="site">
-		<a class="site-title" href="{base}/">local write, global chunks</a>
+		{#if inPage}
+			<a class="site-title" href="{base}/">← index</a>
+		{:else}
+			<span></span>
+		{/if}
 		<a
 			class="site-gh"
 			href={repo}

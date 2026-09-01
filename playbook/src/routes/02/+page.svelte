@@ -8,7 +8,7 @@
 	<strong>Part 1.</strong><br />
 	Same stock QEMU, same guest, same NVMe device, storage behind the device varies.<br />
 	The prediction is a tie on capture between the daemon and ZFS fast dedup.<br />
-	It is measured anyway, because the chunk-size curve under it is the single-host design result, and because a reviewer will ask why not ZFS.
+	It is measured anyway, because the chunk-size curve under it is the single-host design result, and because the comparison against ZFS is the first objection a reviewer will raise.
 </p>
 
 <h2>Rungs</h2>
@@ -32,7 +32,7 @@
 	</li>
 	<li>
 		<span class="rid">R4</span><strong>The daemon, one host.</strong><br />
-		Local store only, k not in play.<br />
+		Local store only; k does not apply.<br />
 		Three chunk-size arms below.
 	</li>
 </ul>
@@ -44,13 +44,13 @@
 <h2>Chunk size</h2>
 <p>
 	Fixed 4K captures everything a Linux guest offers, and costs an index entry per 4K: about 250 million entries per TB, roughly 10 GB of RAM per TB at 40 bytes each.<br />
-	That is the DDT memory problem the daemon is supposed to escape.<br />
+	That is the DDT memory cost the daemon is designed to avoid.<br />
 	FastCDC at a 16K mean cuts the index four times over and loses some aligned matches.
 </p>
 <p>
 	Three arms: fixed 4K, fixed 16K, FastCDC 8K to 64K with a 16K mean.<br />
 	Reported per arm: bytes stored, index bytes per TB, guest p99, write amplification.<br />
-	<mark>Capture against index memory as a function of chunk size is the curve this page exists for.</mark><br />
+	<mark>Capture against index memory as a function of chunk size is the result this page produces.</mark><br />
 	The census below predicts the capture column before any run.
 </p>
 
@@ -106,7 +106,7 @@
 	<strong>The split.</strong><br />
 	Per byte range: zero or unallocated (from the guest allocation map, excluded), unique, shared with the T0 base in place, duplicate at an aligned 4K or 16K boundary elsewhere in the fleet, or duplicate only at a shifted offset.<br />
 	The aligned column predicts R1 and the fixed arms; aligned plus shifted predicts the CDC arm.<br />
-	Nothing more: no donors, no real fleets, no time-axis claims.
+	Nothing further: no donors, no real fleets, no claims about time.
 </p>
 
 <PageNav num="02" />

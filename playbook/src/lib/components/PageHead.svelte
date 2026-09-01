@@ -8,7 +8,7 @@
 </script>
 
 <svelte:head>
-	<title>local write, global chunks · {num} {title}</title>
+	<title>Content Addressed Deduplication · {num} {title}</title>
 </svelte:head>
 
 <div class="pagehead">

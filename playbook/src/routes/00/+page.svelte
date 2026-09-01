@@ -10,13 +10,13 @@
 	A dedup table shares duplicate data within one host.<br />
 	Content addressing shares it across hosts.<br />
 	On Linux VM fleets the first is already solved by ZFS.<br />
-	So the case for content addressing is what a name does that an address cannot: move only unique bytes between hosts, store each chunk k times across a fleet instead of once per host, and serve a chunk from whichever host holds it in memory.
+	So the case for content addressing rests on what a name does that an address cannot: move only unique bytes between hosts, store each chunk k times across a fleet instead of once per host, and serve a chunk from whichever host holds it in memory.
 </p>
 <p>
-	This study builds that backend on a stock hypervisor and measures what those buy and what they cost.
+	This study builds that backend on a stock hypervisor and measures what each provides and what each costs.
 </p>
 
-<h2>Where dedup stops</h2>
+<h2>Where deduplication stops</h2>
 <p>
 	Two VMs each run <code>apt upgrade</code> and download the same packages.<br />
 	Their disks now hold the same bytes.<br />
@@ -65,7 +65,7 @@
 	<Note x={720} y={200} anchor="middle" tone="accent" text={['one namespace across hosts', 'shared chunk stored k times · map moves, chunks stay', 'cold read = fetch by name from the owner']} />
 </Diagram>
 
-<h2>What a name buys</h2>
+<h2>What content addressing provides</h2>
 <p>
 	A chunk named by its hash has the same name on every host, so placement is a function of the name.
 </p>
@@ -76,30 +76,30 @@
 	A chunk that is hot anywhere is in some host's memory, and <mark>a peer's memory over 100 GbE is closer than local NVMe</mark>: about 20 µs against about 80.
 </p>
 
-<h2>The price</h2>
+<h2>The cost</h2>
 <p>
 	The network sits on the read path for cold chunks and nowhere else.<br />
 	Never on the write path, never on FLUSH.<br />
-	Part 3 prices a cold read on TCP and on RDMA, from a peer's RAM and from its NVMe, and shows how much of it prefetch hides.
+	Part 3 measures the cost of a cold read on TCP and on RDMA, from a peer's RAM and from its NVMe, and shows how much of it prefetch hides.
 </p>
 <p>
-	The rest is what every dedup design pays and this one measures: write amplification, compactor interference with the guest, index memory, and the window between a local ack and the chunk being durable on its owner.
+	The remaining costs are the ones every deduplication design incurs, and this one measures them: write amplification, compactor interference with the guest, index memory, and the window between a local ack and the chunk being durable on its owner.
 </p>
 
 <h2>Hypotheses</h2>
 <ul class="reqs">
 	<li>
-		<span class="rid">H1</span><strong>One host is a tie.</strong><br />
+		<span class="rid">H1</span><strong>Single-host parity.</strong><br />
 		The daemon stores within 10% of the bytes ZFS fast dedup stores at the same block size, with guest p99 within 20% of a raw file on XFS.<br />
 		Index bytes per TB fall in proportion to chunk size.
 	</li>
 	<li>
-		<span class="rid">H2</span><strong>Crossing hosts is where the name pays.</strong><br />
+		<span class="rid">H2</span><strong>Cross-host benefit.</strong><br />
 		Provisioning and migrating a guest between hosts move the map plus the uncompacted tail, within 10% of that bound.<br />
 		With one copy per chunk, two hosts store at most 55% of what two per-host dedup stores hold.
 	</li>
 	<li>
-		<span class="rid">H3</span><strong>The price is a cold read, and a peer's RAM beats local disk.</strong><br />
+		<span class="rid">H3</span><strong>The cost is the remote cold read.</strong><br />
 		A chunk served from the owner's memory arrives faster than a local NVMe read on both TCP and RDMA.<br />
 		From the owner's NVMe it costs at most 30% over local on TCP and 15% on RDMA.<br />
 		With enough reads in flight, remote sequential throughput matches local.

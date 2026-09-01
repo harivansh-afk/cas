@@ -8,7 +8,7 @@
 <p class="lede">
 	<strong>Part 2.</strong><br />
 	Same daemon, a second host, one parameter.<br />
-	Everything a stock backend cannot do is on this page.
+	Every measurement on this page is one no stock backend can produce.
 </p>
 
 <h2>Two modes</h2>
@@ -21,7 +21,7 @@
 	w={960}
 	h={300}
 	label="Left, replicated: k equals 2, every chunk is on both hosts, compaction ships each new unique chunk once, and no read is ever remote. Right, partitioned: k equals 1, each chunk lives on the host its hash selects, fleet capacity is one copy per chunk, and about half of a guest's cold reads go to the other host."
-	caption="k = 2 buys transfer and keeps every read local. k = 1 buys capacity and pays in remote reads. Two hosts with k = 1 is the worst case for remote reads and is run for exactly that reason."
+	caption="k = 2 provides transfer savings and keeps every read local. k = 1 provides capacity savings at the cost of remote reads. Two hosts with k = 1 is the worst case for remote reads and is run for exactly that reason."
 >
 	<Group x={20} y={20} w={440} h={250} label="replicated · k = 2" />
 	<Node x={50} y={70} w={170} h={60} title="host A" sub={['staging · maps', 'all chunks']} />

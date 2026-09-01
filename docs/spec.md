@@ -1,4 +1,4 @@
-# Local write, global chunks: content-addressed block storage across hosts for VM fleets
+# Content Addressed Deduplication: A distributed storage system study
 
 CS 4993, fall 2026. Research spec, v8.
 
@@ -18,11 +18,11 @@ Content addressing shares it across hosts.
 
 On Linux VM fleets the first is already solved by ZFS.
 
-So the case for content addressing is what a name does that an address cannot: move only unique bytes between hosts, store each chunk k times across a fleet instead of once per host, and serve a chunk from whichever host holds it in memory.
+So the case for content addressing rests on what a name does that an address cannot: move only unique bytes between hosts, store each chunk k times across a fleet instead of once per host, and serve a chunk from whichever host holds it in memory.
 
-This study builds that backend on a stock hypervisor and measures what those buy and what they cost.
+This study builds that backend on a stock hypervisor and measures what each provides and what each costs.
 
-## Where dedup stops
+## Where deduplication stops
 
 Two VMs each run `apt upgrade` and download the same packages.
 
@@ -58,7 +58,7 @@ A fleet of N hosts each running dedup stores every shared chunk N times and move
 
 [figure: left, two hosts each with a DDT and no link between them, shared chunk stored twice, migration moves the full logical size; right, two hosts whose chunks are owned by hash, one namespace, chunk stored k times, map moves and chunks stay, cold read fetches by name from the owner]
 
-## What a name buys
+## What content addressing provides
 
 A chunk named by its hash has the same name on every host, so placement is a function of the name.
 
@@ -70,27 +70,27 @@ A fleet stores each chunk k times, not once per host.
 
 A chunk that is hot anywhere is in some host's memory, and **a peer's memory over 100 GbE is closer than local NVMe**: about 20 µs against about 80.
 
-## The price
+## The cost
 
 The network sits on the read path for cold chunks and nowhere else.
 
 Never on the write path, never on FLUSH.
 
-Part 3 prices a cold read on TCP and on RDMA, from a peer's RAM and from its NVMe, and shows how much of it prefetch hides.
+Part 3 measures the cost of a cold read on TCP and on RDMA, from a peer's RAM and from its NVMe, and shows how much of it prefetch hides.
 
-The rest is what every dedup design pays and this one measures: write amplification, compactor interference with the guest, index memory, and the window between a local ack and the chunk being durable on its owner.
+The remaining costs are the ones every deduplication design incurs, and this one measures them: write amplification, compactor interference with the guest, index memory, and the window between a local ack and the chunk being durable on its owner.
 
 ## Hypotheses
 
-**H1. One host is a tie.**
+**H1. Single-host parity.**
 The daemon stores within 10% of the bytes ZFS fast dedup stores at the same block size, with guest p99 within 20% of a raw file on XFS.
 Index bytes per TB fall in proportion to chunk size.
 
-**H2. Crossing hosts is where the name pays.**
+**H2. Cross-host benefit.**
 Provisioning and migrating a guest between hosts move the map plus the uncompacted tail, within 10% of that bound.
 With one copy per chunk, two hosts store at most 55% of what two per-host dedup stores hold.
 
-**H3. The price is a cold read, and a peer's RAM beats local disk.**
+**H3. The cost is the remote cold read.**
 A chunk served from the owner's memory arrives faster than a local NVMe read on both TCP and RDMA.
 From the owner's NVMe it costs at most 30% over local on TCP and 15% on RDMA.
 With enough reads in flight, remote sequential throughput matches local.
@@ -132,7 +132,7 @@ A8. RDMA is a measurement arm on page 04. Nothing in the architecture requires i
 
 The network is on the read path only, only for cold chunks, and never on the write or flush path.
 
-Every choice below serves that sentence.
+Every design choice below follows from it.
 
 ## One host
 
@@ -194,7 +194,7 @@ Reads check staging, then the local store, then the chunk cache, then send `GET(
 
 The owner answers from its cache if the chunk is hot, otherwise from its store.
 
-Fresh data never pays indirection; settled data pays the map walk, the index lookup, and, if the owner is remote, one round trip.
+Fresh data is served without indirection; settled data incurs the map walk, the index lookup, and, if the owner is remote, one round trip.
 
 The chunk cache is daemon-owned RAM keyed by hash, LRU, with a size that is a parameter.
 
@@ -225,7 +225,7 @@ It lives with the guest's host and moves when the guest does.
 
 Length-prefixed messages over kernel TCP, one connection per core, `TCP_NODELAY`, driven by io_uring.
 
-The daemon runs spinning or sleeping; page 04 measures both, because the wakeup is part of the price.
+The daemon runs spinning or sleeping; page 04 measures both, because the wakeup is part of the cost.
 
 Rendezvous hashing means a reader already knows the owner of every hash; nobody looks up anyone else's index.
 
@@ -261,7 +261,7 @@ The window between a local ack and the chunk being durable on its owner is the c
 
 One optional arm closes it: mirror the staging tail to the peer on every FLUSH and wait for its fdatasync before acking.
 
-That is what every production system in this space does, and the arm measures what it costs: one round trip per FLUSH.
+Every production system in this space does this, and the arm measures its cost: one round trip per FLUSH.
 
 ## Crash consistency
 
@@ -314,7 +314,7 @@ Same stock QEMU, same guest, same NVMe device, storage behind the device varies.
 
 The prediction is a tie on capture between the daemon and ZFS fast dedup.
 
-It is measured anyway, because the chunk-size curve under it is the single-host design result, and because a reviewer will ask why not ZFS.
+It is measured anyway, because the chunk-size curve under it is the single-host design result, and because the comparison against ZFS is the first objection a reviewer will raise.
 
 ## Rungs
 
@@ -333,7 +333,7 @@ Its own XFS instance on the vdo device.
 Index memory from `vdostats`.
 
 **R4. The daemon, one host.**
-Local store only, k not in play.
+Local store only; k does not apply.
 Three chunk-size arms below.
 
 R0 against R4 is the cost of the daemon with everything else held constant.
@@ -344,7 +344,7 @@ R1 is the deployed state of the art and differs in kernel boundary, caching, and
 
 Fixed 4K captures everything a Linux guest offers, and costs an index entry per 4K: about 250 million entries per TB, roughly 10 GB of RAM per TB at 40 bytes each.
 
-That is the DDT memory problem the daemon is supposed to escape.
+That is the DDT memory cost the daemon is designed to avoid.
 
 FastCDC at a 16K mean cuts the index four times over and loses some aligned matches.
 
@@ -352,7 +352,7 @@ Three arms: fixed 4K, fixed 16K, FastCDC 8K to 64K with a 16K mean.
 
 Reported per arm: bytes stored, index bytes per TB, guest p99, write amplification.
 
-**Capture against index memory as a function of chunk size is the curve this page exists for.**
+**Capture against index memory as a function of chunk size is the result this page produces.**
 
 The census below predicts the capture column before any run.
 
@@ -403,7 +403,7 @@ It is rebuilt by one command, dated, and is also the replay workload above.
 **The split.**
 Per byte range: zero or unallocated (from the guest allocation map, excluded), unique, shared with the T0 base in place, duplicate at an aligned 4K or 16K boundary elsewhere in the fleet, or duplicate only at a shifted offset.
 The aligned column predicts R1 and the fixed arms; aligned plus shifted predicts the CDC arm.
-Nothing more: no donors, no real fleets, no time-axis claims.
+Nothing further: no donors, no real fleets, no claims about time.
 
 ---
 
@@ -413,7 +413,7 @@ Nothing more: no donors, no real fleets, no time-axis claims.
 
 Same daemon, a second host, one parameter.
 
-Everything a stock backend cannot do is on this page.
+Every measurement on this page is one no stock backend can produce.
 
 ## Two modes
 
@@ -423,9 +423,9 @@ On two hosts it takes two values, and they are two different experiments.
 
 [figure: left, replicated k = 2: host A and host B each hold all chunks, PUT new chunks both ways, each unique chunk crosses the wire once, every read is local, capacity = one store twice. Right, partitioned k = 1: host A holds chunks with hash → A, host B holds hash → B, PUT and GET both ways, each chunk stored once fleet-wide, about half of cold reads are remote, capacity = one store once.]
 
-k = 2 buys transfer and keeps every read local.
+k = 2 provides transfer savings and keeps every read local.
 
-k = 1 buys capacity and pays in remote reads.
+k = 1 provides capacity savings at the cost of remote reads.
 
 Two hosts with k = 1 is the worst case for remote reads and is run for exactly that reason.
 
@@ -512,7 +512,7 @@ If it is large, placement by super-chunk is the knob, noted here and measured on
 
 A cold read whose chunk lives on the other host is the only place the network enters guest latency.
 
-This page prices it, and pushes it down.
+This page measures it and reduces it.
 
 ## Where the time goes
 
@@ -522,9 +522,9 @@ On 100 GbE the transport sits on top: raw RDMA adds 3 to 5 µs, kernel nvme-rdma
 
 Those are the SPDK 24.05 and Systor '17 numbers on ConnectX-5; the testbed replaces them.
 
-So RDMA against TCP is a 10 µs question on an 80 µs read.
+RDMA against TCP is therefore a 10 µs difference on an 80 µs read.
 
-The 4x question is whether the chunk is in the owner's memory or on its disk.
+The larger factor, about 4x, is whether the chunk is in the owner's memory or on its disk.
 
 **A chunk from a peer's RAM over TCP is faster than a chunk from local NVMe.**
 
@@ -544,7 +544,7 @@ The other rows exist to show what the kernel stack and the userspace hop each co
 | nvme-rdma export | kernel block path over RDMA; owner's store exported by `nvmet` as a file-backed namespace, `buffered_io` on for RAM, off for media | configuration |
 | nvme-tcp export | same over kernel TCP | configuration |
 | daemon, TCP, spinning | the architecture, without the wakeup | the daemon |
-| daemon, TCP, sleeping | the architecture as deployed; the wakeup is the price | the daemon |
+| daemon, TCP, sleeping | the architecture as deployed; the wakeup is the cost | the daemon |
 | daemon, ibverbs two-sided (stretch) | the userspace hop without the kernel stack | ~40 h |
 
 The nvmet export is a probe and not the architecture: it exposes the raw store, needs the reader to know offsets, and has no place for authentication.
@@ -573,7 +573,7 @@ Profile prefetch: record the chunk sequence of one boot, replay it on later boot
 
 Every lazy-loading system that has published numbers does this and reports it removing most of the miss cost; DADI says 95%.
 
-It is the consensus mitigation and it costs about a day.
+It is the consensus mitigation and a one-day implementation.
 
 ## Under a guest
 
@@ -581,7 +581,7 @@ Partitioned boot storm at N = 16, with and without profile prefetch, against the
 
 Reported: guest p99 and host device reads per guest byte.
 
-**The gap between partitioned with prefetch and replicated is the residual price of one copy per chunk.**
+**The gap between partitioned with prefetch and replicated is the residual cost of one copy per chunk.**
 
 ## RDMA is a probe
 
@@ -589,7 +589,7 @@ The CloudLab fabric is lossy; no PFC or ECN is documented on the shared switches
 
 Adaptive retransmission is enabled on the NIC and the counters above prove the runs were clean.
 
-ConnectX-5 cannot do io_uring zero-copy receive, so that lever is out.
+ConnectX-5 cannot do io_uring zero-copy receive, so that option is unavailable.
 
 None of this touches the architecture, which runs on kernel TCP and would run on any Ethernet.
 
@@ -608,9 +608,9 @@ None of this touches the architecture, which runs on kernel TCP and would run on
 
 That is 23 a week.
 
-The credit says 8.
+The course credit corresponds to 8.
 
-The plan is sized to the work, and the cut order says what goes when it slips.
+The plan is sized to the work, and the cut order defines what is removed if it slips.
 
 ## Hardware
 
@@ -648,7 +648,7 @@ Fallback: two OVHcloud Advance-4 2026 servers (EPYC 4585PX, 16 cores, 64 GB DDR5
 
 ## Gates
 
-G1. Passthrough daemon under stock QEMU within 10% of R0 p99 by the end of week 2. If this slips, everything slips, and the sponsor hears it that week.
+G1. Passthrough daemon under stock QEMU within 10% of R0 p99 by the end of week 2. If this slips, everything after it slips, and the sponsor is informed that week.
 
 G2. `kill -9` at arbitrary points, replay, `fio --verify` passes, before any daemon number is reported.
 
@@ -664,7 +664,7 @@ G6. One command rebuilds the fleet from dated archives; one command reruns every
 
 When the schedule slips, items come off from the top.
 
-Never the item at the bottom.
+The last item is never removed.
 
 1. ibverbs daemon arm.
 2. Super-chunk placement.
@@ -678,11 +678,11 @@ Never the item at the bottom.
 
 **Daemon overrun.** The largest risk and the reason G1 is at week 2. Protocol plumbing comes from maintained crates so the hours go to the five components the study is about.
 
-**RoCE bring-up.** GID selection, MTU, adaptive retransmission on a lossy fabric. Budgeted at 8 hours; if it eats 20, the RDMA rows go and the TCP rows stand.
+**RoCE bring-up.** GID selection, MTU, adaptive retransmission on a lossy fabric. Budgeted at 8 hours; if it exceeds 20, the RDMA rows are dropped and the TCP rows stand.
 
 **Node availability.** 36 nodes of this type exist. Reserve the pair in week 1 for every measurement week.
 
-**Configuration traps already known.** `dedup=on` means SHA-256; direct IO does nothing on zvols; the 100G interface stays down unless the profile declares a link on it.
+**Known configuration pitfalls.** `dedup=on` means SHA-256; direct IO does nothing on zvols; the 100G interface stays down unless the profile declares a link on it.
 
 **Census realism.** Scripted drift is not real drift. The fleet is built from real dated archives, the scripts are published, and the numbers it supplies are bounds the daemon is read against, not claims about fleets in the wild.
 
@@ -714,13 +714,13 @@ Swept on 2026-09-01; sources and what was actually opened are in `docs/review/`.
 
 No prior system is a local-only write log with no network on the write path, a fleet-wide hash-placed chunk store, and remote cold reads under a stock hypervisor.
 
-Three are close enough that a reviewer would write a sentence if they were missing.
+Three are close enough that a reviewer would cite them if they were omitted.
 
 ## Nearest systems
 
 | Work | What it is | How this differs |
 |---|---|---|
-| Datrium DVX (2016), US20170031994A1 | host-side fingerprinting, host flash as read cache, global dedup on a shared data-node pool; the patent lists host-only ack as an alternative | peers as owners by hash instead of a shared pool; open implementation on stock QEMU; the cold read priced per transport |
+| Datrium DVX (2016), US20170031994A1 | host-side fingerprinting, host flash as read cache, global dedup on a shared data-node pool; the patent lists host-only ack as an alternative | peers as owners by hash instead of a shared pool; open implementation on stock QEMU; the cold read measured per transport |
 | Nutanix AOS | local OpLog on SSD, mirrored to another node before ack; cluster-wide post-process dedup at 16K; per-node cache | no mirror on the write path, with the window measured and the mirror as an arm; placement by hash instead of by vDisk locality; numbers published |
 | Fossil + Venti (2002) | a disk write buffer in front of a content-addressed archive; the two-tier shape | block device under a VM instead of a filesystem; primary capacity instead of archival; more than one owner |
 | Ceph + TiDedup (ATC '23) | post-process CDC into a chunk pool placed by CRUSH on the fingerprint; promotes on a cold miss | writes never cross the network; a host cache instead of promotion; a guest block path; latency numbers, which TiDedup does not report |
@@ -733,12 +733,12 @@ Three are close enough that a reviewer would write a sentence if they were missi
 
 | Work | What it measured | What it leaves open |
 |---|---|---|
-| DADI (ATC '20) | block-level lazy loading with tree P2P; 10,000 containers on 1,000 hosts in 4 s; trace prefetch removes 95% of the cold gap; reads from a parent's page cache beat local disk | no per-read miss latency; not content-addressed |
+| DADI (ATC '20) | block-level lazy loading with tree P2P; 10,000 containers on 1,000 hosts in 4 s; trace prefetch removes 95% of the cold gap; reads from a parent's page cache are faster than local disk | no per-read miss latency; not content-addressed |
 | Slacker (FAST '16) | only 6.4% of a container image is read at startup; lazy fetch over NFS; run phase 17% slower | no per-block miss cost; centralized |
 | VMTorrent (CoNEXT '12), VMThunder (TPDS '14) | demand-priority P2P VM image streaming with recorded profiles | startup seconds only |
 | FaaSnap (EuroSys '22), REAP (ASPLOS '21) | lazy page faults from local disk at 13 µs; userfaultfd over 128 µs uncached; working set 9% of footprint | memory, not disk; local |
 | SnowFlock (EuroSys '09) | 275 µs per page fetched over gigabit, 82% of it in the network stack | the only in-VM remote per-unit number, and it is from 2009 |
-| Dahlin et al. (OSDI '94) | cooperative caching: remote client memory at 1.25 ms beats disk at 15 ms; N-chance forwarding | the argument this study remakes at 100 GbE with content names |
+| Dahlin et al. (OSDI '94) | cooperative caching: remote client memory at 1.25 ms against disk at 15 ms; N-chance forwarding | the argument this study repeats at 100 GbE with content-addressed chunks |
 | CLB (VEE '17), Satori (ATC '09) | content-keyed sharing of VM disk reads across guests on one host; 95 to 98% of boot reads eliminated | single host; no store |
 
 **Nobody has measured a content-addressed chunk fetched from a peer inside a VM block read path at microsecond scale.**
@@ -771,4 +771,4 @@ Datrium's patent and Nutanix's design are cited by name.
 
 Fossil and Venti are cited as the origin of the two-tier shape.
 
-The study's claim is the measurement: what a name buys across hosts on commodity hardware under a stock hypervisor, and what the cold read costs, per transport, with the numbers.
+The study's contribution is the measurement: what content addressing provides across hosts on commodity hardware under a stock hypervisor, and what the remote cold read costs, per transport.

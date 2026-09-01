@@ -4,19 +4,15 @@
 </script>
 
 <svelte:head>
-	<title>local write, global chunks</title>
+	<title>Content Addressed Deduplication: A distributed storage system study</title>
 	<meta
 		name="description"
-		content="A dedup table shares duplicate data within one host. Content addressing shares it across hosts. This study builds a content-addressed block backend under stock QEMU and measures what crossing the host buys and what the cold read costs."
+		content="A dedup table shares duplicate data within one host. Content addressing shares it across hosts. This study builds a content-addressed block backend under stock QEMU and measures what crossing the host boundary provides and what the remote cold read costs."
 	/>
 </svelte:head>
 
-<span class="eyebrow">CS 4993 · fall 2026 · research spec</span>
-<p class="lede">
-	<mark>A dedup table shares duplicate data within one host. Content addressing shares it across hosts.</mark>
-	This study builds a content-addressed block backend under stock QEMU, with the network on the read path only, and measures what crossing the host buys and what a cold read costs.
-</p>
-
+<span class="eyebrow">research specification</span>
+<h2 class="title">Content Addressed Deduplication: A distributed storage system study</h2>
 <nav class="toc" aria-label="Pages">
 	{#each pages as { num, title, description } (num)}
 		<div class="row">
@@ -33,6 +29,12 @@
 </nav>
 
 <style>
+	.title {
+		margin: 0.5rem 0 1rem;
+	}
+	.title::before {
+		content: none;
+	}
 	.toc {
 		margin-top: 0.875rem;
 		border-top: 1px solid var(--border);

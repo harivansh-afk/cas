@@ -8,7 +8,7 @@
 <p class="lede">
 	<strong>Part 3.</strong><br />
 	A cold read whose chunk lives on the other host is the only place the network enters guest latency.<br />
-	This page prices it, and pushes it down.
+	This page measures it and reduces it.
 </p>
 
 <h2>Where the time goes</h2>
@@ -18,8 +18,8 @@
 	Those are the SPDK 24.05 and Systor '17 numbers on ConnectX-5; the testbed replaces them.
 </p>
 <p>
-	So RDMA against TCP is a 10 µs question on an 80 µs read.<br />
-	The 4x question is whether the chunk is in the owner's memory or on its disk.<br />
+	RDMA against TCP is therefore a 10 µs difference on an 80 µs read.<br />
+	The larger factor, about 4x, is whether the chunk is in the owner's memory or on its disk.<br />
 	<mark>A chunk from a peer's RAM over TCP is faster than a chunk from local NVMe.</mark><br />
 	With hash placement, a chunk shared across the fleet is hot at exactly one owner, and every host's read of it hits that owner's cache.
 </p>
@@ -47,7 +47,7 @@
 	<Node x={170} y={200} w={404} h={20} title="≈ 101" tone="outline" />
 	<Note x={20} y={244} size={10} text="peer NVMe · daemon TCP" />
 	<Node x={170} y={230} w={440} h={20} title="≈ 110" tone="outline" />
-	<Bracket x={650} y1={170} y2={250} label={['10 to 30% over local', 'the cold case prefetch hides']} />
+	<Bracket x={650} y1={170} y2={250} label={['10 to 30% over local', 'the cold case that prefetch hides']} />
 </Diagram>
 
 <h2>Probes</h2>
@@ -65,7 +65,7 @@
 			<tr><td class="k">nvme-rdma export</td><td>kernel block path over RDMA; owner's store exported by <code>nvmet</code> as a file-backed namespace, <code>buffered_io</code> on for RAM, off for media</td><td>configuration</td></tr>
 			<tr><td class="k">nvme-tcp export</td><td>same over kernel TCP</td><td>configuration</td></tr>
 			<tr><td class="k">daemon, TCP, spinning</td><td>the architecture, without the wakeup</td><td>the daemon</td></tr>
-			<tr><td class="k">daemon, TCP, sleeping</td><td>the architecture as deployed; the wakeup is the price</td><td>the daemon</td></tr>
+			<tr><td class="k">daemon, TCP, sleeping</td><td>the architecture as deployed; the wakeup is the cost</td><td>the daemon</td></tr>
 			<tr><td class="k">daemon, ibverbs two-sided<span class="tag-stretch">stretch</span></td><td>the userspace hop without the kernel stack</td><td>~40 h</td></tr>
 		</tbody>
 	</table>
@@ -94,21 +94,21 @@
 <p>
 	Profile prefetch: record the chunk sequence of one boot, replay it on later boots.<br />
 	Every lazy-loading system that has published numbers does this and reports it removing most of the miss cost; DADI says 95%.<br />
-	It is the consensus mitigation and it costs about a day.
+	It is the consensus mitigation and a one-day implementation.
 </p>
 
 <h2>Under a guest</h2>
 <p>
 	Partitioned boot storm at N = 16, with and without profile prefetch, against the same storm in replicated mode.<br />
 	Reported: guest p99 and host device reads per guest byte.<br />
-	<mark>The gap between partitioned with prefetch and replicated is the residual price of one copy per chunk.</mark>
+	<mark>The gap between partitioned with prefetch and replicated is the residual cost of one copy per chunk.</mark>
 </p>
 
 <h2>RDMA is a probe</h2>
 <p>
 	The CloudLab fabric is lossy; no PFC or ECN is documented on the shared switches, and published work on this node type ran RoCE that way.<br />
 	Adaptive retransmission is enabled on the NIC and the counters above prove the runs were clean.<br />
-	ConnectX-5 cannot do io_uring zero-copy receive, so that lever is out.<br />
+	ConnectX-5 cannot do io_uring zero-copy receive, so that option is unavailable.<br />
 	None of this touches the architecture, which runs on kernel TCP and would run on any Ethernet.
 </p>
 

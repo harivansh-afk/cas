@@ -7,8 +7,8 @@
 <p class="lede">
 	<strong>Fourteen weeks, about 320 hours.</strong><br />
 	That is 23 a week.<br />
-	The credit says 8.<br />
-	The plan is sized to the work, and the cut order says what goes when it slips.
+	The course credit corresponds to 8.<br />
+	The plan is sized to the work, and the cut order defines what is removed if it slips.
 </p>
 
 <h2>Hardware</h2>
@@ -49,7 +49,7 @@
 
 <h2>Gates</h2>
 <ul class="reqs">
-	<li><span class="rid">G1</span>Passthrough daemon under stock QEMU within 10% of R0 p99 by the end of week 2. If this slips, everything slips, and the sponsor hears it that week.</li>
+	<li><span class="rid">G1</span>Passthrough daemon under stock QEMU within 10% of R0 p99 by the end of week 2. If this slips, everything after it slips, and the sponsor is informed that week.</li>
 	<li><span class="rid">G2</span><code>kill -9</code> at arbitrary points, replay, <code>fio --verify</code> passes, before any daemon number is reported.</li>
 	<li><span class="rid">G3</span>Part 1 table complete: R0, R1 at two block sizes, R4 at three chunk sizes; latency, capture, index, amplification; variance beside every number.</li>
 	<li><span class="rid">G4</span>Part 2 table complete: both modes, every flow, bytes on the wire against the census bound.</li>
@@ -60,7 +60,7 @@
 <h2>Cut order</h2>
 <p>
 	When the schedule slips, items come off from the top.<br />
-	Never the item at the bottom.
+	The last item is never removed.
 </p>
 <ol class="steps">
 	<li>ibverbs daemon arm.</li>
@@ -75,9 +75,9 @@
 <h2>Risks</h2>
 <ul class="plain">
 	<li><strong>Daemon overrun.</strong> The largest risk and the reason G1 is at week 2. Protocol plumbing comes from maintained crates so the hours go to the five components the study is about.</li>
-	<li><strong>RoCE bring-up.</strong> GID selection, MTU, adaptive retransmission on a lossy fabric. Budgeted at 8 hours; if it eats 20, the RDMA rows go and the TCP rows stand.</li>
+	<li><strong>RoCE bring-up.</strong> GID selection, MTU, adaptive retransmission on a lossy fabric. Budgeted at 8 hours; if it exceeds 20, the RDMA rows are dropped and the TCP rows stand.</li>
 	<li><strong>Node availability.</strong> 36 nodes of this type exist. Reserve the pair in week 1 for every measurement week.</li>
-	<li><strong>Configuration traps already known.</strong> <code>dedup=on</code> means SHA-256; direct IO does nothing on zvols; the 100G interface stays down unless the profile declares a link on it.</li>
+	<li><strong>Known configuration pitfalls.</strong> <code>dedup=on</code> means SHA-256; direct IO does nothing on zvols; the 100G interface stays down unless the profile declares a link on it.</li>
 	<li><strong>Census realism.</strong> Scripted drift is not real drift. The fleet is built from real dated archives, the scripts are published, and the numbers it supplies are bounds the daemon is read against, not claims about fleets in the wild.</li>
 </ul>
 

@@ -7,7 +7,7 @@
 <p class="lede">
 	Swept on 2026-09-01; sources and what was actually opened are in <code>docs/review/</code>.<br />
 	No prior system is a local-only write log with no network on the write path, a fleet-wide hash-placed chunk store, and remote cold reads under a stock hypervisor.<br />
-	Three are close enough that a reviewer would write a sentence if they were missing.
+	Three are close enough that a reviewer would cite them if they were omitted.
 </p>
 
 <h2>Nearest systems</h2>
@@ -17,7 +17,7 @@
 			<tr><th>Work</th><th>What it is</th><th>How this differs</th></tr>
 		</thead>
 		<tbody>
-			<tr><td class="k">Datrium DVX (2016), US20170031994A1</td><td>host-side fingerprinting, host flash as read cache, global dedup on a shared data-node pool; the patent lists host-only ack as an alternative</td><td>peers as owners by hash instead of a shared pool; open implementation on stock QEMU; the cold read priced per transport</td></tr>
+			<tr><td class="k">Datrium DVX (2016), US20170031994A1</td><td>host-side fingerprinting, host flash as read cache, global dedup on a shared data-node pool; the patent lists host-only ack as an alternative</td><td>peers as owners by hash instead of a shared pool; open implementation on stock QEMU; the cold read measured per transport</td></tr>
 			<tr><td class="k">Nutanix AOS</td><td>local OpLog on SSD, mirrored to another node before ack; cluster-wide post-process dedup at 16K; per-node cache</td><td>no mirror on the write path, with the window measured and the mirror as an arm; placement by hash instead of by vDisk locality; numbers published</td></tr>
 			<tr><td class="k">Fossil + Venti (2002)</td><td>a disk write buffer in front of a content-addressed archive; the two-tier shape</td><td>block device under a VM instead of a filesystem; primary capacity instead of archival; more than one owner</td></tr>
 			<tr><td class="k">Ceph + TiDedup (ATC '23)</td><td>post-process CDC into a chunk pool placed by CRUSH on the fingerprint; promotes on a cold miss</td><td>writes never cross the network; a host cache instead of promotion; a guest block path; latency numbers, which TiDedup does not report</td></tr>
@@ -36,12 +36,12 @@
 			<tr><th>Work</th><th>What it measured</th><th>What it leaves open</th></tr>
 		</thead>
 		<tbody>
-			<tr><td class="k">DADI (ATC '20)</td><td>block-level lazy loading with tree P2P; 10,000 containers on 1,000 hosts in 4 s; trace prefetch removes 95% of the cold gap; reads from a parent's page cache beat local disk</td><td>no per-read miss latency; not content-addressed</td></tr>
+			<tr><td class="k">DADI (ATC '20)</td><td>block-level lazy loading with tree P2P; 10,000 containers on 1,000 hosts in 4 s; trace prefetch removes 95% of the cold gap; reads from a parent's page cache are faster than local disk</td><td>no per-read miss latency; not content-addressed</td></tr>
 			<tr><td class="k">Slacker (FAST '16)</td><td>only 6.4% of a container image is read at startup; lazy fetch over NFS; run phase 17% slower</td><td>no per-block miss cost; centralized</td></tr>
 			<tr><td class="k">VMTorrent (CoNEXT '12), VMThunder (TPDS '14)</td><td>demand-priority P2P VM image streaming with recorded profiles</td><td>startup seconds only</td></tr>
 			<tr><td class="k">FaaSnap (EuroSys '22), REAP (ASPLOS '21)</td><td>lazy page faults from local disk at 13 µs; userfaultfd over 128 µs uncached; working set 9% of footprint</td><td>memory, not disk; local</td></tr>
 			<tr><td class="k">SnowFlock (EuroSys '09)</td><td>275 µs per page fetched over gigabit, 82% of it in the network stack</td><td>the only in-VM remote per-unit number, and it is from 2009</td></tr>
-			<tr><td class="k">Dahlin et al. (OSDI '94)</td><td>cooperative caching: remote client memory at 1.25 ms beats disk at 15 ms; N-chance forwarding</td><td>the argument this study remakes at 100 GbE with content names</td></tr>
+			<tr><td class="k">Dahlin et al. (OSDI '94)</td><td>cooperative caching: remote client memory at 1.25 ms against disk at 15 ms; N-chance forwarding</td><td>the argument this study repeats at 100 GbE with content-addressed chunks</td></tr>
 			<tr><td class="k">CLB (VEE '17), Satori (ATC '09)</td><td>content-keyed sharing of VM disk reads across guests on one host; 95 to 98% of boot reads eliminated</td><td>single host; no store</td></tr>
 		</tbody>
 	</table>
@@ -71,7 +71,7 @@
 <p>
 	Datrium's patent and Nutanix's design are cited by name.<br />
 	Fossil and Venti are cited as the origin of the two-tier shape.<br />
-	The study's claim is the measurement: what a name buys across hosts on commodity hardware under a stock hypervisor, and what the cold read costs, per transport, with the numbers.
+	The study's contribution is the measurement: what content addressing provides across hosts on commodity hardware under a stock hypervisor, and what the remote cold read costs, per transport.
 </p>
 
 <PageNav num="06" />
