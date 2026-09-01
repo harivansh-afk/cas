@@ -6,14 +6,14 @@
 
 <PageHead num="03" />
 <p class="lede">
-	<strong>Part 2.</strong>
-	Same daemon, a second host, one parameter.
+	<strong>Part 2.</strong><br />
+	Same daemon, a second host, one parameter.<br />
 	Everything a stock backend cannot do is on this page.
 </p>
 
 <h2>Two modes</h2>
 <p>
-	k is the number of owners per chunk.
+	k is the number of owners per chunk.<br />
 	On two hosts it takes two values, and they are two different experiments.
 </p>
 
@@ -40,9 +40,9 @@
 
 <h2>Provision</h2>
 <p>
-	A new guest on host B from an image whose chunks exist anywhere: copy the map, a few MB, and <code>HAS</code> its hashes.
-	In replicated mode nothing else moves.
-	In partitioned mode nothing else moves either; chunks are fetched on first read.
+	A new guest on host B from an image whose chunks exist anywhere: copy the map, a few MB, and <code>HAS</code> its hashes.<br />
+	In replicated mode nothing else moves.<br />
+	In partitioned mode nothing else moves either; chunks are fetched on first read.<br />
 	<mark>Provisioning cost is the size of the map.</mark>
 </p>
 <p>
@@ -51,39 +51,39 @@
 
 <h2>Migrate</h2>
 <p>
-	Move a guest from A to B: stop, copy the map and the staging extents not yet compacted, start.
-	A 40 GB guest that compacted recently moves in MB.
+	Move a guest from A to B: stop, copy the map and the staging extents not yet compacted, start.<br />
+	A 40 GB guest that compacted recently moves in MB.<br />
 	Memory migration is QEMU's and is out of scope; this is the disk.
 </p>
 <p>
-	Baseline: rsync of the raw file, <code>zfs send</code> of the zvol.
+	Baseline: rsync of the raw file, <code>zfs send</code> of the zvol.<br />
 	Since 2.0 <code>zfs send</code> emits no deduplicated stream; the bytes are the logical size regardless of the DDT.
 </p>
 
 <h2>Sync after drift</h2>
 <p>
-	Two guests, one on each host, cloned from the same image, each updated independently to the same package set.
-	Compaction on each host ships only chunks the owner lacks.
-	Bytes on the wire are read against the census's unique-byte count for the pair.
+	Two guests, one on each host, cloned from the same image, each updated independently to the same package set.<br />
+	Compaction on each host ships only chunks the owner lacks.<br />
+	Bytes on the wire are read against the census's unique-byte count for the pair.<br />
 	This is the <code>apt upgrade</code> case from page 00, measured.
 </p>
 
 <h2>Capacity</h2>
 <p>
-	Partitioned mode stores each chunk once across the fleet.
-	Measured: bytes on both stores after the fleet replay settles, against two per-host ZFS pools holding the same guests.
-	Predicted: about half.
+	Partitioned mode stores each chunk once across the fleet.<br />
+	Measured: bytes on both stores after the fleet replay settles, against two per-host ZFS pools holding the same guests.<br />
+	Predicted: about half.<br />
 	Also measured: what fraction of a guest's cold reads went to the other host, which on two hosts with k = 1 should be about half and is the worst case any fleet would see.
 </p>
 
 <h2>The window</h2>
 <p>
-	Between a local FLUSH ack and the chunk being durable on its owner sits the compaction lag.
+	Between a local FLUSH ack and the chunk being durable on its owner sits the compaction lag.<br />
 	It is reported in seconds under the fleet replay, as a distribution, with the compactor's ship batch size as the knob.
 </p>
 <p>
-	Optional arm: mirror the staging tail to the peer on every FLUSH and wait for the peer's fdatasync before acking.
-	Every production system in this space does this.
+	Optional arm: mirror the staging tail to the peer on every FLUSH and wait for the peer's fdatasync before acking.<br />
+	Every production system in this space does this.<br />
 	The arm reports the write p99 it costs on TCP, which is one round trip per FLUSH.
 </p>
 
@@ -106,8 +106,8 @@
 
 <h2>The locality objection</h2>
 <p>
-	Dong et al. (FAST '11) rejected per-chunk hash placement for backup because it destroys read locality and routed 1 MB super-chunks instead.
-	This is primary storage with a local cache, and the fragmentation cost they argued about is measured directly on page 04 instead of argued.
+	Dong et al. (FAST '11) rejected per-chunk hash placement for backup because it destroys read locality and routed 1 MB super-chunks instead.<br />
+	This is primary storage with a local cache, and the fragmentation cost they argued about is measured directly on page 04 instead of argued.<br />
 	If it is large, placement by super-chunk is the knob, noted here and measured only if time remains.
 </p>
 

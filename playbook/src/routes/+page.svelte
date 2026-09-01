@@ -4,7 +4,7 @@
 </script>
 
 <svelte:head>
-	<title>content addressing across hosts</title>
+	<title>local write, global chunks</title>
 	<meta
 		name="description"
 		content="A dedup table shares duplicate data within one host. Content addressing shares it across hosts. This study builds a content-addressed block backend under stock QEMU and measures what crossing the host buys and what the cold read costs."

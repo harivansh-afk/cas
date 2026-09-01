@@ -6,16 +6,16 @@
 
 <PageHead num="01" />
 <p class="lede">
-	<strong>Invariant.</strong>
-	The network is on the read path only, only for cold chunks, and never on the write or flush path.
+	<strong>Invariant.</strong><br />
+	The network is on the read path only, only for cold chunks, and never on the write or flush path.<br />
 	Every choice below serves that sentence.
 </p>
 
 <h2>One host</h2>
 <p>
-	The guest sees a virtio-blk device on stock QEMU.
-	QEMU connects it over vhost-user-blk to one process per host, the daemon.
-	All new code lives there.
+	The guest sees a virtio-blk device on stock QEMU.<br />
+	QEMU connects it over vhost-user-blk to one process per host, the daemon.<br />
+	All new code lives there.<br />
 	Guest memory is shared with the daemon, so requests are read in place, and storage IO goes through io_uring.
 </p>
 
@@ -52,59 +52,59 @@
 
 <h2>Write path</h2>
 <p>
-	Guest writes append at block granularity to a staging log on local NVMe.
-	FLUSH is <code>fdatasync</code> of the log, then the acknowledgment.
+	Guest writes append at block granularity to a staging log on local NVMe.<br />
+	FLUSH is <code>fdatasync</code> of the log, then the acknowledgment.<br />
 	The hot path hashes nothing and chunks nothing, so large writes proceed at sequential-append speed.
 </p>
 <p>
-	Durability belongs to the log alone.
-	The page cache never holds the only copy of anything, and every file is opened O_DIRECT.
+	Durability belongs to the log alone.<br />
+	The page cache never holds the only copy of anything, and every file is opened O_DIRECT.<br />
 	Staging is finite; when ingest outruns compaction, back-pressure throttles the guest, and the point where it engages is measured.
 </p>
 
 <h2>Compactor</h2>
 <p>
-	A background pass reads settled extents from staging, cuts them into chunks, hashes each with BLAKE3, and drops any hash already in the local index.
-	Chunking is fixed 4K or FastCDC, chosen per arm on page 02.
+	A background pass reads settled extents from staging, cuts them into chunks, hashes each with BLAKE3, and drops any hash already in the local index.<br />
+	Chunking is fixed 4K or FastCDC, chosen per arm on page 02.<br />
 	Extents overwritten in staging are never compacted.
 </p>
 <p>
-	For each new chunk, the owner is the first k hosts in rendezvous order of its hash.
-	If the owner is this host, the chunk is appended to the local store and fdatasync'd.
-	Otherwise it goes in a batch to the owner, which appends, fdatasyncs once per batch, and acks.
-	<mark>Only after the ack does the extent count as compacted.</mark>
+	For each new chunk, the owner is the first k hosts in rendezvous order of its hash.<br />
+	If the owner is this host, the chunk is appended to the local store and fdatasync'd.<br />
+	Otherwise it goes in a batch to the owner, which appends, fdatasyncs once per batch, and acks.<br />
+	<mark>Only after the ack does the extent count as compacted.</mark><br />
 	Staging is the write-ahead log for the whole fleet.
 </p>
 <p>
-	Two costs come with this and both are measured.
-	Every surviving byte is written at least twice, staging then store, plus journal traffic.
+	Two costs come with this and both are measured.<br />
+	Every surviving byte is written at least twice, staging then store, plus journal traffic.<br />
 	Compaction reads and writes the same device the guest is using, so guest p99 is measured with the compactor active and idle.
 </p>
 <p class="note">
-	CDC over a dirty extent re-chunks from the last settled boundary before it to the first boundary after it that agrees with the existing cut.
+	CDC over a dirty extent re-chunks from the last settled boundary before it to the first boundary after it that agrees with the existing cut.<br />
 	This is the standard resynchronization rule (LBFS locality; Xet's boundary reset), and it is why CDC never runs on the hot path: one aligned write can move every boundary in its neighborhood.
 </p>
 
 <h2>Read path</h2>
 <p>
-	Reads check staging, then the local store, then the chunk cache, then send <code>GET(hash)</code> to the owner.
-	The owner answers from its cache if the chunk is hot, otherwise from its store.
+	Reads check staging, then the local store, then the chunk cache, then send <code>GET(hash)</code> to the owner.<br />
+	The owner answers from its cache if the chunk is hot, otherwise from its store.<br />
 	Fresh data never pays indirection; settled data pays the map walk, the index lookup, and, if the owner is remote, one round trip.
 </p>
 <p>
-	The chunk cache is daemon-owned RAM keyed by hash, LRU, with a size that is a parameter.
+	The chunk cache is daemon-owned RAM keyed by hash, LRU, with a size that is a parameter.<br />
 	Because every file is O_DIRECT, the kernel page cache is out of the picture on every host, and the cache size can be bounded equal to ARC on the ZFS rung.
 </p>
 <p>
-	Prefetch is the daemon issuing the next D hashes from the map when it sees sequential reads, and optionally replaying a recorded boot profile.
+	Prefetch is the daemon issuing the next D hashes from the map when it sees sequential reads, and optionally replaying a recorded boot profile.<br />
 	D is swept on page 04.
 </p>
 
 <h2>Capacity tier</h2>
 <p>
-	The local store is an append-only log of records (length, hash, flags, bytes) and is authoritative for the chunks this host owns.
-	The index maps hash to offset, lives in RAM, and is rebuilt by scanning the store; its bytes per TB is the constant the chunk-size arms measure.
-	The map, one per image, is a journaled offset tree from disk offset to chunk hash.
+	The local store is an append-only log of records (length, hash, flags, bytes) and is authoritative for the chunks this host owns.<br />
+	The index maps hash to offset, lives in RAM, and is rebuilt by scanning the store; its bytes per TB is the constant the chunk-size arms measure.<br />
+	The map, one per image, is a journaled offset tree from disk offset to chunk hash.<br />
 	It lives with the guest's host and moves when the guest does.
 </p>
 
@@ -123,20 +123,20 @@
 	</table>
 </div>
 <p>
-	Length-prefixed messages over kernel TCP, one connection per core, <code>TCP_NODELAY</code>, driven by io_uring.
-	The daemon runs spinning or sleeping; page 04 measures both, because the wakeup is part of the price.
+	Length-prefixed messages over kernel TCP, one connection per core, <code>TCP_NODELAY</code>, driven by io_uring.<br />
+	The daemon runs spinning or sleeping; page 04 measures both, because the wakeup is part of the price.<br />
 	Rendezvous hashing means a reader already knows the owner of every hash; nobody looks up anyone else's index.
 </p>
 <p>
-	RDMA and NVMe-oF exports appear on page 04 as probes that show what the kernel stack costs.
+	RDMA and NVMe-oF exports appear on page 04 as probes that show what the kernel stack costs.<br />
 	The architecture does not depend on either.
 </p>
 
 <h2>Placement and k</h2>
 <p>
-	Owner set = the first k hosts in rendezvous order of the chunk's hash.
-	k is the one cross-host parameter.
-	On two hosts, k = 2 means every chunk is on both (replicated) and k = 1 means each chunk lives on exactly one (partitioned).
+	Owner set = the first k hosts in rendezvous order of the chunk's hash.<br />
+	k is the one cross-host parameter.<br />
+	On two hosts, k = 2 means every chunk is on both (replicated) and k = 1 means each chunk lives on exactly one (partitioned).<br />
 	Page 03 measures both; a deployment would run k ≥ 2 on N ≥ 3 hosts.
 </p>
 
@@ -154,36 +154,36 @@
 	</table>
 </div>
 <p>
-	Two rules follow.
-	Bytes are durable on local NVMe before they go on the wire, always.
+	Two rules follow.<br />
+	Bytes are durable on local NVMe before they go on the wire, always.<br />
 	Shipping is two-phase: the owner fdatasyncs and acks before the sender marks anything compacted or reclaimable.
 </p>
 <p>
-	The window between a local ack and the chunk being durable on its owner is the compaction lag, measured in seconds under the fleet replay.
-	One optional arm closes it: mirror the staging tail to the peer on every FLUSH and wait for its fdatasync before acking.
+	The window between a local ack and the chunk being durable on its owner is the compaction lag, measured in seconds under the fleet replay.<br />
+	One optional arm closes it: mirror the staging tail to the peer on every FLUSH and wait for its fdatasync before acking.<br />
 	That is what every production system in this space does, and the arm measures what it costs: one round trip per FLUSH.
 </p>
 
 <h2>Crash consistency</h2>
 <p>
-	Two logs, staging and the map journal, must agree after a crash.
-	Staging is senior.
-	Compaction is idempotent and every batch carries an epoch recorded in both logs.
-	Recovery replays staging, discards map records from any epoch whose extents were not marked compacted, and re-runs compaction from the oldest incomplete epoch.
+	Two logs, staging and the map journal, must agree after a crash.<br />
+	Staging is senior.<br />
+	Compaction is idempotent and every batch carries an epoch recorded in both logs.<br />
+	Recovery replays staging, discards map records from any epoch whose extents were not marked compacted, and re-runs compaction from the oldest incomplete epoch.<br />
 	<code>kill -9</code> at any point, then this replay, must pass <code>fio --verify</code> before any number from the daemon is reported.
 </p>
 
 <h2>Garbage</h2>
 <p>
-	A chunk is live if any staging log or any map on any host references it.
-	Each host sends its owner the live set for an epoch with <code>LIVE</code>; the owner sweeps with <code>FALLOC_FL_PUNCH_HOLE</code> over dead records.
-	No reference counts.
+	A chunk is live if any staging log or any map on any host references it.<br />
+	Each host sends its owner the live set for an epoch with <code>LIVE</code>; the owner sweeps with <code>FALLOC_FL_PUNCH_HOLE</code> over dead records.<br />
+	No reference counts.<br />
 	The sweep runs once after the fleet replay to report reclaimed bytes; concurrent collection is out of scope.
 </p>
 
 <h2>Out of scope</h2>
 <p>
-	Membership changes, failure detection, rebalancing when a host joins or leaves, authentication and encryption on the wire, more than two hosts, and concurrent garbage collection.
+	Membership changes, failure detection, rebalancing when a host joins or leaves, authentication and encryption on the wire, more than two hosts, and concurrent garbage collection.<br />
 	Each is named in future work on page 05, and none of them affects a number this study reports.
 </p>
 

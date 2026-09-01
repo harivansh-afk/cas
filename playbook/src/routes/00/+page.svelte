@@ -6,10 +6,10 @@
 
 <PageHead num="00" />
 <p class="lede">
-	<strong>Thesis.</strong>
-	A dedup table shares duplicate data within one host.
-	Content addressing shares it across hosts.
-	On Linux VM fleets the first is already solved by ZFS.
+	<strong>Thesis.</strong><br />
+	A dedup table shares duplicate data within one host.<br />
+	Content addressing shares it across hosts.<br />
+	On Linux VM fleets the first is already solved by ZFS.<br />
 	So the case for content addressing is what a name does that an address cannot: move only unique bytes between hosts, store each chunk k times across a fleet instead of once per host, and serve a chunk from whichever host holds it in memory.
 </p>
 <p>
@@ -18,27 +18,27 @@
 
 <h2>Where dedup stops</h2>
 <p>
-	Two VMs each run <code>apt upgrade</code> and download the same packages.
-	Their disks now hold the same bytes.
+	Two VMs each run <code>apt upgrade</code> and download the same packages.<br />
+	Their disks now hold the same bytes.<br />
 	No clone can share them, because neither copy descends from the other.
 </p>
 <p>
-	A dedup table can.
-	ZFS dedup and dm-vdo hash every block and share equal ones, at a fixed aligned block size.
-	On a Linux guest everything is 4K aligned: ext4 uses 4K blocks, partitions start at 1 MiB, and package managers write whole files.
+	A dedup table can.<br />
+	ZFS dedup and dm-vdo hash every block and share equal ones, at a fixed aligned block size.<br />
+	On a Linux guest everything is 4K aligned: ext4 uses 4K blocks, partitions start at 1 MiB, and package managers write whole files.<br />
 	So at 4K a dedup table reaches nearly all of it, which is why Jin and Miller found fixed blocks match content-defined chunking on VM images in 2009.
 </p>
 <p>
-	<mark>On one host, content addressing has no capacity win over ZFS at 4K.</mark>
+	<mark>On one host, content addressing has no capacity win over ZFS at 4K.</mark><br />
 	Part 1 measures this instead of assuming it.
 </p>
 <p>
-	Every stock mechanism stops at the host boundary.
-	The DDT is per pool.
-	<code>zfs send</code> dropped deduplicated streams in 2.0.
-	dm-vdo has no replication.
-	Reflinks do not survive rsync.
-	A clone on host B shares nothing with host A.
+	Every stock mechanism stops at the host boundary.<br />
+	The DDT is per pool.<br />
+	<code>zfs send</code> dropped deduplicated streams in 2.0.<br />
+	dm-vdo has no replication.<br />
+	Reflinks do not survive rsync.<br />
+	A clone on host B shares nothing with host A.<br />
 	A fleet of N hosts each running dedup stores every shared chunk N times and moves it whole every time a guest moves.
 </p>
 
@@ -70,16 +70,16 @@
 	A chunk named by its hash has the same name on every host, so placement is a function of the name.
 </p>
 <p>
-	Provisioning a guest moves its map, a few MB of offset to hash pairs, and no chunks.
-	Migrating a guest moves the map plus whatever it wrote since the last compaction.
-	A fleet stores each chunk k times, not once per host.
+	Provisioning a guest moves its map, a few MB of offset to hash pairs, and no chunks.<br />
+	Migrating a guest moves the map plus whatever it wrote since the last compaction.<br />
+	A fleet stores each chunk k times, not once per host.<br />
 	A chunk that is hot anywhere is in some host's memory, and <mark>a peer's memory over 100 GbE is closer than local NVMe</mark>: about 20 µs against about 80.
 </p>
 
 <h2>The price</h2>
 <p>
-	The network sits on the read path for cold chunks and nowhere else.
-	Never on the write path, never on FLUSH.
+	The network sits on the read path for cold chunks and nowhere else.<br />
+	Never on the write path, never on FLUSH.<br />
 	Part 3 prices a cold read on TCP and on RDMA, from a peer's RAM and from its NVMe, and shows how much of it prefetch hides.
 </p>
 <p>
@@ -89,24 +89,24 @@
 <h2>Hypotheses</h2>
 <ul class="reqs">
 	<li>
-		<span class="rid">H1</span><strong>One host is a tie.</strong>
-		The daemon stores within 10% of the bytes ZFS fast dedup stores at the same block size, with guest p99 within 20% of a raw file on XFS.
+		<span class="rid">H1</span><strong>One host is a tie.</strong><br />
+		The daemon stores within 10% of the bytes ZFS fast dedup stores at the same block size, with guest p99 within 20% of a raw file on XFS.<br />
 		Index bytes per TB fall in proportion to chunk size.
 	</li>
 	<li>
-		<span class="rid">H2</span><strong>Crossing hosts is where the name pays.</strong>
-		Provisioning and migrating a guest between hosts move the map plus the uncompacted tail, within 10% of that bound.
+		<span class="rid">H2</span><strong>Crossing hosts is where the name pays.</strong><br />
+		Provisioning and migrating a guest between hosts move the map plus the uncompacted tail, within 10% of that bound.<br />
 		With one copy per chunk, two hosts store at most 55% of what two per-host dedup stores hold.
 	</li>
 	<li>
-		<span class="rid">H3</span><strong>The price is a cold read, and a peer's RAM beats local disk.</strong>
-		A chunk served from the owner's memory arrives faster than a local NVMe read on both TCP and RDMA.
-		From the owner's NVMe it costs at most 30% over local on TCP and 15% on RDMA.
+		<span class="rid">H3</span><strong>The price is a cold read, and a peer's RAM beats local disk.</strong><br />
+		A chunk served from the owner's memory arrives faster than a local NVMe read on both TCP and RDMA.<br />
+		From the owner's NVMe it costs at most 30% over local on TCP and 15% on RDMA.<br />
 		With enough reads in flight, remote sequential throughput matches local.
 	</li>
 </ul>
 <p class="note">
-	Thresholds come from the transport literature on page 04 and the census prediction on page 02.
+	Thresholds come from the transport literature on page 04 and the census prediction on page 02.<br />
 	They are frozen at the end of week 2 and do not move.
 </p>
 

@@ -52,7 +52,7 @@
 
 <main>
 	<header class="site">
-		<a class="site-title" href="{base}/">content addressing across hosts</a>
+		<a class="site-title" href="{base}/">local write, global chunks</a>
 		<a
 			class="site-gh"
 			href={repo}

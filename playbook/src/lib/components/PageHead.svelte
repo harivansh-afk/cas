@@ -8,7 +8,7 @@
 </script>
 
 <svelte:head>
-	<title>across hosts · {num} {title}</title>
+	<title>local write, global chunks · {num} {title}</title>
 </svelte:head>
 
 <div class="pagehead">

@@ -5,27 +5,27 @@
 
 <PageHead num="05" />
 <p class="lede">
-	<strong>Fourteen weeks, about 320 hours.</strong>
-	That is 23 a week.
-	The credit says 8.
+	<strong>Fourteen weeks, about 320 hours.</strong><br />
+	That is 23 a week.<br />
+	The credit says 8.<br />
 	The plan is sized to the work, and the cut order says what goes when it slips.
 </p>
 
 <h2>Hardware</h2>
 <p>
-	Two CloudLab c6525-100g nodes (Utah), reserved as a pair.
-	Per node: AMD EPYC 7402P, 24 cores at 2.80 GHz; 128 GB ECC DDR4-3200; two 1.6 TB PCIe 4.0 NVMe SSDs; ConnectX-5 Ex 100 GbE, one port on the experiment network.
-	One NVMe holds the system and results; the other is the device under test.
+	Two CloudLab c6525-100g nodes (Utah), reserved as a pair.<br />
+	Per node: AMD EPYC 7402P, 24 cores at 2.80 GHz; 128 GB ECC DDR4-3200; two 1.6 TB PCIe 4.0 NVMe SSDs; ConnectX-5 Ex 100 GbE, one port on the experiment network.<br />
+	One NVMe holds the system and results; the other is the device under test.<br />
 	The pair is one hop through a single switch.
 </p>
 <p>
-	RoCE between two of these nodes works and has been used in published work on this exact hardware, on a lossy fabric.
-	Self-built kernels are routine there; the Ubuntu 24.04 image ships 6.8, dm-vdo needs 6.9, and OpenZFS 2.3 is a source build, so a kernel and ZFS are built once in week 1 and snapshotted as an image.
+	RoCE between two of these nodes works and has been used in published work on this exact hardware, on a lossy fabric.<br />
+	Self-built kernels are routine there; the Ubuntu 24.04 image ships 6.8, dm-vdo needs 6.9, and OpenZFS 2.3 is a source build, so a kernel and ZFS are built once in week 1 and snapshotted as an image.<br />
 	Reservations expire at 16 hours by default, so every run is scripted to complete inside one.
 </p>
 <p>
-	CloudLab is free for research.
-	A project is opened by a faculty member and reviewed by CloudLab staff; the sponsor opens it before Sep 9.
+	CloudLab is free for research.<br />
+	A project is opened by a faculty member and reviewed by CloudLab staff; the sponsor opens it before Sep 9.<br />
 	Fallback: two OVHcloud Advance-4 2026 servers (EPYC 4585PX, 16 cores, 64 GB DDR5 ECC, 2 × 960 GB NVMe) on a 25 Gbps private link, which loses the RDMA arm and nothing else.
 </p>
 
@@ -59,7 +59,7 @@
 
 <h2>Cut order</h2>
 <p>
-	When the schedule slips, items come off from the top.
+	When the schedule slips, items come off from the top.<br />
 	Never the item at the bottom.
 </p>
 <ol class="steps">
@@ -83,23 +83,23 @@
 
 <h2>Logistics</h2>
 <p>
-	CS 4993, 1 credit.
-	Expectations in writing before Sep 9.
+	CS 4993, 1 credit.<br />
+	Expectations in writing before Sep 9.<br />
 	Thirty minutes of sponsor time every two weeks, with G1 as a scheduled meeting.
 </p>
 
 <h2>Future work</h2>
 <p>
-	<strong>Availability.</strong>
+	<strong>Availability.</strong><br />
 	The mirror arm is the seed of replication before ack; with it and k ≥ 2 on N ≥ 3 the system has a failure model, which needs membership, failure detection, and rebalancing, none of which this study touches.
 </p>
 <p>
-	<strong>Placement.</strong>
+	<strong>Placement.</strong><br />
 	Super-chunk placement for locality, and a cache policy that weighs a chunk's owner distance.
 </p>
 <p>
-	<strong>The same split elsewhere.</strong>
-	Prefix caching in LLM serving (vLLM, SGLang, Mooncake) names cached KV blocks by a hash chain over the whole token history, so two requests share only along a common prefix; that is lineage.
+	<strong>The same split elsewhere.</strong><br />
+	Prefix caching in LLM serving (vLLM, SGLang, Mooncake) names cached KV blocks by a hash chain over the whole token history, so two requests share only along a common prefix; that is lineage.<br />
 	The same document after two different preambles is computed twice; that is the cross-host case here, and nobody has measured its size on a real trace.
 </p>
 

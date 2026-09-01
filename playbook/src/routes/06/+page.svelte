@@ -5,8 +5,8 @@
 
 <PageHead num="06" />
 <p class="lede">
-	Swept on 2026-09-01; sources and what was actually opened are in <code>docs/review/</code>.
-	No prior system is a local-only write log with no network on the write path, a fleet-wide hash-placed chunk store, and remote cold reads under a stock hypervisor.
+	Swept on 2026-09-01; sources and what was actually opened are in <code>docs/review/</code>.<br />
+	No prior system is a local-only write log with no network on the write path, a fleet-wide hash-placed chunk store, and remote cold reads under a stock hypervisor.<br />
 	Three are close enough that a reviewer would write a sentence if they were missing.
 </p>
 
@@ -47,30 +47,30 @@
 	</table>
 </div>
 <p>
-	<mark>Nobody has measured a content-addressed chunk fetched from a peer inside a VM block read path at microsecond scale.</mark>
+	<mark>Nobody has measured a content-addressed chunk fetched from a peer inside a VM block read path at microsecond scale.</mark><br />
 	Every lazy-loading system reports startup seconds, admits a per-read penalty, and hides it with a recorded prefetch profile.
 </p>
 
 <h2>Transport</h2>
 <p>
-	i10 (NSDI '20) and blk-switch (OSDI '21) showed kernel TCP can match RDMA on throughput per core with batching, at a latency cost of 50 to 100 µs at low load.
-	The SPDK 24.05 reports on ConnectX-5 put kernel nvme-rdma at 12.1 µs and kernel nvme-tcp at 21.4 µs for a 4K read against a null device.
-	Homa (ATC '21) and eRPC (NSDI '19) put kernel bypass at 2 to 4 µs and attribute the rest of kernel TCP to wakeups and core selection.
+	i10 (NSDI '20) and blk-switch (OSDI '21) showed kernel TCP can match RDMA on throughput per core with batching, at a latency cost of 50 to 100 µs at low load.<br />
+	The SPDK 24.05 reports on ConnectX-5 put kernel nvme-rdma at 12.1 µs and kernel nvme-tcp at 21.4 µs for a 4K read against a null device.<br />
+	Homa (ATC '21) and eRPC (NSDI '19) put kernel bypass at 2 to 4 µs and attribute the rest of kernel TCP to wakeups and core selection.<br />
 	No storage paper measured a non-spinning userspace daemon over kernel TCP as a remote read target; that row is estimated on page 04 and measured here.
 </p>
 
 <h2>Objections already in print</h2>
 <p>
-	<strong>Dong et al. (FAST '11)</strong> rejected per-chunk hash placement for backup streams on locality grounds and routed 1 MB super-chunks; page 03 answers with a local cache and page 04 measures the cost.
-	<strong>Meyer and Bolosky (FAST '11)</strong> already showed dedup savings grow with the log of the number of machines in one domain, which is the capacity half of H2 stated for desktops.
-	<strong>Jin and Miller (SYSTOR '09)</strong> found fixed blocks match CDC on VM images, which is why part 1 predicts a tie.
+	<strong>Dong et al. (FAST '11)</strong> rejected per-chunk hash placement for backup streams on locality grounds and routed 1 MB super-chunks; page 03 answers with a local cache and page 04 measures the cost.<br />
+	<strong>Meyer and Bolosky (FAST '11)</strong> already showed dedup savings grow with the log of the number of machines in one domain, which is the capacity half of H2 stated for desktops.<br />
+	<strong>Jin and Miller (SYSTOR '09)</strong> found fixed blocks match CDC on VM images, which is why part 1 predicts a tie.<br />
 	<strong>despairlabs (2024)</strong> tells ZFS operators to use clones and block cloning for the copy case and dedup rarely; the study agrees on one host and disagrees across hosts.
 </p>
 
 <h2>What remains</h2>
 <p>
-	Datrium's patent and Nutanix's design are cited by name.
-	Fossil and Venti are cited as the origin of the two-tier shape.
+	Datrium's patent and Nutanix's design are cited by name.<br />
+	Fossil and Venti are cited as the origin of the two-tier shape.<br />
 	The study's claim is the measurement: what a name buys across hosts on commodity hardware under a stock hypervisor, and what the cold read costs, per transport, with the numbers.
 </p>
 

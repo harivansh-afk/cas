@@ -1,4 +1,4 @@
-# Content addressing across hosts
+# Local write, global chunks: content-addressed block storage across hosts for VM fleets
 
 CS 4993, fall 2026. Research spec, v8.
 

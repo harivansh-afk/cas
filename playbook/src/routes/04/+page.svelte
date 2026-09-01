@@ -6,21 +6,21 @@
 
 <PageHead num="04" />
 <p class="lede">
-	<strong>Part 3.</strong>
-	A cold read whose chunk lives on the other host is the only place the network enters guest latency.
+	<strong>Part 3.</strong><br />
+	A cold read whose chunk lives on the other host is the only place the network enters guest latency.<br />
 	This page prices it, and pushes it down.
 </p>
 
 <h2>Where the time goes</h2>
 <p>
-	Every read has about 80 µs of NVMe media time under it.
-	On 100 GbE the transport sits on top: raw RDMA adds 3 to 5 µs, kernel nvme-rdma about 12, kernel nvme-tcp about 21, a userspace daemon over kernel TCP 20 to 30.
+	Every read has about 80 µs of NVMe media time under it.<br />
+	On 100 GbE the transport sits on top: raw RDMA adds 3 to 5 µs, kernel nvme-rdma about 12, kernel nvme-tcp about 21, a userspace daemon over kernel TCP 20 to 30.<br />
 	Those are the SPDK 24.05 and Systor '17 numbers on ConnectX-5; the testbed replaces them.
 </p>
 <p>
-	So RDMA against TCP is a 10 µs question on an 80 µs read.
-	The 4x question is whether the chunk is in the owner's memory or on its disk.
-	<mark>A chunk from a peer's RAM over TCP is faster than a chunk from local NVMe.</mark>
+	So RDMA against TCP is a 10 µs question on an 80 µs read.<br />
+	The 4x question is whether the chunk is in the owner's memory or on its disk.<br />
+	<mark>A chunk from a peer's RAM over TCP is faster than a chunk from local NVMe.</mark><br />
 	With hash placement, a chunk shared across the fleet is hot at exactly one owner, and every host's read of it hits that owner's cache.
 </p>
 
@@ -52,7 +52,7 @@
 
 <h2>Probes</h2>
 <p>
-	The architecture's transport is the daemon over kernel TCP.
+	The architecture's transport is the daemon over kernel TCP.<br />
 	The other rows exist to show what the kernel stack and the userspace hop each cost; nothing depends on them.
 </p>
 <div class="table-scroll">
@@ -71,7 +71,7 @@
 	</table>
 </div>
 <p>
-	The nvmet export is a probe and not the architecture: it exposes the raw store, needs the reader to know offsets, and has no place for authentication.
+	The nvmet export is a probe and not the architecture: it exposes the raw store, needs the reader to know offsets, and has no place for authentication.<br />
 	It is in the table because the difference between it and the daemon over the same TCP is the cost of the userspace hop, with SPDK's 1 µs kernel-versus-userspace target delta as the reference point.
 </p>
 
@@ -86,29 +86,29 @@
 
 <h2>Prefetch</h2>
 <p>
-	The map tells the daemon what comes next.
-	Depth sweep: sequential reads through the map with 1, 2, 4, 8, 16, 32 chunks in flight, at 4K and 64K.
-	The bandwidth-delay point is about 250 KB for the fabric and about 1 MB with media under it, so roughly 20 chunks of 64K or 300 of 4K outstanding should hide the remote entirely.
+	The map tells the daemon what comes next.<br />
+	Depth sweep: sequential reads through the map with 1, 2, 4, 8, 16, 32 chunks in flight, at 4K and 64K.<br />
+	The bandwidth-delay point is about 250 KB for the fabric and about 1 MB with media under it, so roughly 20 chunks of 64K or 300 of 4K outstanding should hide the remote entirely.<br />
 	Success is remote sequential throughput within the error bars of local.
 </p>
 <p>
-	Profile prefetch: record the chunk sequence of one boot, replay it on later boots.
-	Every lazy-loading system that has published numbers does this and reports it removing most of the miss cost; DADI says 95%.
+	Profile prefetch: record the chunk sequence of one boot, replay it on later boots.<br />
+	Every lazy-loading system that has published numbers does this and reports it removing most of the miss cost; DADI says 95%.<br />
 	It is the consensus mitigation and it costs about a day.
 </p>
 
 <h2>Under a guest</h2>
 <p>
-	Partitioned boot storm at N = 16, with and without profile prefetch, against the same storm in replicated mode.
-	Reported: guest p99 and host device reads per guest byte.
+	Partitioned boot storm at N = 16, with and without profile prefetch, against the same storm in replicated mode.<br />
+	Reported: guest p99 and host device reads per guest byte.<br />
 	<mark>The gap between partitioned with prefetch and replicated is the residual price of one copy per chunk.</mark>
 </p>
 
 <h2>RDMA is a probe</h2>
 <p>
-	The CloudLab fabric is lossy; no PFC or ECN is documented on the shared switches, and published work on this node type ran RoCE that way.
-	Adaptive retransmission is enabled on the NIC and the counters above prove the runs were clean.
-	ConnectX-5 cannot do io_uring zero-copy receive, so that lever is out.
+	The CloudLab fabric is lossy; no PFC or ECN is documented on the shared switches, and published work on this node type ran RoCE that way.<br />
+	Adaptive retransmission is enabled on the NIC and the counters above prove the runs were clean.<br />
+	ConnectX-5 cannot do io_uring zero-copy receive, so that lever is out.<br />
 	None of this touches the architecture, which runs on kernel TCP and would run on any Ethernet.
 </p>
 
