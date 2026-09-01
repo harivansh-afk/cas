@@ -9,10 +9,10 @@
 	and the remainder only content addressing can reach, then price capturing that remainder.
 </p>
 <p>
-	That subtraction has never been performed: dedup's value has only ever been reported raw, with
-	no baseline for the sharing a fleet already gets from snapshots, clones, and reflinks.
-	The instrument is a two-tier storage backend; the baseline is stock ZFS; the evidence is a
-	redundancy census over real corpora and a four-rung system comparison.
+	We find no study that performs that subtraction: dedup's value is reported raw, with no
+	baseline for the sharing a fleet already gets from snapshots, clones, and reflinks.
+	The instrument is a two-tier storage backend; the baseline is stock OpenZFS with fast dedup;
+	the evidence is a redundancy census over real corpora and a four-rung system comparison.
 </p>
 
 <h2>The structural gap</h2>
@@ -25,8 +25,19 @@
 	Copy-on-write shares data that was copied.
 	<mark>It cannot share data that became equal.</mark>
 	This study calls the difference <a class="term" href="#term-cross-lineage">cross-lineage redundancy</a>.
-	A content-addressed store captures it because the address is the content; a block-pointer store
-	cannot, regardless of tuning.
+	A content-addressed store captures it because the address is the content.
+	A clone or snapshot cannot, regardless of tuning.
+</p>
+<p>
+	A block-pointer store can reach part of it, but only by adding content identity beside the
+	offset: an inline dedup table (the ZFS DDT, dm-vdo) or a post-process extent-same pass (bees on
+	btrfs, duperemove over XFS reflinks).
+	Both work at fixed, aligned block granularity, so they capture the duplicates that happen to
+	land on the same block boundary and miss the rest.
+	The census therefore splits cross-lineage bytes once more, into the
+	<a class="term" href="#term-block-capturable">block-capturable</a> part an aligned dedup table
+	reaches and the part only content-defined chunking reaches; R1 is the deployed instance of the
+	former.
 </p>
 
 <h2>Prior art</h2>
@@ -35,7 +46,7 @@
 	This study answers a different one: <mark>how much duplicate data requires content addressing
 	to capture</mark>, given that clones and reflinks already capture the history-shaped part for
 	free.
-	The second question is the one that decides deployment, and no study on record asks it.
+	The second question is the one that decides deployment, and we find none that asks it.
 </p>
 
 <div class="table-scroll">
@@ -45,12 +56,17 @@
 		</thead>
 		<tbody>
 			<tr><td class="k"><a href="https://www.usenix.org/legacy/event/fast11/tech/full_papers/Meyer.pdf">Meyer &amp; Bolosky, FAST '11</a></td><td>file- vs block-level dedup ratios on 857 desktops</td><td>no lineage axis; no VM corpora</td></tr>
-			<tr><td class="k"><a href="https://www.ssrc.ucsc.edu/papers/jin-systor09.pdf">Jin &amp; Miller, SYSTOR '09</a></td><td>dedup ratios across VM disk images</td><td>ratios only; no COW baseline; 2009 corpora</td></tr>
+			<tr><td class="k"><a href="https://www.ssrc.ucsc.edu/papers/jin-systor09.pdf">Jin &amp; Miller, SYSTOR '09</a></td><td>dedup ratios across VM disk images; fixed blocks ≈ CDC</td><td>ratios only; no COW baseline; 2009 corpora</td></tr>
+			<tr><td class="k"><a href="https://www.usenix.org/conference/usenix-09/decentralized-deduplication-san-cluster-file-systems">DeDe, ATC '09</a></td><td>out-of-band fixed-4K dedup of VM disks on VMFS; 80% of a real VDI footprint duplicate</td><td>no lineage axis; no CDC; no clone baseline</td></tr>
+			<tr><td class="k"><a href="https://dl.acm.org/doi/10.1145/2090181.2090187">Jayaram et al., Middleware '11</a></td><td>intra- and inter-image similarity across 525 production cloud VM images</td><td>no COW baseline; no cost side</td></tr>
+			<tr><td class="k"><a href="https://www.usenix.org/conference/atc12/technical-sessions/presentation/el-shimi">El-Shimi et al., ATC '12</a></td><td>post-process CDC dedup for Windows Server, with a 15-server corpus study</td><td>file servers, not VM block devices; no lineage axis</td></tr>
 			<tr><td class="k"><a href="https://www.usenix.org/conference/atc20/presentation/zhao">DupHunter, ATC '20</a></td><td>file-level redundancy across Docker Hub</td><td>no block granularity; no lineage axis</td></tr>
-			<tr><td class="k">iDedup FAST '12 · Dmdedup · VDO</td><td>cost of inline block dedup on primary storage</td><td>never compared against what COW capture gets free</td></tr>
-			<tr><td class="k"><a href="https://github.com/openzfs/zfs">OpenZFS</a></td><td>ships clones and dedup side by side since 2009</td><td>no published split of their respective capture</td></tr>
+			<tr><td class="k">iDedup FAST '12 · Dmdedup · dm-vdo (mainline since 6.9)</td><td>cost of inline fixed-block dedup on primary storage</td><td>never compared against what COW capture gets free</td></tr>
+			<tr><td class="k"><a href="https://github.com/openzfs/zfs">OpenZFS</a></td><td>clones since 2005, dedup since 2009, block cloning (BRT) since 2.2, <a href="https://github.com/openzfs/zfs/discussions/15896">fast dedup</a> since 2.3</td><td>no published split of what clones and the DDT each capture</td></tr>
+			<tr><td class="k"><a href="https://www.usenix.org/conference/atc23/presentation/oh">TiDedup, ATC '23</a></td><td>post-process CDC dedup into a Ceph chunk pool; 34% reduction on real workloads</td><td>distributed object store, not a guest block path; no lineage axis</td></tr>
+			<tr><td class="k"><a href="https://www.usenix.org/conference/fast09/technical-sessions/presentation/dubnicki">HYDRAstor, FAST '09</a></td><td>content-addressed blocks placed by DHT across a grid; global dedup</td><td>secondary storage; establishes H3's placement property, does not price it on a guest path</td></tr>
 			<tr><td class="k"><a href="https://dl.acm.org/doi/abs/10.1145/3140607.3050762">CLB, VEE '17</a></td><td>content addressing as a VM read-cache optimization</td><td>uses content addressing; never prices it</td></tr>
-			<tr><td class="k">casync · restic · borg</td><td>chunk-level CAS deployed at scale, for backup</td><td>no latency contract; no peer-reviewed measurement</td></tr>
+			<tr><td class="k">casync · restic · borg · <a href="https://huggingface.co/docs/hub/xet/deduplication">Xet</a> · <a href="https://tvl.fyi/blog/tvix-update-february-24">tvix-castore</a></td><td>chunk-level CAS deployed at scale: backup, model repositories, the Nix store</td><td>no latency contract; production ratios without a COW baseline</td></tr>
 			<tr><td class="k">VAST · Pure</td><td>commercial data-reduction ratios</td><td>proprietary, undecomposed, unreproducible</td></tr>
 		</tbody>
 	</table>
@@ -60,9 +76,11 @@
 	The gap exists because the two mechanisms belong to different communities.
 	Filesystem developers ship clones and stopped there; backup tools ship chunking and never had a
 	COW baseline to subtract.
-	<mark>The split between what history can share and what only content can share has never been
-	measured</mark>, on any corpus, by anyone.
+	<mark>We find no measurement of the split between what history can share and what only content
+	can share</mark>, on any corpus.
 	The census produces that split; the rungs price capturing it.
+	The sweep behind this table is dated on page 03; OpenZFS development talks and lists are still
+	to be checked.
 </p>
 
 <h2>Hypotheses</h2>
@@ -84,15 +102,17 @@
 		<span class="rid">H3</span>Chunk pointers distribute where block pointers do not:
 		<mark>a chunk's placement is a function of its name</mark>, so the capacity tier spreads
 		across hosts without shared allocation state.
+		The property is established (HYDRAstor; Ceph's chunk pool); what this study adds is that
+		it survives the compactor's output from a guest block path.
 		Argued from the design; demonstrated on two nodes; not benchmarked further.
 	</li>
 </ul>
 
 <figure>
 	<svg
-		viewBox="0 0 960 292"
+		viewBox="0 0 960 314"
 		role="img"
-		aria-label="The three hypotheses on one picture. A bar of duplicate bytes splits into a history-shaped segment and a cross-lineage segment. Clones and reflinks reach only the first; content addressing reaches both. H1 measures the size of the cross-lineage segment, H2 the cost of capturing it, H3 whether placement follows from the chunk name."
+		aria-label="The three hypotheses on one picture. A bar of duplicate bytes splits into a history-shaped segment and a cross-lineage segment. Clones and reflinks reach only the first; an aligned dedup table reaches part of the second; chunk-level content addressing reaches both. H1 measures the size of the cross-lineage segment, H2 the cost of capturing it, H3 whether placement follows from the chunk name."
 		style="max-width: 100%; height: auto;"
 	>
 		<text x="40" y="20" font-size="10.5" fill="currentColor" opacity="0.6">duplicate bytes across a fleet · zeros excluded · widths illustrative</text>
@@ -107,27 +127,31 @@
 		<text x="745" y="67" text-anchor="middle" font-size="10" fill="currentColor" opacity="0.6">same packages, twice; same weights, twice</text>
 
 		<!-- capture reach -->
-		<line x1="40" y1="102" x2="570" y2="102" stroke="currentColor" stroke-width="1.25" />
-		<line x1="570" y1="96" x2="570" y2="108" stroke="currentColor" stroke-width="1.25" />
-		<text x="40" y="124" font-size="10.5" fill="currentColor">clones and reflinks stop here — the COW ceiling (R1's world)</text>
+		<line x1="40" y1="96" x2="570" y2="96" stroke="currentColor" stroke-width="1.25" />
+		<line x1="570" y1="90" x2="570" y2="102" stroke="currentColor" stroke-width="1.25" />
+		<text x="40" y="116" font-size="10.5" fill="currentColor">clones and reflinks stop here — the COW ceiling</text>
 
-		<line x1="40" y1="146" x2="920" y2="146" stroke="#d97706" stroke-width="1.5" />
-		<line x1="920" y1="140" x2="920" y2="152" stroke="#d97706" stroke-width="1.5" />
-		<text x="40" y="168" font-size="10.5" fill="#d97706">content addressing reaches all of it (R2, R3)</text>
+		<line x1="40" y1="134" x2="790" y2="134" stroke="currentColor" stroke-width="1.25" stroke-dasharray="4 3" />
+		<line x1="790" y1="128" x2="790" y2="140" stroke="currentColor" stroke-width="1.25" />
+		<text x="40" y="154" font-size="10.5" fill="currentColor">an aligned dedup table reaches the block-capturable part (R1; width unmeasured)</text>
+
+		<line x1="40" y1="172" x2="920" y2="172" stroke="#d97706" stroke-width="1.5" />
+		<line x1="920" y1="166" x2="920" y2="178" stroke="#d97706" stroke-width="1.5" />
+		<text x="40" y="192" font-size="10.5" fill="#d97706">chunk-level content addressing reaches all of it (R2, R3)</text>
 
 		<!-- H annotations -->
 		<g font-size="10.5">
-			<rect x="40" y="192" width="28" height="17" rx="3" fill="none" stroke="#d97706" stroke-width="1" />
-			<text x="54" y="204" text-anchor="middle" fill="#d97706" font-weight="600">H1</text>
-			<text x="80" y="204" fill="currentColor">the size of the amber segment, per workload class — the census, S1</text>
+			<rect x="40" y="214" width="28" height="17" rx="3" fill="none" stroke="#d97706" stroke-width="1" />
+			<text x="54" y="226" text-anchor="middle" fill="#d97706" font-weight="600">H1</text>
+			<text x="80" y="226" fill="currentColor">the size of the amber segment and its aligned share, per workload class — the census, S1</text>
 
-			<rect x="40" y="224" width="28" height="17" rx="3" fill="none" stroke="currentColor" stroke-width="1" />
-			<text x="54" y="236" text-anchor="middle" fill="currentColor" font-weight="600">H2</text>
-			<text x="80" y="236" fill="currentColor">the cost of reaching it: write amplification · index RAM · guest p99 — the rungs, S2</text>
+			<rect x="40" y="246" width="28" height="17" rx="3" fill="none" stroke="currentColor" stroke-width="1" />
+			<text x="54" y="258" text-anchor="middle" fill="currentColor" font-weight="600">H2</text>
+			<text x="80" y="258" fill="currentColor">the cost of reaching it: write amplification · index RAM · guest p99 — the rungs, S2</text>
 
-			<rect x="40" y="256" width="28" height="17" rx="3" fill="none" stroke="currentColor" stroke-width="1" />
-			<text x="54" y="268" text-anchor="middle" fill="currentColor" font-weight="600">H3</text>
-			<text x="80" y="268" fill="currentColor">placement from the name alone: hash 0x00–7f → host A · 0x80–ff → host B — two nodes, S3</text>
+			<rect x="40" y="278" width="28" height="17" rx="3" fill="none" stroke="currentColor" stroke-width="1" />
+			<text x="54" y="290" text-anchor="middle" fill="currentColor" font-weight="600">H3</text>
+			<text x="80" y="290" fill="currentColor">placement from the name alone: hash 0x00–7f → host A · 0x80–ff → host B — two nodes, S3</text>
 		</g>
 	</svg>
 	<figcaption>
@@ -139,9 +163,12 @@
 
 <h2>The objection this study must survive</h2>
 <p>
-	Raw capacity is cheap.
-	NVMe retails on the order of $50–100 per TB, so halving a small fleet's bytes saves little
-	money at rest.
+	Raw capacity is cheap, most years.
+	Retail NVMe bottomed near $50 per TB in 2023; the 2025–26 NAND shortage has pushed the cheapest
+	drives past <a href="https://cheapestssd.com/">$100 per TB</a> (August 2026) and analysts do not
+	expect relief before 2027.
+	Even at the high price, halving a small fleet's bytes saves little money at rest, and the study
+	does not lean on the price cycle in either direction.
 </p>
 <p>
 	The claim is therefore not that disks get smaller.
@@ -170,9 +197,11 @@
 <p>
 	Three artifacts outlive the verdict.
 	The census pipeline and corpus scripts let anyone rerun the measurement on their own fleet.
-	The VM redundancy numbers are the first since 2009.
+	The VM redundancy numbers are the first since the 2009–2011 VMware and IBM studies (DeDe;
+	Jayaram et al.), and the first at CDC granularity with a clone baseline.
 	The compactor constants — sustained-ingest ceiling, write amplification, interference — are the
-	first published for a content-addressing compactor.
+	first we know of for a post-process compactor behind a virtio-blk device; El-Shimi et al. and
+	TiDedup report throughput for file-server and object-store compactors, not these constants.
 </p>
 
 <h2>Hardware</h2>
@@ -197,8 +226,9 @@
 	ECC, 2 × 960 GB NVMe, 25 Gbps private bandwidth.
 </p>
 <p>
-	Neither testbed has RDMA NICs, persistent memory, or accelerators; the commodity restriction is
-	part of the claim.
+	The CloudLab NICs are ConnectX-5 and therefore RoCE-capable; RDMA is not used.
+	Neither testbed has persistent memory or accelerators; the commodity restriction is part of the
+	claim.
 	Every figure in the paper is measured on the testbed rather than quoted.
 </p>
 
@@ -244,7 +274,14 @@
 	<dt id="term-cross-lineage">cross-lineage redundancy</dt>
 	<dd>
 		Duplicate bytes whose copies share no ancestor, so no snapshot, clone, or reflink can ever
-		share them. Reachable by content addressing only. The census's headline number.
+		share them. Reachable by content identity only. The census's headline number; split further
+		into block-capturable and CDC-only.
+	</dd>
+	<dt id="term-block-capturable">block-capturable</dt>
+	<dd>
+		Cross-lineage bytes whose copies coincide at a fixed, aligned block boundary (4K, or the
+		zvol's volblocksize), so an inline dedup table finds them without content-defined chunking.
+		The ceiling of R1 and of dm-vdo. The census reports it at 4K and 16K.
 	</dd>
 	<dt id="term-lineage-capturable">lineage-capturable</dt>
 	<dd>

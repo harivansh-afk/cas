@@ -11,7 +11,9 @@
 	D -- no --> U[unique]
 	D -- yes --> L{identical and in-place vs a declared ancestor?}
 	L -- yes --> LC[lineage-capturable · COW shares it free]
-	L -- no --> XL[cross-lineage · only content addressing finds it]`;
+	L -- no --> A{coincides at an aligned fixed block?}
+	A -- yes --> BC[block-capturable · an aligned dedup table finds it]
+	A -- no --> XC[CDC-only · content-defined chunking finds it]`;
 </script>
 
 <PageHead num="03" />
@@ -31,7 +33,8 @@
 	best case). Convergent installs (N independent installs updated to the same package set;
 	lineage's structural blind spot). Container layer stacks (cross-checks DupHunter at chunk
 	granularity). Model family on the testbed (base, fine-tunes, quantizations; where whole-file
-	dedup collapses). Nix store generations (successive closures of one flake; no published study).
+	dedup collapses). Nix store generations (successive closures of one flake; tvix-castore deploys
+	FastCDC and BLAKE3 over the store, so the class has a shipped system and no published numbers).
 </p>
 <p>
 	Method.
@@ -42,13 +45,20 @@
 	Lineage-capturable means identical and in-place relative to an ancestor, the ceiling for any
 	COW system; a simulated COW at realistic record sizes and a declared snapshot cadence gives the
 	practical figure, since sibling sharing depends on when snapshots were taken.
-	The remainder is cross-lineage, reachable only by content.
+	The remainder is cross-lineage, reachable only by content, and is split once more into
+	<a class="term" href="{base}/00#term-block-capturable">block-capturable</a> (coincident at 4K
+	and at 16K alignment, reported at both) and CDC-only; the first is R1's ceiling, the sum is
+	R2's.
+	Duplicates within a single image are counted in these leaves and also reported as their own
+	column, as Meyer and Bolosky and Jayaram et al. did, since a fleet study that hides them
+	overstates cross-image sharing.
+	CDC is computed whole-image and extent-wise, the second as the compactor will see it (page 01).
 	Compression in both orders and zeros excluded, per A7.
 </p>
 
 <Mermaid
 	code={censusFlow}
-	caption="The census, per byte range. Gate G1 requires the leaves to sum to 100% of non-zero bytes. The cross-lineage leaf is the study's headline number."
+	caption="The census, per byte range. Gate G1 requires the leaves to sum to 100% of non-zero bytes. The two cross-lineage leaves together are the study's headline number; their ratio is what R1 can reach of it."
 />
 <p>
 	The census settles standing claims as a side effect: whether compression captures most of
@@ -68,7 +78,8 @@
 	Measured per rung: guest p50/p99 write and read latency, compactor active and idle; write
 	amplification (device bytes written per guest byte, from NVMe counters); storage consumed after
 	ingest and after compaction settles; sustainable ingest ceiling and the back-pressure point;
-	compaction bandwidth; index bytes per stored TB; recovery, <code>kill -9</code> then replay then
+	compaction bandwidth; index bytes per stored TB; host device reads per guest byte read during
+	the boot storm (the cache term); recovery, <code>kill -9</code> then replay then
 	<code>fio --verify</code>.
 </p>
 <p>
@@ -137,8 +148,11 @@
 	are published so the classes themselves can be criticized. Daemon overrun is the principal
 	threat to H2; the cut order is fixed in advance: R3 first, then the aging protocol, never the
 	R0/R2 comparison or the census. The lineage-vs-content novelty claim was checked against the
-	open web (2026-09-01) but not against OpenZFS development talks and mailing lists; those are
-	swept before related work is final.
+	open web (2026-09-01); that sweep added DeDe, Jayaram et al., El-Shimi et al., TiDedup, and
+	HYDRAstor to related work and found no split measurement. OpenZFS development talks and mailing
+	lists are not yet swept; they are, before related work is final.
+	The fixed-versus-CDC decision on page 01 is the one place the census changes the build, and it
+	is settled by week 4, before the compactor exists.
 </p>
 
 <PageNav num="03" />

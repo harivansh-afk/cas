@@ -16,6 +16,8 @@
 	Chunks are immutable and named by content, so placement is a function of the name: rendezvous
 	or CRUSH-style hashing from chunk hash to k owner nodes.
 	The data path carries no allocation tables, rebalancing metadata, or coordinator.
+	This is HYDRAstor's DHT of content-addressed blocks (FAST '09) and Ceph's chunk pool
+	(TiDedup, ATC '23); the property is borrowed, not claimed.
 </p>
 <p>
 	The index partitions by the same function, so the shard owning a chunk owns its index entry;
@@ -136,9 +138,12 @@
 	Three candidates, each representing a distinct tradeoff.
 	Kernel TCP with per-core connections and batched submissions is the i10 design (NSDI '20),
 	which reached RDMA-class CPU efficiency without kernel bypass.
-	nvme-tcp is its standardized kernel descendant and presents remote chunks as block namespaces.
+	nvme-tcp is the standardized in-kernel NVMe-over-fabrics transport (Linux 5.0, before i10) and
+	presents remote chunks as block namespaces.
 	QUIC with one stream per in-flight chunk removes head-of-line blocking across concurrent
 	fetches, at a userspace per-byte CPU cost.
+	io_uring zero-copy receive (Linux 6.15) changes the per-byte cost of the first and third and
+	is measured with them rather than listed as a fourth.
 </p>
 <p>
 	Choosing among them requires the per-stage measurement methodology this study builds, applied

@@ -1,5 +1,7 @@
 # Chunk pointers, not block pointers — research spec v4
 
+v4.2 (2026-09-01, literature sweep): the "block-pointer stores cannot capture cross-lineage" claim was wrong for ZFS dedup, dm-vdo, bees, and duperemove, which all add content identity beside the offset at aligned granularity; the census now splits cross-lineage into block-capturable and CDC-only, and R1 is read as the deployed instance of the former. R1 requires OpenZFS ≥ 2.3 fast dedup with 4K and 16K volblocksize arms. R0 is the daemon in passthrough, with the vhost-user hop bounded once against stock QEMU and qemu-storage-daemon. Prior art gained DeDe (ATC '09), Jayaram et al. (Middleware '11), El-Shimi et al. (ATC '12), TiDedup (ATC '23), HYDRAstor (FAST '09), Xet, tvix-castore; "first since 2009" and "never measured by anyone" softened to what the sweep supports. H3 is stated as a borrowed property. Added: compactor boundary resynchronization, the pre-registered fixed-4K-vs-CDC decision at week 4, the cache-term metric, the nvme-tcp lineage fix, the RoCE-capable NIC correction, and the 2026 NVMe price with a source.
+
 NOTE: as of v4.1 the app pages (`src/routes/00–04`) are the authoritative text; this file is design history and no longer tracks wording changes.
 
 Source of truth for the playbook app. Five pages: thesis, model, distribution, measurement, implementation. Typeset verbatim. Labels: hypotheses (H), assumptions (A), rungs (R), stages (S), gates (G).

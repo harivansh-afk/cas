@@ -119,9 +119,11 @@
 <h2>A conventional design, on purpose</h2>
 <p>
 	Nothing in this architecture is new, and the paper says so.
-	Post-process dedup ships in Windows Server; a durable write buffer ahead of a reduction
-	pipeline is how VAST is built; the append-only store with a rebuildable index is Venti; the
-	compaction pattern is the LSM tree's.
+	Post-process dedup ships in Windows Server (El-Shimi et al., ATC '12) and in Ceph's chunk pool
+	(TiDedup, ATC '23); OpenZFS 2.3's fast dedup already puts a log ahead of its dedup table and
+	flushes it sorted, which is this design's staging step applied to metadata alone; a durable
+	write buffer ahead of a reduction pipeline is how VAST is built; the append-only store with a
+	rebuildable index is Venti; the compaction pattern is the LSM tree's.
 </p>
 <p>
 	The assembly is deliberate.
@@ -162,6 +164,28 @@
 	slow.
 </p>
 <p>
+	The same boundary problem returns in compaction, weaker.
+	A settled extent is a window into the image, and a chunker started at its edge cuts chunks that
+	depend on where the window fell, not only on content.
+	The compactor therefore re-chunks from the last settled chunk boundary before the dirty extent
+	to the first boundary after it that agrees with the existing cut, the standard resynchronization
+	rule; chunks in between are replaced, the rest are untouched.
+	The census computes CDC both whole-image and extent-wise as the compactor will see it, and the
+	gap between the two is the price of this rule.
+</p>
+<p>
+	One decision is fixed before the census runs.
+	Jin and Miller (2009) found that fixed 4K blocks capture nearly what CDC does on VM images,
+	because guest filesystems align file data to blocks; if the census confirms this within five
+	percentage points on the VM corpora, the compactor's headline arm becomes fixed 4K aligned
+	blocks and CDC is reported as a second arm.
+	Fixed blocks remove the resynchronization rule, make the chunker trivial, and make the R1
+	comparison one of mechanism (post-process, refcount-free, rebuildable index) rather than of
+	granularity.
+	The daemon keeps CDC in either case for the model and Nix corpora, where alignment does not
+	hold.
+</p>
+<p>
 	The design buys its write path with two known costs.
 	Write amplification: <mark>every surviving byte is written at least twice</mark>, staging then
 	chunk store, plus map-journal traffic; the WA factor is reported as a headline result.
@@ -200,6 +224,15 @@
 	amplification. This is the workload the design is worst at: a read-heavy process over settled
 	data pays the indirection on every access. S2 includes that workload deliberately, young and
 	aged.
+</p>
+<p>
+	The cache term on page 00 depends on who holds the cache.
+	With the page cache, N guests reading a shared chunk occupy one entry because the chunk is one
+	file range.
+	In the O_DIRECT arms there is no page cache, so the daemon keeps its own chunk cache keyed by
+	hash, and the sharing claim is the same claim about that cache.
+	Either way it is measured, not asserted: host device reads per guest byte read during the
+	N-clone boot storm, per rung.
 </p>
 
 <h2>Crash consistency</h2>
@@ -247,20 +280,33 @@
 </p>
 <ul class="reqs">
 	<li>
-		<span class="rid">R0</span><strong>Raw file on XFS.</strong> The control: passthrough only,
-		with dedup nowhere in the path.
+		<span class="rid">R0</span><strong>Raw file on XFS, through the daemon in passthrough.</strong>
+		The control: the same daemon binary with staging and compaction disabled, writing through to a
+		raw file, so R0 versus R2 differs only in content addressing and not in the vhost-user hop.
+		The vhost-user hop itself is bounded once, by running the same workloads against stock QEMU's
+		built-in raw driver and against <code>qemu-storage-daemon</code>'s vhost-user-blk export of
+		the same file; both numbers are reported beside R0 and neither is a rung.
 	</li>
 	<li>
-		<span class="rid">R1</span><strong>Raw file on a ZFS zvol, stock OpenZFS, its own pool on the
-		same NVMe device.</strong> The incumbent block-pointer design with content-hash identity.
-		Configuration: <code>checksum=blake3, dedup=on</code>; <code>volblocksize</code> matched to
-		the daemon's chunk-size arm, since zvol dedup granularity is the volblocksize; compression
-		off outside the labeled compression arm; DDT memory read from <code>zpool status -D</code>
-		and reported in the same index-cost column as the daemon's.
+		<span class="rid">R1</span><strong>Raw file on a ZFS zvol, stock OpenZFS ≥ 2.3 with fast
+		dedup, its own pool on the same NVMe device.</strong> The incumbent block-pointer design with
+		content-hash identity.
+		Fast dedup is required, not optional: it replaces the legacy DDT's random writes with a
+		sorted log flush and adds a quota and pruning, and a comparison against the pre-2.3 DDT would
+		be against a design its own maintainers call obsolete.
+		Configuration: <code>feature@fast_dedup</code> enabled; <code>checksum=blake3, dedup=on</code>;
+		<code>volblocksize</code> arms at 4K and 16K, since zvol dedup granularity is the volblocksize
+		and the census's fixed-block result decides which is headline; <code>dedup_table_quota</code>
+		unset and <code>zpool ddtprune</code> never run during a measurement, both recorded;
+		compression off outside the labeled compression arm; DDT memory read from
+		<code>zpool status -D</code> and reported in the same index-cost column as the daemon's.
 		R1 is a case study rather than a controlled comparison: it differs from the daemon in kernel
 		boundary, caching, and allocation, and the paper attributes cross-rung deltas accordingly.
 		Patching ZFS is out of scope; a fork would consume the schedule and demonstrate nothing
 		stock ZFS does not.
+		If time allows, a zero-code variant runs beside it: <code>duperemove</code> over the R0 file
+		on the same XFS, which is post-process fixed-block dedup by <code>FIDEDUPERANGE</code> on the
+		control filesystem and bounds block-capturable capture with no kernel boundary change.
 	</li>
 	<li>
 		<span class="rid">R2</span><strong>The daemon, offset-tree map.</strong> Chunk-level content
@@ -273,15 +319,16 @@
 </ul>
 <p>
 	R0 versus R2 prices content addressing. R2 versus R3 prices the metadata structure. R1 anchors
-	both against the deployed state of the art. Controlled claims are made only within the daemon
-	rungs.
+	both against the deployed state of the art and, read against the census, shows how much of the
+	cross-lineage segment an aligned dedup table reaches. Controlled claims are made only within
+	the daemon rungs.
 </p>
 
 <figure>
 	<svg
 		viewBox="0 0 1000 380"
 		role="img"
-		aria-label="Block pointers versus chunk pointers. Left: two images share records only along a clone relationship, and independently written identical bytes are stored twice, with a refcounted dedup table bolted on. Right: two maps point at chunks by hash, so identical bytes are stored once wherever they came from."
+		aria-label="Block pointers versus chunk pointers. Left: two images share records only along a clone relationship; independently written identical bytes are stored twice unless a refcounted dedup table, bolted on beside the tree, catches them at an aligned record boundary. Right: two maps point at chunks by hash, so identical bytes are stored once wherever they came from."
 		style="max-width: 100%; height: auto;"
 	>
 		<defs>
@@ -328,12 +375,12 @@
 
 		<!-- duplicate callout -->
 		<path d="M 240 296 L 240 318 L 400 318 L 400 296" fill="none" stroke="#d97706" stroke-width="1" />
-		<text x="320" y="338" text-anchor="middle" font-size="10.5" fill="#d97706">identical bytes · stored twice</text>
+		<text x="320" y="338" text-anchor="middle" font-size="10.5" fill="#d97706">identical bytes · stored twice, unless aligned and the DDT is on</text>
 
 		<!-- DDT bolt-on -->
 		<rect x="45" y="150" width="120" height="44" rx="4" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="4 4" />
 		<text x="105" y="169" text-anchor="middle" font-size="10.5" fill="currentColor" opacity="0.8">dedup table</text>
-		<text x="105" y="185" text-anchor="middle" font-size="10" fill="currentColor" opacity="0.6">refcounts · bolted on</text>
+		<text x="105" y="185" text-anchor="middle" font-size="10" fill="currentColor" opacity="0.6">refcounts · aligned records only</text>
 
 		<!-- divider -->
 		<line x1="500" y1="30" x2="500" y2="350" stroke="currentColor" stroke-width="1" opacity="0.25" />
@@ -377,8 +424,8 @@
 		<text x="760" y="180" text-anchor="middle" font-size="10" fill="currentColor" opacity="0.6">pointers by hash · no refcounts · liveness by map scan</text>
 	</svg>
 	<figcaption>
-		Block pointers versus chunk pointers. The left structure shares what was copied; the right
-		shares what is equal.
+		Block pointers versus chunk pointers. The left structure shares what was copied, plus what
+		its dedup table finds at aligned record boundaries; the right shares what is equal.
 	</figcaption>
 </figure>
 
