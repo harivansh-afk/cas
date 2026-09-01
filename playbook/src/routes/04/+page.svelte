@@ -20,24 +20,24 @@
 <p>
 	RDMA against TCP is therefore a 10 µs difference on an 80 µs read.<br />
 	The larger factor, about 4x, is whether the chunk is in the owner's memory or on its disk.<br />
-	<mark>A chunk from a peer's RAM over TCP is faster than a chunk from local NVMe.</mark><br />
+	<mark>A chunk from a peer's memory over TCP is faster than a chunk from local NVMe.</mark><br />
 	With hash placement, a chunk shared across the fleet is hot at exactly one owner, and every host's read of it hits that owner's cache.
 </p>
 
 <Diagram
 	w={960}
 	h={260}
-	label="Horizontal bars, one per case, length proportional to latency from the literature. Local NVMe about 80 microseconds. Peer RAM over RDMA about 12, over TCP about 21, over the daemon on TCP 20 to 30. Peer NVMe over RDMA about 92, over TCP about 101, over the daemon about 110. The peer RAM bars are all shorter than the local NVMe bar."
+	label="Horizontal bars, one per case, length proportional to latency from the literature. Local NVMe about 80 microseconds. Peer RAM over RDMA about 12, over TCP about 21, over the daemon on TCP 20 to 30. Peer NVMe over RDMA about 92, over TCP about 101, over the daemon about 110. The peer memory bars are all shorter than the local NVMe bar."
 	caption="Latency stack for one 4K read, literature values in microseconds, before the testbed measures them. A peer's memory is closer than the local disk on every transport; the transport tier moves the bar by 10 to 30%."
 >
 	<Note x={20} y={36} tone="muted" size={10} text="local NVMe" />
 	<Node x={170} y={22} w={320} h={20} title="≈ 80" tone="muted" />
 
-	<Note x={20} y={80} tone="accent" size={10} text="peer RAM · RDMA" />
+	<Note x={20} y={80} tone="accent" size={10} text="peer memory · RDMA" />
 	<Node x={170} y={66} w={48} h={20} title="≈ 12" tone="accent" />
-	<Note x={20} y={110} tone="accent" size={10} text="peer RAM · nvme-tcp" />
+	<Note x={20} y={110} tone="accent" size={10} text="peer memory · nvme-tcp" />
 	<Node x={170} y={96} w={84} h={20} title="≈ 21" tone="accent" />
-	<Note x={20} y={140} tone="accent" size={10} text="peer RAM · daemon TCP" />
+	<Note x={20} y={140} tone="accent" size={10} text="peer memory · daemon TCP" />
 	<Node x={170} y={126} w={100} h={20} title="20–30" tone="accent" />
 	<Bracket x={290} y1={66} y2={146} label={['faster than local disk', 'the case hash placement makes common']} tone="accent" />
 
@@ -62,10 +62,10 @@
 		</thead>
 		<tbody>
 			<tr><td class="k"><code>ib_read_lat -s 4096</code></td><td>the hardware floor</td><td>none</td></tr>
-			<tr><td class="k">nvme-rdma export</td><td>kernel block path over RDMA; owner's store exported by <code>nvmet</code> as a file-backed namespace, <code>buffered_io</code> on for RAM, off for media</td><td>configuration</td></tr>
+			<tr><td class="k">nvme-rdma export</td><td>kernel block path over RDMA; owner's store exported by <code>nvmet</code> as a file-backed namespace, <code>buffered_io</code> on for memory, off for media</td><td>configuration</td></tr>
 			<tr><td class="k">nvme-tcp export</td><td>same over kernel TCP</td><td>configuration</td></tr>
-			<tr><td class="k">daemon, TCP, spinning</td><td>the architecture, without the wakeup</td><td>the daemon</td></tr>
-			<tr><td class="k">daemon, TCP, sleeping</td><td>the architecture as deployed; the wakeup is the cost</td><td>the daemon</td></tr>
+			<tr><td class="k">daemon, TCP, busy-polling</td><td>the architecture, without the wakeup</td><td>the daemon</td></tr>
+			<tr><td class="k">daemon, TCP, blocking</td><td>the architecture as deployed; the scheduler wakeup is the cost</td><td>the daemon</td></tr>
 			<tr><td class="k">daemon, ibverbs two-sided<span class="tag-stretch">stretch</span></td><td>the userspace hop without the kernel stack</td><td>~40 h</td></tr>
 		</tbody>
 	</table>
@@ -78,7 +78,7 @@
 <h2>Method</h2>
 <ul class="plain">
 	<li>Same two hosts, NIC, drive, and kernel for every row. Kernel, firmware, MTU, IRQ affinity, interrupt moderation, C-states, busy-poll, and PFC state recorded.</li>
-	<li>Two far ends per row: a null device for fabric plus stack alone, and the real file for end to end. Each from the owner's RAM and from its NVMe.</li>
+	<li>Two targets per row: a null device for fabric plus stack alone, and the real file for end to end. Each from the owner's memory and from its NVMe.</li>
 	<li>4K, 16K, 64K. p50, p99, p99.9. Five runs of 30 s, caches dropped between, medians with spread.</li>
 	<li>QD sweep 1, 4, 16, 64 for throughput and CPU per IOPS on both ends; TCP costs about 2.5x the CPU of RDMA at equal IOPS and the paper shows the ratio it measures.</li>
 	<li>RoCE hardware counters (<code>out_of_sequence</code>, <code>packet_seq_err</code>, <code>local_ack_timeout_err</code>) printed beside every RDMA number, proving zero retransmits on a fabric with no PFC.</li>
@@ -114,7 +114,7 @@
 
 <h2>H3, restated</h2>
 <ul class="reqs">
-	<li>A chunk from the owner's RAM arrives faster than a local NVMe read, on TCP and on RDMA.</li>
+	<li>A chunk from the owner's memory arrives faster than a local NVMe read, on TCP and on RDMA.</li>
 	<li>From the owner's NVMe it costs at most 30% over local on TCP and 15% on RDMA, at QD1, 4K.</li>
 	<li>At depth at or above the bandwidth-delay point, remote sequential throughput is within 10% of local.</li>
 	<li>Partitioned boot storm p99 with profile prefetch is within 25% of replicated.</li>

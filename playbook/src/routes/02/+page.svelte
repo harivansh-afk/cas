@@ -11,22 +11,22 @@
 	It is measured anyway, because the chunk-size curve under it is the single-host design result, and because the comparison against ZFS is the first objection a reviewer will raise.
 </p>
 
-<h2>Rungs</h2>
+<h2>Configurations</h2>
 <ul class="reqs">
 	<li>
 		<span class="rid">R0</span><strong>Raw file on XFS.</strong><br />
 		QEMU's raw driver on the dedicated NVMe.<br />
-		The control; no dedup anywhere in the path.
+		The control; no deduplication anywhere in the path.
 	</li>
 	<li>
 		<span class="rid">R1</span><strong>Zvol on ZFS 2.3 fast dedup.</strong><br />
 		Own pool on the same device, created and destroyed per run, opened by QEMU as a block device.<br />
 		<code>feature@fast_dedup</code>; <code>dedup=blake3</code>, since <code>dedup=on</code> silently uses SHA-256 regardless of the checksum property; <code>volblocksize=16K</code> primary and <code>4K</code> second arm; <code>compression=zle</code> outside the compression arm so zero blocks do not collapse onto one DDT entry; <code>dedup_table_quota</code> unset and <code>zpool ddtprune</code> never run during a measurement; DDT memory from <code>zpool status -D</code>.<br />
-		OpenZFS direct IO does not apply to zvols or with dedup, so R1 is ARC-backed in every arm and the paper says so.
+		OpenZFS direct IO does not apply to zvols or with deduplication enabled, so R1 is ARC-backed in every arm, and the paper reports it as such.
 	</li>
 	<li>
 		<span class="rid">R2</span><strong>Raw file on XFS over dm-vdo.</strong><span class="tag-stretch">optional</span><br />
-		Inline fixed-4K dedup in the kernel, mainline since 6.9.<br />
+		Inline fixed-4K deduplication in the kernel, mainline since 6.9.<br />
 		Its own XFS instance on the vdo device.<br />
 		Index memory from <code>vdostats</code>.
 	</li>
@@ -43,7 +43,7 @@
 
 <h2>Chunk size</h2>
 <p>
-	Fixed 4K captures everything a Linux guest offers, and costs an index entry per 4K: about 250 million entries per TB, roughly 10 GB of RAM per TB at 40 bytes each.<br />
+	Fixed 4K captures everything a Linux guest offers, and costs an index entry per 4K: about 250 million entries per TB, roughly 10 GB of memory per TB at 40 bytes each.<br />
 	That is the DDT memory cost the daemon is designed to avoid.<br />
 	FastCDC at a 16K mean cuts the index four times over and loses some aligned matches.
 </p>
@@ -67,7 +67,7 @@
 <h2>Metrics</h2>
 <ul class="plain">
 	<li>Guest p50 and p99 write and read latency against R0, compactor active and idle. Reported first.</li>
-	<li>Bytes stored after compaction settles, against the census prediction at the rung's block size.</li>
+	<li>Bytes stored after compaction completes, against the census prediction at the configuration's block size.</li>
 	<li>Index or DDT bytes per stored TB.</li>
 	<li>Write amplification: device bytes written per guest byte, from NVMe counters.</li>
 	<li>Sustainable ingest and the back-pressure point.</li>
@@ -77,10 +77,10 @@
 <h2>Controls</h2>
 <p>
 	Pinned vCPUs, performance governor, discarded warm-up, fresh filesystem or pool per repetition, at least five repetitions, variance beside every number.<br />
-	Cache bounded equal across rungs: cgroup memory limit for the page cache on R0 and R2, <code>zfs_arc_max</code> on R1, the daemon's cache size on R4.
+	Cache bounded equal across configurations: cgroup memory limit for the page cache on R0 and R2, <code>zfs_arc_max</code> on R1, the daemon's cache size on R4.
 </p>
 <p>
-	All rungs are observed at the guest boundary (fio's histograms, guest-side blktrace for the boot storm) plus host device counters.<br />
+	All configurations are observed at the guest boundary (fio's histograms, guest-side blktrace for the boot storm) plus host device counters.<br />
 	The daemon adds per-request stage timestamps drained to ndjson, cross-checked once against bpftrace with the delta reported.<br />
 	<code>zpool</code> and <code>vdostats</code> figures are supplementary.
 </p>

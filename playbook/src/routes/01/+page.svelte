@@ -38,13 +38,13 @@
 	<Node x={230} y={190} w={220} h={64} title="compactor" sub={['fixed 4K or FastCDC · BLAKE3', 'owner = rendezvous(hash)']} tone="outline" />
 
 	<Edge points={[[450, 210], [520, 210]]} label="owner = self" labelDy={-8} />
-	<Node x={520} y={190} w={200} h={64} title="local store" sub={['append-only chunks', 'hole-punch GC']} />
+	<Node x={520} y={190} w={200} h={64} title="local store" sub={['append-only chunks', 'garbage collection by hole punching']} />
 	<Edge points={[[450, 238], [520, 300]]} label="owner = peer" labelDy={14} labelDx={-10} tone="accent" />
 	<Node x={520} y={280} w={200} h={64} title="PUT to owner" sub={['batched · durable ack', 'then mark compacted']} tone="accent" />
 	<Edge points={[[720, 312], [960, 312]]} tone="accent" label="to host B" labelDy={-8} />
 
-	<Node x={760} y={60} w={200} h={52} title="index" sub="hash → offset · RAM · rebuildable" />
-	<Node x={760} y={130} w={200} h={52} title="chunk cache" sub="hash → bytes · RAM · bounded" tone="outline" />
+	<Node x={760} y={60} w={200} h={52} title="index" sub="hash → offset · memory · rebuildable" />
+	<Node x={760} y={130} w={200} h={52} title="chunk cache" sub="hash → bytes · memory · bounded" tone="outline" />
 	<Node x={760} y={200} w={200} h={52} title="maps" sub="offset → hash · one per image" />
 
 	<Note x={230} y={330} tone="muted" size={10} text={['read: staging → local store → cache → GET(hash) from owner', 'prefetch: next chunks from the map on sequential reads']} />
@@ -64,13 +64,13 @@
 
 <h2>Compactor</h2>
 <p>
-	A background pass reads settled extents from staging, cuts them into chunks, hashes each with BLAKE3, and drops any hash already in the local index.<br />
+	A background pass reads settled extents from staging, cuts them into chunks, hashes each with BLAKE3, and discards any hash already in the local index.<br />
 	Chunking is fixed 4K or FastCDC, chosen per arm on page 02.<br />
 	Extents overwritten in staging are never compacted.
 </p>
 <p>
 	For each new chunk, the owner is the first k hosts in rendezvous order of its hash.<br />
-	If the owner is this host, the chunk is appended to the local store and fdatasync'd.<br />
+	If the owner is this host, the chunk is appended to the local store and written with fdatasync.<br />
 	Otherwise it goes in a batch to the owner, which appends, fdatasyncs once per batch, and acks.<br />
 	<mark>Only after the ack does the extent count as compacted.</mark><br />
 	Staging is the write-ahead log for the whole fleet.
@@ -92,8 +92,8 @@
 	Fresh data is served without indirection; settled data incurs the map walk, the index lookup, and, if the owner is remote, one round trip.
 </p>
 <p>
-	The chunk cache is daemon-owned RAM keyed by hash, LRU, with a size that is a parameter.<br />
-	Because every file is O_DIRECT, the kernel page cache is out of the picture on every host, and the cache size can be bounded equal to ARC on the ZFS rung.
+	The chunk cache is daemon-owned memory keyed by hash, LRU, with a size that is a parameter.<br />
+	Because every file is O_DIRECT, the kernel page cache is out of the picture on every host, and the cache size can be bounded equal to ARC on the ZFS configuration.
 </p>
 <p>
 	Prefetch is the daemon issuing the next D hashes from the map when it sees sequential reads, and optionally replaying a recorded boot profile.<br />
@@ -103,7 +103,7 @@
 <h2>Capacity tier</h2>
 <p>
 	The local store is an append-only log of records (length, hash, flags, bytes) and is authoritative for the chunks this host owns.<br />
-	The index maps hash to offset, lives in RAM, and is rebuilt by scanning the store; its bytes per TB is the constant the chunk-size arms measure.<br />
+	The index maps hash to offset, lives in memory, and is rebuilt by scanning the store; its bytes per TB is the constant the chunk-size arms measure.<br />
 	The map, one per image, is a journaled offset tree from disk offset to chunk hash.<br />
 	It lives with the guest's host and moves when the guest does.
 </p>
@@ -116,7 +116,7 @@
 		</thead>
 		<tbody>
 			<tr><td class="k">GET(hash)</td><td>bytes</td><td>cold read, prefetch</td></tr>
-			<tr><td class="k">PUT(batch of chunks)</td><td>ack after one fdatasync</td><td>compactor shipping to an owner</td></tr>
+			<tr><td class="k">PUT(batch of chunks)</td><td>ack after one fdatasync</td><td>compactor sending chunks to an owner</td></tr>
 			<tr><td class="k">HAS(hashes)</td><td>bitmap</td><td>provisioning, migration, sync</td></tr>
 			<tr><td class="k">LIVE(epoch, hashes)</td><td>ack</td><td>garbage collection</td></tr>
 		</tbody>
@@ -124,7 +124,7 @@
 </div>
 <p>
 	Length-prefixed messages over kernel TCP, one connection per core, <code>TCP_NODELAY</code>, driven by io_uring.<br />
-	The daemon runs spinning or sleeping; page 04 measures both, because the wakeup is part of the cost.<br />
+	The daemon runs busy-polling or blocking; page 04 measures both, because the scheduler wakeup is part of the cost.<br />
 	Rendezvous hashing means a reader already knows the owner of every hash; nobody looks up anyone else's index.
 </p>
 <p>
@@ -136,7 +136,7 @@
 <p>
 	Owner set = the first k hosts in rendezvous order of the chunk's hash.<br />
 	k is the one cross-host parameter.<br />
-	On two hosts, k = 2 means every chunk is on both (replicated) and k = 1 means each chunk lives on exactly one (partitioned).<br />
+	With N hosts, k = N places every chunk on every host (replicated) and k = 1 places each chunk on exactly one (partitioned). On the two-host testbed these are k = 2 and k = 1.<br />
 	Page 03 measures both; a deployment would run k ≥ 2 on N ≥ 3 hosts.
 </p>
 
@@ -149,14 +149,14 @@
 		<tbody>
 			<tr><td class="k">daemon crash</td><td>everything: replay the staging log, re-run incomplete compaction epochs</td><td>gate G2, <code>fio --verify</code> after <code>kill -9</code></td></tr>
 			<tr><td class="k">host crash, power loss</td><td>everything acked: FLUSH was fdatasync on local NVMe</td><td>same contract as a local disk</td></tr>
-			<tr><td class="k">host lost</td><td>acked bytes not yet shipped are gone; with k = 1, chunks it owned are gone fleet-wide</td><td>R0 and R1 lose everything too; the window is measured, and k ≥ 2 closes the second half</td></tr>
+			<tr><td class="k">host lost</td><td>acknowledged bytes not yet transferred are lost; with k = 1, chunks it owned are gone fleet-wide</td><td>R0 and R1 lose everything too; the window is measured, and k ≥ 2 closes the second half</td></tr>
 		</tbody>
 	</table>
 </div>
 <p>
 	Two rules follow.<br />
 	Bytes are durable on local NVMe before they go on the wire, always.<br />
-	Shipping is two-phase: the owner fdatasyncs and acks before the sender marks anything compacted or reclaimable.
+	Transfer is two-phase: the owner fdatasyncs and acks before the sender marks anything compacted or reclaimable.
 </p>
 <p>
 	The window between a local ack and the chunk being durable on its owner is the compaction lag, measured in seconds under the fleet replay.<br />
@@ -173,7 +173,7 @@
 	<code>kill -9</code> at any point, then this replay, must pass <code>fio --verify</code> before any number from the daemon is reported.
 </p>
 
-<h2>Garbage</h2>
+<h2>Garbage collection</h2>
 <p>
 	A chunk is live if any staging log or any map on any host references it.<br />
 	Each host sends its owner the live set for an epoch with <code>LIVE</code>; the owner sweeps with <code>FALLOC_FL_PUNCH_HOLE</code> over dead records.<br />
@@ -183,7 +183,7 @@
 
 <h2>Out of scope</h2>
 <p>
-	Membership changes, failure detection, rebalancing when a host joins or leaves, authentication and encryption on the wire, more than two hosts, and concurrent garbage collection.<br />
+	Membership changes, failure detection, rebalancing when a host joins or leaves, authentication and encryption on the wire, measurement on more than two hosts, and concurrent garbage collection.<br />
 	Each is named in future work on page 05, and none of them affects a number this study reports.
 </p>
 
@@ -199,7 +199,7 @@
 			<tr><td class="k">hashing</td><td><code>blake3</code> crate</td><td>CC0 / Apache-2.0</td></tr>
 			<tr><td class="k">chunking</td><td><code>fastcdc</code> crate</td><td>MIT</td></tr>
 			<tr><td class="k">host filesystem</td><td>XFS on the dedicated NVMe, O_DIRECT, hole punching; ZFS never sits under the daemon</td><td></td></tr>
-			<tr><td class="k">staging, compactor, store, index, maps, cache, protocol, GC</td><td>this study</td><td>new code</td></tr>
+			<tr><td class="k">staging, compactor, store, index, maps, cache, protocol, garbage collection</td><td>this study</td><td>new code</td></tr>
 		</tbody>
 	</table>
 </div>
