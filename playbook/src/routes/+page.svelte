@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { base } from '$app/paths';
-	import { pages, source } from '$lib/pages';
+	import { pages, repo, source } from '$lib/pages';
+	import GitHubIcon from '$lib/components/GitHubIcon.svelte';
 </script>
 
 <svelte:head>
@@ -12,7 +13,12 @@
 </svelte:head>
 
 <span class="eyebrow">research specification</span>
-<h2 class="title">Content Addressed Deduplication: A distributed storage system study</h2>
+<div class="title-row">
+	<h2 class="title">Content Addressed Deduplication: A distributed storage system study</h2>
+	<a class="site-gh" href={repo} target="_blank" rel="noopener" aria-label="source on GitHub" title="source on GitHub">
+		<GitHubIcon />
+	</a>
+</div>
 <nav class="toc" aria-label="Pages">
 	{#each pages as { num, title, description } (num)}
 		<div class="row">
@@ -29,11 +35,28 @@
 </nav>
 
 <style>
-	.title {
+	.title-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 1rem;
 		margin: 0.5rem 0 1rem;
+	}
+	.title {
+		margin: 0;
 	}
 	.title::before {
 		content: none;
+	}
+	.site-gh {
+		display: inline-flex;
+		align-items: center;
+		flex-shrink: 0;
+		padding: 0 0.5rem;
+		color: var(--text-tertiary);
+	}
+	.site-gh:hover {
+		color: var(--text-primary);
 	}
 	.toc {
 		margin-top: 0.875rem;

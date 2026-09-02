@@ -5,8 +5,7 @@
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
 	import { base } from '$app/paths';
-	import { pages, repo } from '$lib/pages';
-	import GitHubIcon from '$lib/components/GitHubIcon.svelte';
+	import { pages } from '$lib/pages';
 
 	let { children } = $props();
 
@@ -53,22 +52,15 @@
 <svelte:window {onkeydown} />
 
 <main>
-	<header class="site">
-		{#if inPage}
+	{#if inPage}
+		<header class="site">
 			<a class="site-title" href="{base}/">← index</a>
-		{:else}
-			<span></span>
-			<a
-				class="site-gh"
-				href={repo}
-				target="_blank"
-				rel="noopener"
-				aria-label="source on GitHub"
-			>
-				<GitHubIcon />
+			<a class="byline" href="https://github.com/harivansh-afk" target="_blank" rel="noopener">
+				<img src="https://github.com/harivansh-afk.png?size=64" alt="" width="16" height="16" loading="lazy" />
+				harivansh-afk
 			</a>
-		{/if}
-	</header>
+		</header>
+	{/if}
 	{@render children()}
 </main>
 
@@ -87,11 +79,20 @@
 	.site-title:hover {
 		color: var(--text-tertiary);
 	}
-	.site-gh {
+	.byline {
 		display: inline-flex;
+		align-items: center;
+		flex-shrink: 0;
+		gap: 0.4rem;
+		font-size: 0.75rem;
 		color: var(--text-tertiary);
+		white-space: nowrap;
 	}
-	.site-gh:hover {
+	.byline:hover {
 		color: var(--text-primary);
+	}
+	.byline img {
+		border-radius: 50%;
+		display: block;
 	}
 </style>
