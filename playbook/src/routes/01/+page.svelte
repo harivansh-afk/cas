@@ -75,7 +75,8 @@
 <p>
 	A background pass reads settled extents from staging, cuts them into chunks, hashes each with BLAKE3, and skips any hash that every current owner already holds and has fenced; a copy in a cache does not count.<br />
 	Chunking is fixed 4K or FastCDC with boundaries snapped to 4K, chosen per arm on page 02.<br />
-	Settled means unwritten for a settle window, so an extent overwritten inside the window is chunked once, in its final form; the window is a parameter and its effect on chunk traffic is measured.
+	Settled means unwritten for a settle window, so an extent overwritten inside the window is chunked once, in its final form; the window is a parameter and its effect on chunk traffic is measured.<br />
+	Deferred hashing behind a write buffer is Liquid's design (TPDS '14) and Fossil's before it; the difference here is that the buffer is a durable log with a FLUSH contract rather than volatile memory flushed at shutdown.
 </p>
 <p>
 	For each new chunk, the owner is the first k hosts in rendezvous order of its hash.<br />
@@ -104,6 +105,7 @@
 </p>
 <p>
 	The chunk cache is daemon-owned memory keyed by hash, LRU, with a size that is a parameter.<br />
+	Fetched chunks that this host does not own live in that memory cache only. Liquid persisted them in an on-disk copy-on-read cache; here a refetch from a peer's memory costs about 20 µs while a local disk hit costs about 80, so the disk tier pays only for chunks that are cold at their owner too. It is a knob, noted, and measured only if time remains.<br />
 	Because every file is O_DIRECT, the kernel page cache holds nothing on any host, and the cache size is set equal to ARC on the ZFS configuration.
 </p>
 <p>
@@ -200,7 +202,7 @@
 <h2>Garbage collection</h2>
 <p>
 	A chunk is live if any manifest on any host references it, or if an in-flight compaction has pinned it.<br />
-	Each host sends its owner the live set for an epoch with <code>LIVE</code>, and the owner sweeps with <code>FALLOC_FL_PUNCH_HOLE</code> over dead records; there are no reference counts.<br />
+	Each host sends its owner the live set for an epoch with <code>LIVE</code>, and the owner sweeps with <code>FALLOC_FL_PUNCH_HOLE</code> over dead records; there are no reference counts. Liquid ran the same mark-and-sweep with Bloom-filter live sets over its data servers.<br />
 	ZFS frees an overwritten block the moment its reference count drops; this design does not, so space leaks between sweeps.<br />
 	The sweep therefore runs before every capacity measurement, and the bytes it reclaims are reported beside the capacity number as the leak; concurrent collection is out of scope.
 </p>

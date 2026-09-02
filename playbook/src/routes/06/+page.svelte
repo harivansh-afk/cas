@@ -6,8 +6,8 @@
 <PageHead num="06" />
 <p class="lede">
 	Swept on 2026-09-01; sources and what was actually opened are in <code>docs/review/</code>.<br />
-	No prior system is a local-only write log with no network on the write path, a fleet-wide hash-placed chunk store, and remote cold reads under a stock hypervisor.<br />
-	Three of them, Datrium, Nutanix, and Fossil with Venti, are close enough that a reviewer would cite them if they were omitted.
+	No prior system combines a durable, sequence-numbered local write log with a stated FLUSH contract, a fleet-wide chunk store whose owners are the hosts themselves, a block device under a stock hypervisor, and a per-transport measurement of the remote cold read.<br />
+	Liquid came closest in 2014 and is the row to read first; Datrium, Nutanix, and Fossil with Venti are close enough that a reviewer would cite them if they were omitted.
 </p>
 
 <h2>Nearest systems</h2>
@@ -24,7 +24,7 @@
 			<tr><td class="k">vSAN ESA global deduplication (2025)</td><td>cluster-wide post-process 4K deduplication, mirrored writes, 3 to 16 hosts, no published numbers</td><td>the per-host to cluster-wide change this study measures, with published numbers</td></tr>
 			<tr><td class="k">HYDRAstor (FAST '09)</td><td>content-addressed blocks placed by DHT across a grid, global deduplication</td><td>secondary storage with network writes; no guest path</td></tr>
 			<tr><td class="k">DeDe (ATC '09)</td><td>hosts hash in-band, deduplicate out-of-band against a shared index on a SAN, no coordinator</td><td>local disks instead of a SAN; chunks move to owners instead of pointers on shared storage</td></tr>
-			<tr><td class="k">Liquid (TPDS '14)</td><td>fingerprint-keyed VM image filesystem, P2P fetch across hosts, copy-on-read local cache</td><td>block device under a stock hypervisor instead of a filesystem; owner by hash instead of P2P; full text not yet read</td></tr>
+			<tr><td class="k"><a href="https://madsys.cs.tsinghua.edu.cn/publications/TPDS2014-zhao.pdf" target="_blank" rel="noopener">Liquid (TPDS '14)</a></td><td>FUSE file under a stock hypervisor; fixed 256 KB to 1 MB blocks hashed on flush or eviction from a 256 MB volatile write cache, pushed to range-partitioned data servers at VM shutdown; central meta server with refcounts; P2P Bloom-filter cache tier; copy-on-read disk cache; two replicas</td><td>a durable log with a FLUSH contract instead of a volatile buffer with no crash story; a vhost-user block device instead of FUSE; hosts as owners by rendezvous instead of a meta server and a data-server tier; exact HAS instead of Bloom filters; the miss cost measured, which Liquid names ("several times longer") and never measures</td></tr>
 		</tbody>
 	</table>
 </div>
@@ -36,6 +36,7 @@
 			<tr><th>Work</th><th>What it measured</th><th>What it leaves open</th></tr>
 		</thead>
 		<tbody>
+			<tr><td class="k">Liquid (TPDS '14)</td><td>8 GB image to 7 nodes on 1 GbE: scp 730 s, NFS 510 s, BitTorrent 95 s, Liquid 35 s; on-demand boot 1.7x to 4x a cached boot; dedup 77% at 4 KB falling to 59% at 256 KB on 183 images</td><td>miss cost stated as "several times longer IO delay" and never measured; no latency numbers anywhere; HDD and 1 GbE</td></tr>
 			<tr><td class="k">DADI (ATC '20)</td><td>block-level lazy loading with tree P2P; 10,000 containers on 1,000 hosts in 4 s; trace prefetch removes 95% of the cold gap; reads from a parent's page cache are faster than local disk</td><td>no per-read miss latency; not content-addressed</td></tr>
 			<tr><td class="k">Slacker (FAST '16)</td><td>only 6.4% of a container image is read at startup; lazy fetch over NFS; run phase 17% slower</td><td>no per-block miss cost; centralized</td></tr>
 			<tr><td class="k">VMTorrent (CoNEXT '12), VMThunder (TPDS '14)</td><td>demand-priority P2P VM image streaming with recorded profiles</td><td>startup seconds only</td></tr>

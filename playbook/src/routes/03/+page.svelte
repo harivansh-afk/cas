@@ -49,7 +49,8 @@
 	<mark>Provisioning cost is the size of the manifest.</mark>
 </p>
 <p>
-	Baseline: <code>qemu-img convert</code> or <code>scp</code> of the raw file, and <code>zfs send | zfs recv</code> of the zvol, each moving the allocated size of the image.
+	Baseline: <code>qemu-img convert</code> or <code>scp</code> of the raw file, and <code>zfs send | zfs recv</code> of the zvol, each moving the allocated size of the image.<br />
+	Liquid measured this comparison in 2014 on 1 GbE (8 GB to seven nodes: 730 s by scp, 35 s by Liquid) in seconds; here it is bytes on the wire at 100 GbE.
 </p>
 
 <h2>Migration</h2>

@@ -238,6 +238,8 @@ Chunking is fixed 4K or FastCDC with boundaries snapped to 4K, chosen per arm on
 
 Settled means unwritten for a settle window, so an extent overwritten inside the window is chunked once, in its final form; the window is a parameter and its effect on chunk traffic is measured.
 
+Deferred hashing behind a write buffer is Liquid's design (TPDS '14) and Fossil's before it; the difference here is that the buffer is a durable log with a FLUSH contract rather than volatile memory flushed at shutdown.
+
 For each new chunk, the owner is the first k hosts in rendezvous order of its hash.
 
 If the owner is this host, the chunk is appended to the local store and written with fdatasync.
@@ -271,6 +273,8 @@ Fresh data is served without indirection; settled data incurs the manifest looku
 `GET` runs on its own connections with priority over `PUT` and over compaction IO at the serving disk, so a guest-blocking read never waits behind a bulk transfer.
 
 The chunk cache is daemon-owned memory keyed by hash, LRU, with a size that is a parameter.
+
+Fetched chunks that this host does not own live in that memory cache only. Liquid persisted them in an on-disk copy-on-read cache; here a refetch from a peer's memory costs about 20 µs while a local disk hit costs about 80, so the disk tier pays only for chunks that are cold at their owner too. It is a knob, noted, and measured only if time remains.
 
 Because every file is O_DIRECT, the kernel page cache holds nothing on any host, and the cache size is set equal to ARC on the ZFS configuration.
 
@@ -373,7 +377,7 @@ Three more cases have tests because each has stalled a guest in a production sys
 
 A chunk is live if any manifest on any host references it, or if an in-flight compaction has pinned it.
 
-Each host sends its owner the live set for an epoch with `LIVE`, and the owner sweeps with `FALLOC_FL_PUNCH_HOLE` over dead records; there are no reference counts.
+Each host sends its owner the live set for an epoch with `LIVE`, and the owner sweeps with `FALLOC_FL_PUNCH_HOLE` over dead records; there are no reference counts. Liquid ran the same mark-and-sweep with Bloom-filter live sets over its data servers.
 
 ZFS frees an overwritten block the moment its reference count drops; this design does not, so space leaks between sweeps.
 
@@ -448,6 +452,8 @@ That is the DDT memory cost the daemon is designed to avoid.
 
 FastCDC at a 16K mean cuts the index four times over and loses some aligned matches.
 
+The one prior curve on VM images is Liquid's: 77% deduplicated at 4 KB falling to 59% at 256 KB, with 256 KB chosen for HDD seek cost; on NVMe the seek term is gone and the trade is index memory alone.
+
 Three arms: fixed 4K, fixed 16K, FastCDC 8K to 64K with a 16K mean.
 
 CDC boundaries snap to 4K, so no guest block straddles two chunks and a 4K overwrite invalidates one chunk, not two.
@@ -475,6 +481,7 @@ There is no kernel build and no synthetic stress workload that exists only to ex
 - Write amplification: device bytes written per guest byte, from NVMe counters, with both legs (staging and store) reported, not one.
 - Sustainable ingest, the point where the governor starts adding latency, and how much it adds.
 - Chunk traffic against the settle window: chunks produced per guest byte written, on the overwrite workload.
+- Compactor CPU per GB ingested, per chunk-size arm; hashing cost was Liquid's stated reason for large blocks and is a number here, not a reason.
 - Recovery: `kill -9`, replay, `fio --verify`; FLUSH racing writes on another queue; discard of an unwritten range; a daemon that stops answering.
 
 ## Controls
@@ -550,6 +557,8 @@ In partitioned mode no other data is transferred either, because chunks are fetc
 **Provisioning cost is the size of the manifest.**
 
 Baseline: `qemu-img convert` or `scp` of the raw file, and `zfs send | zfs recv` of the zvol, each moving the allocated size of the image.
+
+Liquid measured this comparison in 2014 on 1 GbE (8 GB to seven nodes: 730 s by scp, 35 s by Liquid) in seconds; here it is bytes on the wire at 100 GbE.
 
 ## Migration
 
@@ -834,9 +843,9 @@ The same document after two different preambles is computed twice; that is the m
 
 Swept on 2026-09-01; sources and what was actually opened are in `docs/review/`.
 
-No prior system is a local-only write log with no network on the write path, a fleet-wide hash-placed chunk store, and remote cold reads under a stock hypervisor.
+No prior system combines a durable, sequence-numbered local write log with a stated FLUSH contract, a fleet-wide chunk store whose owners are the hosts themselves, a block device under a stock hypervisor, and a per-transport measurement of the remote cold read.
 
-Three of them, Datrium, Nutanix, and Fossil with Venti, are close enough that a reviewer would cite them if they were omitted.
+Liquid came closest in 2014 and is the row to read first; Datrium, Nutanix, and Fossil with Venti are close enough that a reviewer would cite them if they were omitted.
 
 ## Nearest systems
 
@@ -849,12 +858,13 @@ Three of them, Datrium, Nutanix, and Fossil with Venti, are close enough that a 
 | vSAN ESA global deduplication (2025) | cluster-wide post-process 4K deduplication, mirrored writes, 3 to 16 hosts, no published numbers | the per-host to cluster-wide change this study measures, with published numbers |
 | HYDRAstor (FAST '09) | content-addressed blocks placed by DHT across a grid, global deduplication | secondary storage with network writes; no guest path |
 | DeDe (ATC '09) | hosts hash in-band, deduplicate out-of-band against a shared index on a SAN, no coordinator | local disks instead of a SAN; chunks move to owners instead of pointers on shared storage |
-| Liquid (TPDS '14) | fingerprint-keyed VM image filesystem, P2P fetch across hosts, copy-on-read local cache | block device under a stock hypervisor instead of a filesystem; owner by hash instead of P2P; full text not yet read |
+| [Liquid (TPDS '14)](https://madsys.cs.tsinghua.edu.cn/publications/TPDS2014-zhao.pdf) | FUSE file under a stock hypervisor; fixed 256 KB to 1 MB blocks hashed on flush or eviction from a 256 MB volatile write cache, pushed to range-partitioned data servers at VM shutdown; central meta server with refcounts; P2P Bloom-filter cache tier; copy-on-read disk cache; two replicas | a durable log with a FLUSH contract instead of a volatile buffer with no crash story; a vhost-user block device instead of FUSE; hosts as owners by rendezvous instead of a meta server and a data-server tier; exact HAS instead of Bloom filters; the miss cost measured, which Liquid names ("several times longer") and never measures |
 
 ## Remote fetch in prior systems
 
 | Work | What it measured | What it leaves open |
 |---|---|---|
+| Liquid (TPDS '14) | 8 GB image to 7 nodes on 1 GbE: scp 730 s, NFS 510 s, BitTorrent 95 s, Liquid 35 s; on-demand boot 1.7x to 4x a cached boot; dedup 77% at 4 KB falling to 59% at 256 KB on 183 images | miss cost stated as "several times longer IO delay" and never measured; no latency numbers anywhere; HDD and 1 GbE |
 | DADI (ATC '20) | block-level lazy loading with tree P2P; 10,000 containers on 1,000 hosts in 4 s; trace prefetch removes 95% of the cold gap; reads from a parent's page cache are faster than local disk | no per-read miss latency; not content-addressed |
 | Slacker (FAST '16) | only 6.4% of a container image is read at startup; lazy fetch over NFS; run phase 17% slower | no per-block miss cost; centralized |
 | VMTorrent (CoNEXT '12), VMThunder (TPDS '14) | demand-priority P2P VM image streaming with recorded profiles | startup seconds only |

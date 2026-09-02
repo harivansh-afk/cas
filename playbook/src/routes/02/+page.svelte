@@ -41,7 +41,8 @@
 <p>
 	Fixed 4K captures everything a Linux guest offers, and costs an index entry per 4K: about 250 million entries per TB, roughly 10 GB of memory per TB at 40 bytes each.<br />
 	That is the DDT memory cost the daemon is designed to avoid.<br />
-	FastCDC at a 16K mean cuts the index four times over and loses some aligned matches.
+	FastCDC at a 16K mean cuts the index four times over and loses some aligned matches.<br />
+	The one prior curve on VM images is Liquid's: 77% deduplicated at 4 KB falling to 59% at 256 KB, with 256 KB chosen for HDD seek cost; on NVMe the seek term is gone and the trade is index memory alone.
 </p>
 <p>
 	Three arms: fixed 4K, fixed 16K, FastCDC 8K to 64K with a 16K mean.<br />
@@ -70,6 +71,7 @@
 	<li>Write amplification: device bytes written per guest byte, from NVMe counters, with both legs (staging and store) reported, not one.</li>
 	<li>Sustainable ingest, the point where the governor starts adding latency, and how much it adds.</li>
 	<li>Chunk traffic against the settle window: chunks produced per guest byte written, on the overwrite workload.</li>
+	<li>Compactor CPU per GB ingested, per chunk-size arm; hashing cost was Liquid's stated reason for large blocks and is a number here, not a reason.</li>
 	<li>Recovery: <code>kill -9</code>, replay, <code>fio --verify</code>; FLUSH racing writes on another queue; discard of an unwritten range; a daemon that stops answering.</li>
 </ul>
 
