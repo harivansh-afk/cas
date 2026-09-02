@@ -9,7 +9,7 @@
 	<title>Content-addressed deduplication: a distributed-storage-system study</title>
 	<meta
 		name="description"
-		content="In a content-addressed store the hash is the address, and an address computed from the bytes is the same on every host. This study builds a content-addressed block backend under unmodified QEMU and measures, on two hosts, what that provides and what the remote cold read costs."
+		content="Deduplication tables in ZFS and dm-vdo find equal blocks within one host, and nothing they know leaves it, so a fleet stores a shared chunk once per host and migrates a guest by sending every block of its image. This study makes a chunk's hash its address, so every host computes where a chunk lives, whether a peer already holds it, and where it is cached from the hash alone, and builds that as a block backend under unmodified QEMU on two hosts. We predict provisioning and migration that move only a manifest, one copy per chunk across the fleet at 55% or less of what two per-host ZFS pools hold, a cold 4 KiB read from a peer's memory over TCP that arrives before one from local NVMe, and single-host capture within 10% of ZFS fast dedup at equal block size. The testbed is two hosts with static membership, Linux guests, and single-digit terabytes, and the cost measured is the network round trip on the cold read path and, in fleet class, on the FLUSH path."
 	/>
 </svelte:head>
 

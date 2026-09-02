@@ -19,7 +19,7 @@
 <p>
 	RoCE between two of these nodes works on the lossy fabric. <a href="https://arxiv.org/pdf/2312.06808" target="_blank" rel="noopener">BPF-oF</a> ran nvme-rdma and nvme-tcp between two c6525-100g nodes and measured 18 and 30 µs average round trips.<br />
 	Self-built kernels are routine there. The Ubuntu 24.04 image ships 6.8, dm-vdo needs 6.9, and OpenZFS 2.3 is a source build, so a kernel and ZFS are built once in week 1 and snapshotted as an image.<br />
-	Reservations expire at 16 hours by default, so every run is scripted to complete inside one.
+	An experiment expires after a few hours unless it is extended, so every run is scripted to complete inside one sitting.
 </p>
 <p>
 	CloudLab is free for research.<br />
@@ -36,9 +36,9 @@
 		<tbody>
 			<tr><td class="k">1–2</td><td>vhost-user-blk daemon in passthrough: staging log, FLUSH, replay. Kernel and ZFS image.</td><td>R0, with the drive's read and fdatasync times; passthrough within 10% of R0 p99 (G1). Thresholds frozen. <code>zdb -S</code> phase 0 on the synthetic fleet.</td></tr>
 			<tr><td class="k">3–5</td><td>Compactor with settle window, store, index, manifests, watermark, governor, recovery. Three chunk-size arms.</td><td><code>kill -9</code> recovery and the three ordering tests pass (G2). First capture numbers.</td></tr>
-			<tr><td class="k">6–7</td><td>R1 configured, both volblocksize arms. R2 if time permits.</td><td>Part 1 table complete (G3), sweep before every capacity number.</td></tr>
+			<tr><td class="k">6–7</td><td>R1 configured, both volblocksize arms. R2 if time permits.</td><td>Page 02 table complete (G3), sweep before every capacity number.</td></tr>
 			<tr><td class="k">8–9</td><td>Protocol with separate GET and PUT connections, rendezvous placement, k, segment PUT with durable ack, HAS, pins, surplus copies, sweep. Provisioning; migration with the fenced handoff.</td><td>Replicated mode on two nodes.</td></tr>
-			<tr><td class="k">10</td><td>Partitioned mode. Fleet class over TCP.</td><td>Part 2 table complete (G4).</td></tr>
+			<tr><td class="k">10</td><td>Partitioned mode. Fleet class over TCP.</td><td>Page 03 table complete (G4).</td></tr>
 			<tr><td class="k">11–12</td><td>nvmet exports, RoCE configuration, busy-polling and blocking daemon, depth prefetch, profile prefetch.</td><td>Transport matrix and prefetch sweeps (G5). Partitioned boot storm.</td></tr>
 			<tr><td class="k">13–14</td><td></td><td>Report; reproducibility pack (G6).</td></tr>
 		</tbody>
@@ -53,13 +53,13 @@
 	<strong>G2.</strong> <code>kill -9</code> at arbitrary points, replay, <code>fio --verify</code> passes, before any daemon number is reported. Three ordering tests pass with it: a FLUSH covering writes completed on another queue, an empty discard, and a stalled daemon that is restarted with the guest still recoverable.
 </p>
 <p>
-	<strong>G3.</strong> Part 1 table complete: R0, R1 at two block sizes, R3 at three chunk sizes; latency, capture, index, amplification; variance beside every number.
+	<strong>G3.</strong> Page 02 table complete: R0, R1 at two block sizes, R3 at three chunk sizes; latency, capture, index, amplification; variance beside every number.
 </p>
 <p>
-	<strong>G4.</strong> Part 2 table complete: both modes, every flow, bytes transferred against the census bound.
+	<strong>G4.</strong> Page 03 table complete: both modes, every flow, each read against the bound its row names.
 </p>
 <p>
-	<strong>G5.</strong> Transport matrix complete for every non-stretch probe, null and file, memory and NVMe, with RoCE counters at zero.
+	<strong>G5.</strong> Transport matrix complete for every non-stretch probe, null and file, memory and NVMe, with the RoCE counters printed beside every RDMA number.
 </p>
 <p>
 	<strong>G6.</strong> One command rebuilds the fleet from dated archives, and one command reruns every table on a fresh pair.
@@ -73,12 +73,12 @@
 	<li>ibverbs daemon arm, and with it fleet class over RDMA.</li>
 	<li>Super-chunk placement.</li>
 	<li>R2 dm-vdo.</li>
-	<li>Profile prefetch (depth prefetch stays).</li>
+	<li>Profile prefetch (depth prefetch stays), and with it the boot-storm clause of hypothesis 3.</li>
 	<li>Fleet class over TCP. Hypothesis 4 is then reported as untested, with the literature's numbers as the estimate.</li>
-	<li>Partitioned mode. Replicated mode alone still gives hypothesis 2's transfer result.</li>
+	<li>Partitioned mode. Replicated mode alone still gives hypothesis 2's transfer result, and the remote read of hypothesis 3 is then measured with the local copy disabled so that the read is forced to the peer.</li>
 </ol>
 <p>
-	Not removed under any slip: part 1, the nvmet TCP and RDMA probes, and the daemon over TCP.
+	Not removed under any slip: page 02, the nvmet TCP probe, and the daemon over TCP. The RDMA probes go if RoCE configuration exceeds its budget or the fallback hardware is used.
 </p>
 
 <h2>Risks</h2>
