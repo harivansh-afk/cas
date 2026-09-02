@@ -2,6 +2,7 @@
 	import { base } from '$app/paths';
 	import { pages, repo, source } from '$lib/pages';
 	import GitHubIcon from '$lib/components/GitHubIcon.svelte';
+	import PdfIcon from '$lib/components/PdfIcon.svelte';
 </script>
 
 <svelte:head>
@@ -14,9 +15,14 @@
 
 <div class="eyebrow-row">
 	<span class="eyebrow">research specification</span>
-	<a class="site-gh" href={repo} target="_blank" rel="noopener" aria-label="source on GitHub" title="source on GitHub">
-		<GitHubIcon />
-	</a>
+	<span class="links">
+		<a class="site-link" href="{base}/spec.pdf" target="_blank" rel="noopener" aria-label="PDF of the specification" title="PDF">
+			<PdfIcon />
+		</a>
+		<a class="site-link" href={repo} target="_blank" rel="noopener" aria-label="source on GitHub" title="source on GitHub">
+			<GitHubIcon />
+		</a>
+	</span>
 </div>
 <h2 class="title">Content-addressed deduplication: a distributed-storage-system study</h2>
 <nav class="toc" aria-label="Pages">
@@ -47,14 +53,18 @@
 	.title::before {
 		content: none;
 	}
-	.site-gh {
+	.links {
 		display: inline-flex;
 		align-items: center;
 		flex-shrink: 0;
+	}
+	.site-link {
+		display: inline-flex;
+		align-items: center;
 		padding: 0 0.5rem;
 		color: var(--text-tertiary);
 	}
-	.site-gh:hover {
+	.site-link:hover {
 		color: var(--text-primary);
 	}
 	.toc {

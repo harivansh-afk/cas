@@ -15,7 +15,16 @@ export default defineConfig({
 			adapter: adapter(),
 
 			// Set by the GitHub Pages workflow (e.g. /playbook); empty for local dev.
-			paths: { base: (process.env.BASE_PATH || '') as '' | `/${string}` }
+			paths: { base: (process.env.BASE_PATH || '') as '' | `/${string}` },
+
+			// spec.pdf is typeset from the built pages (scripts/pdf), so it does
+			// not exist yet when the crawler follows the index link to it.
+			prerender: {
+				handleHttpError: ({ path, message }) => {
+					if (path.endsWith('/spec.pdf')) return;
+					throw new Error(message);
+				}
+			}
 		})
 	]
 });
