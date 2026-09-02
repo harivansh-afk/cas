@@ -14,7 +14,9 @@
 <h2>Two modes</h2>
 <p>
 	k is the number of owners per chunk.<br />
-	The design supports any N; the testbed has two hosts, so k takes two values, and they are two different experiments.
+	The design supports any N; the testbed has two hosts, so k takes two values, and they are two different experiments.<br />
+	With k = 1, a host that goes down takes its chunks with it until it returns; a read that needs one waits or fails with an error, and nothing is lost if the disk comes back.<br />
+	Surviving a host dark at two hosts costs a full mirror, which is k = 2.
 </p>
 
 <Diagram
@@ -53,8 +55,11 @@
 
 <h2>Migration</h2>
 <p>
-	Move a guest from A to B: stop, copy the map and the staging extents not yet compacted, start.<br />
+	Move a guest from A to B.<br />
+	Freeze the device on A and take E. Hand the image to B by one fenced swap of its root record, which names the writer. Ship the map and the staging extents in (D, E]. Resume on B.<br />
+	A accepts no write after the swap; B resumes only after the swap names it; on resume the log is reconciled by evidence, the local high-water against the durable head, never by who claims to own it.<br />
 	A 40 GB guest that compacted recently moves in tens of MB.<br />
+	Bytes are the small part. The disk cut is milliseconds and the rest of the blackout is orchestration, so the blackout is reported decomposed into freeze, swap, transfer, and resume, beside the bytes.<br />
 	Memory migration is QEMU's and is out of scope; this is the disk.
 </p>
 <p>
@@ -65,8 +70,9 @@
 <h2>Synchronization after drift</h2>
 <p>
 	Two guests, one on each host, cloned from the same image, each updated independently to the same package set.<br />
-	Compaction on each host sends only the chunks the owner lacks.<br />
+	Compaction on each host sends only the chunks the owner lacks, packed in sealed segments.<br />
 	Bytes on the wire are read against the census's unique-byte count for the pair.<br />
+	Chunks per second is reported beside bytes per second, because per-chunk cost is what caps a replication path before the link does.<br />
 	This is the <code>apt upgrade</code> case from page 00, measured.
 </p>
 
@@ -78,15 +84,17 @@
 	Also measured: what fraction of a guest's cold reads went to the other host, which on two hosts with k = 1 should be about half and is the worst case any fleet would see.
 </p>
 
-<h2>Durability window</h2>
+<h2>Durability classes</h2>
 <p>
-	Between a local FLUSH ack and the chunk being durable on its owner sits the compaction lag.<br />
-	It is reported in seconds under the fleet replay, as a distribution, with the compactor's transfer batch size as the parameter.
+	Local class: between a FLUSH ack and the chunk being durable on its owner sits the compaction lag, (D, E] in the watermark's terms.<br />
+	It is reported in seconds under the fleet replay, as a distribution, with the segment size as the parameter.<br />
+	That window is what a lost host loses, and it is the RPO of local class.
 </p>
 <p>
-	Optional arm: mirror the staging tail to the peer on every FLUSH and wait for the peer's fdatasync before acking.<br />
+	Fleet class: the staging tail goes to the image's journal peer on every FLUSH and the ack waits for the peer's fdatasync.<br />
 	Every production system in this space does this.<br />
-	The arm reports the write p99 it costs on TCP, which is one round trip per FLUSH.
+	The class costs one round trip plus one remote fdatasync per FLUSH, and it is measured as write p99 at QD1 against local class, on TCP, and on RDMA if the ibverbs arm lands.<br />
+	This is the one place where RDMA is the whole cost rather than a tenth of it.
 </p>
 
 <h2>Measured</h2>
@@ -97,11 +105,12 @@
 		</thead>
 		<tbody>
 			<tr><td class="k">provision</td><td>bytes transferred, both modes</td><td>scp of raw file; zfs send</td><td>map size</td></tr>
-			<tr><td class="k">migrate</td><td>bytes transferred, both modes</td><td>rsync; zfs send</td><td>map size + staging tail</td></tr>
-			<tr><td class="k">sync after drift</td><td>bytes sent by compaction</td><td>rsync; zfs send</td><td>census unique bytes</td></tr>
-			<tr><td class="k">capacity</td><td>bytes stored, partitioned</td><td>two per-host ZFS pools</td><td>census prediction</td></tr>
+			<tr><td class="k">migrate</td><td>bytes transferred, both modes; blackout decomposed</td><td>rsync; zfs send</td><td>map size + staging tail; milliseconds for the cut</td></tr>
+			<tr><td class="k">sync after drift</td><td>bytes and chunks per second sent by compaction</td><td>rsync; zfs send</td><td>census unique bytes</td></tr>
+			<tr><td class="k">capacity</td><td>bytes stored, partitioned, after the sweep</td><td>two per-host ZFS pools</td><td>census prediction</td></tr>
 			<tr><td class="k">remote fraction</td><td>cold reads served by the peer</td><td></td><td>about half, worst case</td></tr>
-			<tr><td class="k">window</td><td>seconds from ack to owner-durable</td><td>mirror arm: write p99 with mirroring</td><td>one RTT per FLUSH</td></tr>
+			<tr><td class="k">local-class window</td><td>seconds from ack to owner-durable</td><td></td><td>the RPO of local class</td></tr>
+			<tr><td class="k">fleet-class cost</td><td>write p99 at QD1, TCP and RDMA</td><td>local class</td><td>one RTT plus one remote fdatasync per FLUSH</td></tr>
 		</tbody>
 	</table>
 </div>

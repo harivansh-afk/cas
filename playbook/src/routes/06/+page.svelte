@@ -18,7 +18,7 @@
 		</thead>
 		<tbody>
 			<tr><td class="k">Datrium DVX (2016), US20170031994A1</td><td>host-side fingerprinting, host flash as read cache, global deduplication on a shared data-node pool; the patent lists host-only ack as an alternative</td><td>peers as owners by hash instead of a shared pool; open implementation on stock QEMU; the cold read measured per transport</td></tr>
-			<tr><td class="k">Nutanix AOS</td><td>local OpLog on SSD, mirrored to another node before ack; cluster-wide post-process deduplication at 16K; per-node cache</td><td>no mirror on the write path, with the window measured and the mirror as an arm; placement by hash instead of by vDisk locality; numbers published</td></tr>
+			<tr><td class="k">Nutanix AOS</td><td>local OpLog on SSD, mirrored to another node before ack; cluster-wide post-process deduplication at 16K; per-node cache</td><td>no mirror on the write path by default, with the window measured and the mirror as fleet class; placement by hash instead of by vDisk locality; numbers published</td></tr>
 			<tr><td class="k">Fossil + Venti (2002)</td><td>a disk write buffer in front of a content-addressed archive; the two-tier shape</td><td>block device under a VM instead of a filesystem; primary capacity instead of archival; more than one owner</td></tr>
 			<tr><td class="k">Ceph + TiDedup (ATC '23)</td><td>post-process CDC into a chunk pool placed by CRUSH on the fingerprint; promotes on a cold miss</td><td>writes never cross the network; a host cache instead of promotion; a guest block path; latency numbers, which TiDedup does not report</td></tr>
 			<tr><td class="k">vSAN ESA global deduplication (2025)</td><td>cluster-wide post-process 4K deduplication, mirrored writes, 3 to 16 hosts, no published numbers</td><td>the per-host to cluster-wide change this study measures, with published numbers</td></tr>
@@ -64,7 +64,8 @@
 	<strong>Dong et al. (FAST '11)</strong> rejected per-chunk hash placement for backup streams on locality grounds and routed 1 MB super-chunks; page 03 answers with a local cache and page 04 measures the cost.<br />
 	<strong>Meyer and Bolosky (FAST '11)</strong> already showed deduplication savings grow with the log of the number of machines in one domain, which is the capacity half of H2 stated for desktops.<br />
 	<strong>Jin and Miller (SYSTOR '09)</strong> found fixed blocks match CDC on VM images, which is why part 1 predicts a tie.<br />
-	<strong>despairlabs (2024)</strong> tells ZFS operators to use clones and block cloning for the copy case and deduplication rarely; the study agrees on one host and disagrees across hosts.
+	<strong>despairlabs (2024)</strong> tells ZFS operators to use clones and block cloning for the copy case and deduplication rarely; the study agrees on one host and disagrees across hosts.<br />
+	<strong>Every hyperconverged product</strong> (Nutanix, Datrium, SimpliVity, vSAN ESA) mirrors a write over the network before acknowledging it, so a local-only ack is a durability trade, not a free latency win; page 01 makes it a class and page 03 prices both.
 </p>
 
 <h2>What remains</h2>

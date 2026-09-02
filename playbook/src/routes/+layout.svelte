@@ -58,16 +58,16 @@
 			<a class="site-title" href="{base}/">← index</a>
 		{:else}
 			<span></span>
+			<a
+				class="site-gh"
+				href={repo}
+				target="_blank"
+				rel="noopener"
+				aria-label="source on GitHub"
+			>
+				<GitHubIcon />
+			</a>
 		{/if}
-		<a
-			class="site-gh"
-			href={repo}
-			target="_blank"
-			rel="noopener"
-			aria-label="source on GitHub"
-		>
-			<GitHubIcon />
-		</a>
 	</header>
 	{@render children()}
 </main>

@@ -49,6 +49,7 @@
 </p>
 <p>
 	Three arms: fixed 4K, fixed 16K, FastCDC 8K to 64K with a 16K mean.<br />
+	CDC boundaries snap to 4K, so no guest block straddles two chunks and a 4K overwrite invalidates one chunk, not two.<br />
 	Reported per arm: bytes stored, index bytes per TB, guest p99, write amplification.<br />
 	<mark>Capture against index memory as a function of chunk size is the result this page produces.</mark><br />
 	The census below predicts the capture column before any run.
@@ -59,6 +60,7 @@
 	<li>fio: 4K random write and read at QD1 and QD32; 128K sequential.</li>
 	<li>Boot storm: N clones of one image booted together, N = 4, 16, 32.</li>
 	<li>Fleet replay: the synthetic fleet below written onto N guests, at two points on its timeline.</li>
+	<li>Overwrite: a small SQLite database rewriting its pages in place for an hour, with guest discard on. This is the case where a store without reference counts leaks between sweeps and ZFS does not.</li>
 </ul>
 <p>
 	No kernel build and no synthetic stress workload that exists only to exercise the daemon.
@@ -67,11 +69,12 @@
 <h2>Metrics</h2>
 <ul class="plain">
 	<li>Guest p50 and p99 write and read latency against R0, compactor active and idle. Reported first.</li>
-	<li>Bytes stored after compaction completes, against the census prediction at the configuration's block size.</li>
+	<li>Bytes stored after compaction completes and the sweep has run, against the census prediction at the configuration's block size; bytes the sweep reclaimed reported beside it as the leak.</li>
 	<li>Index or DDT bytes per stored TB.</li>
-	<li>Write amplification: device bytes written per guest byte, from NVMe counters.</li>
-	<li>Sustainable ingest and the back-pressure point.</li>
-	<li>Recovery: <code>kill -9</code>, replay, <code>fio --verify</code>.</li>
+	<li>Write amplification: device bytes written per guest byte, from NVMe counters, with both legs (staging and store) reported, not one.</li>
+	<li>Sustainable ingest, the point where the governor starts adding latency, and how much it adds.</li>
+	<li>Chunk traffic against the settle window: chunks produced per guest byte written, on the overwrite workload.</li>
+	<li>Recovery: <code>kill -9</code>, replay, <code>fio --verify</code>; FLUSH racing writes on another queue; discard of an unwritten range; a daemon that stops answering.</li>
 </ul>
 
 <h2>Controls</h2>

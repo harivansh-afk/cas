@@ -79,6 +79,7 @@
 <ul class="plain">
 	<li>Same two hosts, NIC, drive, and kernel for every row. Kernel, firmware, MTU, IRQ affinity, interrupt moderation, C-states, busy-poll, and PFC state recorded.</li>
 	<li>Two targets per row: a null device for fabric plus stack alone, and the real file for end to end. Each from the owner's memory and from its NVMe.</li>
+	<li>Two load states for the file rows: quiet, and with <code>PUT</code> traffic running on its own connection at the ship rate from page 03, because a cold read in deployment competes with compaction. The difference is what the read-priority rule on page 01 buys.</li>
 	<li>4K, 16K, 64K. p50, p99, p99.9. Five runs of 30 s, caches dropped between, medians with spread.</li>
 	<li>QD sweep 1, 4, 16, 64 for throughput and CPU per IOPS on both ends; TCP costs about 2.5x the CPU of RDMA at equal IOPS and the paper shows the ratio it measures.</li>
 	<li>RoCE hardware counters (<code>out_of_sequence</code>, <code>packet_seq_err</code>, <code>local_ack_timeout_err</code>) printed beside every RDMA number, proving zero retransmits on a fabric with no PFC.</li>
@@ -102,6 +103,13 @@
 	Partitioned boot storm at N = 16, with and without profile prefetch, against the same storm in replicated mode.<br />
 	Reported: guest p99 and host device reads per guest byte.<br />
 	<mark>The gap between partitioned with prefetch and replicated is the residual cost of one copy per chunk.</mark>
+</p>
+
+<h2>The FLUSH round trip</h2>
+<p>
+	Fleet class on page 03 puts one round trip and one remote fdatasync in front of every FLUSH acknowledgment.<br />
+	There is no 80 µs of media to hide behind: the round trip is the cost.<br />
+	Measured here with the same discipline as the read rows: write p99 at QD1 for local class, for fleet class over the daemon on TCP, and for fleet class over ibverbs if that arm lands, with the peer's fdatasync time reported separately so the transport's share is visible.
 </p>
 
 <h2>RDMA is a probe</h2>

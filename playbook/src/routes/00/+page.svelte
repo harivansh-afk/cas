@@ -84,7 +84,13 @@
 	Part 3 measures the cost of a cold read on TCP and on RDMA, from a peer's memory and from its NVMe, and shows how much of it prefetch hides.
 </p>
 <p>
-	The remaining costs are the ones every deduplication design incurs, and this one measures them: write amplification, compactor interference with the guest, index memory, and the window between a local ack and the chunk being durable on its owner.
+	The remaining costs are the ones every deduplication design incurs, and this one measures them: write amplification, compactor interference with the guest, and index memory.
+</p>
+<p>
+	Durability is a class, not a design choice.<br />
+	Local class acknowledges after fdatasync on this host and is the default, because that is the contract a local disk gives and the baselines are local disks.<br />
+	Fleet class ships the staging tail to a fixed peer and acknowledges after the peer's fdatasync, which is what every hyperconverged product does.<br />
+	Both run the same pipeline after the ack; the difference is one round trip per FLUSH, and part 2 measures it on TCP and on RDMA.
 </p>
 
 <h2>Hypotheses</h2>
@@ -105,6 +111,12 @@
 		From the owner's NVMe it costs at most 30% over local on TCP and 15% on RDMA.<br />
 		With enough reads in flight, remote sequential throughput matches local.
 	</li>
+	<li>
+		<span class="rid">H4</span><strong>The price of durability before ack.</strong><br />
+		Fleet class costs one round trip and one peer fdatasync per FLUSH.<br />
+		Its write p99 at QD1 is within 3x of local class on TCP and within 2x on RDMA.<br />
+		In local class, a lost host loses exactly the acknowledged bytes not yet compacted to an owner, and that window is reported in seconds.
+	</li>
 </ul>
 <p class="note">
 	Thresholds come from the transport literature on page 04 and the census prediction on page 02.<br />
@@ -117,6 +129,7 @@
 	<li>A single-host table against ZFS fast dedup: capture, p99, write amplification, index memory, as a function of chunk size.</li>
 	<li>Two numbers no existing backend can match: bytes moved to provision and migrate a guest, and fleet bytes stored with one copy per chunk.</li>
 	<li>The first microsecond-scale measurement of a content-addressed chunk fetched from a peer under a VM block device, over kernel TCP and over NVMe-oF on TCP and RDMA.</li>
+	<li>The cost of durability before acknowledgment on the same hardware: local class against fleet class, per transport.</li>
 </ul>
 
 <h2>Scope</h2>
