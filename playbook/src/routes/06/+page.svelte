@@ -29,7 +29,7 @@
 	</table>
 </div>
 
-<h2>Remote fetch</h2>
+<h2>Remote fetch in prior systems</h2>
 <div class="table-scroll">
 	<table class="spec prose">
 		<thead>
@@ -51,7 +51,7 @@
 	Every lazy-loading system reports startup seconds, admits a per-read penalty, and hides it with a recorded prefetch profile.
 </p>
 
-<h2>Transport</h2>
+<h2>Transport measurements in prior work</h2>
 <p>
 	i10 (NSDI '20) and blk-switch (OSDI '21) showed kernel TCP can match RDMA on throughput per core with batching, at a latency cost of 50 to 100 µs at low load.<br />
 	The SPDK 24.05 reports on ConnectX-5 put kernel nvme-rdma at 12.1 µs and kernel nvme-tcp at 21.4 µs for a 4K read against a null device.<br />
@@ -62,16 +62,15 @@
 <h2>Objections already in print</h2>
 <p>
 	<strong>Dong et al. (FAST '11)</strong> rejected per-chunk hash placement for backup streams on locality grounds and routed 1 MB super-chunks; page 03 answers with a local cache and page 04 measures the cost.<br />
-	<strong>Meyer and Bolosky (FAST '11)</strong> already showed deduplication savings grow with the log of the number of machines in one domain, which is the capacity half of H2 stated for desktops.<br />
+	<strong>Meyer and Bolosky (FAST '11)</strong> already showed deduplication savings grow with the log of the number of machines in one domain, which is the capacity half of hypothesis 2 stated for desktops.<br />
 	<strong>Jin and Miller (SYSTOR '09)</strong> found fixed blocks match CDC on VM images, which is why part 1 predicts a tie.<br />
 	<strong>despairlabs (2024)</strong> tells ZFS operators to use clones and block cloning for the copy case and deduplication rarely; the study agrees on one host and disagrees across hosts.<br />
 	<strong>Every hyperconverged product</strong> (Nutanix, Datrium, SimpliVity, vSAN ESA) mirrors a write over the network before acknowledging it, so a local-only ack is a durability trade, not a free latency win; page 01 makes it a class and page 03 prices both.
 </p>
 
-<h2>What remains</h2>
+<h2>What this study adds</h2>
 <p>
-	Datrium's patent and Nutanix's design are cited by name.<br />
-	Fossil and Venti are cited as the origin of the two-tier shape.<br />
+	Datrium's patent and Nutanix's design are cited by name, and Fossil and Venti are cited as the origin of the two-tier shape.<br />
 	The study's contribution is the measurement: what content addressing provides across hosts on commodity hardware under a stock hypervisor, and what the remote cold read costs, per transport.
 </p>
 

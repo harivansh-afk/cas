@@ -5,43 +5,39 @@
 
 <PageHead num="02" />
 <p class="lede">
-	<strong>Part 1.</strong><br />
-	Same stock QEMU, same guest, same NVMe device, storage behind the device varies.<br />
-	The prediction is a tie on capture between the daemon and ZFS fast dedup.<br />
+	Part 1 runs the same stock QEMU, the same guest, and the same NVMe device, and varies only the storage behind the device.<br />
+	The prediction is a tie on capture between our CAS system and ZFS fast dedup.<br />
 	It is measured anyway, because the chunk-size curve under it is the single-host design result, and because the comparison against ZFS is the first objection a reviewer will raise.
 </p>
 
 <h2>Configurations</h2>
-<ul class="reqs">
-	<li>
-		<span class="rid">R0</span><strong>Raw file on XFS.</strong><br />
-		QEMU's raw driver on the dedicated NVMe.<br />
-		The control; no deduplication anywhere in the path.
-	</li>
-	<li>
-		<span class="rid">R1</span><strong>Zvol on ZFS 2.3 fast dedup.</strong><br />
-		Own pool on the same device, created and destroyed per run, opened by QEMU as a block device.<br />
-		<code>feature@fast_dedup</code>; <code>dedup=blake3</code>, since <code>dedup=on</code> silently uses SHA-256 regardless of the checksum property; <code>volblocksize=16K</code> primary and <code>4K</code> second arm; <code>compression=zle</code> outside the compression arm so zero blocks do not collapse onto one DDT entry; <code>dedup_table_quota</code> unset and <code>zpool ddtprune</code> never run during a measurement; DDT memory from <code>zpool status -D</code>.<br />
-		OpenZFS direct IO does not apply to zvols or with deduplication enabled, so R1 is ARC-backed in every arm, and the paper reports it as such.
-	</li>
-	<li>
-		<span class="rid">R2</span><strong>Raw file on XFS over dm-vdo.</strong><span class="tag-stretch">optional</span><br />
-		Inline fixed-4K deduplication in the kernel, mainline since 6.9.<br />
-		Its own XFS instance on the vdo device.<br />
-		Index memory from <code>vdostats</code>.
-	</li>
-	<li>
-		<span class="rid">R3</span><strong>The daemon, one host.</strong><br />
-		Local store only; k does not apply.<br />
-		Three chunk-size arms below.
-	</li>
-</ul>
+<p>
+	<strong>R0. Raw file on XFS.</strong><br />
+	QEMU's raw driver on the dedicated NVMe.<br />
+	The control, with no deduplication anywhere in the path.
+</p>
+<p>
+	<strong>R1. Zvol on ZFS 2.3 fast dedup.</strong><br />
+	Own pool on the same device, created and destroyed per run, opened by QEMU as a block device.<br />
+	<code>feature@fast_dedup</code>; <code>dedup=blake3</code>, since <code>dedup=on</code> silently uses SHA-256 regardless of the checksum property; <code>volblocksize=16K</code> primary and <code>4K</code> second arm; <code>compression=zle</code> outside the compression arm so zero blocks do not collapse onto one DDT entry; <code>dedup_table_quota</code> unset and <code>zpool ddtprune</code> never run during a measurement; DDT memory from <code>zpool status -D</code>.<br />
+	OpenZFS direct IO does not apply to zvols or with deduplication enabled, so R1 is ARC-backed in every arm, and the paper reports it as such.
+</p>
+<p>
+	<strong>R2. Raw file on XFS over dm-vdo</strong> (optional).<br />
+	Inline fixed-4K deduplication in the kernel, mainline since 6.9, with its own XFS instance on the vdo device.<br />
+	Index memory from <code>vdostats</code>.
+</p>
+<p>
+	<strong>R3. Our CAS system on one host.</strong><br />
+	Local store only, so k does not apply.<br />
+	Three chunk-size arms, below.
+</p>
 <p>
 	R0 against R3 is the cost of the daemon with everything else held constant.<br />
 	R1 is the deployed state of the art and differs in kernel boundary, caching, and allocation, so it is a case study beside the controlled pair, and the paper attributes deltas accordingly.
 </p>
 
-<h2>Chunk size</h2>
+<h2>Chunk-size arms</h2>
 <p>
 	Fixed 4K captures everything a Linux guest offers, and costs an index entry per 4K: about 250 million entries per TB, roughly 10 GB of memory per TB at 40 bytes each.<br />
 	That is the DDT memory cost the daemon is designed to avoid.<br />
@@ -63,7 +59,7 @@
 	<li>Overwrite: a small SQLite database rewriting its pages in place for an hour, with guest discard on. This is the case where a store without reference counts leaks between sweeps and ZFS does not.</li>
 </ul>
 <p>
-	No kernel build and no synthetic stress workload that exists only to exercise the daemon.
+	There is no kernel build and no synthetic stress workload that exists only to exercise the daemon.
 </p>
 
 <h2>Metrics</h2>
@@ -88,7 +84,7 @@
 	<code>zpool</code> and <code>vdostats</code> figures are supplementary.
 </p>
 
-<h2>Prediction</h2>
+<h2>Prediction from a small census</h2>
 <p>
 	A small census supplies two numbers the rest of the study is measured against: how many unique bytes a fleet holds at a given block size, and how many bytes copy-on-write would already have shared.
 </p>
@@ -96,7 +92,7 @@
 	<strong>Phase 0.</strong><br />
 	<code>zdb -S</code> on a ZFS pool holding the cloned fleet.<br />
 	Pool traversal starts each dataset at its previous snapshot's txg, so blocks a clone inherited from its origin are counted once, and the simulated ratio is duplicates beyond what clones already share.<br />
-	Verified in <code>dmu_traverse.c</code>; confirmed by a five-minute test before it is cited.
+	Verified in <code>dmu_traverse.c</code>, and confirmed by a five-minute test before it is cited.
 </p>
 <p>
 	<strong>The fleet.</strong><br />

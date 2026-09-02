@@ -6,22 +6,21 @@
 
 <PageHead num="04" />
 <p class="lede">
-	<strong>Part 3.</strong><br />
-	A cold read whose chunk lives on another host is the only place the network enters guest latency.<br />
-	This page measures it and reduces it.
+	Part 3 measures the one place the network enters guest latency: a cold read whose chunk lives on another host.<br />
+	This page measures that read and then reduces it.
 </p>
 
-<h2>Where the time goes</h2>
+<h2>Where the time goes in a remote read</h2>
 <p>
 	Every read has about 80 µs of NVMe media time under it.<br />
-	On 100 GbE the transport sits on top: raw RDMA adds 3 to 5 µs, kernel nvme-rdma about 12, kernel nvme-tcp about 21, a userspace daemon over kernel TCP 20 to 30.<br />
-	Those are the SPDK 24.05 and Systor '17 numbers on ConnectX-5; the testbed replaces them.
+	On 100 GbE the transport sits on top: raw RDMA adds 3 to 5 µs, kernel nvme-rdma about 12, kernel nvme-tcp about 21, and a userspace daemon over kernel TCP 20 to 30.<br />
+	Those are the <a href="https://review.spdk.io/download/performance-reports/SPDK_rdma_mlx_perf_report_2405.pdf" target="_blank" rel="noopener">SPDK 24.05</a> and <a href="https://www.systor.org/2017/slides/NVMe-over-Fabrics_Performance_Characterization.pdf" target="_blank" rel="noopener">Systor '17</a> numbers on ConnectX-5, and the testbed replaces them.
 </p>
 <p>
 	RDMA against TCP is therefore a 10 µs difference on an 80 µs read.<br />
 	The larger factor, about 4x, is whether the chunk is in the owner's memory or on its disk.<br />
-	If those numbers hold, <mark>a chunk from a peer's memory over TCP arrives faster than one from local NVMe</mark>; H3 tests this.<br />
-	With hash placement, a chunk shared across the fleet is hot at exactly one owner, and every host's read of it hits that owner's cache.
+	If those numbers hold, <mark>a chunk from a peer's memory over TCP arrives faster than one from local NVMe</mark>, and hypothesis 3 tests this.<br />
+	With hash placement, a chunk shared across the fleet is hot at exactly one owner, so every host's read of it hits that owner's cache.
 </p>
 
 <Diagram
@@ -50,10 +49,10 @@
 	<Bracket x={695} y1={170} y2={250} label={['10 to 30% slower than local', 'the cold case; prefetch hides it']} />
 </Diagram>
 
-<h2>Probes</h2>
+<h2>Transport probes</h2>
 <p>
 	The architecture's transport is the daemon over kernel TCP.<br />
-	The other rows exist to show what the kernel stack and the userspace hop each cost; nothing depends on them.
+	The other rows exist to show what the kernel stack and the userspace hop each cost, and nothing depends on them.
 </p>
 <div class="table-scroll">
 	<table class="spec prose">
@@ -87,18 +86,18 @@
 
 <h2>Prefetch</h2>
 <p>
-	The map tells the daemon what comes next.<br />
-	Depth sweep: sequential reads through the map with 1, 2, 4, 8, 16, 32 chunks in flight, at 4K and 64K.<br />
+	The manifest tells the daemon what comes next.<br />
+	Depth sweep: sequential reads through the manifest with 1, 2, 4, 8, 16, 32 chunks in flight, at 4K and 64K.<br />
 	The bandwidth-delay point is about 250 KB for the fabric and about 1 MB with media under it, so roughly 20 chunks of 64K or 300 of 4K outstanding should hide the remote entirely.<br />
 	Success is remote sequential throughput within the error bars of local.
 </p>
 <p>
 	Profile prefetch: record the chunk sequence of one boot, replay it on later boots.<br />
-	Every lazy-loading system that has published numbers does this and reports it removing most of the miss cost; DADI says 95%.<br />
+	Every lazy-loading system that has published numbers does this and reports it removing most of the miss cost; <a href="https://www.usenix.org/system/files/atc20-li-huiba.pdf" target="_blank" rel="noopener">DADI</a> says 95%.<br />
 	It is the consensus mitigation and a one-day implementation.
 </p>
 
-<h2>Under a guest</h2>
+<h2>Under a guest workload</h2>
 <p>
 	Partitioned boot storm at N = 16, with and without profile prefetch, against the same storm in replicated mode.<br />
 	Reported: guest p99 and host device reads per guest byte.<br />
@@ -107,21 +106,20 @@
 
 <h2>The FLUSH round trip</h2>
 <p>
-	Fleet class on page 03 puts one round trip and one remote fdatasync in front of every FLUSH acknowledgment.<br />
-	There is no 80 µs of media to hide behind: the round trip is the cost.<br />
-	Measured here with the same discipline as the read rows: write p99 at QD1 for local class, for fleet class over the daemon on TCP, and for fleet class over ibverbs if that arm lands, with the peer's fdatasync time reported separately so the transport's share is visible.
+	Fleet class on page 03 puts one round trip and one remote fdatasync in front of every FLUSH acknowledgment, and there is no 80 µs of media to hide behind, so the round trip is the cost.<br />
+	It is measured here with the same discipline as the read rows: write p99 at QD1 for local class, for fleet class over the daemon on TCP, and for fleet class over ibverbs if that arm lands, with the peer's fdatasync time reported separately so the transport's share is visible.
 </p>
 
-<h2>RDMA is a probe</h2>
+<h2>RDMA on this testbed</h2>
 <p>
-	The CloudLab fabric is lossy; no PFC or ECN is documented on the shared switches, and published work on this node type ran RoCE that way.<br />
+	The CloudLab fabric is lossy: no PFC or ECN is documented on the shared switches, and published work on this node type ran RoCE that way.<br />
 	Adaptive retransmission is enabled on the NIC and the counters above prove the runs were clean.<br />
 	ConnectX-5 cannot do io_uring zero-copy receive, so that option is unavailable.<br />
 	None of this touches the architecture, which runs on kernel TCP and would run on any Ethernet.
 </p>
 
-<h2>H3, restated</h2>
-<ul class="reqs">
+<h2>Hypothesis 3, restated</h2>
+<ul class="plain">
 	<li>A chunk from the owner's memory arrives faster than a local NVMe read, on TCP and on RDMA.</li>
 	<li>From the owner's NVMe it costs at most 30% over local on TCP and 15% on RDMA, at QD1, 4K.</li>
 	<li>At depth at or above the bandwidth-delay point, remote sequential throughput is within 10% of local.</li>
