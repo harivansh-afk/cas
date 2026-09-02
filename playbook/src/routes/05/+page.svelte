@@ -17,7 +17,7 @@
 	The pair is one hop through a single switch.
 </p>
 <p>
-	RoCE between two of these nodes works and has been used in published work on this exact hardware, on a lossy fabric.<br />
+	RoCE between two of these nodes works on the lossy fabric: <a href="https://arxiv.org/pdf/2312.06808" target="_blank" rel="noopener">BPF-oF</a> ran nvme-rdma and nvme-tcp between two c6525-100g nodes and measured 18 and 30 µs average round trips.<br />
 	Self-built kernels are routine there; the Ubuntu 24.04 image ships 6.8, dm-vdo needs 6.9, and OpenZFS 2.3 is a source build, so a kernel and ZFS are built once in week 1 and snapshotted as an image.<br />
 	Reservations expire at 16 hours by default, so every run is scripted to complete inside one.
 </p>
@@ -34,10 +34,10 @@
 			<tr><th>Weeks</th><th>Build</th><th>Measure</th></tr>
 		</thead>
 		<tbody>
-			<tr><td class="k">1–2</td><td>vhost-user-blk daemon in passthrough: staging log, FLUSH, replay. Kernel and ZFS image.</td><td>R0; passthrough within 10% of R0 p99 (G1). Thresholds frozen. <code>zdb -S</code> phase 0 on the synthetic fleet.</td></tr>
+			<tr><td class="k">1–2</td><td>vhost-user-blk daemon in passthrough: staging log, FLUSH, replay. Kernel and ZFS image.</td><td>R0, with the drive's read and fdatasync times; passthrough within 10% of R0 p99 (G1). Thresholds frozen. <code>zdb -S</code> phase 0 on the synthetic fleet.</td></tr>
 			<tr><td class="k">3–5</td><td>Compactor with settle window, store, index, manifests, watermark, governor, recovery. Three chunk-size arms.</td><td><code>kill -9</code> recovery and the three ordering tests pass (G2). First capture numbers.</td></tr>
 			<tr><td class="k">6–7</td><td>R1 configured, both volblocksize arms. R2 if time permits.</td><td>Part 1 table complete (G3), sweep before every capacity number.</td></tr>
-			<tr><td class="k">8–9</td><td>Protocol with separate GET and PUT connections, rendezvous placement, k, segment PUT with durable ack, HAS, pins, sweep. Provisioning; migration with the fenced handoff.</td><td>Replicated mode on two nodes.</td></tr>
+			<tr><td class="k">8–9</td><td>Protocol with separate GET and PUT connections, rendezvous placement, k, segment PUT with durable ack, HAS, pins, surplus copies, sweep. Provisioning; migration with the fenced handoff.</td><td>Replicated mode on two nodes.</td></tr>
 			<tr><td class="k">10</td><td>Partitioned mode. Fleet class over TCP.</td><td>Part 2 table complete (G4).</td></tr>
 			<tr><td class="k">11–12</td><td>nvmet exports, RoCE configuration, busy-polling and blocking daemon, depth prefetch, profile prefetch.</td><td>Transport matrix and prefetch sweeps (G5). Partitioned boot storm.</td></tr>
 			<tr><td class="k">13–14</td><td></td><td>Report; reproducibility pack (G6).</td></tr>
@@ -50,7 +50,7 @@
 	<strong>G1.</strong> Passthrough daemon under stock QEMU within 10% of R0 p99 by the end of week 2. If this slips, everything after it slips, and the sponsor is informed that week.
 </p>
 <p>
-	<strong>G2.</strong> <code>kill -9</code> at arbitrary points, replay, <code>fio --verify</code> passes, before any daemon number is reported. Three ordering tests pass with it: a FLUSH racing writes on another queue, a discard of an unwritten range, and a stalled daemon that is restarted with the guest still recoverable.
+	<strong>G2.</strong> <code>kill -9</code> at arbitrary points, replay, <code>fio --verify</code> passes, before any daemon number is reported. Three ordering tests pass with it: a FLUSH covering writes completed on another queue, an empty discard, and a stalled daemon that is restarted with the guest still recoverable.
 </p>
 <p>
 	<strong>G3.</strong> Part 1 table complete: R0, R1 at two block sizes, R3 at three chunk sizes; latency, capture, index, amplification; variance beside every number.
@@ -86,7 +86,8 @@
 	<li><strong>Daemon overrun.</strong> The largest risk and the reason G1 is at week 2. Protocol plumbing comes from maintained crates, so the hours go to the components listed as new code on page 01.</li>
 	<li><strong>RoCE configuration.</strong> GID selection, MTU, adaptive retransmission on a lossy fabric. Budgeted at 8 hours; if it exceeds 20, the RDMA rows are dropped and the TCP rows stand.</li>
 	<li><strong>Node availability.</strong> 36 nodes of this type exist, so the pair is reserved in week 1 for every measurement week.</li>
-	<li><strong>Correctness debt.</strong> The bugs that stall a guest are known in advance: a FLUSH that misses a write on another queue, a discard that acknowledges a sequence number nothing wrote, a daemon that stops and leaves the guest in D-state. Each has a test in G2 and hours in weeks 3 to 5, before any number is taken.</li>
+	<li><strong>Correctness debt.</strong> The defects that stall or corrupt a guest are known in advance from a prior implementation: a FLUSH that misses a write completed on another queue, an empty discard that acknowledges a sequence number nothing wrote, a daemon that stops and leaves the guest in D-state. Each has a test in G2 and hours in weeks 3 to 5, before any number is taken.</li>
+	<li><strong>O_DIRECT alignment.</strong> A guest buffer not aligned to the logical block is bounced through an aligned copy, and the fraction of requests bounced is counted.</li>
 	<li><strong>Known configuration pitfalls.</strong> <code>dedup=on</code> means SHA-256; direct IO does nothing on zvols; the 100G interface stays down unless the profile declares a link on it.</li>
 	<li><strong>Census realism.</strong> Scripted drift is not real drift. The fleet is built from real dated archives, the scripts are published, and the numbers it supplies are bounds the daemon is read against, not claims about fleets in the wild.</li>
 </ul>
@@ -101,16 +102,16 @@
 <h2>Future work</h2>
 <p>
 	<strong>Availability.</strong><br />
-	Fleet class is the seed of replication before ack; with it and k ≥ 2 on N ≥ 3 the system has a failure model, which needs membership, failure detection, and rebalancing, none of which this study touches.
+	Fleet class is the seed of replication before acknowledgment; with it and k ≥ 2 on N ≥ 3 the system has a failure model, which needs membership, failure detection, and rebalancing, none of which this study touches.
 </p>
 <p>
-	<strong>Placement.</strong><br />
-	Super-chunk placement for locality, and a cache policy that weighs a chunk's owner distance.
+	<strong>Placement and reclamation.</strong><br />
+	Super-chunk placement for locality; a cache policy that weighs a chunk's owner distance; an on-disk copy-on-read tier for chunks that are cold at their owner; and reference counts kept as derived state, with the sweep as the auditor, so an overwrite frees space at once as it does in ZFS.
 </p>
 <p>
 	<strong>The same split elsewhere.</strong><br />
 	Prefix caching in LLM serving (vLLM, SGLang, Mooncake) names cached KV blocks by a hash chain over the whole token history, so two requests share only along a common prefix; that is lineage.<br />
-	The same document after two different preambles is computed twice; that is the multi-host case here, and nobody has measured its size on a real trace.
+	The same document after two different preambles is computed twice; that is the cross-host case here, and its size on a real trace is unmeasured.
 </p>
 
 <PageNav num="05" />

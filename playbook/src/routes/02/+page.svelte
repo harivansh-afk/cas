@@ -6,8 +6,8 @@
 <PageHead num="02" />
 <p class="lede">
 	Part 1 runs the same stock QEMU, the same guest, and the same NVMe device, and varies only the storage behind the device.<br />
-	The prediction is a tie on capture between our CAS system and ZFS fast dedup.<br />
-	It is measured anyway, because the chunk-size curve under it is the single-host design result, and because the comparison against ZFS is the first objection a reviewer will raise.
+	We predict a tie on capture between the backend and ZFS fast dedup.<br />
+	The measurement is made because the chunk-size curve beneath the tie is the single-host design result, and because the tie is hypothesis 1.
 </p>
 
 <h2>Configurations</h2>
@@ -18,50 +18,47 @@
 </p>
 <p>
 	<strong>R1. Zvol on ZFS 2.3 fast dedup.</strong><br />
-	Own pool on the same device, created and destroyed per run, opened by QEMU as a block device.<br />
-	<code>feature@fast_dedup</code>; <code>dedup=blake3</code>, since <code>dedup=on</code> silently uses SHA-256 regardless of the checksum property; <code>volblocksize=16K</code> primary and <code>4K</code> second arm; <code>compression=zle</code> outside the compression arm so zero blocks do not collapse onto one DDT entry; <code>dedup_table_quota</code> unset and <code>zpool ddtprune</code> never run during a measurement; DDT memory from <code>zpool status -D</code>.<br />
-	OpenZFS direct IO does not apply to zvols or with deduplication enabled, so R1 is ARC-backed in every arm, and the paper reports it as such.
+	Its own pool on the same device, created and destroyed per run, opened by QEMU as a block device.<br />
+	<code>feature@fast_dedup</code>; <code>dedup=blake3</code>, because <code>dedup=on</code> hashes with SHA-256 regardless of the <a href="https://openzfs.github.io/openzfs-docs/man/master/7/zfsprops.7.html" target="_blank" rel="noopener">checksum property</a>; <code>volblocksize=16K</code> as the primary arm and <code>4K</code> as the second; <code>compression=zle</code> so zero blocks do not collapse onto one DDT entry; <code>dedup_table_quota</code> unset and <code>zpool ddtprune</code> never run during a measurement; DDT memory from <code>zpool status -D</code>.<br />
+	OpenZFS direct IO applies neither to zvols nor with deduplication enabled, so R1 is ARC-backed in every arm and is reported as such.
 </p>
 <p>
 	<strong>R2. Raw file on XFS over dm-vdo</strong> (optional).<br />
-	Inline fixed-4K deduplication in the kernel, mainline since 6.9, with its own XFS instance on the vdo device.<br />
+	Inline fixed-4 KiB deduplication in the kernel, mainline since 6.9, with its own XFS instance on the vdo device.<br />
 	Index memory from <code>vdostats</code>.
 </p>
 <p>
-	<strong>R3. Our CAS system on one host.</strong><br />
+	<strong>R3. The backend on one host.</strong><br />
 	Local store only, so k does not apply.<br />
 	Three chunk-size arms, below.
 </p>
 <p>
 	R0 against R3 is the cost of the daemon with everything else held constant.<br />
-	R1 is the deployed state of the art and differs in kernel boundary, caching, and allocation, so it is a case study beside the controlled pair, and the paper attributes deltas accordingly.
+	R1 is the deployed comparator and differs in kernel boundary, caching, and allocation, so it is a case study beside the controlled pair, and deltas are attributed accordingly.
 </p>
 
 <h2>Chunk-size arms</h2>
 <p>
-	Fixed 4K captures everything a Linux guest offers, and costs an index entry per 4K: about 250 million entries per TB, roughly 10 GB of memory per TB at 40 bytes each.<br />
-	That is the DDT memory cost the daemon is designed to avoid.<br />
-	FastCDC at a 16K mean cuts the index four times over and loses some aligned matches.<br />
-	The one prior curve on VM images is Liquid's: 77% deduplicated at 4 KB falling to 59% at 256 KB, with 256 KB chosen for HDD seek cost; on NVMe the seek term is gone and the trade is index memory alone.
+	Fixed 4 KiB chunks cost one index entry per 4 KiB: about 250 million entries per TB, about 10 GB of memory per TB at 40 bytes per entry, a 32-byte hash and an 8-byte offset.<br />
+	The alignment argument on page 00 predicts that they capture nearly every duplicate a Linux guest holds; the census measures the remainder.<br />
+	FastCDC with a 16 KiB mean cuts the index by four and loses an aligned 4 KiB match whenever the rest of its chunk differs.<br />
+	The one prior curve on VM images is Liquid's: 77% of bytes removed at 4 KiB, falling to 59% at 256 KiB on 183 images, with 256 KiB chosen for HDD seek cost; on NVMe the seek term is gone and the trade is index memory against capture.
 </p>
 <p>
-	Three arms: fixed 4K, fixed 16K, FastCDC 8K to 64K with a 16K mean.<br />
-	CDC boundaries snap to 4K, so no guest block straddles two chunks and a 4K overwrite invalidates one chunk, not two.<br />
-	Reported per arm: bytes stored, index bytes per TB, guest p99, write amplification.<br />
+	Three arms: fixed 4 KiB, fixed 16 KiB, FastCDC 8 to 64 KiB with a 16 KiB mean.<br />
+	CDC boundaries snap to 4 KiB, so no guest block straddles two chunks and a 4 KiB overwrite invalidates one chunk, not two.<br />
+	Reported per arm: bytes stored, index bytes per TB, guest p99, write amplification, compactor CPU per GB.<br />
 	<mark>Capture against index memory as a function of chunk size is the result this page produces.</mark><br />
-	The census below predicts the capture column before any run.
+	The census below predicts the capture column for each arm before any run.
 </p>
 
 <h2>Workloads</h2>
 <ul class="plain">
-	<li>fio: 4K random write and read at QD1 and QD32; 128K sequential.</li>
-	<li>Boot storm: N clones of one image booted together, N = 4, 16, 32.</li>
+	<li>fio: 4 KiB random write and read at QD1 and QD32; 128 KiB sequential.</li>
+	<li>Boot storm: N clones of one image booted together, N = 4, 16, 32; a clone is a copy of the manifest.</li>
 	<li>Fleet replay: the synthetic fleet below written onto N guests, at two points on its timeline.</li>
 	<li>Overwrite: a small SQLite database rewriting its pages in place for an hour, with guest discard on. This is the case where a store without reference counts leaks between sweeps and ZFS does not.</li>
 </ul>
-<p>
-	There is no kernel build and no synthetic stress workload that exists only to exercise the daemon.
-</p>
 
 <h2>Metrics</h2>
 <ul class="plain">
@@ -71,8 +68,8 @@
 	<li>Write amplification: device bytes written per guest byte, from NVMe counters, with both legs (staging and store) reported, not one.</li>
 	<li>Sustainable ingest, the point where the governor starts adding latency, and how much it adds.</li>
 	<li>Chunk traffic against the settle window: chunks produced per guest byte written, on the overwrite workload.</li>
-	<li>Compactor CPU per GB ingested, per chunk-size arm; hashing cost was Liquid's stated reason for large blocks and is a number here, not a reason.</li>
-	<li>Recovery: <code>kill -9</code>, replay, <code>fio --verify</code>; FLUSH racing writes on another queue; discard of an unwritten range; a daemon that stops answering.</li>
+	<li>Compactor CPU per GB ingested, per chunk-size arm; Liquid gave hashing cost as its reason for large blocks, and here it is a number.</li>
+	<li>Recovery: <code>kill -9</code>, replay, <code>fio --verify</code>; FLUSH covering writes on another queue; an empty discard; a daemon that stops answering.</li>
 </ul>
 
 <h2>Controls</h2>
@@ -88,13 +85,12 @@
 
 <h2>Prediction from a small census</h2>
 <p>
-	A small census supplies two numbers the rest of the study is measured against: how many unique bytes a fleet holds at a given block size, and how many bytes copy-on-write would already have shared.
+	A small census supplies the numbers the rest of the study is measured against: how many unique bytes the fleet holds under each arm's chunker, and how many bytes copy-on-write would already have shared.
 </p>
 <p>
 	<strong>Phase 0.</strong><br />
 	<code>zdb -S</code> on a ZFS pool holding the cloned fleet.<br />
-	Pool traversal starts each dataset at its previous snapshot's txg, so blocks a clone inherited from its origin are counted once, and the simulated ratio is duplicates beyond what clones already share.<br />
-	Verified in <code>dmu_traverse.c</code>, and confirmed by a five-minute test before it is cited.
+	Pool traversal starts each dataset at its origin snapshot's transaction group, so blocks a clone inherited are counted once and the simulated ratio is duplicates beyond what clones already share; this reading of <code>dmu_traverse.c</code> is confirmed with a two-clone test before the number is cited.
 </p>
 <p>
 	<strong>The fleet.</strong><br />
@@ -105,8 +101,9 @@
 </p>
 <p>
 	<strong>The split.</strong><br />
-	Per byte range: zero or unallocated (from the guest allocation map, excluded), unique, shared with the T0 base in place, duplicate at an aligned 4K or 16K boundary elsewhere in the fleet, or duplicate only at a shifted offset.<br />
-	The aligned column predicts R1 and the fixed arms; aligned plus shifted predicts the CDC arm.<br />
+	Per byte range: zero or unallocated (from the guest allocation map, excluded), unique, shared with the T0 base in place, duplicate at an aligned 4 KiB or 16 KiB boundary elsewhere in the fleet, or duplicate only at a shifted offset.<br />
+	The aligned columns predict R1 and the fixed arms.<br />
+	The CDC arm is predicted by running FastCDC with the arm's parameters over the images, because a 16 KiB mean chunk captures fewer aligned matches than 4 KiB blocks and more shifted ones, and the two effects do not add.<br />
 	Nothing further: no donors, no real fleets, no claims about time.
 </p>
 

@@ -6,47 +6,46 @@
 
 <PageHead num="00" />
 <p class="lede">
-	A deduplication table shares duplicate data within one host.<br />
-	Content addressing shares it across hosts.<br />
-	On Linux VM fleets the first is already solved by ZFS.<br />
-	So the case for content addressing rests on what a hash does that a block address cannot: move only unique bytes between hosts, store each chunk k times across a fleet instead of once per host, and serve a chunk from whichever host holds it in memory.
+	In OpenZFS and dm-vdo the hash of a block is a key in an index that belongs to one pool, and the block is still addressed by its location; only writers to that pool consult the index.<br />
+	In a content-addressed store the hash is the address, and an address computed from the bytes is the same on every host.<br />
+	Three things follow for a fleet: a guest can be provisioned or migrated by moving its manifest, because the chunks the manifest names already exist at their owners; each unique chunk can be stored k times across the fleet instead of once per host; and a chunk can be served from whichever host holds it in memory.
 </p>
 <p>
-	This study builds that system on a stock hypervisor and measures what each of those provides and what each costs.
+	This study builds a content-addressed block backend under unmodified QEMU and measures, on two hosts, what each of the three provides and what each costs.<br />
+	The limit is the testbed: two hosts with static membership, Linux guests, and single-digit terabytes.
 </p>
 
-<h2>Current solutions: single-host, cross-VM deduplication</h2>
+<h2>Deduplication within a host</h2>
 <p>
-	Consider two VMs that each run <code>apt upgrade</code> and download the same packages. Their disks now hold the same bytes. Under copy-on-write alone no clone can share them, because neither copy descends from the other.
+	Consider two guests that each run <code>apt upgrade</code> and download the same packages. Their disks now hold the same bytes, and no copy-on-write clone can share them, because neither copy descends from the other.
 </p>
 <p>
-	ZFS solves this with a deduplication table (the DDT), and the Linux kernel has dm-vdo, which does block-level deduplication, compression, and thin provisioning under any filesystem.<br />
-	Both hash every block and share equal ones at a fixed, aligned block size: 4K for dm-vdo, and the volblocksize for a ZFS zvol, 16K by default.
+	A deduplication table shares them. OpenZFS keeps one per pool, the DDT, and Linux has had dm-vdo in the mainline kernel since 6.9.<br />
+	Both hash every block and share equal blocks at one fixed, aligned size: 4 KiB for dm-vdo, and the volblocksize of a ZFS zvol, 16 KiB by default.
 </p>
 <p>
-	Nearly everything inside a Linux guest is 4K aligned (ext4 uses 4K blocks, partitions start at 1 MiB, and package managers write whole files), so at 4K a deduplication table reaches nearly all of the duplicate data.<br />
-	This is why <a href="https://ssrc.us/media/pubs/082a25b906aa716ca3c2439b8c1889449ecac44c.pdf" target="_blank" rel="noopener">Jin and Miller</a> found in 2009 that fixed blocks match content-defined chunking on VM images.
+	Nearly everything a Linux guest writes is 4 KiB aligned: ext4 uses 4 KiB blocks, partitions start at 1 MiB, and package managers write whole files.<br />
+	<a href="https://ssrc.us/media/pubs/082a25b906aa716ca3c2439b8c1889449ecac44c.pdf" target="_blank" rel="noopener">Jin and Miller</a> found on VM disk images that fixed-size chunks reach nearly the same deduplication ratio as content-defined chunking (CDC), which places chunk boundaries by the bytes themselves; <a href="https://madsys.cs.tsinghua.edu.cn/publications/TPDS2014-zhao.pdf" target="_blank" rel="noopener">Liquid</a> measured 77% of bytes removed at 4 KiB fixed blocks on 183 images.
 </p>
 <p>
-	<mark>Therefore, on a single host, content addressing has zero capacity win over ZFS at a 4K chunk size.</mark><br />
-	Part 1 of this study measures our CAS system against ZFS and tests this assertion.
+	<mark>We therefore predict that on one host the backend stores within 10% of what ZFS fast dedup stores at the same block size.</mark><br />
+	Part 1 tests this as hypothesis 1.
 </p>
 <p>
-	None of this works across hosts.<br />
-	The DDT is per pool, dm-vdo has no replication, and <code>zfs send</code> has not carried a deduplicated stream since OpenZFS 2.0.<br />
-	With a fleet of N hosts each running its own deduplication store, every unique chunk is stored N times.<br />
-	As a side effect, moving a VM to another host means sending every one of its chunks over the wire (via <code>zfs send</code> or similar), whether or not the destination already holds them.
+	None of this reaches across hosts.<br />
+	The DDT is per pool, dm-vdo has no replication, and <code>zfs send</code> has not carried a deduplicated stream since <a href="https://github.com/openzfs/zfs/issues/7887" target="_blank" rel="noopener">OpenZFS 2.0</a>.<br />
+	A fleet of N hosts, each with its own table, stores a chunk shared by all of them N times, and moving a guest to another host sends every block of its image whether or not the destination holds an equal one.
 </p>
 <p>
-	Shared-storage systems (Ceph RBD with TiDedup, for example) do deduplicate across hosts, by putting every write on the network before it is acknowledged.<br />
-	That is the other end of the design space, and page 06 places this study against it.
+	Shared-storage systems deduplicate across hosts by placing every write on the network before it is acknowledged; Ceph RBD with <a href="https://www.usenix.org/system/files/atc23-oh.pdf" target="_blank" rel="noopener">TiDedup</a> is the open example.<br />
+	Page 06 places this study between the two.
 </p>
 
 <Diagram
 	w={960}
 	h={284}
 	label="Left: two hosts each with their own deduplication table and no link between them; the same chunk is stored on both and moves whole when a guest migrates. Right: two hosts whose chunks are named by hash and owned by hash across both; a chunk is stored k times fleet-wide, a guest's manifest moves while its chunks stay, and a cold read fetches by hash from the owner."
-	caption="Left: a deduplication table shares within a host. Right: a hash is the same on every host, so placement, transfer, and cache follow the content."
+	caption="Left: a deduplication table indexes blocks within one pool. Right: a hash is the same name on every host, so placement, transfer, and the cache key follow the content."
 >
 	<Group x={20} y={20} w={440} h={244} label="per-host deduplication" />
 	<Node x={40} y={56} w={195} h={44} title="host A" sub="guests on ZFS" tone="muted" />
@@ -66,73 +65,78 @@
 	<Note x={720} y={190} anchor="middle" tone="accent" text={['one chunk namespace across hosts', 'a shared chunk is stored k times fleet-wide', 'migration copies the manifest; the chunks stay', 'a cold read fetches the chunk from its owner']} />
 </Diagram>
 
-<h2>Advantages of content-addressing your data</h2>
+<h2>What a hash provides across hosts</h2>
 <p>
-	A chunk named by its hash has the same name on every host, so placement is a function of the content itself.<br />
-	Three things follow, and each is a measured claim in parts 2 and 3.
+	A chunk named by its hash has that name on every host, so its placement, its transfer, and its cache key are functions of its content.<br />
+	Each consequence below is a measured claim in parts 2 and 3.
 </p>
 <p>
 	<strong>Transfer.</strong><br />
-	Provisioning a guest moves only its manifest (32 bytes per chunk) and no chunk data, because every chunk it names already exists at its owner.<br />
-	Migrating a guest moves the manifest plus whatever it wrote since the last compaction.<br />
-	Migration is not the point of the study; it is the operation where "only unique bytes cross the wire" is easiest to see and to measure.
+	Provisioning a guest from an image whose chunks exist in the fleet moves the manifest, at least 32 bytes per chunk, and no chunk data.<br />
+	Migrating a guest moves the manifest plus the bytes written since the last compaction.<br />
+	Migration is measured because it is the operation in which "only unique bytes cross the wire" is easiest to isolate.
 </p>
 <p>
 	<strong>Capacity.</strong><br />
-	A fleet stores each chunk k times, not once per host.
+	The fleet stores each unique chunk k times rather than once per host, and each host's index holds entries only for the chunks it owns.
 </p>
 <p>
 	<strong>Cache.</strong><br />
-	A chunk that is hot anywhere is in some host's memory, and <mark>a peer's memory over 100 GbE is closer than local NVMe</mark>: about 20 µs against about 80.
+	Every host sends its reads of a chunk to the same k owners, so a chunk that many guests read is hot at its owner.<br />
+	On ConnectX-5 hardware, a 4 KiB read from a peer's memory measured 12 µs over kernel nvme-rdma and 21 µs over kernel nvme-tcp (<a href="https://review.spdk.io/download/performance-reports/SPDK_rdma_mlx_perf_report_2405.pdf" target="_blank" rel="noopener">SPDK 24.05</a>), and a 4 KiB read from an enterprise NVMe SSD measured about 80 µs (<a href="https://www.systor.org/2017/slides/NVMe-over-Fabrics_Performance_Characterization.pdf" target="_blank" rel="noopener">Systor '17</a>; <a href="https://www.usenix.org/system/files/osdi21-hwang.pdf" target="_blank" rel="noopener">blk-switch</a>).<br />
+	<mark>If those figures hold on the testbed, a chunk in a peer's memory arrives before a chunk on the local disk.</mark> Hypothesis 3 tests this.
 </p>
 
-<h2>The cost</h2>
+<h2>What it costs</h2>
 <p>
-	Three costs come with any deduplicating store, and we measure them rather than assume them: write amplification (every byte is written to the staging log and again to the chunk store), compactor interference (compaction shares the guest's disk), and index memory (one entry per chunk, in RAM).
+	Three costs come with any post-process deduplicating store, and each is measured rather than assumed: write amplification, because every surviving byte is written to the staging log and again to the store; compactor interference, because compaction shares the guest's disk; and index memory, one entry per chunk in RAM.
 </p>
 <p>
-	One cost is specific to crossing hosts: the network sits on the read path for cold chunks.<br />
-	A guest read whose chunk lives on another host pays one round trip.<br />
-	Part 3 measures that round trip over TCP and over RDMA (remote direct memory access), from the peer's memory and from the peer's NVMe.<br />
-	It then measures prefetch: the daemon knows from the manifest which chunks come next, so it fetches them before the guest asks, and the round trip overlaps with work the guest is already doing instead of adding to it.<br />
-	How much of the cost prefetch removes is the number.
+	One cost belongs to distribution alone: for a chunk this host does not hold, the network is on the read path.<br />
+	Part 3 measures that read over TCP and over RDMA, from the peer's memory and from the peer's NVMe.<br />
+	It then measures prefetch: the daemon reads the manifest, so it knows which chunks a sequential reader will ask for next and fetches them while the guest works on the last one.<br />
+	How much of the cost prefetch removes is a reported number.
 </p>
 <p>
 	One cost is a trade rather than a tax: durability before acknowledgment.<br />
-	A guest's FLUSH means "these bytes must survive".<br />
-	In local class, the default, the daemon acknowledges after fdatasync on this host, which is the same contract a local disk gives; if the host is lost before compaction has shipped those bytes to their owner, they are lost with it.<br />
-	In fleet class the daemon first sends the bytes themselves (not the manifest, since the manifest points at bytes that exist nowhere else yet) to a fixed peer, waits for the peer's fdatasync, and then acknowledges; the bytes now survive the loss of this host.<br />
-	Every hyperconverged product works in fleet class.<br />
-	Parts 2 and 3 measure the price of the difference: one round trip and one remote fdatasync per FLUSH, on TCP, and on RDMA if that arm lands.
+	A guest's FLUSH means that the bytes must survive.<br />
+	In local class, the default, the daemon acknowledges after fdatasync on this host, which is the contract a local disk gives; if the host is lost before compaction has shipped those bytes to their owners, they are lost with it.<br />
+	In fleet class the daemon also sends the bytes themselves to one fixed peer (not the manifest, since the manifest names bytes that exist nowhere else yet) and acknowledges after both this host's fdatasync and the peer's; the bytes then survive the loss of this host.<br />
+	<a href="https://www.nutanixbible.com/4g-book-of-aos-data-io-path.html" target="_blank" rel="noopener">Nutanix AOS</a> replicates its write log to another node before it acknowledges, and <a href="https://experistg.com/wp-content/uploads/2019/12/The-technology-enabling-HPE-SimpliVity-data-efficiency.pdf" target="_blank" rel="noopener">HPE SimpliVity</a> mirrors every write between two nodes; each product in the page 06 table acknowledges after a network copy.<br />
+	Parts 2 and 3 measure the price of the difference: one round trip and one remote fdatasync per FLUSH, over TCP, and over RDMA if that arm lands.
 </p>
 
 <h2>Hypotheses</h2>
+<p class="note">
+	Each hypothesis states a metric with its conditions, a comparator, a threshold, the source of the threshold, and what a miss would show.<br />
+	Thresholds are frozen at the end of week 2, after R0 has measured the testbed's fdatasync and media times, and do not move after that.
+</p>
 <p>
 	<strong>1. Single-host parity.</strong><br />
-	Our CAS system stores within 10% of the bytes ZFS fast dedup stores at the same block size, with guest p99 within 20% of a raw file on XFS.<br />
-	Index bytes per TB fall in inverse proportion to chunk size.
+	Bytes stored by the backend after compaction and sweep, under the fleet replay at fixed 4 KiB and 16 KiB, are within 10% of the bytes ZFS fast dedup stores at the same volblocksize, and bytes stored in each chunk-size arm are within 10% of the census prediction for that arm.<br />
+	Guest write and read p99 at 4 KiB QD1 are within 20% of a raw file on XFS.<br />
+	The 10% is the alignment argument above plus record headers and the leak between sweeps; the 20% is the passthrough bound of gate G1 plus an equal allowance for the log append and compactor interference.<br />
+	A miss on capture would show that fixed aligned chunks lose duplicates a Linux guest produces; a miss on p99 would show that the daemon, not deduplication, is the cost.
 </p>
 <p>
-	<strong>2. Multi-host benefits.</strong><br />
-	Provisioning and migrating a guest between hosts move the manifest plus the uncompacted tail, within 10% of that bound.<br />
-	With one copy per chunk, the two-host testbed stores at most 55% of what two per-host deduplication stores hold.<br />
-	Two hosts is the floor of this gain: Meyer and Bolosky showed deduplication savings grow with the log of the number of machines in one domain, so a larger fleet gains more, not less.
+	<strong>2. Transfer and capacity across hosts.</strong><br />
+	Bytes on the wire to provision and to migrate a guest are within 10% of the manifest size plus the staging tail, against the allocated image size that <code>zfs send</code> or rsync moves.<br />
+	Bytes stored on both hosts in partitioned mode, after the sweep, are at most 55% of the bytes two per-host ZFS pools hold for the same guests.<br />
+	The transfer bound is the design, since nothing else is sent; the 55% is one copy of the unique set instead of two, because guests cloned from one image give the two pools nearly the same unique set, plus five points for headers, manifests, and the leak.<br />
+	A miss on transfer would mean chunks were sent that an owner already held, a HAS or fence defect; a miss on capacity would mean the two pools shared less than the census predicted, which the census would show first.
 </p>
 <p>
-	<strong>3. The cost of a read over the network.</strong><br />
-	A chunk served from the owner's memory arrives faster than a local NVMe read on both TCP and RDMA.<br />
-	From the owner's NVMe it costs at most 40% over local on TCP and 15% on RDMA.<br />
-	With enough reads in flight, remote sequential throughput matches local.
+	<strong>3. The remote read.</strong><br />
+	For a 4 KiB read at QD1 whose chunk is not in the local cache: served from the owner's memory, guest-visible latency is lower than the same read served by the daemon from its own NVMe, over TCP and over RDMA; served from the owner's NVMe, it is at most 40% over the local read on TCP and 15% on RDMA; and with reads in flight at or above the bandwidth-delay point, remote sequential throughput is within 10% of local.<br />
+	The thresholds are the literature stack on page 04: about 80 µs of media, plus 20 to 30 µs for a userspace daemon over kernel TCP and about 12 µs for kernel nvme-rdma.<br />
+	A miss on the first part would show that the kernel stack or the daemon's wakeup costs more than the media; a miss on the last would show that the fabric, not the depth, bounds throughput.
 </p>
 <p>
-	<strong>4. The cost of durability before acknowledgment.</strong><br />
-	Fleet class costs one round trip and one peer fdatasync per FLUSH.<br />
-	Its write p99 at QD1 is within 3x of local class on TCP, and within 2x on RDMA if the ibverbs arm lands.<br />
-	In local class, a lost host loses exactly the acknowledged bytes not yet compacted to an owner, and that window is reported in seconds.
-</p>
-<p class="note">
-	Thresholds come from the transport literature on page 04 and the census prediction on page 02.<br />
-	They are frozen at the end of week 2 and do not move.
+	<strong>4. Durability before acknowledgment.</strong><br />
+	Write p99 at 4 KiB QD1 in fleet class is within 3x of local class over TCP, and within 2x over RDMA if the ibverbs arm lands.<br />
+	The window of local class, the seconds between a FLUSH acknowledgment and the durability of those bytes at their owners, is reported as a distribution under the fleet replay.<br />
+	The 3x is one round trip plus one peer fdatasync alongside the local fdatasync, on the page 04 figures and an fdatasync near 40 µs (NEED DATA; measured on the testbed drive in week 1).<br />
+	A miss would show that the journal path rather than the transport is the cost, and the peer's fdatasync time is reported separately so the two can be told apart.
 </p>
 
 <h2>Outputs</h2>
@@ -142,18 +146,16 @@
 </p>
 <p>
 	<strong>The single-host table.</strong><br />
-	Our CAS system against ZFS fast dedup and a raw file on XFS: bytes stored, guest p99, write amplification, and index memory, at three chunk sizes.<br />
-	This is where hypothesis 1 is decided and where the chunk-size trade-off is measured.
+	The backend against ZFS fast dedup and a raw file on XFS: bytes stored, guest p99, write amplification, and index memory, at three chunk sizes.<br />
+	Hypothesis 1 is decided here, and the chunk-size trade is measured here.
 </p>
 <p>
 	<strong>The multi-host table.</strong><br />
-	Bytes moved to provision and to migrate a guest, bytes sent to synchronize two drifted guests, and fleet bytes stored with one copy per chunk, each against what <code>zfs send</code> or rsync would move and what two per-host ZFS pools would hold.<br />
-	No local-disk backend can produce these numbers.
+	Bytes moved to provision and to migrate a guest, bytes sent to synchronize two drifted guests, fleet bytes stored with one copy per chunk, and index bytes per host, each against what <code>zfs send</code> or rsync moves and what two per-host ZFS pools hold.
 </p>
 <p>
 	<strong>The remote-read measurement.</strong><br />
-	A content-addressed chunk fetched from a peer under a VM block device, at microsecond resolution, over the daemon on kernel TCP and over NVMe-oF on TCP and RDMA, from the peer's memory and from its NVMe, with and without prefetch.<br />
-	No published system has this measurement.
+	A content-addressed chunk fetched from a peer under a VM block device, at microsecond resolution, over the daemon on kernel TCP and over NVMe-oF on TCP and RDMA, from the peer's memory and from its NVMe, with and without prefetch.
 </p>
 <p>
 	<strong>The durability trade.</strong><br />
@@ -162,17 +164,19 @@
 
 <h2>Scope</h2>
 <p>
-	The study covers hosts that serve guests from local flash, from a homelab up to rack scale.<br />
-	Storage arrays and hyperscale economics are out of scope.
+	The study covers hosts that serve guests from local flash, from a homelab up to rack scale; storage arrays and hyperscale economics are out of scope.<br />
+	Hosts hold each other's chunks, which couples the failure domains of compute and storage that shared-storage designs keep apart; the study measures what that costs on the read path and does not model its availability.
 </p>
 <p>
 	Chunks are placed over N hosts by rendezvous hashing: every host scores each (chunk, host) pair with one hash function, and the k highest-scoring hosts own the chunk.<br />
-	Every host computes the same answer with no shared state, no ring, and no lookup, which is what makes it simpler than a consistent-hashing ring at small N.<br />
-	The testbed is two hosts with static membership, so failure detection, rebalancing, and authentication are out of scope.<br />
-	One copy per chunk (k = 1) on two hosts is a measurement configuration that maximizes remote reads so their cost can be seen; a deployment runs k ≥ 2 on N ≥ 3 hosts.
+	Every host computes the same owner set with no shared state, no ring, and no lookup, at N hash evaluations per chunk; CRUSH's straw2 bucket is the same computation with per-host weights (NEED CITE).<br />
+	The testbed is two hosts with static membership, so failure detection, rebalancing, and authentication are out of scope; when a host joins or leaves under rendezvous hashing, only the chunks whose top-k set changes move.<br />
+	One copy per chunk (k = 1) on two hosts sends the largest share of cold reads over the network that this testbed can produce, one half in expectation; in general the share is 1 − k/N.<br />
+	A deployment runs k ≥ 2 on N ≥ 3 hosts.
 </p>
 <p>
 	Each image has one writer.<br />
+	Ownership state, the root record that names the writer and carries an epoch, is held on both hosts; two hosts form no quorum, so failover of a lost writer is a scripted decision and not automatic.<br />
 	The study migrates disks only; memory migration is QEMU's.
 </p>
 <p>
@@ -184,7 +188,7 @@
 	The store is trusted infrastructure, so deduplication side channels are documented and excluded.
 </p>
 <p>
-	Experiments run at single-digit TB, and larger figures are formulas with measured constants, labeled as such.<br />
+	Experiments run at single-digit TB, and larger figures are projections from measured constants, labeled as such.<br />
 	RDMA is a measurement arm on page 04; nothing in the architecture requires it.
 </p>
 

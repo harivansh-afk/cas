@@ -8,7 +8,7 @@
 </script>
 
 <svelte:head>
-	<title>Content Addressed Deduplication · {num} {title}</title>
+	<title>Content-addressed deduplication · {num} {title}</title>
 </svelte:head>
 
 <span class="eyebrow">page {num} / {last}</span>
