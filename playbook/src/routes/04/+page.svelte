@@ -6,8 +6,7 @@
 
 <PageHead num="04" />
 <p class="lede">
-	Page 04 measures the one place the network enters guest latency in local class, a cold read whose chunk lives on another host, and then the round trip fleet class adds to FLUSH.<br />
-	This page measures that read, then measures how much of it prefetch removes.
+	Page 04 measures the one place the network enters guest latency in local class, a cold read whose chunk lives on another host, then how much of it prefetch removes, then the round trip fleet class adds to FLUSH.
 </p>
 
 <h2>Where the time goes in a remote read</h2>
@@ -25,7 +24,7 @@
 	Every host sends its reads of a chunk to the same k owners, so we predict a chunk read by many guests is hot at its owner, and a remote read in that case is the memory row. The owner's hit rate is reported under the boot storm below.
 </p>
 <p class="note">
-	A caution from a prior implementation by the author: a peer round trip over QUIC with TLS on a bonded 25 GbE link measured 108 µs at p50 and 257 µs at p99 (unpublished). The daemon here uses kernel TCP with <code>TCP_NODELAY</code> on 100 GbE, and the number is measured rather than assumed.
+	A caution from a prior implementation by the author: a peer round trip over QUIC with TLS on a bonded 25 GbE link measured 108 µs at p50 and 257 µs at p99 (unpublished). The daemon here uses kernel TCP with <code>TCP_NODELAY</code> on 100 GbE.
 </p>
 
 <Diagram
@@ -57,7 +56,7 @@
 <h2>Transport probes</h2>
 <p>
 	The architecture's transport is the daemon over kernel TCP.<br />
-	The other rows exist to show what the kernel stack and the userspace hop each cost, and nothing depends on them.
+	The other rows exist to show what the kernel stack and the userspace hop each cost.
 </p>
 <div class="table-scroll">
 	<table class="spec prose">
@@ -92,27 +91,26 @@
 
 <h2>Prefetch</h2>
 <p>
-	The manifest tells the daemon what comes next.<br />
-	Depth sweep: sequential reads through the manifest with P chunks in flight, P doubling from 1 to 512 at 4 KiB and from 1 to 32 at 64 KiB.<br />
+	The depth sweep reads sequentially through the manifest with P chunks in flight, P doubling from 1 to 512 at 4 KiB and from 1 to 32 at 64 KiB.<br />
 	The bandwidth-delay point is about 250 KB for the fabric (100 Gb/s × 20 µs) and about 1.2 MB with media under it (100 Gb/s × 100 µs), so we predict that about 20 chunks of 64 KiB or 300 of 4 KiB in flight hide the remote read.<br />
 	Success is remote sequential throughput within 10% of local, the throughput clause of hypothesis 3.
 </p>
 <p>
-	Profile prefetch: record the chunk sequence of one boot, replay it on later boots.<br />
-	<a href="https://www.usenix.org/system/files/atc20-li-huiba.pdf" target="_blank" rel="noopener">DADI</a>, REAP, FaaSnap, VMTorrent, and Nydus each prefetch a recorded access profile, and DADI reports that this removes 95% of the gap between cold and warm start.<br />
+	Profile prefetch records the chunk sequence of one boot and replays it on later boots.<br />
+	DADI, REAP, FaaSnap, VMTorrent, and Nydus each prefetch a recorded access profile (page 06).<br />
 	It is budgeted at one day.
 </p>
 
 <h2>Under a guest workload</h2>
 <p>
 	Partitioned boot storm at n = 16, with and without profile prefetch, against the same storm in replicated mode.<br />
-	Reported: guest p99, host device reads per guest byte, the fraction of reads served by the peer, and the fraction of those the peer answered from memory, so the per-read cost and the miss rate can be multiplied and the hotness prediction on page 00 is checked.<br />
+	The run reports guest p99, host device reads per guest byte, the fraction of reads served by the peer, and the fraction of those the peer answered from memory, so the per-read cost and the miss rate can be multiplied and the hotness prediction on page 00 is checked.<br />
 	<mark>The gap between partitioned with prefetch and replicated is the residual cost of one copy per chunk.</mark>
 </p>
 
 <h2>The FLUSH round trip</h2>
 <p>
-	Fleet class puts one round trip and one remote fdatasync in front of every FLUSH acknowledgment, as Nutanix AOS and HPE SimpliVity do. On the figures above the transport is about a tenth of a cold read over RDMA and a fifth over TCP, because 80 µs of media sits beneath the read. A FLUSH has no media to hide behind, so we predict the round trip and the peer's fdatasync are most of its cost, and hypothesis 4 bounds it.<br />
+	Fleet class puts one round trip and one remote fdatasync in front of every FLUSH acknowledgment. On the figures above the transport is about a tenth of a cold read over RDMA and a fifth over TCP, because 80 µs of media sits beneath the read. A FLUSH has no media to hide behind, so we predict the round trip and the peer's fdatasync are most of its cost, and hypothesis 4 bounds it.<br />
 	It is measured here with the same discipline as the read rows: write p99 at QD1 for local class, for fleet class over the daemon on TCP, and for fleet class over ibverbs if that arm lands, with the peer's fdatasync time reported separately so the transport's share is visible.
 </p>
 
@@ -120,8 +118,7 @@
 <p>
 	The CloudLab fabric is lossy. No PFC or ECN is documented on the shared switches, and the one published RoCE measurement on this node type does not say whether either was on.<br />
 	Adaptive retransmission is enabled on the NIC and the counters above show whether the runs were clean.<br />
-	ConnectX-5 cannot do io_uring zero-copy receive, so that option is unavailable.<br />
-	None of this touches the architecture, which runs on kernel TCP and would run on any Ethernet.
+	ConnectX-5 cannot do io_uring zero-copy receive, so that option is unavailable.
 </p>
 
 <PageNav num="04" />

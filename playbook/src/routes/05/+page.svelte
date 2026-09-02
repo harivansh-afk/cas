@@ -12,19 +12,19 @@
 <h2>Hardware</h2>
 <p>
 	Two CloudLab c6525-100g nodes (Utah), reserved as a pair.<br />
-	Per node: AMD EPYC 7402P, 24 cores at 2.80 GHz; 128 GB ECC DDR4-3200; two 1.6 TB PCIe 4.0 NVMe SSDs; ConnectX-5 Ex 100 GbE, one port on the experiment network.<br />
+	Each node has an AMD EPYC 7402P with 24 cores at 2.80 GHz, 128 GB ECC DDR4-3200, two 1.6 TB PCIe 4.0 NVMe SSDs, and a ConnectX-5 Ex 100 GbE with one port on the experiment network.<br />
 	One NVMe holds the system and results, and the other is the device under test.<br />
 	The pair is one hop through a single switch.
 </p>
 <p>
-	RoCE between two of these nodes works on the lossy fabric. <a href="https://arxiv.org/pdf/2312.06808" target="_blank" rel="noopener">BPF-oF</a> ran nvme-rdma and nvme-tcp between two c6525-100g nodes and measured 18 and 30 µs average round trips.<br />
+	RoCE between two of these nodes works on the lossy fabric, since BPF-oF ran it there (page 04).<br />
 	Self-built kernels are routine there. The Ubuntu 24.04 image ships 6.8, dm-vdo needs 6.9, and OpenZFS 2.3 is a source build, so a kernel and ZFS are built once in week 1 and snapshotted as an image.<br />
 	An experiment expires after a few hours unless it is extended, so every run is scripted to complete inside one sitting.
 </p>
 <p>
 	CloudLab is free for research.<br />
 	A project is opened by a faculty member and reviewed by CloudLab staff, so the sponsor opens it before Sep 9.<br />
-	Fallback: two OVHcloud Advance-4 2026 servers (EPYC 4585PX, 16 cores, 64 GB DDR5 ECC, 2 × 960 GB NVMe) on a 25 Gbps private link, which loses the RDMA arm and replaces the 100 GbE fabric with 25 GbE.
+	The fallback is two OVHcloud Advance-4 2026 servers (EPYC 4585PX, 16 cores, 64 GB DDR5 ECC, 2 × 960 GB NVMe) on a 25 Gbps private link, which loses the RDMA arm and replaces the 100 GbE fabric with 25 GbE.
 </p>
 
 <h2>Schedule</h2>
@@ -50,7 +50,7 @@
 	<strong>G1.</strong> Passthrough daemon under stock QEMU within 10% of R0 p99 by the end of week 2. If this slips, everything after it slips, and the sponsor is informed that week.
 </p>
 <p>
-	<strong>G2.</strong> <code>kill -9</code> at arbitrary points, replay, <code>fio --verify</code> passes, before any daemon number is reported. Three ordering tests pass with it: a FLUSH covering writes completed on another queue, an empty discard, and a stalled daemon that is restarted with the guest still recoverable.
+	<strong>G2.</strong> The recovery and ordering tests on page 01 pass before any daemon number is reported.
 </p>
 <p>
 	<strong>G3.</strong> Page 02 table complete: R0, R1 at two block sizes, R3 at three chunk sizes; latency, capture, index, amplification; variance beside every number.
@@ -86,9 +86,9 @@
 	<li><strong>Daemon overrun.</strong> The largest risk and the reason G1 is at week 2. Protocol plumbing comes from maintained crates, so the hours go to the components listed as new code on page 01.</li>
 	<li><strong>RoCE configuration.</strong> GID selection, MTU, adaptive retransmission on a lossy fabric. Budgeted at 8 hours. If it exceeds 20, the RDMA rows are dropped and the TCP rows stand.</li>
 	<li><strong>Node availability.</strong> 36 nodes of this type exist, so the pair is reserved in week 1 for every measurement week.</li>
-	<li><strong>Correctness debt.</strong> The defects that stall or corrupt a guest are known in advance from a prior implementation: a FLUSH that misses a write completed on another queue, an empty discard that acknowledges a sequence number nothing wrote, a daemon that stops and leaves the guest in D-state. Each has a test in G2 and hours in weeks 3 to 5, before any number is taken.</li>
+	<li><strong>Correctness debt.</strong> The defects that stall or corrupt a guest are known from a prior implementation, and each has a test on page 01 and hours in weeks 3 to 5, before any number is taken.</li>
 	<li><strong>O_DIRECT alignment.</strong> A guest buffer not aligned to the logical block is bounced through an aligned copy, and the fraction of requests bounced is counted.</li>
-	<li><strong>Known configuration pitfalls.</strong> <code>dedup=on</code> means SHA-256. Direct IO does nothing on zvols. The 100G interface stays down unless the profile declares a link on it.</li>
+	<li><strong>Known configuration pitfalls.</strong> The 100G interface stays down unless the profile declares a link on it; the ZFS pitfalls are in the R1 table on page 02.</li>
 	<li><strong>Census realism.</strong> Scripted drift is not real drift. The fleet is built from real dated archives, the scripts are published, and the numbers it supplies are bounds the daemon is read against, not claims about fleets in the wild.</li>
 </ul>
 

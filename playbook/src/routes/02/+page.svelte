@@ -6,8 +6,7 @@
 <PageHead num="02" />
 <p class="lede">
 	Page 02 runs the same stock QEMU, the same guest, and the same NVMe device, and varies only the storage behind the device.<br />
-	We predict a tie on capture between the backend and ZFS fast dedup.<br />
-	The measurement is made because the chunk-size curve beneath the tie is the single-host design result, and because the tie is hypothesis 1.
+	Hypothesis 1 predicts a tie on capture with ZFS fast dedup. The curve beneath the tie, capture against index memory across three chunk sizes, is this page's result.
 </p>
 
 <h2>Configurations</h2>
@@ -41,7 +40,7 @@
 </p>
 <p>
 	<strong>R2. Raw file on XFS over dm-vdo</strong> (optional).<br />
-	Inline fixed-4 KiB deduplication in the kernel, mainline since 6.9, with its own XFS instance on the vdo device.<br />
+	Fixed 4 KiB deduplication in the kernel, with its own XFS instance on the vdo device.<br />
 	Index memory from <code>vdostats</code>.
 </p>
 <p>
@@ -71,7 +70,6 @@
 	Three arms: fixed 4 KiB, fixed 16 KiB, FastCDC 8 to 64 KiB with a 16 KiB mean.<br />
 	CDC boundaries snap to 4 KiB, so no guest block straddles two chunks and a 4 KiB overwrite invalidates one chunk, not two.<br />
 	Reported per arm: bytes stored, index bytes per TB, guest p99, write amplification, compactor CPU per GB.<br />
-	<mark>Capture against index memory as a function of chunk size is the result this page produces.</mark><br />
 	The census below predicts the capture column for each arm before any run.
 </p>
 
@@ -80,7 +78,7 @@
 	<li>fio: 4 KiB random write and read at QD1 and QD32; 128 KiB sequential.</li>
 	<li>Boot storm: n clones of one image booted together, n = 4, 16, 32. A clone is a copy of the manifest with its own staging log.</li>
 	<li>Fleet replay: the synthetic fleet below written onto n guests, at two points on its timeline.</li>
-	<li>Overwrite: a small SQLite database rewriting its pages in place for an hour, with guest discard on. This is the case where a store without reference counts leaks between sweeps and ZFS does not.</li>
+	<li>Overwrite: a small SQLite database rewriting its pages in place for an hour, with guest discard on.</li>
 </ul>
 
 <h2>Metrics</h2>
@@ -91,8 +89,8 @@
 	<li>Write amplification: device bytes written per guest byte, from NVMe counters, with both legs (staging and store) reported, not one.</li>
 	<li>Sustainable ingest, the point where the governor starts adding latency, and how much it adds.</li>
 	<li>Chunk traffic against the settle window: chunks produced per guest byte written, on the overwrite workload.</li>
-	<li>Compactor CPU per GB ingested, per chunk-size arm. Liquid called hashing CPU-intensive and did not price it, and here it is a number.</li>
-	<li>Recovery: <code>kill -9</code>, replay, <code>fio --verify</code>; FLUSH covering writes on another queue; an empty discard; a daemon that stops answering.</li>
+	<li>Compactor CPU per GB ingested, per chunk-size arm.</li>
+	<li>Recovery: the page 01 tests pass before any number is reported.</li>
 </ul>
 
 <h2>Controls</h2>
@@ -128,7 +126,7 @@
 	Per byte range: zero or unallocated (from the guest allocation map, excluded), unique, shared with the T0 base in place, duplicate at an aligned 4 KiB or 16 KiB boundary elsewhere in the fleet, or duplicate only at a shifted offset.<br />
 	The aligned columns predict R1 and the fixed arms.<br />
 	The CDC arm is predicted by running FastCDC with the arm's parameters over the images, because a 16 KiB mean chunk captures fewer aligned matches than fixed 4 KiB chunks and more shifted ones, and the two effects do not add.<br />
-	Nothing further: no donors, no real fleets, no claims about time.
+	There are no donors, no real fleets, and no claims about time.
 </p>
 
 <PageNav num="02" />

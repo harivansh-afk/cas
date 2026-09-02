@@ -36,7 +36,7 @@
 			<tr><th>Work</th><th>What it measured</th><th>What it leaves open</th></tr>
 		</thead>
 		<tbody>
-			<tr><td class="k">Liquid (TPDS '14)</td><td>8 GB image to 7 nodes on 1 GbE: scp 730 s, NFS 510 s, BitTorrent 95 s, Liquid 35 s; on-demand boot 1.7x to 4x a cached boot; dedup 77% at 4 KiB falling to 59% at 256 KiB on 183 images</td><td>miss cost stated as "several times longer IO delay" and never measured; no latency numbers anywhere; HDD and 1 GbE</td></tr>
+			<tr><td class="k">Liquid (TPDS '14)</td><td>8 GB image to 7 nodes on 1 GbE: scp 730 s, NFS 510 s, BitTorrent 95 s, Liquid 35 s; on-demand boot 1.7x to 4x a cached boot</td><td>miss cost stated as "several times longer IO delay" and never measured; no latency numbers anywhere; HDD and 1 GbE</td></tr>
 			<tr><td class="k">DADI (ATC '20)</td><td>block-level lazy loading with tree P2P; 10,000 containers on 1,000 hosts in 4 s; trace prefetch removes 95% of the cold gap; reads from a parent's page cache are faster than local disk</td><td>no per-read miss latency; not content-addressed</td></tr>
 			<tr><td class="k">Slacker (FAST '16)</td><td>only 6.4% of a container image is read at startup; lazy fetch over NFS; run phase 17% slower</td><td>no per-block miss cost; centralized</td></tr>
 			<tr><td class="k">VMTorrent (CoNEXT '12), VMThunder (TPDS '14)</td><td>demand-priority P2P VM image streaming; VMTorrent replays recorded profiles, VMThunder streams on demand through a relay tree</td><td>startup seconds only</td></tr>
@@ -52,27 +52,16 @@
 	DADI, VMTorrent, REAP, and FaaSnap report startup time in seconds and hide the per-read penalty behind a recorded access profile, and VMThunder reports seconds without one. Liquid names the penalty and does not measure it.
 </p>
 
-<h2>Transport measurements in prior systems</h2>
-<p>
-	i10 (NSDI '20) and blk-switch (OSDI '21) showed kernel TCP can match RDMA on throughput per core with batching, at a latency cost of 50 to 100 µs at low load.<br />
-	The SPDK 24.05 reports on ConnectX-5 put kernel nvme-rdma at 12.1 µs and kernel nvme-tcp at 21.4 µs for a 4 KiB read against a null device.<br />
-	BPF-oF (2023) measured 18 µs over nvme-rdma and 30 µs over nvme-tcp between two CloudLab c6525-100g nodes, the testbed's node type, on kernel 5.12.<br />
-	Homa (ATC '21) and eRPC (NSDI '19) put kernel bypass at 2 to 5 µs and attribute the rest of kernel TCP to wakeups and core selection.<br />
-	No storage paper in the sweep measured a blocking userspace daemon over kernel TCP as a remote read target. Page 04 estimates that row and then measures it.
-</p>
-
 <h2>Objections already in print</h2>
 <p>
 	<strong>Dong et al. (FAST '11)</strong> rejected per-chunk hash placement for backup streams on locality grounds and routed 1 MB super-chunks. Page 03 answers with a local cache and page 04 measures the cost.<br />
 	<strong>Meyer and Bolosky (FAST '11)</strong> found that deduplication savings grow with the log of the number of file systems in one domain, on 857 desktops. Two hosts is the floor of the capacity half of hypothesis 2, and a larger fleet gains more.<br />
-	<strong>Jin and Miller (SYSTOR '09)</strong> found fixed blocks match CDC on VM images, which is why page 02 predicts a tie.<br />
 	<strong>despairlabs (2024)</strong> tells ZFS operators to use clones and block cloning for the copy case and deduplication rarely. Hypothesis 1 predicts agreement on one host, and hypothesis 2 measures the cross-host case that advice does not address.<br />
-	<strong>The hyperconverged products</strong> (Nutanix, Datrium, SimpliVity, vSAN ESA) mirror a write over the network before acknowledging it, so a local-only acknowledgment is a durability trade rather than a free latency gain. Page 01 makes it a class and page 03 prices both.
+	<strong>The hyperconverged products</strong> (Nutanix, Datrium, SimpliVity, vSAN ESA) mirror a write over the network before acknowledging it, so a local-only acknowledgment is a durability trade rather than a free latency gain. Page 01 makes it a class and page 04 prices it.
 </p>
 
 <h2>What this study adds</h2>
 <p>
-	Datrium's patent and Nutanix's design are cited by name, Liquid is the nearest prior system, and Fossil and Venti are the origin of the two-tier shape.<br />
 	The study's contribution is the measurement: what content addressing provides across hosts on commodity hardware under a stock hypervisor, and what the remote cold read costs, per transport.
 </p>
 

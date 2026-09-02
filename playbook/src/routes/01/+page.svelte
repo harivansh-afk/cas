@@ -97,7 +97,7 @@
 <p>
 	Durability comes from the log alone. Every file is opened O_DIRECT, so the page cache must never hold the sole copy of a byte.<br />
 	A waiting FLUSH starts an fdatasync at once. FLUSHes that arrive during one are covered by the next, and an idle fdatasync every 50 ms upgrades writes no FLUSH has asked for.<br />
-	Fresh data is read back from the log at the cost of one NVMe read, the cost R0 pays. An in-memory map from block to log offset supplies the location.
+	An in-memory map from block to log offset locates fresh data in the log.
 </p>
 <p>
 	The staging log is finite, so a governor paces compaction on the measured drain rate, with an idle trigger so that nothing sits in staging after a workload ends.<br />
@@ -140,12 +140,10 @@
 	Chunking is fixed 4 KiB, fixed 16 KiB, or FastCDC with boundaries snapped to 4 KiB (one per measurement arm on page 02).<br />
 	Settled means unwritten for a settle window, so an extent overwritten inside the window is chunked once, after the window closes, in its final form.<br />
 	The window is a parameter, and its effect on chunk traffic is measured.<br />
-	A discarded or zero-filled range is one range entry in the manifest that names no chunk, so DISCARD and WRITE_ZEROES of any size consume no store space and constant compactor work. A read of such a range returns zeros.<br />
-	Deferred hashing behind a write buffer is <a href="https://madsys.cs.tsinghua.edu.cn/publications/TPDS2014-zhao.pdf" target="_blank" rel="noopener">Liquid</a>'s design and <a href="https://github.com/wangeguo/plan9/blob/master/sys/man/4/fossil" target="_blank" rel="noopener">Fossil</a>'s before it.<br />
-	The buffer in this study is a durable log on local NVMe with a FLUSH contract.
+	A discarded or zero-filled range is one range entry in the manifest that names no chunk, so DISCARD and WRITE_ZEROES of any size consume no store space and constant compactor work. A read of such a range returns zeros.
 </p>
 <p>
-	For each new chunk, the owner set is the first k hosts in rendezvous order of its hash.<br />
+	Rendezvous order of the hash names the k owners (Placement, below).<br />
 	If this host is an owner, the chunk is appended to the local store and made durable with fdatasync.<br />
 	Otherwise it goes to each owner in a sealed segment of many chunks, which the owner appends, fdatasyncs once, and acknowledges.<br />
 	<mark>An extent counts as compacted at D, when its chunks are durable in a store, at their owners or as surplus copies here, and its manifest entry is committed. It counts as owner-durable at O, after every owner's acknowledgment.</mark><br />
@@ -154,13 +152,6 @@
 	A chunk the compactor has produced stays pinned, in the staging log or in a store, until the manifest commit that references it is durable. An owner never reclaims a chunk it acknowledged before that fence.<br />
 	The staging log is therefore the write-ahead log for every chunk this host produces, wherever the chunk might end up.
 </p>
-<p>
-	Two costs come with this design:
-</p>
-<ul class="plain">
-	<li>Every surviving byte is written at least twice, staging then store, plus journal traffic.</li>
-	<li>Compaction reads and writes the same device the guest is using, so guest p99 is measured with the compactor active and idle.</li>
-</ul>
 <p>
 	The compactor holds no lock the FLUSH path takes. A test slows the store to one second per append and checks that every FLUSH still completes within its budget.
 </p>
@@ -207,9 +198,7 @@
 <p>
 	The chunk cache is daemon-owned memory keyed by hash, LRU, with a size that is a parameter.<br />
 	A fetched chunk this host does not own lives in that memory cache only.<br />
-	Liquid persisted fetched blocks in an on-disk copy-on-read cache. Here a refetch from a peer's memory is predicted at 20 to 30 µs against about 80 µs for a local disk hit, so a disk tier would pay only for chunks that are cold at their owner too (page 04 measures the refetch).<br />
-	The disk tier is a knob, noted, and measured only if time remains. The residual cost of one copy per chunk on page 04 is measured without it.<br />
-	Because every file is O_DIRECT, the kernel page cache holds nothing on any host, and the cache size is set equal to the ARC (adaptive replacement cache) limit on the ZFS configuration.
+	A disk tier for fetched chunks, as Liquid had, is a knob measured only if time remains, since page 04 predicts a refetch from a peer's memory costs less than a local disk hit.
 </p>
 <p>
 	Prefetch is the daemon issuing the next P hashes from the manifest in one <code>GET</code> when it sees sequential reads, and optionally replaying a recorded boot profile.<br />
@@ -247,12 +236,7 @@
 	Messages are length-prefixed over kernel TCP with <code>TCP_NODELAY</code>, driven by io_uring.<br />
 	<code>GET</code> and <code>JOURNAL</code> have their own connections and priority. <code>PUT</code> is bulk.<br />
 	Every message is idempotent and named by hash or sequence number, so any of them can be retried.<br />
-	The daemon runs busy-polling or blocking. Page 04 measures both, because the scheduler wakeup is part of the cost.<br />
-	Rendezvous hashing means a reader already knows the owners of every hash, so no host looks up another's index.
-</p>
-<p>
-	RDMA and NVMe-oF exports appear on page 04 as probes that show what the kernel stack costs.<br />
-	The architecture has no structural dependency on either.
+	The daemon runs busy-polling or blocking. Page 04 measures both, because the scheduler wakeup is part of the cost.
 </p>
 
 <h2>Placement and the parameter k</h2>
@@ -273,7 +257,6 @@
 	Durability is a per-image class on one pipeline. The class changes who waits at FLUSH and for how long. Chunks reach the same owners either way; fleet class adds a copy of the staging tail at the journal peer until compaction catches up.<br />
 	<strong>Local class</strong>, the default: FLUSH returns after fdatasync of the staging log on this host.<br />
 	<strong>Fleet class</strong>: the appends since the last FLUSH are sent to the image's journal peer, which appends it to its own log and fdatasyncs. The send proceeds in parallel with this host's fdatasync, FLUSH returns after both, and FLUSHes from several images to the same peer share one round trip and one fdatasync.<br />
-	Local class is the contract a local disk gives, which is why it is the default against R0 and R1.<br />
 	Fleet class is what <a href="https://www.nutanixbible.com/4g-book-of-aos-data-io-path.html" target="_blank" rel="noopener">Nutanix AOS</a> and <a href="https://experistg.com/wp-content/uploads/2019/12/The-technology-enabling-HPE-SimpliVity-data-efficiency.pdf" target="_blank" rel="noopener">HPE SimpliVity</a> do before they acknowledge, and page 04 measures what it costs.
 </p>
 <div class="table-scroll">
@@ -302,7 +285,6 @@
 	A chunk is live if any manifest on any host references it, or if an in-flight compaction has pinned it. A copy in a cache is never a reference.<br />
 	Each host sends each owner the live set for an epoch with <code>LIVE</code>, and the owner sweeps with <code>FALLOC_FL_PUNCH_HOLE</code> over dead records.<br />
 	Refcounting is not a concept in this architecture.<br />
-	(Liquid ran the same mark-and-sweep with Bloom-filter live sets over its data servers.)<br />
 	ZFS frees an overwritten block when its reference count drops. This design does not, so space can leak between sweeps.<br />
 	The sweep therefore runs before every capacity measurement, and the bytes it reclaims are reported beside the capacity number as the leak.
 </p>
@@ -323,8 +305,5 @@
 		</tbody>
 	</table>
 </div>
-<p>
-	Because the hypervisor is unmodified, no result can be an artifact of a patched QEMU, and the raw-file control runs the identical binary.
-</p>
 
 <PageNav num="01" />
