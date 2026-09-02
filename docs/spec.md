@@ -4,7 +4,7 @@ CS 4993, fall 2026. Research specification, v10.
 
 Abstract, rendered as the PDF abstract and the site description (`playbook/src/routes/+page.svelte`):
 
-Content addressing names a chunk by the hash of its bytes, so equal bytes have one name on every host. Deduplication in ZFS and dm-vdo is scoped to one pool, so a fleet stores a shared chunk once per host and migrates a guest by copying its image. This study builds a content-addressed block backend for virtual machines under unmodified QEMU. We predict that a guest is provisioned or migrated by moving only its manifest, that two hosts store at most 55% of what two per-host ZFS pools hold, that a cold 4 KiB read from a peer's memory over TCP arrives before one from local NVMe, and that single-host capture is within 10% of ZFS fast dedup at equal block size. The testbed is two hosts with static membership, Linux guests, and single-digit terabytes, and the cost measured is the network round trip on the cold read path and, in fleet class, on the FLUSH path.
+A content-addressed store identifies each chunk by a cryptographic hash of its contents, so identical data receives an identical identifier on every host. Deduplication in ZFS and dm-vdo is confined to one pool, so a fleet stores a shared chunk once per host and migrates a guest by copying its image. This study implements a content-addressed block backend for virtual machines beneath unmodified QEMU. We predict that a guest is provisioned or migrated by moving only its manifest, that two hosts store at most 55% of what two per-host ZFS pools hold, that a cold 4 KiB read from a peer's memory over TCP arrives before one from local NVMe, and that single-host capture is within 10% of ZFS fast dedup at equal block size. The testbed is two hosts with static membership, Linux guests, and single-digit terabytes, and the cost measured is the network round trip on the cold read path and, in fleet class, on the FLUSH path.
 
 This file is the working text of `playbook/src/routes/00–06`. Edits here are ported to the pages by hand. The generator `docs/mkspec.py` was removed in f4ea13b.
 Figures are described in brackets where the pages draw them.
@@ -17,9 +17,9 @@ Glossary, not rendered: the backend (daemon, store, protocol as a whole); the da
 
 # 00 Thesis
 
-**Content addressing names a chunk of data by the hash of its bytes, so equal bytes have one name wherever they are stored. In a fleet of hosts that name is the same on every host, which lets the fleet store a shared chunk once, transfer a guest by its list of names, and cache a chunk at one owner. This study builds a content-addressed block backend for virtual machines under unmodified QEMU and measures, on two hosts, those three gains against the latency of a cold read over the network.**
+**A content-addressed store identifies each chunk by a cryptographic hash of its contents, so that identical data receives an identical identifier independent of where it is stored. Across a fleet of hosts this property permits a shared chunk to be stored once, a guest to be transferred as a manifest of identifiers rather than as data, and a chunk to be cached at a single owner. This study implements a content-addressed block backend for virtual machines beneath unmodified QEMU and evaluates, on a two-host testbed, these three gains against the latency of a cold read served over the network.**
 
-Deduplication in ZFS and dm-vdo hashes blocks too, but the hash is a key in a table scoped to one pool and the block is still addressed by its location on disk, so nothing the table knows leaves the host.
+ZFS and dm-vdo also hash blocks for deduplication, but the hash serves only as a key into a table scoped to one pool while the block remains addressed by its location on disk, so no identity the table records is visible beyond the host.
 
 Three things follow: a guest is provisioned or migrated by moving its manifest, each unique chunk is stored k times across the fleet instead of once per host, and a chunk many guests read is served from its owner's memory. Pages 03 and 04 measure each.
 

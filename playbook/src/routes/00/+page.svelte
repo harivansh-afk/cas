@@ -6,8 +6,8 @@
 
 <PageHead num="00" />
 <p class="lede">
-	<mark>Content addressing names a chunk of data by the hash of its bytes, so equal bytes have one name wherever they are stored. In a fleet of hosts that name is the same on every host, which lets the fleet store a shared chunk once, transfer a guest by its list of names, and cache a chunk at one owner. This study builds a content-addressed block backend for virtual machines under unmodified QEMU and measures, on two hosts, those three gains against the latency of a cold read over the network.</mark><br />
-	Deduplication in ZFS and dm-vdo hashes blocks too, but the hash is a key in a table scoped to one pool and the block is still addressed by its location on disk, so nothing the table knows leaves the host.
+	<mark>A content-addressed store identifies each chunk by a cryptographic hash of its contents, so that identical data receives an identical identifier independent of where it is stored. Across a fleet of hosts this property permits a shared chunk to be stored once, a guest to be transferred as a manifest of identifiers rather than as data, and a chunk to be cached at a single owner. This study implements a content-addressed block backend for virtual machines beneath unmodified QEMU and evaluates, on a two-host testbed, these three gains against the latency of a cold read served over the network.</mark><br />
+	ZFS and dm-vdo also hash blocks for deduplication, but the hash serves only as a key into a table scoped to one pool while the block remains addressed by its location on disk, so no identity the table records is visible beyond the host.
 </p>
 <p>
 	Three things follow: a guest is provisioned or migrated by moving its manifest, each unique chunk is stored k times across the fleet instead of once per host, and a chunk many guests read is served from its owner's memory. Pages 03 and 04 measure each.<br />
