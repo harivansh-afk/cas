@@ -11,14 +11,24 @@
 	Existing solutions such as ZFS and dm-vdo also hash blocks for deduplication, but the hash serves only as a key into a table scoped to one pool while the block remains addressed by its location on disk, so no identity the table records is visible beyond a single host.
 </p>
 <p>
-	Three things follow: a guest is provisioned or migrated by moving its manifest, each unique chunk is stored k times across the fleet instead of once per host, and a chunk many guests read is served from its owner's memory. Pages 03 and 04 measure each.<br />
-	Two things are paid, and both are measured. A cold read of a chunk another host holds costs one round trip on the network. Durability before acknowledgment becomes a choice between this host's disk alone and a peer's disk as well.<br />
-	The system is a content-addressed block backend under unmodified QEMU. Its scope, called the testbed from here on:
+	Our system has three pre-requisites<br />
+	A guest is provisioned or migrated by moving its manifest<br />
+	Each unique chunk is stored k times across the fleet instead of once per host<br />
+	A chunk many guests read is served from its owner's memory. Pages 03 and 04 measure each individually.
+</p>
+<p>
+	A cold read of a chunk another host holds costs one round trip on the network,<br />
+	the latency for this is measured in this study over NVMe-tcp as well as RDMA<br />
+	Durability before acknowledgment becomes a choice between this host's disk alone and a peer's disk as well.
+</p>
+<p>
+	The system is a content-addressed block backend under unmodified QEMU.<br />
+	Its scope, called the testbed from here on:
 </p>
 <ul class="plain">
-	<li>two hosts with static membership</li>
+	<li>Two hosts with static membership</li>
 	<li>Linux guests</li>
-	<li>single-digit terabytes</li>
+	<li>Assumed single-digit terabytes scale</li>
 </ul>
 
 <h2>Deduplication within a host</h2>

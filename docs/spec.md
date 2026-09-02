@@ -23,15 +23,20 @@ This study measures those advantages and their cost on a multi-host cluster, and
 
 Existing solutions such as ZFS and dm-vdo also hash blocks for deduplication, but the hash serves only as a key into a table scoped to one pool while the block remains addressed by its location on disk, so no identity the table records is visible beyond a single host.
 
-Three things follow: a guest is provisioned or migrated by moving its manifest, each unique chunk is stored k times across the fleet instead of once per host, and a chunk many guests read is served from its owner's memory. Pages 03 and 04 measure each.
+Our system has three pre-requisites
+A guest is provisioned or migrated by moving its manifest
+Each unique chunk is stored k times across the fleet instead of once per host
+A chunk many guests read is served from its owner's memory. Pages 03 and 04 measure each individually.
 
-Two things are paid, and both are measured. A cold read of a chunk another host holds costs one round trip on the network. Durability before acknowledgment becomes a choice between this host's disk alone and a peer's disk as well.
+A cold read of a chunk another host holds costs one round trip on the network,
+the latency for this is measured in this study over NVMe-tcp as well as RDMA
+Durability before acknowledgment becomes a choice between this host's disk alone and a peer's disk as well.
 
-The system is a content-addressed block backend under unmodified QEMU. Its scope, called the testbed from here on:
-
-- two hosts with static membership
+The system is a content-addressed block backend under unmodified QEMU. 
+Its scope, called the testbed from here on:
+- Two hosts with static membership
 - Linux guests
-- single-digit terabytes
+- Assumed single-digit terabytes scale
 
 ## Deduplication within a host
 
