@@ -17,7 +17,7 @@ Glossary, not rendered: the backend (daemon, store, protocol as a whole); the da
 
 # 00 Thesis
 
-**A content-addressed store identifies each chunk by a cryptographic hash of its contents, so that identical data receives an identical identifier independent of where it is stored. Across a fleet of hosts this property permits a shared chunk to be stored once, a guest to be transferred as a manifest of identifiers rather than as data, and a chunk to be cached at a single owner. This study implements a content-addressed block backend for virtual machines beneath unmodified QEMU and evaluates, on a two-host testbed, these three gains against the latency of a cold read served over the network.**
+**Naming a virtual machine's disk blocks by their content rather than their location lets a fleet of hosts deduplicate, provision, and cache across host boundaries, at the cost of one network round trip per cold read. We test this claim with a content-addressed block backend beneath unmodified QEMU, measured on two hosts against ZFS.**
 
 ZFS and dm-vdo also hash blocks for deduplication, but the hash serves only as a key into a table scoped to one pool while the block remains addressed by its location on disk, so no identity the table records is visible beyond the host.
 
