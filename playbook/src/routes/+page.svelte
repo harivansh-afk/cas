@@ -12,13 +12,13 @@
 	/>
 </svelte:head>
 
-<span class="eyebrow">research specification</span>
-<div class="title-row">
-	<h2 class="title">Content-addressed deduplication: a distributed-storage-system study</h2>
+<div class="eyebrow-row">
+	<span class="eyebrow">research specification</span>
 	<a class="site-gh" href={repo} target="_blank" rel="noopener" aria-label="source on GitHub" title="source on GitHub">
 		<GitHubIcon />
 	</a>
 </div>
+<h2 class="title">Content-addressed deduplication: a distributed-storage-system study</h2>
 <nav class="toc" aria-label="Pages">
 	{#each pages as { num, title, description } (num)}
 		<div class="row">
@@ -35,15 +35,14 @@
 </nav>
 
 <style>
-	.title-row {
+	.eyebrow-row {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
 		gap: 1rem;
-		margin: 0.5rem 0 1rem;
 	}
 	.title {
-		margin: 0;
+		margin: 0.5rem 0 1rem;
 	}
 	.title::before {
 		content: none;
