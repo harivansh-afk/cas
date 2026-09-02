@@ -31,13 +31,13 @@
 		Index memory from <code>vdostats</code>.
 	</li>
 	<li>
-		<span class="rid">R4</span><strong>The daemon, one host.</strong><br />
+		<span class="rid">R3</span><strong>The daemon, one host.</strong><br />
 		Local store only; k does not apply.<br />
 		Three chunk-size arms below.
 	</li>
 </ul>
 <p>
-	R0 against R4 is the cost of the daemon with everything else held constant.<br />
+	R0 against R3 is the cost of the daemon with everything else held constant.<br />
 	R1 is the deployed state of the art and differs in kernel boundary, caching, and allocation, so it is a case study beside the controlled pair, and the paper attributes deltas accordingly.
 </p>
 
@@ -77,7 +77,7 @@
 <h2>Controls</h2>
 <p>
 	Pinned vCPUs, performance governor, discarded warm-up, fresh filesystem or pool per repetition, at least five repetitions, variance beside every number.<br />
-	Cache bounded equal across configurations: cgroup memory limit for the page cache on R0 and R2, <code>zfs_arc_max</code> on R1, the daemon's cache size on R4.
+	With <code>cache=none</code>, R0 and R2 have no host cache; <code>zfs_arc_max</code> on R1 and the daemon's cache size on R3 are set equal.
 </p>
 <p>
 	All configurations are observed at the guest boundary (fio's histograms, guest-side blktrace for the boot storm) plus host device counters.<br />

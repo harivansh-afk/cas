@@ -8,7 +8,7 @@
 <p class="lede">
 	<strong>Part 2.</strong><br />
 	Same daemon, N hosts, one parameter: k.<br />
-	Every measurement on this page is one no stock backend can produce.
+	Every number on this page is one no local-disk backend can match.
 </p>
 
 <h2>Two modes</h2>
@@ -40,19 +40,19 @@
 
 <h2>Provisioning</h2>
 <p>
-	A new guest on host B from an image whose chunks exist anywhere: copy the map, a few MB, and <code>HAS</code> its hashes.<br />
+	A new guest on host B from an image whose chunks exist anywhere: copy the map, 32 bytes per chunk, about 80 MB for a 40 GB image at 16K chunks. Every chunk it names already exists at its owner.<br />
 	In replicated mode no other data is transferred.<br />
 	In partitioned mode no other data is transferred either; chunks are fetched on first read.<br />
 	<mark>Provisioning cost is the size of the map.</mark>
 </p>
 <p>
-	Baseline: <code>qemu-img convert</code> or <code>scp</code> of the raw file, and <code>zfs send | zfs recv</code> of the zvol, each moving the full logical size.
+	Baseline: <code>qemu-img convert</code> or <code>scp</code> of the raw file, and <code>zfs send | zfs recv</code> of the zvol, each moving the allocated size of the image.
 </p>
 
 <h2>Migration</h2>
 <p>
 	Move a guest from A to B: stop, copy the map and the staging extents not yet compacted, start.<br />
-	A 40 GB guest that compacted recently moves in MB.<br />
+	A 40 GB guest that compacted recently moves in tens of MB.<br />
 	Memory migration is QEMU's and is out of scope; this is the disk.
 </p>
 <p>

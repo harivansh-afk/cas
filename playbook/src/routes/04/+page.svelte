@@ -7,7 +7,7 @@
 <PageHead num="04" />
 <p class="lede">
 	<strong>Part 3.</strong><br />
-	A cold read whose chunk lives on the other host is the only place the network enters guest latency.<br />
+	A cold read whose chunk lives on another host is the only place the network enters guest latency.<br />
 	This page measures it and reduces it.
 </p>
 
@@ -20,7 +20,7 @@
 <p>
 	RDMA against TCP is therefore a 10 µs difference on an 80 µs read.<br />
 	The larger factor, about 4x, is whether the chunk is in the owner's memory or on its disk.<br />
-	<mark>A chunk from a peer's memory over TCP is faster than a chunk from local NVMe.</mark><br />
+	If those numbers hold, <mark>a chunk from a peer's memory over TCP arrives faster than one from local NVMe</mark>; H3 tests this.<br />
 	With hash placement, a chunk shared across the fleet is hot at exactly one owner, and every host's read of it hits that owner's cache.
 </p>
 

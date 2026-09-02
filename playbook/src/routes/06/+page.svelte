@@ -7,7 +7,7 @@
 <p class="lede">
 	Swept on 2026-09-01; sources and what was actually opened are in <code>docs/review/</code>.<br />
 	No prior system is a local-only write log with no network on the write path, a fleet-wide hash-placed chunk store, and remote cold reads under a stock hypervisor.<br />
-	Three are close enough that a reviewer would cite them if they were omitted.
+	Three of them, Datrium, Nutanix, and Fossil with Venti, are close enough that a reviewer would cite them if they were omitted.
 </p>
 
 <h2>Nearest systems</h2>
@@ -56,7 +56,7 @@
 	i10 (NSDI '20) and blk-switch (OSDI '21) showed kernel TCP can match RDMA on throughput per core with batching, at a latency cost of 50 to 100 µs at low load.<br />
 	The SPDK 24.05 reports on ConnectX-5 put kernel nvme-rdma at 12.1 µs and kernel nvme-tcp at 21.4 µs for a 4K read against a null device.<br />
 	Homa (ATC '21) and eRPC (NSDI '19) put kernel bypass at 2 to 4 µs and attribute the rest of kernel TCP to wakeups and core selection.<br />
-	No storage paper measured a non-spinning userspace daemon over kernel TCP as a remote read target; that row is estimated on page 04 and measured here.
+	No storage paper measured a blocking userspace daemon over kernel TCP as a remote read target; that row is estimated on page 04 and measured here.
 </p>
 
 <h2>Objections already in print</h2>

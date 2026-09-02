@@ -33,7 +33,7 @@
 	Part 1 measures this instead of assuming it.
 </p>
 <p>
-	Every existing mechanism stops at the host boundary.<br />
+	Every local-disk mechanism stops at the host boundary.<br />
 	The DDT is per pool.<br />
 	<code>zfs send</code> dropped deduplicated streams in 2.0.<br />
 	dm-vdo has no replication.<br />
@@ -70,7 +70,7 @@
 	A chunk named by its hash has the same name on every host, so placement is a function of the name.
 </p>
 <p>
-	Provisioning a guest moves its map, a few MB of offset to hash pairs, and no chunks.<br />
+	Provisioning a guest moves its map, 32 bytes per chunk, and no chunks.<br />
 	Migrating a guest moves the map plus whatever it wrote since the last compaction.<br />
 	A fleet stores each chunk k times, not once per host.<br />
 	A chunk that is hot anywhere is in some host's memory, and <mark>a peer's memory over 100 GbE is closer than local NVMe</mark>: about 20 µs against about 80.
@@ -91,7 +91,7 @@
 	<li>
 		<span class="rid">H1</span><strong>Single-host parity.</strong><br />
 		The daemon stores within 10% of the bytes ZFS fast dedup stores at the same block size, with guest p99 within 20% of a raw file on XFS.<br />
-		Index bytes per TB fall in proportion to chunk size.
+		Index bytes per TB fall in inverse proportion to chunk size.
 	</li>
 	<li>
 		<span class="rid">H2</span><strong>Cross-host benefit.</strong><br />
@@ -114,8 +114,8 @@
 <ul class="plain">
 	<li>A working content-addressed block backend under unmodified QEMU, on a stock kernel, over kernel TCP.</li>
 	<li>A single-host table against ZFS fast dedup: capture, p99, write amplification, index memory, as a function of chunk size.</li>
-	<li>Two numbers no stock backend can produce: bytes moved to provision and migrate a guest, and fleet bytes stored with one copy per chunk.</li>
-	<li>The first microsecond-scale measurement of a content-addressed chunk fetched from a peer under a VM block device, on four transports.</li>
+	<li>Two numbers no existing backend can match: bytes moved to provision and migrate a guest, and fleet bytes stored with one copy per chunk.</li>
+	<li>The first microsecond-scale measurement of a content-addressed chunk fetched from a peer under a VM block device, over kernel TCP and over NVMe-oF on TCP and RDMA.</li>
 </ul>
 
 <h2>Scope</h2>
@@ -123,7 +123,7 @@
 	<li><span class="rid">A1</span>Hosts serving guests from local flash, homelab to rack scale. Array economics are out of scope.</li>
 	<li><span class="rid">A2</span>The design places chunks over N hosts by rendezvous hashing; the testbed is two hosts with static membership. No failure detection, rebalancing, or authentication. One copy per chunk on two hosts is a measurement configuration; a deployment runs k ≥ 2 on N ≥ 3.</li>
 	<li><span class="rid">A3</span>One image, one writer. Disk migration only; memory migration is QEMU's.</li>
-	<li><span class="rid">A4</span>The guest contract is virtio-blk with a volatile write cache: an acknowledged FLUSH is durable and nothing else is. Every configuration runs under the same QEMU cache mode.</li>
+	<li><span class="rid">A4</span>The guest contract is virtio-blk with a volatile write cache: an acknowledged FLUSH is durable and nothing else is. Every configuration runs with QEMU <code>cache=none</code>, so the host page cache is bypassed everywhere.</li>
 	<li><span class="rid">A5</span>Equal BLAKE3 implies equal bytes. A sample of matches is verified byte for byte and the sample size reported.</li>
 	<li><span class="rid">A6</span>The store is trusted infrastructure. Deduplication side channels are documented and excluded.</li>
 	<li><span class="rid">A7</span>Experiments run at single-digit TB. Larger figures are formulas with measured constants and are labeled as such.</li>

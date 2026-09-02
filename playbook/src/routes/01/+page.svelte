@@ -93,7 +93,7 @@
 </p>
 <p>
 	The chunk cache is daemon-owned memory keyed by hash, LRU, with a size that is a parameter.<br />
-	Because every file is O_DIRECT, the kernel page cache is out of the picture on every host, and the cache size can be bounded equal to ARC on the ZFS configuration.
+	Because every file is O_DIRECT, the kernel page cache holds nothing on any host, and the cache size is set equal to ARC on the ZFS configuration.
 </p>
 <p>
 	Prefetch is the daemon issuing the next D hashes from the map when it sees sequential reads, and optionally replaying a recorded boot profile.<br />
@@ -117,7 +117,7 @@
 		<tbody>
 			<tr><td class="k">GET(hash)</td><td>bytes</td><td>cold read, prefetch</td></tr>
 			<tr><td class="k">PUT(batch of chunks)</td><td>ack after one fdatasync</td><td>compactor sending chunks to an owner</td></tr>
-			<tr><td class="k">HAS(hashes)</td><td>bitmap</td><td>provisioning, migration, sync</td></tr>
+			<tr><td class="k">HAS(hashes)</td><td>bitmap of hashes the owner lacks</td><td>compactor before PUT, so only missing chunks are sent; provisioning verification</td></tr>
 			<tr><td class="k">LIVE(epoch, hashes)</td><td>ack</td><td>garbage collection</td></tr>
 		</tbody>
 	</table>

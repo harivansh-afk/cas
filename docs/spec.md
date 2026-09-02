@@ -42,7 +42,7 @@ So at 4K a deduplication table reaches nearly all of it, which is why Jin and Mi
 
 Part 1 measures this instead of assuming it.
 
-Every existing mechanism stops at the host boundary.
+Every local-disk mechanism stops at the host boundary.
 
 The DDT is per pool.
 
@@ -62,7 +62,7 @@ A fleet of N hosts each running deduplication stores every shared chunk N times 
 
 A chunk named by its hash has the same name on every host, so placement is a function of the name.
 
-Provisioning a guest moves its map, a few MB of offset to hash pairs, and no chunks.
+Provisioning a guest moves its map, 32 bytes per chunk, and no chunks.
 
 Migrating a guest moves the map plus whatever it wrote since the last compaction.
 
@@ -84,7 +84,7 @@ The remaining costs are the ones every deduplication design incurs, and this one
 
 **H1. Single-host parity.**
 The daemon stores within 10% of the bytes ZFS fast dedup stores at the same block size, with guest p99 within 20% of a raw file on XFS.
-Index bytes per TB fall in proportion to chunk size.
+Index bytes per TB fall in inverse proportion to chunk size.
 
 **H2. Cross-host benefit.**
 Provisioning and migrating a guest between hosts move the map plus the uncompacted tail, within 10% of that bound.
@@ -103,8 +103,8 @@ They are frozen at the end of week 2 and do not move.
 
 - A working content-addressed block backend under unmodified QEMU, on a stock kernel, over kernel TCP.
 - A single-host table against ZFS fast dedup: capture, p99, write amplification, index memory, as a function of chunk size.
-- Two numbers no stock backend can produce: bytes moved to provision and migrate a guest, and fleet bytes stored with one copy per chunk.
-- The first microsecond-scale measurement of a content-addressed chunk fetched from a peer under a VM block device, on four transports.
+- Two numbers no existing backend can match: bytes moved to provision and migrate a guest, and fleet bytes stored with one copy per chunk.
+- The first microsecond-scale measurement of a content-addressed chunk fetched from a peer under a VM block device, over kernel TCP and over NVMe-oF on TCP and RDMA.
 
 ## Scope
 
@@ -114,7 +114,7 @@ A2. The design places chunks over N hosts by rendezvous hashing; the testbed is 
 
 A3. One image, one writer. Disk migration only; memory migration is QEMU's.
 
-A4. The guest contract is virtio-blk with a volatile write cache: an acknowledged FLUSH is durable and nothing else is. Every configuration runs under the same QEMU cache mode.
+A4. The guest contract is virtio-blk with a volatile write cache: an acknowledged FLUSH is durable and nothing else is. Every configuration runs with QEMU <code>cache=none</code>, so the host page cache is bypassed everywhere.
 
 A5. Equal BLAKE3 implies equal bytes. A sample of matches is verified byte for byte and the sample size reported.
 
@@ -198,7 +198,7 @@ Fresh data is served without indirection; settled data incurs the map walk, the 
 
 The chunk cache is daemon-owned memory keyed by hash, LRU, with a size that is a parameter.
 
-Because every file is O_DIRECT, the kernel page cache is out of the picture on every host, and the cache size can be bounded equal to ARC on the ZFS configuration.
+Because every file is O_DIRECT, the kernel page cache holds nothing on any host, and the cache size is set equal to ARC on the ZFS configuration.
 
 Prefetch is the daemon issuing the next D hashes from the map when it sees sequential reads, and optionally replaying a recorded boot profile.
 
@@ -220,7 +220,7 @@ It lives with the guest's host and moves when the guest does.
 |---|---|---|
 | GET(hash) | bytes | cold read, prefetch |
 | PUT(batch of chunks) | ack after one fdatasync | compactor sending chunks to an owner |
-| HAS(hashes) | bitmap | provisioning, migration, sync |
+| HAS(hashes) | bitmap of hashes the owner lacks | compactor before PUT, so only missing chunks are sent; provisioning verification |
 | LIVE(epoch, hashes) | ack | garbage collection |
 
 Length-prefixed messages over kernel TCP, one connection per core, `TCP_NODELAY`, driven by io_uring.
@@ -332,11 +332,11 @@ Inline fixed-4K deduplication in the kernel, mainline since 6.9.
 Its own XFS instance on the vdo device.
 Index memory from `vdostats`.
 
-**R4. The daemon, one host.**
+**R3. The daemon, one host.**
 Local store only; k does not apply.
 Three chunk-size arms below.
 
-R0 against R4 is the cost of the daemon with everything else held constant.
+R0 against R3 is the cost of the daemon with everything else held constant.
 
 R1 is the deployed state of the art and differs in kernel boundary, caching, and allocation, so it is a case study beside the controlled pair, and the paper attributes deltas accordingly.
 
@@ -377,7 +377,7 @@ No kernel build and no synthetic stress workload that exists only to exercise th
 
 Pinned vCPUs, performance governor, discarded warm-up, fresh filesystem or pool per repetition, at least five repetitions, variance beside every number.
 
-Cache bounded equal across configurations: cgroup memory limit for the page cache on R0 and R2, `zfs_arc_max` on R1, the daemon's cache size on R4.
+With `cache=none`, R0 and R2 have no host cache; `zfs_arc_max` on R1 and the daemon's cache size on R3 are set equal.
 
 All configurations are observed at the guest boundary (fio's histograms, guest-side blktrace for the boot storm) plus host device counters.
 
@@ -413,7 +413,7 @@ Nothing further: no donors, no real fleets, no claims about time.
 
 Same daemon, N hosts, one parameter: k.
 
-Every measurement on this page is one no stock backend can produce.
+Every number on this page is one no local-disk backend can match.
 
 ## Two modes
 
@@ -431,7 +431,7 @@ Two hosts with k = 1 is the worst case for remote reads and is run for exactly t
 
 ## Provisioning
 
-A new guest on host B from an image whose chunks exist anywhere: copy the map, a few MB, and `HAS` its hashes.
+A new guest on host B from an image whose chunks exist anywhere: copy the map, 32 bytes per chunk, about 80 MB for a 40 GB image at 16K chunks. Every chunk it names already exists at its owner.
 
 In replicated mode no other data is transferred.
 
@@ -439,13 +439,13 @@ In partitioned mode no other data is transferred either; chunks are fetched on f
 
 **Provisioning cost is the size of the map.**
 
-Baseline: `qemu-img convert` or `scp` of the raw file, and `zfs send | zfs recv` of the zvol, each moving the full logical size.
+Baseline: `qemu-img convert` or `scp` of the raw file, and `zfs send | zfs recv` of the zvol, each moving the allocated size of the image.
 
 ## Migration
 
 Move a guest from A to B: stop, copy the map and the staging extents not yet compacted, start.
 
-A 40 GB guest that compacted recently moves in MB.
+A 40 GB guest that compacted recently moves in tens of MB.
 
 Memory migration is QEMU's and is out of scope; this is the disk.
 
@@ -510,7 +510,7 @@ If it is large, placement by super-chunk is the knob, noted here and measured on
 
 **Part 3.**
 
-A cold read whose chunk lives on the other host is the only place the network enters guest latency.
+A cold read whose chunk lives on another host is the only place the network enters guest latency.
 
 This page measures it and reduces it.
 
@@ -526,7 +526,7 @@ RDMA against TCP is therefore a 10 µs difference on an 80 µs read.
 
 The larger factor, about 4x, is whether the chunk is in the owner's memory or on its disk.
 
-**A chunk from a peer's memory over TCP is faster than a chunk from local NVMe.**
+If those numbers hold, **a chunk from a peer's memory over TCP arrives faster than one from local NVMe**; H3 tests this.
 
 With hash placement, a chunk shared across the fleet is hot at exactly one owner, and every host's read of it hits that owner's cache.
 
@@ -616,7 +616,7 @@ The plan is sized to the work, and the descoping order defines what is removed i
 
 Two CloudLab c6525-100g nodes (Utah), reserved as a pair.
 
-Per node: AMD EPYC 7402P, 24 cores at 2.80 GHz; 128 GB ECC DDR4-3200; two 1.6 TB PCIe 4.0 NVMe SSDs; ConnectX-5 Ex 100 GbE, one port on the experiment network.
+Per node: AMD EPYC 7402P, 24 cores at 2.80 GHz; 128 GB ECC DDR3-3200; two 1.6 TB PCIe 4.0 NVMe SSDs; ConnectX-5 Ex 100 GbE, one port on the experiment network.
 
 One NVMe holds the system and results; the other is the device under test.
 
@@ -632,7 +632,7 @@ CloudLab is free for research.
 
 A project is opened by a faculty member and reviewed by CloudLab staff; the sponsor opens it before Sep 9.
 
-Fallback: two OVHcloud Advance-4 2026 servers (EPYC 4585PX, 16 cores, 64 GB DDR5 ECC, 2 × 960 GB NVMe) on a 25 Gbps private link, which loses the RDMA arm and nothing else.
+Fallback: two OVHcloud Advance-4 2026 servers (EPYC 4585PX, 16 cores, 64 GB DDR5 ECC, 2 × 960 GB NVMe) on a 25 Gbps private link, which loses the RDMA arm and replaces the 100 GbE fabric with 25 GbE.
 
 ## Schedule
 
@@ -641,7 +641,7 @@ Fallback: two OVHcloud Advance-4 2026 servers (EPYC 4585PX, 16 cores, 64 GB DDR5
 | 1–2 | vhost-user-blk daemon in passthrough: staging log, FLUSH, replay. Kernel and ZFS image. | R0; passthrough within 10% of R0 p99 (G1). Thresholds frozen. `zdb -S` phase 0 on the synthetic fleet. |
 | 3–5 | Compactor, store, index, maps, epochs, recovery. Three chunk-size arms. | `kill -9` recovery passes (G2). First capture numbers. |
 | 6–7 | R1 configured, both volblocksize arms. R2 if time permits. | Part 1 table complete (G3). |
-| 8–9 | Protocol, rendezvous placement, k, PUT with durable ack, HAS, single-pass garbage collection. Provision and migrate scripts. | Replicated mode on two nodes. |
+| 8–9 | Protocol, rendezvous placement, k, PUT with durable ack, HAS, single-pass garbage collection. Provisioning and migration scripts. | Replicated mode on two nodes. |
 | 10 | Partitioned mode. Mirror arm if time permits. | Part 2 table complete (G4). |
 | 11–12 | nvmet exports, RoCE configuration, busy-polling and blocking daemon, depth prefetch, profile prefetch. | Transport matrix and prefetch sweeps (G5). Partitioned boot storm. |
 | 13–14 | | Report; reproducibility pack (G6). |
@@ -652,11 +652,11 @@ G1. Passthrough daemon under stock QEMU within 10% of R0 p99 by the end of week 
 
 G2. `kill -9` at arbitrary points, replay, `fio --verify` passes, before any daemon number is reported.
 
-G3. Part 1 table complete: R0, R1 at two block sizes, R4 at three chunk sizes; latency, capture, index, amplification; variance beside every number.
+G3. Part 1 table complete: R0, R1 at two block sizes, R3 at three chunk sizes; latency, capture, index, amplification; variance beside every number.
 
 G4. Part 2 table complete: both modes, every flow, bytes transferred against the census bound.
 
-G5. Transport matrix complete for the four non-stretch probes, null and file, memory and NVMe, with RoCE counters at zero.
+G5. Transport matrix complete for every non-stretch probe, null and file, memory and NVMe, with RoCE counters at zero.
 
 G6. One command rebuilds the fleet from dated archives; one command reruns every table on a fresh pair.
 
@@ -664,19 +664,18 @@ G6. One command rebuilds the fleet from dated archives; one command reruns every
 
 When the schedule slips, items come off from the top.
 
-The last item is never removed.
-
 1. ibverbs daemon arm.
 2. Super-chunk placement.
 3. Mirror-on-FLUSH arm.
 4. R2 dm-vdo.
 5. Profile prefetch (depth prefetch stays).
 6. Partitioned mode. Replicated mode alone still gives H2's transfer result.
-7. Never: part 1, the nvmet TCP and RDMA probes, the daemon over TCP.
+
+Not removed under any slip: part 1, the nvmet TCP and RDMA probes, and the daemon over TCP.
 
 ## Risks
 
-**Daemon overrun.** The largest risk and the reason G1 is at week 2. Protocol plumbing comes from maintained crates so the hours go to the five components the study is about.
+**Daemon overrun.** The largest risk and the reason G1 is at week 2. Protocol plumbing comes from maintained crates so the hours go to the components listed as new code on page 01.
 
 **RoCE configuration.** GID selection, MTU, adaptive retransmission on a lossy fabric. Budgeted at 8 hours; if it exceeds 20, the RDMA rows are dropped and the TCP rows stand.
 
@@ -714,7 +713,7 @@ Swept on 2026-09-01; sources and what was actually opened are in `docs/review/`.
 
 No prior system is a local-only write log with no network on the write path, a fleet-wide hash-placed chunk store, and remote cold reads under a stock hypervisor.
 
-Three are close enough that a reviewer would cite them if they were omitted.
+Three of them, Datrium, Nutanix, and Fossil with Venti, are close enough that a reviewer would cite them if they were omitted.
 
 ## Nearest systems
 
@@ -753,7 +752,7 @@ The SPDK 24.05 reports on ConnectX-5 put kernel nvme-rdma at 12.1 µs and kernel
 
 Homa (ATC '21) and eRPC (NSDI '19) put kernel bypass at 2 to 4 µs and attribute the rest of kernel TCP to wakeups and core selection.
 
-No storage paper measured a non-spinning userspace daemon over kernel TCP as a remote read target; that row is estimated on page 04 and measured here.
+No storage paper measured a blocking userspace daemon over kernel TCP as a remote read target; that row is estimated on page 04 and measured here.
 
 ## Objections already in print
 
