@@ -19,23 +19,25 @@
 
 <Diagram
 	w={960}
-	h={300}
+	h={250}
 	label="Left, replicated: k equals 2, every chunk is on both hosts, compaction sends each new unique chunk once, and no read is ever remote. Right, partitioned: k equals 1, each chunk lives on the host its hash selects, fleet capacity is one copy per chunk, and about half of a guest's cold reads go to the other host."
 	caption="k = 2 provides transfer savings and keeps every read local. k = 1 provides capacity savings at the cost of remote reads. Two hosts with k = 1 is the worst case for remote reads and is run for exactly that reason."
 >
-	<Group x={20} y={20} w={440} h={250} label="replicated · k = 2" />
-	<Node x={50} y={70} w={170} h={60} title="host A" sub={['staging · maps', 'all chunks']} />
-	<Node x={260} y={70} w={170} h={60} title="host B" sub={['staging · maps', 'all chunks']} />
-	<Edge points={[[220, 92], [260, 92]]} label="PUT new chunks" labelDy={-8} />
-	<Edge points={[[260, 112], [220, 112]]} />
-	<Note x={240} y={180} anchor="middle" tone="muted" text={['each unique chunk crosses the wire once', 'every read is local', 'capacity = one store, twice']} />
+	<Group x={20} y={20} w={440} h={210} label="replicated · k = 2" />
+	<Node x={40} y={76} w={185} h={60} title="host A" sub={['staging log and maps', 'every chunk']} />
+	<Node x={255} y={76} w={185} h={60} title="host B" sub={['staging log and maps', 'every chunk']} />
+	<Edge points={[[225, 98], [255, 98]]} />
+	<Edge points={[[255, 114], [225, 114]]} />
+	<Note x={240} y={62} anchor="middle" size={10} text="PUT each new chunk" />
+	<Note x={240} y={170} anchor="middle" tone="muted" text={['each unique chunk is transferred once', 'every read is local', 'capacity: the full store on each host']} />
 
-	<Group x={500} y={20} w={440} h={250} label="partitioned · k = 1" tone="accent" />
-	<Node x={530} y={70} w={170} h={60} title="host A" sub={['staging · maps', 'chunks with hash → A']} tone="accent" />
-	<Node x={740} y={70} w={170} h={60} title="host B" sub={['staging · maps', 'chunks with hash → B']} tone="accent" />
-	<Edge points={[[700, 92], [740, 92]]} tone="accent" label="PUT · GET" labelDy={-8} />
-	<Edge points={[[740, 112], [700, 112]]} tone="accent" />
-	<Note x={720} y={180} anchor="middle" tone="accent" text={['each chunk stored once fleet-wide', 'about half of cold reads are remote', 'capacity = one store, once']} />
+	<Group x={500} y={20} w={440} h={210} label="partitioned · k = 1" tone="accent" />
+	<Node x={520} y={76} w={185} h={60} title="host A" sub={['staging log and maps', 'chunks whose hash selects A']} tone="accent" />
+	<Node x={735} y={76} w={185} h={60} title="host B" sub={['staging log and maps', 'chunks whose hash selects B']} tone="accent" />
+	<Edge points={[[705, 98], [735, 98]]} tone="accent" />
+	<Edge points={[[735, 114], [705, 114]]} tone="accent" />
+	<Note x={720} y={62} anchor="middle" size={10} tone="accent" text="PUT and GET by hash" />
+	<Note x={720} y={170} anchor="middle" tone="accent" text={['each chunk is stored on one host', 'about half of cold reads are remote', 'capacity: the store split across hosts']} />
 </Diagram>
 
 <h2>Provisioning</h2>
@@ -89,7 +91,7 @@
 
 <h2>Measured</h2>
 <div class="table-scroll">
-	<table class="spec">
+	<table class="spec prose">
 		<thead>
 			<tr><th>Flow</th><th>Daemon</th><th>Baseline</th><th>Read against</th></tr>
 		</thead>

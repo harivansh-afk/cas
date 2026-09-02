@@ -66,6 +66,8 @@
 }
 
 html {
+	overflow-x: hidden;
+	overscroll-behavior-x: none;
 	font-size: 16px;
 	background: var(--background);
 	color-scheme: light dark;
@@ -75,6 +77,8 @@ html {
 }
 
 body {
+	overflow-x: hidden;
+	overscroll-behavior-x: none;
 	background: var(--background);
 	color: var(--text-secondary);
 	font-family: var(--font-mono);
@@ -294,12 +298,36 @@ pre {
 	margin: 1.5rem 0;
 }
 
+/* figures break out of the text column on wide screens; tables stay in it and scroll */
+figure {
+	--wide: min(1000px, 100vw - 3rem);
+	width: var(--wide);
+	margin-left: calc((100% - var(--wide)) / 2);
+}
+
+/* tables: scroll sideways inside their own box, with edge shadows and a thin bar */
 .table-scroll {
-	margin: 1.5rem 0;
+	margin-top: 1.5rem;
+	margin-bottom: 1.5rem;
 	overflow-x: auto;
+	overscroll-behavior-x: none;
 	border: 1px solid var(--border);
 	border-radius: var(--radius);
 	background: var(--surface);
+	scrollbar-width: thin;
+	scrollbar-color: var(--border) transparent;
+}
+.table-scroll::-webkit-scrollbar {
+	height: 8px;
+}
+.table-scroll::-webkit-scrollbar-thumb {
+	background: var(--border);
+	border-radius: 8px;
+	border: 2px solid transparent;
+	background-clip: padding-box;
+}
+.table-scroll::-webkit-scrollbar-track {
+	background: transparent;
 }
 table.spec {
 	width: max-content;
@@ -309,6 +337,7 @@ table.spec {
 	font-size: 0.8125rem;
 	font-variant-numeric: tabular-nums;
 	line-height: 1.5;
+	background: transparent;
 }
 table.spec th,
 table.spec td {
@@ -316,6 +345,9 @@ table.spec td {
 	padding: 0.625rem 0.75rem;
 	vertical-align: top;
 	font-weight: var(--weight-body);
+	min-width: 22ch;
+	max-width: 44ch;
+	white-space: normal;
 }
 table.spec thead th {
 	font-size: 0.6875rem;
@@ -336,10 +368,26 @@ table.spec tbody tr:hover td {
 table.spec tbody tr:last-child td {
 	border-bottom: 0;
 }
+table.spec td.k,
+table.spec thead th:first-child {
+	position: sticky;
+	left: 0;
+	z-index: 1;
+	background: var(--surface);
+	box-shadow: 1px 0 0 var(--border-subtle);
+}
+table.spec thead th:first-child {
+	background: var(--background-secondary);
+}
+table.spec tbody tr:hover td.k {
+	background: var(--background-secondary);
+}
 table.spec td.k {
 	color: var(--text-primary);
 	font-weight: var(--weight-strong);
-	white-space: nowrap;
+	white-space: normal;
+	min-width: 12ch;
+	max-width: 26ch;
 }
 table.spec a {
 	color: var(--text-primary);
@@ -351,7 +399,8 @@ table.spec a:hover {
 }
 
 figure {
-	margin: 1.5rem 0;
+	margin-top: 1.5rem;
+	margin-bottom: 1.5rem;
 	display: flex;
 	flex-direction: column;
 	gap: 0.5rem;
@@ -360,7 +409,12 @@ figcaption {
 	font-size: 0.8125rem;
 	line-height: 1.6;
 	color: var(--text-tertiary);
-	max-width: 60ch;
+	max-width: 64ch;
+	margin: 0.25rem auto 0;
+	padding: 0.625rem 1rem;
+	text-align: center;
+	border: 1px dotted var(--text-quaternary);
+	border-radius: var(--radius);
 }
 
 .note {
@@ -386,3 +440,4 @@ figcaption {
 		padding: 0.5rem 0.625rem;
 	}
 }
+

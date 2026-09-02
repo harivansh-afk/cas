@@ -21,33 +21,39 @@
 
 <Diagram
 	w={1000}
-	h={420}
-	label="The per-host datapath. A guest on stock QEMU reaches the daemon over vhost-user. Writes append to a local staging log and are acknowledged at FLUSH after fdatasync. A background compactor chunks settled extents, hashes them, and either appends unique chunks to the local store or ships them to their owner on another host, waiting for a durable ack. Reads check staging, then the local store, then the chunk cache, then fetch by name from the owner."
-	caption="One host. The write path ends at the staging log. The compactor is the only thing that talks to other hosts on the write side, and it does so after the ack."
+	h={440}
+	label="The per-host datapath. A guest on stock QEMU reaches the daemon over vhost-user. Writes append to a local staging log and are acknowledged at FLUSH after fdatasync. A background compactor chunks settled extents, hashes them, and either appends unique chunks to the local store or sends them to their owner on another host, waiting for a durable ack. Reads check staging, then the local store, then the chunk cache, then fetch by name from the owner."
+	caption="One host. The write path ends at the staging log. The compactor is the only component that talks to other hosts on the write side, and it does so after the ack."
 >
-	<Node x={20} y={40} w={130} h={52} title="guest" sub="virtio-blk" tone="muted" />
-	<Node x={20} y={112} w={130} h={44} title="stock QEMU" sub="vhost-user-blk" tone="muted" />
-	<Edge points={[[150, 134], [200, 134]]} label="shared memory" labelDy={-8} />
+	<Node x={20} y={44} w={130} h={52} title="guest" sub="virtio-blk" tone="muted" />
+	<Node x={20} y={116} w={130} h={44} title="stock QEMU" sub="vhost-user-blk" tone="muted" />
+	<Edge points={[[150, 138], [200, 138]]} />
+	<Note x={22} y={110} size={9.5} tone="muted" text="shared guest memory" />
 
-	<Group x={200} y={20} w={780} h={380} label="daemon · one per host" tone="accent" />
+	<Group x={200} y={20} w={780} h={400} label="daemon · one per host" tone="accent" />
 
 	<Node x={230} y={60} w={220} h={64} title="staging log" sub={['append-only · local NVMe', 'FLUSH → fdatasync → ack']} tone="accent" />
-	<Note x={340} y={145} anchor="middle" tone="muted" size={9.5} text="no hashing, no chunking, no network" />
+	<Note x={470} y={86} tone="muted" size={9.5} text={['no hashing, chunking, or network on this path', 'the write path ends here']} />
 
-	<Edge points={[[340, 124], [340, 190]]} label="settled extents" labelDx={64} labelDy={4} />
-	<Node x={230} y={190} w={220} h={64} title="compactor" sub={['fixed 4K or FastCDC · BLAKE3', 'owner = rendezvous(hash)']} tone="outline" />
+	<Edge points={[[340, 124], [340, 200]]} />
+	<Note x={352} y={166} size={10} text="settled extents" />
+	<Node x={230} y={200} w={240} h={64} title="compactor" sub={['chunk, then hash with BLAKE3', 'owner = rendezvous hash of the chunk']} tone="outline" />
 
-	<Edge points={[[450, 210], [520, 210]]} label="owner = self" labelDy={-8} />
-	<Node x={520} y={190} w={200} h={64} title="local store" sub={['append-only chunks', 'garbage collection by hole punching']} />
-	<Edge points={[[450, 238], [520, 300]]} label="owner = peer" labelDy={14} labelDx={-10} tone="accent" />
-	<Node x={520} y={280} w={200} h={64} title="PUT to owner" sub={['batched · durable ack', 'then mark compacted']} tone="accent" />
-	<Edge points={[[720, 312], [960, 312]]} tone="accent" label="to host B" labelDy={-8} />
+	<Edge points={[[470, 232], [570, 232]]} />
+	<Note x={520} y={190} anchor="middle" size={10} text="owner is this host" />
+	<Node x={570} y={200} w={180} h={64} title="local store" sub={['append-only chunk log', 'reclaimed by hole punching']} />
 
-	<Node x={760} y={60} w={200} h={52} title="index" sub="hash → offset · memory · rebuildable" />
-	<Node x={760} y={130} w={200} h={52} title="chunk cache" sub="hash → bytes · memory · bounded" tone="outline" />
-	<Node x={760} y={200} w={200} h={52} title="maps" sub="offset → hash · one per image" />
+	<Edge points={[[340, 264], [340, 342], [540, 342]]} tone="accent" />
+	<Note x={440} y={332} anchor="middle" size={10} tone="accent" text="owner is another host" />
+	<Node x={540} y={310} w={230} h={64} title="PUT to owner" sub={['batched; acked after fdatasync', 'extent compacted after the ack']} tone="accent" />
+	<Edge points={[[770, 342], [995, 342]]} tone="accent" />
+	<Note x={882} y={332} anchor="middle" size={10} tone="accent" text="to the owner on another host" />
 
-	<Note x={230} y={330} tone="muted" size={10} text={['read: staging → local store → cache → GET(hash) from owner', 'prefetch: next chunks from the map on sequential reads']} />
+	<Node x={760} y={50} w={200} h={52} title="index" sub="hash → store offset, in memory" />
+	<Node x={760} y={116} w={200} h={52} title="chunk cache" sub="hash → chunk bytes, bounded" tone="outline" />
+	<Node x={760} y={182} w={200} h={52} title="maps" sub="image offset → chunk hash" />
+
+	<Note x={230} y={396} tone="muted" size={10} text={['read path: staging log, then local store, then chunk cache, then GET from the owner', 'prefetch: the next chunks in the map, on sequential reads']} />
 </Diagram>
 
 <h2>Write path</h2>
@@ -110,7 +116,7 @@
 
 <h2>Protocol</h2>
 <div class="table-scroll">
-	<table class="spec">
+	<table class="spec prose">
 		<thead>
 			<tr><th>Message</th><th>Reply</th><th>Used by</th></tr>
 		</thead>
@@ -142,7 +148,7 @@
 
 <h2>Durability</h2>
 <div class="table-scroll">
-	<table class="spec">
+	<table class="spec prose">
 		<thead>
 			<tr><th>Failure</th><th>What survives</th><th>Against R0 and R1</th></tr>
 		</thead>
@@ -189,7 +195,7 @@
 
 <h2>Provenance</h2>
 <div class="table-scroll">
-	<table class="spec">
+	<table class="spec prose">
 		<thead>
 			<tr><th>Component</th><th>Source</th><th>License</th></tr>
 		</thead>

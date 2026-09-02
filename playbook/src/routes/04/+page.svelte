@@ -30,24 +30,24 @@
 	label="Horizontal bars, one per case, length proportional to latency from the literature. Local NVMe about 80 microseconds. Peer RAM over RDMA about 12, over TCP about 21, over the daemon on TCP 20 to 30. Peer NVMe over RDMA about 92, over TCP about 101, over the daemon about 110. The peer memory bars are all shorter than the local NVMe bar."
 	caption="Latency stack for one 4K read, literature values in microseconds, before the testbed measures them. A peer's memory is closer than the local disk on every transport; the transport tier moves the bar by 10 to 30%."
 >
-	<Note x={20} y={36} tone="muted" size={10} text="local NVMe" />
-	<Node x={170} y={22} w={320} h={20} title="≈ 80" tone="muted" />
+	<Note x={20} y={36} tone="muted" size={10} text="local NVMe read" />
+	<Node x={215} y={22} w={320} h={20} title="≈ 80 µs" tone="muted" />
 
-	<Note x={20} y={80} tone="accent" size={10} text="peer memory · RDMA" />
-	<Node x={170} y={66} w={48} h={20} title="≈ 12" tone="accent" />
-	<Note x={20} y={110} tone="accent" size={10} text="peer memory · nvme-tcp" />
-	<Node x={170} y={96} w={84} h={20} title="≈ 21" tone="accent" />
-	<Note x={20} y={140} tone="accent" size={10} text="peer memory · daemon TCP" />
-	<Node x={170} y={126} w={100} h={20} title="20–30" tone="accent" />
-	<Bracket x={290} y1={66} y2={146} label={['faster than local disk', 'the case hash placement makes common']} tone="accent" />
+	<Note x={20} y={80} tone="accent" size={10} text="peer memory over RDMA" />
+	<Node x={215} y={66} w={64} h={20} title="≈ 12 µs" tone="accent" />
+	<Note x={20} y={110} tone="accent" size={10} text="peer memory over nvme-tcp" />
+	<Node x={215} y={96} w={84} h={20} title="≈ 21 µs" tone="accent" />
+	<Note x={20} y={140} tone="accent" size={10} text="peer memory, daemon on TCP" />
+	<Node x={215} y={126} w={100} h={20} title="20 to 30 µs" tone="accent" />
+	<Bracket x={335} y1={66} y2={146} label={['faster than a local NVMe read', 'the common case under hash placement']} tone="accent" />
 
-	<Note x={20} y={184} size={10} text="peer NVMe · RDMA" />
-	<Node x={170} y={170} w={368} h={20} title="≈ 92" tone="outline" />
-	<Note x={20} y={214} size={10} text="peer NVMe · nvme-tcp" />
-	<Node x={170} y={200} w={404} h={20} title="≈ 101" tone="outline" />
-	<Note x={20} y={244} size={10} text="peer NVMe · daemon TCP" />
-	<Node x={170} y={230} w={440} h={20} title="≈ 110" tone="outline" />
-	<Bracket x={650} y1={170} y2={250} label={['10 to 30% over local', 'the cold case that prefetch hides']} />
+	<Note x={20} y={184} size={10} text="peer NVMe over RDMA" />
+	<Node x={215} y={170} w={368} h={20} title="≈ 92 µs" tone="outline" />
+	<Note x={20} y={214} size={10} text="peer NVMe over nvme-tcp" />
+	<Node x={215} y={200} w={404} h={20} title="≈ 101 µs" tone="outline" />
+	<Note x={20} y={244} size={10} text="peer NVMe, daemon on TCP" />
+	<Node x={215} y={230} w={440} h={20} title="≈ 110 µs" tone="outline" />
+	<Bracket x={695} y1={170} y2={250} label={['10 to 30% slower than local', 'the cold case; prefetch hides it']} />
 </Diagram>
 
 <h2>Probes</h2>
@@ -56,7 +56,7 @@
 	The other rows exist to show what the kernel stack and the userspace hop each cost; nothing depends on them.
 </p>
 <div class="table-scroll">
-	<table class="spec">
+	<table class="spec prose">
 		<thead>
 			<tr><th>Probe</th><th>What it isolates</th><th>Code</th></tr>
 		</thead>

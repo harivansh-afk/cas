@@ -44,25 +44,26 @@
 
 <Diagram
 	w={960}
-	h={300}
+	h={284}
 	label="Left: two hosts each with their own deduplication table and no link between them; the same chunk is stored on both and moves whole when a guest migrates. Right: two hosts whose chunks are named by hash and owned by hash across both; a chunk is stored k times fleet-wide, a guest's map moves while its chunks stay, and a cold read fetches by name from the owner."
 	caption="Left: a deduplication table shares within a host. Right: a name is the same on every host, so placement, transfer, and cache follow the name."
 >
-	<Group x={20} y={20} w={440} h={250} label="per-host deduplication" />
-	<Node x={50} y={60} w={170} h={44} title="host A" sub="guests · ZFS" tone="muted" />
-	<Node x={50} y={120} w={170} h={44} title="DDT A" sub="hash → address in pool A" />
-	<Node x={260} y={60} w={170} h={44} title="host B" sub="guests · ZFS" tone="muted" />
-	<Node x={260} y={120} w={170} h={44} title="DDT B" sub="hash → address in pool B" />
-	<Note x={240} y={200} anchor="middle" tone="muted" text={['no link between the tables', 'shared chunk stored twice · moves whole', 'migration = full logical size']} />
+	<Group x={20} y={20} w={440} h={244} label="per-host deduplication" />
+	<Node x={40} y={56} w={195} h={44} title="host A" sub="guests on ZFS" tone="muted" />
+	<Node x={40} y={116} w={195} h={44} title="DDT A" sub="hash → block address in pool A" />
+	<Node x={245} y={56} w={195} h={44} title="host B" sub="guests on ZFS" tone="muted" />
+	<Node x={245} y={116} w={195} h={44} title="DDT B" sub="hash → block address in pool B" />
+	<Note x={240} y={190} anchor="middle" tone="muted" text={['the two tables are independent', 'a shared chunk is stored on both hosts', 'migration copies the whole image']} />
 
-	<Group x={500} y={20} w={440} h={250} label="content addressing" tone="accent" />
-	<Node x={530} y={60} w={170} h={44} title="host A" sub="guests · daemon" tone="muted" />
-	<Node x={530} y={120} w={170} h={44} title="chunks A" sub="owner = f(hash)" tone="accent" />
-	<Node x={740} y={60} w={170} h={44} title="host B" sub="guests · daemon" tone="muted" />
-	<Node x={740} y={120} w={170} h={44} title="chunks B" sub="owner = f(hash)" tone="accent" />
-	<Edge points={[[700, 134], [740, 134]]} tone="accent" label="GET · PUT by name" labelDy={-8} />
-	<Edge points={[[740, 150], [700, 150]]} tone="accent" />
-	<Note x={720} y={200} anchor="middle" tone="accent" text={['one namespace across hosts', 'shared chunk stored k times · map moves, chunks stay', 'cold read = fetch by name from the owner']} />
+	<Group x={500} y={20} w={440} h={244} label="content addressing" tone="accent" />
+	<Node x={520} y={56} w={180} h={44} title="host A" sub="guests on the daemon" tone="muted" />
+	<Node x={520} y={116} w={180} h={44} title="chunks owned by A" sub="owner chosen by hash" tone="accent" />
+	<Node x={740} y={56} w={180} h={44} title="host B" sub="guests on the daemon" tone="muted" />
+	<Node x={740} y={116} w={180} h={44} title="chunks owned by B" sub="owner chosen by hash" tone="accent" />
+	<Edge points={[[700, 130], [740, 130]]} tone="accent" />
+	<Edge points={[[740, 146], [700, 146]]} tone="accent" />
+	<Note x={720} y={110} anchor="middle" tone="accent" size={10} text="GET and PUT by hash" />
+	<Note x={720} y={190} anchor="middle" tone="accent" text={['one chunk namespace across hosts', 'a shared chunk is stored k times fleet-wide', 'migration copies the map; the chunks stay', 'a cold read fetches the chunk from its owner']} />
 </Diagram>
 
 <h2>What content addressing provides</h2>
