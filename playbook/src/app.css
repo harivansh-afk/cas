@@ -25,13 +25,13 @@
 	--weight-strong: 600;
 	--weight-display: 700;
 
-	/* backgrounds follow the cozybox palette (nix/lib/theme.nix) */
-	--background: #e7e7e7;
-	--background-secondary: #e1e1e1;
-	--surface: #e1e1e1;
-	--border: #cfcfcf;
-	--border-subtle: #d9d9d9;
-	--code-bg: #dedede;
+	/* backgrounds match harivan.sh (website/src/style.css --bg) */
+	--background: #fdfdfc;
+	--background-secondary: #f5f5f3;
+	--surface: #ffffff;
+	--border: #e6e6e2;
+	--border-subtle: #f0f0ec;
+	--code-bg: #f4f4f1;
 
 	--text-primary: #1c1917;
 	--text-secondary: #44403c;
@@ -46,12 +46,12 @@
 
 @media (prefers-color-scheme: dark) {
 	:root {
-		--background: #101010;
-		--background-secondary: #161616;
-		--surface: #161616;
-		--border: #2a2a2a;
-		--border-subtle: #1e1e1e;
-		--code-bg: #181818;
+		--background: #0d0d0b;
+		--background-secondary: #141412;
+		--surface: #141412;
+		--border: #262622;
+		--border-subtle: #1c1c19;
+		--code-bg: #141412;
 
 		--text-primary: #fafaf9;
 		--text-secondary: #d6d3d1;
