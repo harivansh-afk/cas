@@ -6,7 +6,7 @@
 
 <PageHead num="00" />
 <p class="lede">
-	<mark>Two guests on two hosts that install the same package hold the same bytes twice, and the storage under them does not know. A hash of the bytes gives both hosts the same name for them, and with that name a fleet can store the chunk once, migrate a guest without sending it, and serve it from a peer's memory. We build a block backend on that idea under unmodified QEMU and measure, on two hosts, what it gains and what a cold read over the network costs.</mark><br />
+	<mark>Two guests on different hosts that install the same package hold the same bytes, and neither host knows. Addressing a chunk by a hash of its content gives both hosts one name for it, so it can be stored once and fetched across hosts. This study builds such a backend for VM disks under unmodified QEMU and measures, on two hosts, what it gains and what it costs.</mark><br />
 	In OpenZFS and dm-vdo the hash of a block is a key in a side table that belongs to one pool, and the block is still addressed by its location on disk.<br />
 	In a content-addressed store the hash is the address, so placement, transfer, and the cache key follow the content rather than the host.
 </p>
