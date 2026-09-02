@@ -1,4 +1,4 @@
-# Content-addressed deduplication: a distributed storage system study
+# Content-addressed deduplication: a distributed-storage-system study
 
 CS 4993, fall 2026. Research specification, v9.
 
