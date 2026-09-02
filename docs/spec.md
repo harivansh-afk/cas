@@ -17,9 +17,9 @@ Glossary, not rendered: the backend (daemon, store, protocol as a whole); the da
 
 # 00 Thesis
 
-**Naming a virtual machine's disk blocks by their content rather than their location lets a fleet of hosts deduplicate, provision, and cache across host boundaries, at the cost of one network round trip per cold read. We test this claim with a content-addressed block backend beneath unmodified QEMU, measured on two hosts against ZFS.**
+**Addressing a virtual machine's data chunks by their content lets a fleet of hosts deduplicate, provision, and cache across host boundaries. This study measures those advantages and their cost on two hosts, and projects from them the fleet size at which a content-addressed store becomes advantageous.**
 
-ZFS and dm-vdo also hash blocks for deduplication, but the hash serves only as a key into a table scoped to one pool while the block remains addressed by its location on disk, so no identity the table records is visible beyond the host.
+Existing solutions such as ZFS and dm-vdo also hash blocks for deduplication, but the hash serves only as a key into a table scoped to one pool while the block remains addressed by its location on disk, so no identity the table records is visible beyond a single host.
 
 Three things follow: a guest is provisioned or migrated by moving its manifest, each unique chunk is stored k times across the fleet instead of once per host, and a chunk many guests read is served from its owner's memory. Pages 03 and 04 measure each.
 
