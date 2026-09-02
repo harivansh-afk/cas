@@ -18,8 +18,25 @@
 </p>
 <p>
 	<strong>R1. Zvol on ZFS 2.3 fast dedup.</strong><br />
-	Its own pool on the same device, created and destroyed per run, opened by QEMU as a block device.<br />
-	<code>feature@fast_dedup</code>; <code>dedup=blake3</code>, because <code>dedup=on</code> hashes with SHA-256 regardless of the <a href="https://openzfs.github.io/openzfs-docs/man/master/7/zfsprops.7.html" target="_blank" rel="noopener">checksum property</a>; <code>volblocksize=16K</code> as the primary arm and <code>4K</code> as the second; <code>compression=zle</code> so zero blocks do not collapse onto one DDT entry; <code>dedup_table_quota</code> unset and <code>zpool ddtprune</code> never run during a measurement; DDT memory from <code>zpool status -D</code>.<br />
+	Its own pool on the same device, created and destroyed per run, opened by QEMU as a block device.
+</p>
+<div class="table-scroll">
+	<table class="spec prose">
+		<thead>
+			<tr><th>Setting</th><th>Value</th><th>Why</th></tr>
+		</thead>
+		<tbody>
+			<tr><td class="k"><code>feature@fast_dedup</code></td><td>enabled</td><td>the 2.3 dedup table with its log</td></tr>
+			<tr><td class="k"><code>dedup</code></td><td><code>blake3</code></td><td><code>dedup=on</code> hashes with SHA-256 regardless of the <a href="https://openzfs.github.io/openzfs-docs/man/master/7/zfsprops.7.html" target="_blank" rel="noopener">checksum property</a></td></tr>
+			<tr><td class="k"><code>volblocksize</code></td><td><code>16K</code> primary arm, <code>4K</code> second arm</td><td>the zvol's dedup granularity</td></tr>
+			<tr><td class="k"><code>compression</code></td><td><code>zle</code></td><td>zero blocks would otherwise collapse onto one DDT entry</td></tr>
+			<tr><td class="k"><code>dedup_table_quota</code></td><td>unset</td><td>no cap on the table during a measurement</td></tr>
+			<tr><td class="k"><code>zpool ddtprune</code></td><td>never run during a measurement</td><td>no entries dropped</td></tr>
+			<tr><td class="k">DDT memory</td><td><code>zpool status -D</code></td><td>the index-memory column</td></tr>
+		</tbody>
+	</table>
+</div>
+<p>
 	OpenZFS direct IO applies neither to zvols nor with deduplication enabled, so R1 is ARC-backed in every arm and is reported as such.
 </p>
 <p>
@@ -39,10 +56,16 @@
 
 <h2>Chunk-size arms</h2>
 <p>
-	Fixed 4 KiB chunks cost one index entry per 4 KiB: about 250 million entries per TB, about 10 GB of memory per TB at 40 bytes per entry, a 32-byte hash and an 8-byte offset.<br />
-	The alignment argument on page 00 predicts that they capture nearly every duplicate a Linux guest holds; the census measures the remainder.<br />
+	Fixed 4 KiB chunks cost one index entry per 4 KiB:
+</p>
+<ul class="plain">
+	<li>about 250 million entries per TB</li>
+	<li>about 10 GB of memory per TB at 40 bytes per entry, a 32-byte hash and an 8-byte offset</li>
+</ul>
+<p>
+	The alignment argument on page 00 predicts that they capture nearly every duplicate a Linux guest holds. The census measures the remainder.<br />
 	FastCDC with a 16 KiB mean cuts the index by four and loses an aligned 4 KiB match whenever the rest of its chunk differs.<br />
-	The one prior curve on VM images is Liquid's: 77% of bytes removed at 4 KiB, falling to 59% at 256 KiB on 183 images, with 256 KiB chosen for HDD seek cost; on NVMe the seek term is gone and the trade is index memory against capture.
+	The one prior curve on VM images is Liquid's: 77% of bytes removed at 4 KiB, falling to 59% at 256 KiB on 183 images, with 256 KiB chosen for HDD seek cost. On NVMe the seek term is gone and the trade is index memory against capture.
 </p>
 <p>
 	Three arms: fixed 4 KiB, fixed 16 KiB, FastCDC 8 to 64 KiB with a 16 KiB mean.<br />
@@ -52,10 +75,10 @@
 	The census below predicts the capture column for each arm before any run.
 </p>
 
-<h2>Workloads</h2>
+<h2>Testbench workloads</h2>
 <ul class="plain">
 	<li>fio: 4 KiB random write and read at QD1 and QD32; 128 KiB sequential.</li>
-	<li>Boot storm: N clones of one image booted together, N = 4, 16, 32; a clone is a copy of the manifest.</li>
+	<li>Boot storm: N clones of one image booted together, N = 4, 16, 32. A clone is a copy of the manifest with its own staging log.</li>
 	<li>Fleet replay: the synthetic fleet below written onto N guests, at two points on its timeline.</li>
 	<li>Overwrite: a small SQLite database rewriting its pages in place for an hour, with guest discard on. This is the case where a store without reference counts leaks between sweeps and ZFS does not.</li>
 </ul>
@@ -63,19 +86,20 @@
 <h2>Metrics</h2>
 <ul class="plain">
 	<li>Guest p50 and p99 write and read latency against R0, compactor active and idle. Reported first.</li>
-	<li>Bytes stored after compaction completes and the sweep has run, against the census prediction at the configuration's block size; bytes the sweep reclaimed reported beside it as the leak.</li>
+	<li>Bytes stored after compaction completes and the sweep has run, against the census prediction at the configuration's block size. Bytes the sweep reclaimed reported beside it as the leak.</li>
 	<li>Index or DDT bytes per stored TB.</li>
 	<li>Write amplification: device bytes written per guest byte, from NVMe counters, with both legs (staging and store) reported, not one.</li>
 	<li>Sustainable ingest, the point where the governor starts adding latency, and how much it adds.</li>
 	<li>Chunk traffic against the settle window: chunks produced per guest byte written, on the overwrite workload.</li>
-	<li>Compactor CPU per GB ingested, per chunk-size arm; Liquid gave hashing cost as its reason for large blocks, and here it is a number.</li>
+	<li>Compactor CPU per GB ingested, per chunk-size arm. Liquid gave hashing cost as its reason for large blocks, and here it is a number.</li>
 	<li>Recovery: <code>kill -9</code>, replay, <code>fio --verify</code>; FLUSH covering writes on another queue; an empty discard; a daemon that stops answering.</li>
 </ul>
 
 <h2>Controls</h2>
 <p>
 	Pinned vCPUs, performance governor, discarded warm-up, fresh filesystem or pool per repetition, at least five repetitions, variance beside every number.<br />
-	With <code>cache=none</code>, R0 and R2 have no host cache; <code>zfs_arc_max</code> on R1 and the daemon's cache size on R3 are set equal.
+	With <code>cache=none</code>, R0 and R2 have no host cache. <code>zfs_arc_max</code> on R1 and the daemon's cache size on R3 are set equal.<br />
+	The ARC also holds the DDT, so R1's data cache is smaller than R3's by the DDT's size. The DDT size is reported beside the cache size so the difference is visible.
 </p>
 <p>
 	All configurations are observed at the guest boundary (fio's histograms, guest-side blktrace for the boot storm) plus host device counters.<br />
@@ -90,7 +114,7 @@
 <p>
 	<strong>Phase 0.</strong><br />
 	<code>zdb -S</code> on a ZFS pool holding the cloned fleet.<br />
-	Pool traversal starts each dataset at its origin snapshot's transaction group, so blocks a clone inherited are counted once and the simulated ratio is duplicates beyond what clones already share; this reading of <code>dmu_traverse.c</code> is confirmed with a two-clone test before the number is cited.
+	Pool traversal starts each dataset at its origin snapshot's transaction group, so blocks a clone inherited are counted once and the simulated ratio is duplicates beyond what clones already share. This reading of <code>dmu_traverse.c</code> is confirmed with a two-clone test before the number is cited.
 </p>
 <p>
 	<strong>The fleet.</strong><br />

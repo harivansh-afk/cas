@@ -12,10 +12,10 @@
 
 <h2>Where the time goes in a remote read</h2>
 <p>
-	A 4 KiB random read at QD1 from an enterprise NVMe SSD completes in about 80 µs: 81.6 µs on a PM1725 in <a href="https://www.systor.org/2017/slides/NVMe-over-Fabrics_Performance_Characterization.pdf" target="_blank" rel="noopener">Systor '17</a> and about 80 µs on a PM1735 in <a href="https://www.usenix.org/system/files/osdi21-hwang.pdf" target="_blank" rel="noopener">blk-switch</a>; R0 measures the testbed's drive in week 1.<br />
+	A 4 KiB random read at QD1 from an enterprise NVMe SSD completes in about 80 µs: 81.6 µs on a PM1725 in <a href="https://www.systor.org/2017/slides/NVMe-over-Fabrics_Performance_Characterization.pdf" target="_blank" rel="noopener">Systor '17</a> and about 80 µs on a PM1735 in <a href="https://www.usenix.org/system/files/osdi21-hwang.pdf" target="_blank" rel="noopener">blk-switch</a>. R0 measures the testbed's drive in week 1.<br />
 	On 100 GbE the transport sits on top.<br />
-	Against a null device, kernel nvme-rdma added 12.1 µs and kernel nvme-tcp 21.4 µs for a 4 KiB read on ConnectX-5 (<a href="https://review.spdk.io/download/performance-reports/SPDK_rdma_mlx_perf_report_2405.pdf" target="_blank" rel="noopener">SPDK 24.05</a>); raw RDMA sits at 3 to 5 µs (<a href="https://arxiv.org/pdf/1806.00680" target="_blank" rel="noopener">eRPC</a>; SPDK); and on two CloudLab c6525-100g nodes, the testbed's node type, <a href="https://arxiv.org/pdf/2312.06808" target="_blank" rel="noopener">BPF-oF</a> measured average round trips of 18 µs over nvme-rdma and 30 µs over nvme-tcp on kernel 5.12.<br />
-	A userspace daemon over kernel TCP has no published measurement as a remote read target; from the kernel TCP round-trip floor of 13 to 23 µs (<a href="https://www.usenix.org/system/files/atc21-ousterhout.pdf" target="_blank" rel="noopener">Homa</a>; <a href="https://www.cs.cornell.edu/~ragarwal/pubs/understanding-latency.pdf" target="_blank" rel="noopener">Zuo et al.</a>) plus a file read, we estimate 20 to 30 µs when it polls and more when it sleeps.<br />
+	Against a null device, kernel nvme-rdma added 12.1 µs and kernel nvme-tcp 21.4 µs for a 4 KiB read on ConnectX-5 (<a href="https://review.spdk.io/download/performance-reports/SPDK_rdma_mlx_perf_report_2405.pdf" target="_blank" rel="noopener">SPDK 24.05</a>). Raw RDMA sits at 3 to 5 µs (<a href="https://arxiv.org/pdf/1806.00680" target="_blank" rel="noopener">eRPC</a>; SPDK). On two CloudLab c6525-100g nodes, the testbed's node type, <a href="https://arxiv.org/pdf/2312.06808" target="_blank" rel="noopener">BPF-oF</a> measured average round trips of 18 µs over nvme-rdma and 30 µs over nvme-tcp on kernel 5.12.<br />
+	A userspace daemon over kernel TCP has no published measurement as a remote read target. From the kernel TCP round-trip floor of 13 to 23 µs (<a href="https://www.usenix.org/system/files/atc21-ousterhout.pdf" target="_blank" rel="noopener">Homa</a>; <a href="https://www.cs.cornell.edu/~ragarwal/pubs/understanding-latency.pdf" target="_blank" rel="noopener">Zuo et al.</a>) plus a file read, we estimate 20 to 30 µs when it polls and more when it sleeps.<br />
 	The testbed replaces every one of these figures.
 </p>
 <p>
@@ -25,7 +25,7 @@
 	Every host sends its reads of a chunk to the same k owners, so a chunk read by many guests is hot at its owner, and a remote read in that case is the memory row.
 </p>
 <p class="note">
-	A caution from a prior implementation by the author: a peer round trip over QUIC with TLS on a bonded 25 GbE link measured 108 µs at p50 and 257 µs at p99 (unpublished); the daemon here uses kernel TCP with <code>TCP_NODELAY</code> on 100 GbE, and the number is measured rather than assumed.
+	A caution from a prior implementation by the author: a peer round trip over QUIC with TLS on a bonded 25 GbE link measured 108 µs at p50 and 257 µs at p99 (unpublished). The daemon here uses kernel TCP with <code>TCP_NODELAY</code> on 100 GbE, and the number is measured rather than assumed.
 </p>
 
 <Diagram
@@ -75,7 +75,7 @@
 	</table>
 </div>
 <p>
-	The nvmet export is a probe and not the architecture: it exposes the raw store, needs the reader to know offsets, and has no place for authentication.<br />
+	The nvmet export is a probe and not the architecture. It exposes the raw store, needs the reader to know offsets, and has no place for authentication.<br />
 	It is in the table because the difference between it and the daemon over the same TCP is the cost of the userspace hop, with SPDK's 1 µs kernel-versus-userspace target delta as the reference point.
 </p>
 
@@ -86,7 +86,7 @@
 	<li>Two targets per row: a null device for fabric plus stack alone, and the real file for end to end. Each from the owner's memory and from its NVMe.</li>
 	<li>Two load states for the file rows: quiet, and with <code>PUT</code> traffic running on its own connection at the ship rate from page 03, because a cold read in deployment competes with compaction. The difference is what the read-priority rule on page 01 buys.</li>
 	<li>4 KiB, 16 KiB, 64 KiB. p50, p99, p99.9. Five runs of 30 s, caches dropped between, medians with spread.</li>
-	<li>QD sweep 1, 4, 16, 64 for throughput and CPU per IOPS on both ends; kernel TCP costs 2.5 to 3x the CPU of RDMA at equal IOPS in the SPDK 24.05 reports and in <a href="https://www.usenix.org/system/files/nsdi20-paper-hwang.pdf" target="_blank" rel="noopener">i10</a>, and the ratio measured here is reported.</li>
+	<li>QD sweep 1, 4, 16, 64 for throughput and CPU per IOPS on both ends. Kernel TCP costs 2.5 to 3x the CPU of RDMA at equal IOPS in the SPDK 24.05 reports and in <a href="https://www.usenix.org/system/files/nsdi20-paper-hwang.pdf" target="_blank" rel="noopener">i10</a>, and the ratio measured here is reported.</li>
 	<li>RoCE hardware counters (<code>out_of_sequence</code>, <code>packet_seq_err</code>, <code>local_ack_timeout_err</code>) printed beside every RDMA number, showing zero retransmits on a fabric with no PFC.</li>
 </ul>
 
@@ -118,7 +118,7 @@
 
 <h2>RDMA on this testbed</h2>
 <p>
-	The CloudLab fabric is lossy: no PFC or ECN is documented on the shared switches, and published work on this node type ran RoCE that way.<br />
+	The CloudLab fabric is lossy. No PFC or ECN is documented on the shared switches, and published work on this node type ran RoCE that way.<br />
 	Adaptive retransmission is enabled on the NIC and the counters above show whether the runs were clean.<br />
 	ConnectX-5 cannot do io_uring zero-copy receive, so that option is unavailable.<br />
 	None of this touches the architecture, which runs on kernel TCP and would run on any Ethernet.

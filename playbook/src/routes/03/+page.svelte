@@ -12,8 +12,8 @@
 <h2>Two placement modes</h2>
 <p>
 	k is the number of owners per chunk.<br />
-	The design supports any N; the testbed has two hosts, so k takes two values, and they are two different experiments.<br />
-	With k = 1, a host that goes dark takes its chunks with it until it returns; a read that needs one waits or fails with an error, and nothing is lost if the disk comes back.<br />
+	The design supports any N. The testbed has two hosts, so k takes two values, and they are two different experiments.<br />
+	With k = 1, a host that goes dark takes its chunks with it until it returns. A read that needs one waits or fails with an error, and nothing is lost if the disk comes back.<br />
 	Surviving a dark host at two hosts costs a full mirror of chunks (k = 2) plus fleet class for the staging tail.
 </p>
 
@@ -49,20 +49,20 @@
 </p>
 <p>
 	Baseline: <code>qemu-img convert</code> or <code>scp</code> of the raw file, and <code>zfs send | zfs recv</code> of the zvol, each moving the allocated size of the image.<br />
-	Liquid cloned by copying the metadata file and measured provisioning in seconds on 1 GbE, 8 GB to seven nodes in 730 s by scp and 35 s by Liquid; here it is bytes on the wire at 100 GbE.
+	Liquid cloned by copying the metadata file and measured provisioning in seconds on 1 GbE, 8 GB to seven nodes in 730 s by scp and 35 s by Liquid. Here it is bytes on the wire at 100 GbE.
 </p>
 
 <h2>Migration</h2>
 <p>
 	To move a guest from A to B, the daemon freezes the device on A and takes E, hands the image to B by one fenced swap of its root record, ships the manifest and the staging extents in (D, E], and resumes on B.<br />
-	The root record names the writer and carries an epoch, and the swap is written durably on both hosts before B resumes; A accepts no write after the swap, and B resumes only after the swap names it.<br />
-	On resume the log is reconciled by evidence, the local high-water mark against the durable head, never by who claims to own it; in a prior implementation by the author, a refusal keyed on writer identity kept healthy guests from restarting.<br />
+	The root record names the writer and carries an epoch, and the swap is written durably on both hosts before B resumes. A accepts no write after the swap, and B resumes only after the swap names it.<br />
+	On resume the log is reconciled by evidence, the local high-water mark against the durable head, never by who claims to own it. In a prior implementation by the author, a refusal keyed on writer identity kept healthy guests from restarting.<br />
 	A 40 GB guest that compacted recently moves its manifest, about 80 MB at 16 KiB chunks, plus the staging tail, which was under 9 MB for an idle guest in that implementation and is workload-bound for a busy one.
 </p>
 <p>
 	Bytes are the small part of a migration.<br />
-	The disk cut measured 3 to 6 ms in that implementation and the rest of the blackout was orchestration, so the blackout is reported decomposed into freeze, swap, transfer, and resume, beside the bytes; governor pacing is disabled while the guest is paused.<br />
-	Memory migration is QEMU's and is out of scope; this is the disk.
+	The disk cut measured 3 to 6 ms in that implementation and the rest of the blackout was orchestration, so the blackout is reported decomposed into freeze, swap, transfer, and resume, beside the bytes. Governor pacing is disabled while the guest is paused.<br />
+	Memory migration is QEMU's and is out of scope. This is the disk.
 </p>
 <p>
 	Baseline: rsync of the raw file, and <code>zfs send</code> of the zvol.<br />
@@ -84,7 +84,7 @@
 	Measured: bytes on both stores after the fleet replay completes and the sweep has run, against two per-host ZFS pools holding the same guests, and index bytes on each host.<br />
 	Predicted: about half of the pools' bytes, and half of the index on each host.<br />
 	Also measured: the fraction of a guest's cold reads served by the other host.<br />
-	On two hosts with k = 1 that fraction is one half in expectation; in general it is 1 − k/N, so a larger fleet at fixed k sends a larger share of its cold reads over the network, and the two-host number is a lower bound on that share.
+	On two hosts with k = 1 that fraction is one half in expectation. In general it is 1 − k/N, so a larger fleet at fixed k sends a larger share of its cold reads over the network, and the two-host number is a lower bound on that share.
 </p>
 
 <h2>Durability classes and their cost</h2>
@@ -95,8 +95,8 @@
 </p>
 <p>
 	In fleet class, the staging tail goes to the image's journal peer on every FLUSH and the acknowledgment waits for the peer's fdatasync, as Nutanix AOS and HPE SimpliVity do.<br />
-	The class costs one round trip plus one remote fdatasync per FLUSH, and it is measured as write p99 at QD1 against local class, on TCP, and on RDMA if the ibverbs arm lands.<br />
-	On the page 04 figures the transport is about a tenth of a cold read, which has 80 µs of media beneath it; a FLUSH has no media time to hide the round trip behind, so the transport's share of it is far larger, and this row is where that share shows.
+	The class costs one round trip plus one remote fdatasync per FLUSH. It is measured as write p99 at QD1 against local class, on TCP, and on RDMA if the ibverbs arm lands.<br />
+	On the page 04 figures the transport is about a tenth of a cold read, which has 80 µs of media beneath it. A FLUSH has no media time to hide the round trip behind, so the transport's share of it is far larger, and this row is where that share shows.
 </p>
 
 <h2>Measurements</h2>

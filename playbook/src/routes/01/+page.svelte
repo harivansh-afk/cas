@@ -7,128 +7,178 @@
 <PageHead num="01" />
 <p class="lede">
 	In local class the network is on the read path only, and only for a chunk this host does not hold.<br />
-	In fleet class it is also on the FLUSH path, once per FLUSH, to one fixed peer.<br />
-	No other message precedes an acknowledgment.
+	In fleet class it is also on the FLUSH (fsync) path, once per FLUSH, to only one fixed peer.
 </p>
 
 <h2>Components on one host</h2>
 <p>
 	The guest sees a virtio-blk device on stock QEMU.<br />
-	QEMU connects it over vhost-user-blk to one process per host, the daemon, and all new code lives there.<br />
-	Guest memory is shared with the daemon, so requests are read in place, and storage IO goes through io_uring.<br />
-	The device advertises a 4 KiB logical block, so every write is a whole number of blocks and no read-modify-write exists.
+	QEMU connects it over vhost-user-blk to one process per host, the daemon, and all new code lives in the daemon itself.<br />
+	Guest memory is shared with the daemon, so requests are read in place, and storage IO goes through Linux io_uring.<br />
+	The device advertises a 4 KiB logical block, so every write is a whole number of blocks and no read-modify-write exists.<br />
+	If the daemon restarts, QEMU reconnects over the same vhost-user socket and the requests in flight at the restart are recovered through the vhost-user inflight descriptor mechanism, so a daemon crash is invisible to the guest beyond a pause.
 </p>
-
-<Diagram
-	w={1000}
-	h={440}
-	label="The per-host datapath. A guest on stock QEMU reaches the daemon over vhost-user. Writes append to a local staging log and are acknowledged at FLUSH after fdatasync. A background compactor chunks settled extents, hashes them, and either appends unique chunks to the local store or sends them to their owner on another host, waiting for a durable ack. Reads check staging, then the chunk cache, then the local store, then fetch by hash from the owner."
-	caption="One host. The write path ends at the staging log. The compactor is the only component that talks to other hosts on the write side, and it does so after the acknowledgment."
->
-	<Node x={20} y={44} w={130} h={52} title="guest" sub="virtio-blk" tone="muted" />
-	<Node x={20} y={116} w={130} h={44} title="stock QEMU" sub="vhost-user-blk" tone="muted" />
-	<Edge points={[[150, 138], [200, 138]]} />
-	<Note x={22} y={110} size={9.5} tone="muted" text="shared guest memory" />
-
-	<Group x={200} y={20} w={780} h={400} label="daemon · one per host" tone="accent" />
-
-	<Node x={230} y={60} w={220} h={64} title="staging log" sub={['append-only · local NVMe', 'FLUSH → fdatasync → ack (local class)']} tone="accent" />
-	<Note x={470} y={86} tone="muted" size={9.5} text={['no hashing or chunking on this path', 'fleet class adds one JOURNAL round trip to a fixed peer, in parallel with the fdatasync']} />
-
-	<Edge points={[[340, 124], [340, 200]]} />
-	<Note x={352} y={166} size={10} text="settled extents" />
-	<Node x={230} y={200} w={240} h={64} title="compactor" sub={['chunk, then hash with BLAKE3', 'owner = rendezvous hash of the chunk']} tone="outline" />
-
-	<Edge points={[[470, 232], [570, 232]]} />
-	<Note x={520} y={190} anchor="middle" size={10} text="owner is this host" />
-	<Node x={570} y={200} w={180} h={64} title="local store" sub={['append-only chunk log', 'reclaimed by hole punching']} />
-
-	<Edge points={[[340, 264], [340, 342], [540, 342]]} tone="accent" />
-	<Note x={440} y={332} anchor="middle" size={10} tone="accent" text="owner is another host" />
-	<Node x={540} y={310} w={230} h={64} title="PUT to owner" sub={['sealed segment; acked after fdatasync', 'extent compacted after the ack']} tone="accent" />
-	<Edge points={[[770, 342], [995, 342]]} tone="accent" />
-	<Note x={882} y={332} anchor="middle" size={10} tone="accent" text="to the owner on another host" />
-
-	<Node x={760} y={50} w={200} h={52} title="index" sub="hash → store offset, in memory" />
-	<Node x={760} y={116} w={200} h={52} title="chunk cache" sub="hash → chunk bytes, bounded" tone="outline" />
-	<Node x={760} y={182} w={200} h={52} title="manifests" sub="image offset → chunk hash" />
-
-	<Note x={230} y={396} tone="muted" size={10} text={['read path: staging log, then chunk cache, then local store, then GET from the owner', 'prefetch: the next chunks in the manifest, on sequential reads']} />
-</Diagram>
 
 <h2>Write path</h2>
+
+<Diagram
+	w={960}
+	h={300}
+	label="The write path on one host. The guest's virtio-blk writes reach the daemon over vhost-user and append to a per-image staging log on local NVMe, opened O_DIRECT, with a sequence number per append. FLUSH is an fdatasync of the log followed by the acknowledgment. In fleet class a JOURNAL message carries the staging tail to the journal peer on another host, in parallel with the local fdatasync, and the acknowledgment waits for both. Nothing on this path hashes or chunks."
+	caption="The write path. A write is one append to a per-image log. FLUSH is one fdatasync, and in fleet class one round trip beside it."
+>
+	<Node x={20} y={40} w={140} h={52} title="guest" sub={['virtio-blk', '4 KiB logical blocks']} tone="muted" />
+	<Node x={20} y={124} w={140} h={44} title="stock QEMU" sub="vhost-user-blk" tone="muted" />
+	<Edge points={[[160, 146], [210, 146]]} label="shared memory" labelDy={-8} />
+
+	<Group x={210} y={20} w={460} h={262} label="daemon on host A" tone="accent" />
+	<Node x={236} y={56} w={250} h={64} title="staging log, one per image" sub={['append at block granularity', 'sequence number per append']} tone="accent" />
+	<Edge points={[[361, 120], [361, 190]]} label="O_DIRECT write" labelDx={58} />
+	<Node x={236} y={190} w={250} h={44} title="local NVMe" tone="muted" />
+	<Edge points={[[486, 88], [520, 88]]} />
+	<Node x={520} y={56} w={130} h={64} title="FLUSH" sub={['fdatasync the log', 'then ack the guest']} tone="outline" />
+	<Note x={236} y={262} tone="muted" size={10} text="no hashing and no chunking on this path" />
+
+	<Edge points={[[650, 88], [720, 88]]} tone="accent" dashed label="fleet class only" labelDy={-8} />
+	<Node x={720} y={56} w={220} h={64} title="journal peer, host B" sub={['JOURNAL(image, range)', 'append, fdatasync, ack']} tone="ghost" />
+	<Note x={720} y={150} tone="accent" size={10} text={['local class: ack after the local fdatasync', 'fleet class: ack after both,', 'the send in parallel with the fdatasync']} />
+</Diagram>
+
 <p>
-	Guest writes append at block granularity to a staging log on local NVMe.<br />
+	Guest writes append at block granularity to a staging log on local NVMe, one log per image.<br />
 	Every append is stamped with a per-image sequence number inside the same critical section as the append, so log order is sequence order and replay preserves last-write-wins.<br />
-	FLUSH is <code>fdatasync</code> of the log followed by the acknowledgment, and it covers the highest sequence number completed on any queue of the device, because virtio-blk has no FUA (force unit access) and requests arrive on several queues.<br />
+	FLUSH is <code>fdatasync</code> of the log followed by the guest ack. It covers the highest sequence number completed on any queue of the device, because virtio-blk has no FUA (force unit access) and requests arrive via several queues.<br />
 	If the guest negotiates neither VIRTIO_BLK_F_FLUSH nor a writeback cache, every write is acknowledged after fdatasync.<br />
-	The hot path hashes nothing and chunks nothing, so a large write proceeds at sequential-append speed.
+	The hot path hashes nothing and chunks nothing, so a large write proceeds at the sequential-append speed of the NVMe.
 </p>
 <p>
-	Durability comes from the log alone: every file is opened O_DIRECT, so the page cache never holds the only copy of anything.<br />
-	A waiting FLUSH starts an fdatasync at once, FLUSHes that arrive during one are covered by the next, and an idle fdatasync every 50 ms upgrades writes no FLUSH has asked for.<br />
-	There is no timed linger: in a prior implementation by the author, a 500 µs linger in front of an fdatasync averaging 35 µs was unproductive 97% of the time (unpublished measurement).<br />
-	Fresh data is read back from the log at the cost of one NVMe read, the cost R0 pays; an in-memory map from block to log offset supplies the location.
+	Durability comes from the log alone. Every file is opened O_DIRECT, so the page cache must never hold the sole copy of a byte.<br />
+	A waiting FLUSH starts an fdatasync at once. FLUSHes that arrive during one are covered by the next, and an idle fdatasync every 50 ms upgrades writes no FLUSH has asked for.<br />
+	Fresh data is read back from the log at the cost of one NVMe read, the cost R0 pays. An in-memory map from block to log offset supplies the location.
 </p>
 <p>
 	The staging log is finite, so a governor paces compaction on the measured drain rate, with an idle trigger so that nothing sits in staging after a workload ends.<br />
 	When ingest outruns compaction the guest sees added latency and never an error, because virtio-blk has no out-of-space status and an IO error shuts down the guest's filesystem.<br />
-	The point where pressure engages, and the latency it adds, are both measured.
+	The point where pressure engages, and the latency it adds, are both measured in this study.
 </p>
 
-<h2>Compactor</h2>
+<h2>CAS compactor</h2>
+
+<Diagram
+	w={960}
+	h={390}
+	label="The compactor. Settled extents leave the staging log, are cut into chunks (fixed 4 KiB, fixed 16 KiB, or FastCDC snapped to 4 KiB), and are hashed with BLAKE3. Rendezvous order of the hash names the owner set, and HAS asks each owner what it lacks. A chunk this host owns is appended to the local store and fdatasynced. A chunk another host owns goes there in a sealed segment, which the owner appends, fdatasyncs, and acknowledges. If an owner is unreachable, the chunk is kept in the local store as a pinned surplus copy and a repair queue retries the send. An extent counts as compacted after every owner's acknowledgment and the manifest commit that references it; the staging log is trimmed below D."
+	caption="The compactor. It is the only component that sends bytes to another host on the write side, and it does so after the guest's acknowledgment."
+>
+	<Node x={20} y={40} w={190} h={56} title="staging log" sub="settled extents" tone="muted" />
+	<Edge points={[[210, 68], [250, 68]]} />
+	<Node x={250} y={40} w={180} h={56} title="chunk" sub="fixed 4 or 16 KiB, or FastCDC" tone="outline" />
+	<Edge points={[[430, 68], [470, 68]]} />
+	<Node x={470} y={40} w={150} h={56} title="BLAKE3" sub="one hash per chunk" tone="outline" />
+	<Edge points={[[620, 68], [660, 68]]} />
+	<Node x={660} y={40} w={280} h={56} title="owners = rendezvous(hash)" sub="first k hosts; HAS asks what they lack" tone="accent" />
+
+	<Edge points={[[800, 96], [800, 130], [150, 130], [150, 170]]} />
+	<Edge points={[[800, 130], [480, 130], [480, 170]]} />
+	<Edge points={[[800, 96], [800, 170]]} />
+	<Node x={40} y={170} w={220} h={64} title="this host owns it" sub={['append to the local store', 'fdatasync']} />
+	<Node x={370} y={170} w={220} h={64} title="another host owns it" sub={['PUT a sealed segment', 'owner appends, fdatasyncs, acks']} tone="accent" />
+	<Node x={680} y={170} w={240} h={64} title="owner unreachable" sub={['surplus copy in the local store, pinned', 'a repair queue retries the PUT']} tone="ghost" />
+
+	<Edge points={[[150, 234], [150, 270], [480, 270], [480, 300]]} />
+	<Edge points={[[480, 234], [480, 300]]} />
+	<Edge points={[[800, 234], [800, 270], [480, 270]]} arrow={false} />
+	<Node x={250} y={300} w={460} h={64} title="extent compacted" sub={["after every owner's ack and the manifest commit", 'staging trimmed below D; the chunk pinned until then']} tone="accent" />
+</Diagram>
+
 <p>
-	A background pass reads settled extents from the staging log, cuts them into chunks, hashes each with BLAKE3, and skips any hash that every current owner already holds and has fenced; a copy in a cache does not count.<br />
-	Chunking is fixed 4 KiB, fixed 16 KiB, or FastCDC with boundaries snapped to 4 KiB, chosen per arm on page 02.<br />
-	Settled means unwritten for a settle window, so an extent overwritten inside the window is chunked once, in its final form; the window is a parameter and its effect on chunk traffic is measured.<br />
-	A discarded or zero-filled range is one range entry in the manifest that names no chunk, so DISCARD and WRITE_ZEROES of any size consume no store space and constant compactor work.<br />
-	Deferred hashing behind a write buffer is <a href="https://madsys.cs.tsinghua.edu.cn/publications/TPDS2014-zhao.pdf" target="_blank" rel="noopener">Liquid</a>'s design and <a href="https://github.com/wangeguo/plan9/blob/master/sys/man/4/fossil" target="_blank" rel="noopener">Fossil</a>'s before it; the buffer here is a durable log with a FLUSH contract rather than memory flushed at shutdown.
+	A background pass reads settled extents from the staging log, cuts them into chunks, hashes each with BLAKE3, and skips any hash that every current owner already holds and has fenced.<br />
+	A copy in a cache does not count as held.<br />
+	Chunking is fixed 4 KiB, fixed 16 KiB, or FastCDC with boundaries snapped to 4 KiB (one per measurement arm on page 02).<br />
+	Settled means unwritten for a settle window, so an extent overwritten inside the window is chunked once, after the window closes, in its final form.<br />
+	The window is a parameter, and its effect on chunk traffic is measured.<br />
+	A discarded or zero-filled range is one range entry in the manifest that names no chunk, so DISCARD and WRITE_ZEROES of any size consume no store space and constant compactor work. A read of such a range returns zeros.<br />
+	Deferred hashing behind a write buffer is <a href="https://madsys.cs.tsinghua.edu.cn/publications/TPDS2014-zhao.pdf" target="_blank" rel="noopener">Liquid</a>'s design and <a href="https://github.com/wangeguo/plan9/blob/master/sys/man/4/fossil" target="_blank" rel="noopener">Fossil</a>'s before it.<br />
+	The buffer in this study is a durable log on local NVMe with a FLUSH contract.
 </p>
 <p>
 	For each new chunk, the owner set is the first k hosts in rendezvous order of its hash.<br />
 	If this host is an owner, the chunk is appended to the local store and made durable with fdatasync.<br />
 	Otherwise it goes to each owner in a sealed segment of many chunks, which the owner appends, fdatasyncs once, and acknowledges.<br />
 	<mark>Only after every owner's acknowledgment does the extent count as compacted.</mark><br />
-	If an owner is unreachable, the compactor appends the chunk to the local store as a surplus copy, pinned until that owner acknowledges it later; the staging log therefore trims on local durability alone, a peer outage costs the guest latency and nothing else, and the sweep reclaims the surplus after the acknowledgment.<br />
-	A chunk the compactor has produced stays pinned, in the staging log or in a store, until the manifest commit that references it is durable, and an owner never reclaims a chunk it acknowledged before that fence.<br />
-	The staging log is therefore the write-ahead log for every chunk this host produces, wherever the chunk ends up.
+	If an owner is unreachable, the compactor appends the chunk to the local store as a surplus copy, pinned until that owner acknowledges it later. A repair queue retries the send.<br />
+	The staging log therefore trims on local durability alone. A peer outage costs the guest latency and nothing else, and the sweep reclaims the surplus after the acknowledgment.<br />
+	A chunk the compactor has produced stays pinned, in the staging log or in a store, until the manifest commit that references it is durable. An owner never reclaims a chunk it acknowledged before that fence.<br />
+	The staging log is therefore the write-ahead log for every chunk this host produces, wherever the chunk might end up.
 </p>
 <p>
-	Two costs come with this design, and both are measured.<br />
-	Every surviving byte is written at least twice, staging then store, plus journal traffic.<br />
-	Compaction reads and writes the same device the guest is using, so guest p99 is measured with the compactor active and idle.<br />
-	The compactor holds no lock the FLUSH path takes, and a test slows the store to one second per append and checks that every FLUSH still completes within its budget.
+	Two costs come with this design:
+</p>
+<ul class="plain">
+	<li>Every surviving byte is written at least twice, staging then store, plus journal traffic.</li>
+	<li>Compaction reads and writes the same device the guest is using, so guest p99 is measured with the compactor active and idle.</li>
+</ul>
+<p>
+	The compactor holds no lock the FLUSH path takes. A test slows the store to one second per append and checks that every FLUSH still completes within its budget.
 </p>
 <p class="note">
 	CDC over a dirty extent re-chunks from the last settled boundary before it to the first boundary after it that agrees with the existing cut.<br />
-	This is the standard resynchronization rule (<a href="https://pdos.csail.mit.edu/papers/lbfs:sosp01/lbfs.pdf" target="_blank" rel="noopener">LBFS</a> locality; <a href="https://huggingface.co/docs/xet/en/chunking" target="_blank" rel="noopener">Xet</a>'s boundary reset), and it is why CDC never runs on the hot path: one aligned write can move every boundary in its neighborhood.
+	This is the standard resynchronization rule (<a href="https://pdos.csail.mit.edu/papers/lbfs:sosp01/lbfs.pdf" target="_blank" rel="noopener">LBFS</a> locality; <a href="https://huggingface.co/docs/xet/en/chunking" target="_blank" rel="noopener">Xet</a>'s boundary reset), and it is why CDC never runs on the hot path. One aligned write can move every boundary in its neighborhood.
 </p>
 
 <h2>Read path</h2>
+
+<Diagram
+	w={960}
+	h={300}
+	label="The read path. A read checks the staging log, then the chunk cache, then the local store, and otherwise sends GET for the hash to the first reachable owner in rendezvous order. The owner answers from its cache or its store. A reply is hashed before it is served. On sequential reads the daemon asks for the next P hashes in one GET."
+	caption="The read path. Three local checks, then one round trip. The network appears only in the last box."
+>
+	<Node x={20} y={60} w={200} h={40} title="in the staging log?" kind="question" />
+	<Edge points={[[220, 80], [250, 80]]} label="no" labelDy={-6} />
+	<Node x={250} y={60} w={200} h={40} title="in the chunk cache?" kind="question" />
+	<Edge points={[[450, 80], [480, 80]]} label="no" labelDy={-6} />
+	<Node x={480} y={60} w={200} h={40} title="in the local store?" kind="question" />
+	<Edge points={[[680, 80], [710, 80]]} label="no" labelDy={-6} tone="accent" />
+	<Node x={710} y={50} w={230} h={60} title="GET(hash) to an owner" sub={['first reachable owner in rendezvous order', 'owner: its cache, then its store']} tone="accent" />
+
+	<Edge points={[[120, 100], [120, 170]]} label="yes" labelDx={14} />
+	<Edge points={[[350, 100], [350, 170]]} label="yes" labelDx={14} />
+	<Edge points={[[580, 100], [580, 170]]} label="yes" labelDx={14} />
+	<Edge points={[[825, 110], [825, 170]]} tone="accent" />
+	<Node x={20} y={170} w={200} h={52} title="one NVMe read" sub="fresh data, no indirection" />
+	<Node x={250} y={170} w={200} h={52} title="memory hit" sub="no IO" />
+	<Node x={480} y={170} w={200} h={52} title="one NVMe read" sub="index lookup first" />
+	<Node x={710} y={170} w={230} h={52} title="one round trip" sub="reply hashed before it is served" tone="accent" />
+
+	<Note x={20} y={262} tone="muted" size={10} text="prefetch: on sequential reads the daemon asks for the next P hashes in one GET; the guest's own readahead adds to P" />
+</Diagram>
+
 <p>
-	A read checks the staging log, then the chunk cache, then the local store if this host holds the chunk, and otherwise sends <code>GET</code> for the hash to an owner.<br />
+	A read checks the staging log, then the chunk cache, then the local store if this host holds the chunk. Otherwise it sends <code>GET</code> for the hash to the first reachable owner in rendezvous order.<br />
 	The owner answers from its cache if the chunk is hot and from its store otherwise.<br />
-	Every chunk that arrives over the network is hashed before it is used, so a wrong or corrupt reply is detected and never served.<br />
-	Fresh data is served without indirection; settled data incurs the manifest lookup, the index lookup, and, if the chunk is remote, one round trip.<br />
+	Every chunk that arrives over the network is hashed before it is used, so a wrong or corrupt reply is detected and never served. A record read from a store is checked against its inline checksum.<br />
+	Fresh data is served without indirection. Settled data incurs the manifest lookup, the index lookup, and, if the chunk is remote, one round trip.<br />
 	<code>GET</code> runs on its own connections with priority over <code>PUT</code> and over compaction IO at the serving disk, so a guest-blocking read never waits behind a bulk transfer.
 </p>
 <p>
 	The chunk cache is daemon-owned memory keyed by hash, LRU, with a size that is a parameter.<br />
 	A fetched chunk this host does not own lives in that memory cache only.<br />
-	Liquid persisted fetched blocks in an on-disk copy-on-read cache; here a refetch from a peer's memory is predicted at 20 to 30 µs against about 80 µs for a local disk hit, so a disk tier would pay only for chunks that are cold at their owner too.<br />
-	The disk tier is a knob, noted, and measured only if time remains; the residual cost of one copy per chunk on page 04 is measured without it.<br />
+	Liquid persisted fetched blocks in an on-disk copy-on-read cache. Here a refetch from a peer's memory is predicted at 20 to 30 µs against about 80 µs for a local disk hit, so a disk tier would pay only for chunks that are cold at their owner too (page 04 measures the refetch).<br />
+	The disk tier is a knob, noted, and measured only if time remains. The residual cost of one copy per chunk on page 04 is measured without it.<br />
 	Because every file is O_DIRECT, the kernel page cache holds nothing on any host, and the cache size is set equal to the ARC (adaptive replacement cache) limit on the ZFS configuration.
 </p>
 <p>
-	Prefetch is the daemon issuing the next D hashes from the manifest in one <code>GET</code> when it sees sequential reads, and optionally replaying a recorded boot profile.<br />
-	The guest's own readahead is left at its default and adds to D.<br />
-	D is swept on page 04.
+	Prefetch is the daemon issuing the next P hashes from the manifest in one <code>GET</code> when it sees sequential reads, and optionally replaying a recorded boot profile.<br />
+	The guest's own readahead is left at its default and adds to P.<br />
+	P is swept on page 04.
 </p>
 
 <h2>Store, index, and manifest</h2>
 <p>
 	The local store is an append-only log of records (length, hash, checksum, bytes) and is authoritative for the chunks this host owns.<br />
-	The index maps hash to store offset, lives in memory, and is rebuilt by scanning the store without re-hashing, because the hash is inline; its bytes per TB is the constant the chunk-size arms measure.<br />
+	The index maps hash to store offset, lives in memory, and is rebuilt by scanning the store without re-hashing, because the hash is inline.<br />
+	Its bytes per TB is the constant the chunk-size arms measure.<br />
 	In partitioned mode a host indexes only the chunks it owns, so per-host index memory is k/N of the fleet's.<br />
 	The index is written only after the data it points to is durable, at every fence.<br />
 	The manifest, one per image, is a journaled tree from disk offset to chunk hash, packed in offset order.<br />
@@ -152,29 +202,31 @@
 </div>
 <p>
 	Messages are length-prefixed over kernel TCP with <code>TCP_NODELAY</code>, driven by io_uring.<br />
-	<code>GET</code> and <code>JOURNAL</code> have their own connections and priority; <code>PUT</code> is bulk.<br />
+	<code>GET</code> and <code>JOURNAL</code> have their own connections and priority. <code>PUT</code> is bulk.<br />
 	Every message is idempotent and named by hash or sequence number, so any of them can be retried.<br />
-	The daemon runs busy-polling or blocking; page 04 measures both, because the scheduler wakeup is part of the cost.<br />
+	The daemon runs busy-polling or blocking. Page 04 measures both, because the scheduler wakeup is part of the cost.<br />
 	Rendezvous hashing means a reader already knows the owners of every hash, so no host looks up another's index.
 </p>
 <p>
-	RDMA and NVMe-oF exports appear on page 04 as probes that show what the kernel stack costs; the architecture depends on neither.
+	RDMA and NVMe-oF exports appear on page 04 as probes that show what the kernel stack costs.<br />
+	The architecture has no structural dependency on either.
 </p>
 
 <h2>Placement and the parameter k</h2>
 <p>
 	The owner set of a chunk is the first k hosts in rendezvous order of its hash.<br />
-	The journal peer for fleet class is not chosen this way: a journal needs a fixed home with ordered replay, so each image names one peer at creation and keeps it.<br />
+	The journal peer for fleet class is not chosen this way. A journal needs a fixed home with ordered replay, so each image names one peer at creation and keeps it.<br />
+	If a migration lands the guest on its own journal peer, the image names a new peer in the same fenced swap. On two hosts the journal peer is always the other host.<br />
 	k is the one multi-host parameter.<br />
-	With N hosts, k = N places every chunk on every host (replicated) and k = 1 places each chunk on exactly one (partitioned); on the two-host testbed these are k = 2 and k = 1.<br />
+	With N hosts, k = N places every chunk on every host (replicated) and k = 1 places each chunk on exactly one (partitioned). On the two-host testbed these are k = 2 and k = 1.<br />
 	Page 03 measures both, and a deployment would run k ≥ 2 on N ≥ 3 hosts.
 </p>
 
 <h2>Durability classes</h2>
 <p>
-	Durability is a per-image class on one pipeline; the class changes who waits at FLUSH and for how long, and nothing about where bytes end up.<br />
+	Durability is a per-image class on one pipeline. The class changes who waits at FLUSH and for how long, and nothing about where bytes end up.<br />
 	<strong>Local class</strong>, the default: FLUSH returns after fdatasync of the staging log on this host.<br />
-	<strong>Fleet class</strong>: the staging tail since the last FLUSH is sent to the image's journal peer, which appends it to its own log and fdatasyncs; the send proceeds in parallel with this host's fdatasync, FLUSH returns after both, and FLUSHes from several images to the same peer share one round trip and one fdatasync.<br />
+	<strong>Fleet class</strong>: the staging tail since the last FLUSH is sent to the image's journal peer, which appends it to its own log and fdatasyncs. The send proceeds in parallel with this host's fdatasync, FLUSH returns after both, and FLUSHes from several images to the same peer share one round trip and one fdatasync.<br />
 	Local class is the contract a local disk gives, which is why it is the default against R0 and R1.<br />
 	Fleet class is what <a href="https://www.nutanixbible.com/4g-book-of-aos-data-io-path.html" target="_blank" rel="noopener">Nutanix AOS</a> and <a href="https://experistg.com/wp-content/uploads/2019/12/The-technology-enabling-HPE-SimpliVity-data-efficiency.pdf" target="_blank" rel="noopener">HPE SimpliVity</a> do before they acknowledge, and page 03 measures what it costs.
 </p>
@@ -187,45 +239,73 @@
 			<tr><td class="k">daemon crash</td><td>nothing acknowledged is lost: replay the staging log from D, re-run compaction</td><td>same</td></tr>
 			<tr><td class="k">host crash, power loss</td><td>nothing acknowledged is lost: FLUSH was fdatasync on local NVMe</td><td>same</td></tr>
 			<tr><td class="k">host lost</td><td>acknowledged bytes not yet durable at an owner, exactly (O, E], are lost; R0 and R1 lose everything</td><td>the staging tail survives: the journal peer replays (D, E] onto a new host; chunks the lost host owned survive only if k ≥ 2, as in the row below</td></tr>
-			<tr><td class="k">peer lost, k = 1</td><td colspan="2">chunks it owned are unreadable until it returns, and lost if its disk is; a read that needs one waits or fails with an error, never returns stale bytes; writes continue, with surplus copies standing in</td></tr>
+			<tr><td class="k">peer lost, k = 1</td><td>chunks it owned are unreadable until it returns, and lost if its disk is; a read that needs one waits or fails with an error, never returns stale bytes; writes continue, with surplus copies standing in</td><td>same</td></tr>
 		</tbody>
 	</table>
 </div>
 <p>
-	Two rules hold in both classes.<br />
-	The compactor never sends a chunk whose staging extent is not yet durable on this host.<br />
-	Transfer is two-phase: the owner fdatasyncs and acknowledges before the sender marks anything compacted or reclaimable.
+	Two rules hold in both classes:
 </p>
+<ul class="plain">
+	<li>The compactor never sends a chunk whose staging extent is not yet durable on this host.</li>
+	<li>Transfer is a two-phase job. The owner fdatasyncs and acknowledges before the sender marks anything compacted or reclaimable.</li>
+</ul>
 
-<h2>The watermark</h2>
+<h2>Watermark</h2>
+
+<Diagram
+	w={960}
+	h={230}
+	label="One image's sequence numbers on a line, with three marks. Everything at or below D has its chunks in a store and its manifest entry committed, and the staging log is trimmed there. (D, E] is the staging tail, replayed on recovery and migration. FLUSH waits for E and a snapshot cuts at E. O is at or below D and marks what is durable at every owner; (O, E] is what a lost host loses in local class. O equals D unless a surplus copy is standing in for an unreachable owner."
+	caption="The watermark of one image. O ≤ D ≤ E. Each operation waits on, cuts at, trims below, or replays between exactly one pair of them."
+>
+	<Edge points={[[40, 90], [920, 90]]} tone="muted" />
+	<Note x={920} y={118} anchor="end" tone="muted" size={10} text="sequence numbers of one image" />
+	<Node x={280} y={74} w={40} h={32} title="O" />
+	<Node x={500} y={74} w={40} h={32} title="D" tone="accent" />
+	<Node x={740} y={74} w={40} h={32} title="E" tone="outline" />
+	<Note x={330} y={44} anchor="middle" tone="muted" size={10} text={['at or below D: chunks in a store,', 'manifest committed, staging trimmed']} />
+	<Note x={760} y={44} anchor="middle" size={10} text={['E: FLUSH waits here,', 'a snapshot cuts here']} />
+	<Edge points={[[520, 130], [760, 130]]} dashed arrow={false} tone="accent" />
+	<Note x={640} y={150} anchor="middle" tone="accent" size={10} text={['(D, E]: the staging tail', 'replayed on recovery and migration']} />
+	<Edge points={[[300, 185], [760, 185]]} dashed arrow={false} />
+	<Note x={530} y={205} anchor="middle" size={10} text={['(O, E]: lost if this host is lost, in local class', 'O = D unless a surplus copy stands in for an unreachable owner']} />
+</Diagram>
+
 <p>
 	Every image carries three integers.<br />
-	E is the highest sequence number with no unconfirmed append before it; in local class confirmed means on local NVMe, in fleet class it means on the journal peer too.<br />
+	E is the highest sequence number with no unconfirmed append before it. In local class confirmed means on local NVMe. In fleet class it means on the journal peer too.<br />
 	D is the highest sequence number whose chunks are durable in a store, at their owners or as surplus copies on this host, and whose manifest entries are committed.<br />
-	O ≤ D is the highest sequence number whose chunks are durable at every owner; O equals D except while a surplus copy stands in for an unreachable owner.<br />
+	O ≤ D is the highest sequence number whose chunks are durable at every owner. O equals D except while a surplus copy stands in for an unreachable owner.<br />
 	FLUSH waits for E. A snapshot cuts at E. The staging log is trimmed below D, and trimmed regions are discarded so the drive does not copy dead bytes. Recovery and migration replay exactly (D, E]. A lost host loses (O, E] in local class.<br />
 	E never skips a hole, because a maximum over confirmations forgets the append still in flight, and that is the answer that loses acknowledged data.
 </p>
 <p>
 	Two logs, staging and the manifest journal, must agree after a crash, and staging is senior.<br />
-	Re-running compaction over the replayed extents yields a manifest whose every offset maps to the same bytes; it need not yield the same chunk boundaries under CDC, and the sweep reclaims the orphans of the first run.<br />
-	<code>kill -9</code> at any point, then this replay, must pass <code>fio --verify</code> before any number from the daemon is reported; the log's torn tail is tested in both shapes, a shortened file and a partial record followed by preallocated zeros.<br />
-	Three more cases have tests because each is a defect the author met in a prior implementation: an empty discard that acknowledged a sequence number nothing wrote and wedged the next FLUSH; a FLUSH that must cover writes completed on any queue, checked with a multi-queue test and a negative control that shows the test can see the reordering; and a daemon that stops answering, which leaves the guest in D-state because virtio-blk installs no timeout handler.
+	Re-running compaction over the replayed extents yields a manifest whose every offset maps to the same bytes. It need not yield the same chunk boundaries under CDC, and the sweep reclaims the orphans of the first run.<br />
+	<code>kill -9</code> at any point, then this replay, must pass <code>fio --verify</code> before any number from the daemon is reported. The log's torn tail is tested in both shapes, a shortened file and a partial record followed by preallocated zeros.<br />
+	Three more cases have tests because each is a defect the author met in a prior implementation:
 </p>
+<ul class="plain">
+	<li>an empty discard that acknowledged a sequence number nothing wrote and wedged the next FLUSH</li>
+	<li>a FLUSH that must cover writes completed on any queue, checked with a multi-queue test and a negative control that shows the test can see the reordering</li>
+	<li>a daemon that stops answering, which leaves the guest in D-state because virtio-blk installs no timeout handler</li>
+</ul>
 
-<h2>Garbage collection</h2>
+<h2>Garbage collection (GC)</h2>
 <p>
-	A chunk is live if any manifest on any host references it, or if an in-flight compaction has pinned it; a copy in a cache is never a reference.<br />
-	Each host sends each owner the live set for an epoch with <code>LIVE</code>, and the owner sweeps with <code>FALLOC_FL_PUNCH_HOLE</code> over dead records; there are no reference counts.<br />
-	Liquid ran the same mark-and-sweep with Bloom-filter live sets over its data servers.<br />
-	ZFS frees an overwritten block the moment its reference count drops; this design does not, so space leaks between sweeps.<br />
-	The sweep therefore runs before every capacity measurement, and the bytes it reclaims are reported beside the capacity number as the leak; concurrent collection is out of scope.
+	A chunk is live if any manifest on any host references it, or if an in-flight compaction has pinned it. A copy in a cache is never a reference.<br />
+	Each host sends each owner the live set for an epoch with <code>LIVE</code>, and the owner sweeps with <code>FALLOC_FL_PUNCH_HOLE</code> over dead records.<br />
+	Refcounting is not a concept in this architecture.<br />
+	(Liquid ran the same mark-and-sweep with Bloom-filter live sets over its data servers.)<br />
+	ZFS frees an overwritten block the moment its reference count drops. This design does not, so space can leak between sweeps.<br />
+	The sweep therefore runs before every capacity measurement, and the bytes it reclaims are reported beside the capacity number as the leak.
 </p>
 
 <h2>Out of scope</h2>
 <p>
 	Membership changes, failure detection, rebalancing when a host joins or leaves, authentication and encryption on the wire, measurement on more than two hosts, and concurrent garbage collection.<br />
-	Each is named in future work on page 05, and none affects a number this study reports.
+	Each is named in future work on page 05, and none affects a number we report in this study.
 </p>
 
 <h2>Provenance</h2>

@@ -17,8 +17,8 @@
 	The pair is one hop through a single switch.
 </p>
 <p>
-	RoCE between two of these nodes works on the lossy fabric: <a href="https://arxiv.org/pdf/2312.06808" target="_blank" rel="noopener">BPF-oF</a> ran nvme-rdma and nvme-tcp between two c6525-100g nodes and measured 18 and 30 µs average round trips.<br />
-	Self-built kernels are routine there; the Ubuntu 24.04 image ships 6.8, dm-vdo needs 6.9, and OpenZFS 2.3 is a source build, so a kernel and ZFS are built once in week 1 and snapshotted as an image.<br />
+	RoCE between two of these nodes works on the lossy fabric. <a href="https://arxiv.org/pdf/2312.06808" target="_blank" rel="noopener">BPF-oF</a> ran nvme-rdma and nvme-tcp between two c6525-100g nodes and measured 18 and 30 µs average round trips.<br />
+	Self-built kernels are routine there. The Ubuntu 24.04 image ships 6.8, dm-vdo needs 6.9, and OpenZFS 2.3 is a source build, so a kernel and ZFS are built once in week 1 and snapshotted as an image.<br />
 	Reservations expire at 16 hours by default, so every run is scripted to complete inside one.
 </p>
 <p>
@@ -84,11 +84,11 @@
 <h2>Risks</h2>
 <ul class="plain">
 	<li><strong>Daemon overrun.</strong> The largest risk and the reason G1 is at week 2. Protocol plumbing comes from maintained crates, so the hours go to the components listed as new code on page 01.</li>
-	<li><strong>RoCE configuration.</strong> GID selection, MTU, adaptive retransmission on a lossy fabric. Budgeted at 8 hours; if it exceeds 20, the RDMA rows are dropped and the TCP rows stand.</li>
+	<li><strong>RoCE configuration.</strong> GID selection, MTU, adaptive retransmission on a lossy fabric. Budgeted at 8 hours. If it exceeds 20, the RDMA rows are dropped and the TCP rows stand.</li>
 	<li><strong>Node availability.</strong> 36 nodes of this type exist, so the pair is reserved in week 1 for every measurement week.</li>
 	<li><strong>Correctness debt.</strong> The defects that stall or corrupt a guest are known in advance from a prior implementation: a FLUSH that misses a write completed on another queue, an empty discard that acknowledges a sequence number nothing wrote, a daemon that stops and leaves the guest in D-state. Each has a test in G2 and hours in weeks 3 to 5, before any number is taken.</li>
 	<li><strong>O_DIRECT alignment.</strong> A guest buffer not aligned to the logical block is bounced through an aligned copy, and the fraction of requests bounced is counted.</li>
-	<li><strong>Known configuration pitfalls.</strong> <code>dedup=on</code> means SHA-256; direct IO does nothing on zvols; the 100G interface stays down unless the profile declares a link on it.</li>
+	<li><strong>Known configuration pitfalls.</strong> <code>dedup=on</code> means SHA-256. Direct IO does nothing on zvols. The 100G interface stays down unless the profile declares a link on it.</li>
 	<li><strong>Census realism.</strong> Scripted drift is not real drift. The fleet is built from real dated archives, the scripts are published, and the numbers it supplies are bounds the daemon is read against, not claims about fleets in the wild.</li>
 </ul>
 
@@ -102,16 +102,16 @@
 <h2>Future work</h2>
 <p>
 	<strong>Availability.</strong><br />
-	Fleet class is the seed of replication before acknowledgment; with it and k ≥ 2 on N ≥ 3 the system has a failure model, which needs membership, failure detection, and rebalancing, none of which this study touches.
+	Fleet class is the seed of replication before acknowledgment. With it and k ≥ 2 on N ≥ 3 the system has a failure model, which needs membership, failure detection, and rebalancing, none of which this study touches.
 </p>
 <p>
 	<strong>Placement and reclamation.</strong><br />
-	Super-chunk placement for locality; a cache policy that weighs a chunk's owner distance; an on-disk copy-on-read tier for chunks that are cold at their owner; and reference counts kept as derived state, with the sweep as the auditor, so an overwrite frees space at once as it does in ZFS.
+	Super-chunk placement for locality. A cache policy that weighs a chunk's owner distance. An on-disk copy-on-read tier for chunks that are cold at their owner. Reference counts kept as derived state, with the sweep as the auditor, so an overwrite frees space at once as it does in ZFS.
 </p>
 <p>
 	<strong>The same split elsewhere.</strong><br />
-	Prefix caching in LLM serving (vLLM, SGLang, Mooncake) names cached KV blocks by a hash chain over the whole token history, so two requests share only along a common prefix; that is lineage.<br />
-	The same document after two different preambles is computed twice; that is the cross-host case here, and its size on a real trace is unmeasured.
+	Prefix caching in LLM serving (vLLM, SGLang, Mooncake) names cached KV blocks by a hash chain over the whole token history, so two requests share only along a common prefix. That is lineage.<br />
+	The same document after two different preambles is computed twice. That is the cross-host case here, and its size on a real trace is unmeasured.
 </p>
 
 <PageNav num="05" />
