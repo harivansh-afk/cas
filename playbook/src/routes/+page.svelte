@@ -5,7 +5,7 @@
 </script>
 
 <svelte:head>
-	<title>Content-addressed deduplication: a distributed storage system study</title>
+	<title>Content-addressed deduplication: a distributed-storage-system study</title>
 	<meta
 		name="description"
 		content="In a content-addressed store the hash is the address, and an address computed from the bytes is the same on every host. This study builds a content-addressed block backend under unmodified QEMU and measures, on two hosts, what that provides and what the remote cold read costs."
@@ -14,7 +14,7 @@
 
 <span class="eyebrow">research specification</span>
 <div class="title-row">
-	<h2 class="title">Content-addressed deduplication: a distributed storage system study</h2>
+	<h2 class="title">Content-addressed deduplication: a distributed-storage-system study</h2>
 	<a class="site-gh" href={repo} target="_blank" rel="noopener" aria-label="source on GitHub" title="source on GitHub">
 		<GitHubIcon />
 	</a>
