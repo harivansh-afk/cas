@@ -23,7 +23,7 @@ In OpenZFS and dm-vdo the hash of a block is a key in a side table that belongs 
 
 In a content-addressed store the hash is the address, so placement, transfer, and the cache key follow the content rather than the host.
 
-Pages 03 and 04 measure each of the three.
+Three things follow: a guest is provisioned or migrated by moving its manifest, each unique chunk is stored k times across the fleet instead of once per host, and a chunk many guests read is served from its owner's memory. Pages 03 and 04 measure each.
 
 Two things are paid, and both are measured. A cold read of a chunk another host holds costs one round trip on the network. Durability before acknowledgment becomes a choice between this host's disk alone and a peer's disk as well.
 

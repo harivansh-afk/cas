@@ -11,7 +11,7 @@
 	In a content-addressed store the hash is the address, so placement, transfer, and the cache key follow the content rather than the host.
 </p>
 <p>
-	Pages 03 and 04 measure each of the three.<br />
+	Three things follow: a guest is provisioned or migrated by moving its manifest, each unique chunk is stored k times across the fleet instead of once per host, and a chunk many guests read is served from its owner's memory. Pages 03 and 04 measure each.<br />
 	Two things are paid, and both are measured. A cold read of a chunk another host holds costs one round trip on the network. Durability before acknowledgment becomes a choice between this host's disk alone and a peer's disk as well.<br />
 	The system is a content-addressed block backend under unmodified QEMU. Its scope, called the testbed from here on:
 </p>
