@@ -36,6 +36,13 @@ jobs:
       - run: pnpm build
         env:
           BASE_PATH: /${{ github.event.repository.name }}
+      # spec.pdf is typeset from the same prerendered pages the site serves.
+      - uses: astral-sh/setup-uv@v6
+      - run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            pandoc librsvg2-bin latexmk texlive-xetex texlive-latex-recommended texlive-latex-extra tex-gyre
+      - run: python3 scripts/pdf/build.py --out build/spec.pdf
       - uses: actions/upload-pages-artifact@v3
         with:
           path: playbook/build
