@@ -6,9 +6,8 @@
 
 <PageHead num="00" />
 <p class="lede">
-	<mark>Two guests on different hosts that install the same package hold the same bytes, and neither host knows. Addressing a chunk by a hash of its content gives both hosts one name for it, so it can be stored once and fetched across hosts. This study builds such a backend for VM disks under unmodified QEMU and measures, on two hosts, what it gains and what it costs.</mark><br />
-	In OpenZFS and dm-vdo the hash of a block is a key in a side table that belongs to one pool, and the block is still addressed by its location on disk.<br />
-	In a content-addressed store the hash is the address, so placement, transfer, and the cache key follow the content rather than the host.
+	<mark>Deduplication in ZFS and dm-vdo is scoped to one pool: a chunk present on every host of a fleet is stored once per host, and a migrating guest copies every block of its image. Content addressing removes the scope, since a chunk named by the hash of its bytes has the same name on every host and can be stored once, transferred by name, and cached at one owner. This study builds a content-addressed block backend for virtual machines under unmodified QEMU and measures, on two hosts, the capacity, transfer, and cache gains against the latency of a cold read over the network.</mark><br />
+	In ZFS and dm-vdo the hash is a key in a side table and the block is still addressed by its location on disk; in a content-addressed store the hash is the address.
 </p>
 <p>
 	Three things follow: a guest is provisioned or migrated by moving its manifest, each unique chunk is stored k times across the fleet instead of once per host, and a chunk many guests read is served from its owner's memory. Pages 03 and 04 measure each.<br />
@@ -23,7 +22,7 @@
 
 <h2>Deduplication within a host</h2>
 <p>
-	No clone or snapshot can share the two guests' packages, because neither copy descends from the other.
+	Two guests that install the same package hold equal bytes that no clone or snapshot can share, because neither copy descends from the other.
 </p>
 <p>
 	A deduplication table shares them. OpenZFS keeps one per pool, the DDT, and Linux has had <a href="https://docs.kernel.org/admin-guide/device-mapper/vdo.html" target="_blank" rel="noopener">dm-vdo</a> in the mainline kernel since 6.9.<br />

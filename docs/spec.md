@@ -4,7 +4,7 @@ CS 4993, fall 2026. Research specification, v10.
 
 Abstract, rendered as the PDF abstract and the site description (`playbook/src/routes/+page.svelte`):
 
-Two guests on two hosts that install the same package hold the same bytes twice, and per-host deduplication in ZFS and dm-vdo does not know. This study names each chunk by its hash, so both hosts compute the same name without speaking, and builds on that a block backend for virtual machines under unmodified QEMU. We predict that a guest is provisioned or migrated by moving only its manifest, that two hosts store at most 55% of what two per-host ZFS pools hold, that a cold 4 KiB read from a peer's memory over TCP arrives before one from local NVMe, and that single-host capture is within 10% of ZFS fast dedup at equal block size. The testbed is two hosts with static membership, Linux guests, and single-digit terabytes, and the cost measured is the network round trip on the cold read path and, in fleet class, on the FLUSH path.
+Deduplication in ZFS and dm-vdo is scoped to one pool, so a fleet stores a chunk shared by all its hosts once per host and migrates a guest by copying every block of its image. This study names each chunk by the hash of its bytes, which is the same on every host, and builds on that a block backend for virtual machines under unmodified QEMU. We predict that a guest is provisioned or migrated by moving only its manifest, that two hosts store at most 55% of what two per-host ZFS pools hold, that a cold 4 KiB read from a peer's memory over TCP arrives before one from local NVMe, and that single-host capture is within 10% of ZFS fast dedup at equal block size. The testbed is two hosts with static membership, Linux guests, and single-digit terabytes, and the cost measured is the network round trip on the cold read path and, in fleet class, on the FLUSH path.
 
 This file is the working text of `playbook/src/routes/00–06`. Edits here are ported to the pages by hand. The generator `docs/mkspec.py` was removed in f4ea13b.
 Figures are described in brackets where the pages draw them.
@@ -17,11 +17,9 @@ Glossary, not rendered: the backend (daemon, store, protocol as a whole); the da
 
 # 00 Thesis
 
-**Two guests on different hosts that install the same package hold the same bytes, and neither host knows. Addressing a chunk by a hash of its content gives both hosts one name for it, so it can be stored once and fetched across hosts. This study builds such a backend for VM disks under unmodified QEMU and measures, on two hosts, what it gains and what it costs.**
+**Deduplication in ZFS and dm-vdo is scoped to one pool: a chunk present on every host of a fleet is stored once per host, and a migrating guest copies every block of its image. Content addressing removes the scope, since a chunk named by the hash of its bytes has the same name on every host and can be stored once, transferred by name, and cached at one owner. This study builds a content-addressed block backend for virtual machines under unmodified QEMU and measures, on two hosts, the capacity, transfer, and cache gains against the latency of a cold read over the network.**
 
-In OpenZFS and dm-vdo the hash of a block is a key in a side table that belongs to one pool, and the block is still addressed by its location on disk.
-
-In a content-addressed store the hash is the address, so placement, transfer, and the cache key follow the content rather than the host.
+In ZFS and dm-vdo the hash is a key in a side table and the block is still addressed by its location on disk; in a content-addressed store the hash is the address.
 
 Three things follow: a guest is provisioned or migrated by moving its manifest, each unique chunk is stored k times across the fleet instead of once per host, and a chunk many guests read is served from its owner's memory. Pages 03 and 04 measure each.
 
@@ -35,7 +33,7 @@ The system is a content-addressed block backend under unmodified QEMU. Its scope
 
 ## Deduplication within a host
 
-No clone or snapshot can share the two guests' packages, because neither copy descends from the other.
+Two guests that install the same package hold equal bytes that no clone or snapshot can share, because neither copy descends from the other.
 
 A deduplication table shares them. OpenZFS keeps one per pool, the DDT, and Linux has had [dm-vdo](https://docs.kernel.org/admin-guide/device-mapper/vdo.html) in the mainline kernel since 6.9.
 
