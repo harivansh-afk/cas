@@ -6,7 +6,8 @@
 
 <PageHead num="00" />
 <p class="lede">
-	<mark>Addressing a virtual machine's data chunks by their content lets a fleet of hosts deduplicate, provision, and cache across host boundaries. This study measures those advantages and their cost on two hosts, and projects from them the fleet size at which a content-addressed store becomes advantageous.</mark><br />
+	<mark>Addressing a virtual machine's data chunks by their content lets a fleet of hosts deduplicate, provision, and cache across host boundaries.</mark><br />
+	This study measures those advantages and their cost on a multi-host cluster, and projects from them the fleet size at which a content-addressed store becomes advantageous.<br />
 	Existing solutions such as ZFS and dm-vdo also hash blocks for deduplication, but the hash serves only as a key into a table scoped to one pool while the block remains addressed by its location on disk, so no identity the table records is visible beyond a single host.
 </p>
 <p>
