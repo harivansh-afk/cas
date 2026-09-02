@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build spec.pdf from the prerendered site.
 
-Reads build/00.html … build/06.html, lifts the article out of each page,
+Reads every build/NN.html in order, lifts the article out of each page,
 turns every inline SVG figure into a PDF via rsvg-convert, and hands one
 HTML document to pandoc, which writes LaTeX. latexmk then produces the PDF.
 
@@ -30,7 +30,6 @@ HERE = Path(__file__).resolve().parent
 WORK = ROOT / ".svelte-kit" / "pdf"
 WOFF2 = ROOT / "src" / "lib" / "assets" / "fonts" / "BerkeleyMono-Variable.woff2"
 
-PAGES = ["00", "01", "02", "03", "04", "05", "06"]
 TEXT = "#1c1917"  # site --text-primary, light scheme
 MONO = "Berkeley Mono"
 
@@ -120,7 +119,8 @@ def main() -> None:
     ttf = font_file()
     fontenv = fontconfig(ttf)
 
-    parts = [figures(p, article(p), figdir, fontenv) for p in PAGES]
+    pages = sorted(f.stem for f in BUILD.glob("[0-9][0-9].html"))
+    parts = [figures(p, article(p), figdir, fontenv) for p in pages]
     doc = WORK / "spec.html"
     doc.write_text("\n".join(parts))
 
