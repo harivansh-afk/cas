@@ -6,14 +6,12 @@
 
 <PageHead num="03" />
 <p class="lede">
-	Part 2 runs the backend on two hosts with one parameter, k, and measures bytes moved and bytes stored against what <code>zfs send</code>, rsync, and two per-host ZFS pools would move and hold.
+	Page 03 runs the backend on two hosts with one parameter, k, and measures bytes moved and bytes stored against what <code>zfs send</code>, rsync, and two per-host ZFS pools would move and hold.
 </p>
 
 <h2>Two placement modes</h2>
 <p>
-	k is the number of owners per chunk.<br />
-	The design supports any N. The testbed has two hosts, so k takes two values, and they are two different experiments.<br />
-	With k = 1, a host that goes dark takes its chunks with it until it returns. A read that needs one waits or fails with an error, and nothing is lost if the disk comes back.<br />
+	k, the number of owners per chunk (page 01), takes two values on two hosts, and they are two different experiments.<br />
 	Surviving a dark host at two hosts costs a full mirror of chunks (k = 2) plus fleet class for the staging tail.
 </p>
 
@@ -42,31 +40,28 @@
 
 <h2>Provisioning</h2>
 <p>
-	A new guest on host B from an image whose chunks exist anywhere is a copy of the manifest: at least 32 bytes per chunk, about 80 MB for a 40 GB image at 16 KiB chunks. Every chunk it names already exists at its owner.<br />
+	A new guest on host B from an image whose chunks exist anywhere costs a copy of the manifest: at least 32 bytes per chunk, about 80 MB for a 40 GB image at 16 KiB chunks. Every chunk it names already exists at its owner.<br />
 	In replicated mode no other data is transferred.<br />
-	In partitioned mode no other data is transferred either, because chunks are fetched on first read.<br />
-	<mark>Provisioning cost is the size of the manifest.</mark>
+	In partitioned mode no other data is transferred either, because chunks are fetched on first read.
 </p>
 <p>
-	Baseline: <code>qemu-img convert</code> or <code>scp</code> of the raw file, and <code>zfs send | zfs recv</code> of the zvol, each moving the allocated size of the image.<br />
-	Liquid cloned by copying the metadata file and measured provisioning in seconds on 1 GbE, 8 GB to seven nodes in 730 s by scp and 35 s by Liquid. Here it is bytes on the wire at 100 GbE.
+	The baseline is <code>qemu-img convert</code> or <code>scp</code> of the raw file and <code>zfs send | zfs recv</code> of the zvol, each moving the allocated size of the image.<br />
+	Liquid cloned an image by copying its metadata file, in milliseconds. Its distribution benchmark moved an 8 GB image to seven nodes on 1 GbE in 35 s against 730 s by scp, and still moved every unique block to every node. Here provisioning is bytes on the wire at 100 GbE.
 </p>
 
 <h2>Migration</h2>
 <p>
 	To move a guest from A to B, the daemon freezes the device on A and takes E, hands the image to B by one fenced swap of its root record, ships the manifest and the staging extents in (D, E], and resumes on B.<br />
-	The root record names the writer and carries an epoch, and the swap is written durably on both hosts before B resumes. A accepts no write after the swap, and B resumes only after the swap names it.<br />
-	On resume the log is reconciled by evidence, the local high-water mark against the durable head, never by who claims to own it. In a prior implementation by the author, a refusal keyed on writer identity kept healthy guests from restarting.<br />
-	A 40 GB guest that compacted recently moves its manifest, about 80 MB at 16 KiB chunks, plus the staging tail, which was under 9 MB for an idle guest in that implementation and is workload-bound for a busy one.
+	The root record names the writer and carries a generation number, and the swap is written durably on both hosts before B resumes. A accepts no write after the swap, and B resumes only after the swap names it.<br />
+	On resume the log is reconciled by evidence, the replayed E against what is durable on disk, never by who claims to own it. In a prior implementation by the author, a refusal keyed on writer identity kept healthy guests from restarting.<br />
+	A 40 GB image that compacted recently moves its manifest, about 80 MB at 16 KiB chunks, plus the staging tail, which was under 9 MB for an idle guest in that implementation and is workload-bound for a busy one.
 </p>
 <p>
-	Bytes are the small part of a migration.<br />
-	The disk cut measured 3 to 6 ms in that implementation and the rest of the blackout was orchestration, so the blackout is reported decomposed into freeze, swap, transfer, and resume, beside the bytes. Governor pacing is disabled while the guest is paused.<br />
-	Memory migration is QEMU's and is out of scope. This is the disk.
+	We predict that bytes are the small part of a migration.<br />
+	The disk cut measured 3 to 6 ms in that implementation and the rest of the blackout was orchestration, so the blackout is reported decomposed into freeze, swap, transfer, and resume, beside the bytes. Governor pacing is disabled while the guest is paused.
 </p>
 <p>
-	Baseline: rsync of the raw file, and <code>zfs send</code> of the zvol.<br />
-	Since 2.0 <code>zfs send</code> emits no deduplicated stream, so the bytes are the logical size regardless of the DDT.
+	The baseline is rsync of the raw file and <code>zfs send</code> of the zvol, which since 2.0 emits no deduplicated stream (page 00), so both move the allocated size.
 </p>
 
 <h2>Synchronization after drift</h2>
@@ -74,29 +69,26 @@
 	Two guests, one on each host, are cloned from the same image and each updated independently to the same package set.<br />
 	Compaction on each host sends only the chunks the owner lacks, packed in sealed segments.<br />
 	Bytes on the wire are read against the census's unique-byte count for the pair.<br />
-	Chunks per second is reported beside bytes per second, because per-chunk cost is what caps a replication path before the link does.<br />
+	Chunks per second is reported beside bytes per second, the compactor's ship rate, because we predict per-chunk cost caps the path before the link does.<br />
 	This is the <code>apt upgrade</code> case from page 00, measured.
 </p>
 
 <h2>Capacity</h2>
 <p>
 	Partitioned mode stores each chunk once across the fleet.<br />
-	Measured: bytes on both stores after the fleet replay completes and the sweep has run, against two per-host ZFS pools holding the same guests, and index bytes on each host.<br />
-	Predicted: about half of the pools' bytes, and half of the index on each host.<br />
-	Also measured: the fraction of a guest's cold reads served by the other host.<br />
+	Bytes on both stores after the fleet replay and the sweep are measured against two per-host ZFS pools holding the same guests, with index bytes on each host. Hypothesis 2 predicts at most 55% of the pools' bytes and about half the index per host.<br />
+	The fraction of a guest's cold reads served by the other host is measured too.<br />
 	On two hosts with k = 1 that fraction is one half in expectation. In general it is 1 − k/N, so a larger fleet at fixed k sends a larger share of its cold reads over the network, and the two-host number is a lower bound on that share.
 </p>
 
-<h2>Durability classes and their cost</h2>
+<h2>The local-class window</h2>
 <p>
 	In local class, between a FLUSH acknowledgment and the chunk being durable at its owner sits the compaction lag, (O, E] in the watermark's terms.<br />
 	It is reported in seconds under the fleet replay, as a distribution, with the segment size as the parameter.<br />
 	That window is what a lost host loses, and it is the RPO (recovery point objective) of local class.
 </p>
 <p>
-	In fleet class, the staging tail goes to the image's journal peer on every FLUSH and the acknowledgment waits for the peer's fdatasync, as Nutanix AOS and HPE SimpliVity do.<br />
-	The class costs one round trip plus one remote fdatasync per FLUSH. It is measured as write p99 at QD1 against local class, on TCP, and on RDMA if the ibverbs arm lands.<br />
-	On the page 04 figures the transport is about a tenth of a cold read, which has 80 µs of media beneath it. A FLUSH has no media time to hide the round trip behind, so the transport's share of it is far larger, and this row is where that share shows.
+	Fleet class closes the window and pays one round trip and one remote fdatasync per FLUSH. Page 04 measures that cost.
 </p>
 
 <h2>Measurements</h2>
@@ -109,20 +101,17 @@
 			<tr><td class="k">provision</td><td>bytes transferred, both modes</td><td>scp of raw file; zfs send</td><td>manifest size</td></tr>
 			<tr><td class="k">migrate</td><td>bytes transferred, both modes; blackout decomposed</td><td>rsync; zfs send</td><td>manifest size + staging tail; milliseconds for the cut</td></tr>
 			<tr><td class="k">sync after drift</td><td>bytes and chunks per second sent by compaction</td><td>rsync; zfs send</td><td>census unique bytes</td></tr>
-			<tr><td class="k">capacity</td><td>bytes stored, partitioned, after the sweep</td><td>two per-host ZFS pools</td><td>census prediction</td></tr>
+			<tr><td class="k">capacity</td><td>bytes stored, partitioned, after the sweep</td><td>two per-host ZFS pools</td><td>at most 55% of the pools' bytes (hypothesis 2); census prediction</td></tr>
 			<tr><td class="k">index per host</td><td>index bytes on each host, both modes</td><td>DDT bytes per pool</td><td>k/N of the fleet index</td></tr>
 			<tr><td class="k">remote fraction</td><td>cold reads served by the peer</td><td></td><td>one half in expectation</td></tr>
 			<tr><td class="k">local-class window</td><td>seconds from ack to owner-durable</td><td></td><td>the RPO of local class</td></tr>
-			<tr><td class="k">fleet-class cost</td><td>write p99 at QD1, TCP and RDMA</td><td>local class</td><td>one RTT plus one remote fdatasync per FLUSH</td></tr>
 		</tbody>
 	</table>
 </div>
 
 <h2>The locality objection</h2>
 <p>
-	<a href="https://www.usenix.org/legacy/events/fast11/tech/full_papers/Dong.pdf" target="_blank" rel="noopener">Dong et al. (FAST '11)</a> rejected per-chunk hash placement for backup streams because it destroys read locality, and routed 1 MB super-chunks instead.<br />
-	This is primary storage with a local cache, so the fragmentation cost they argued about is measured directly on page 04.<br />
-	If it is large, placement by super-chunk is the knob, noted here and measured only if time remains.
+	Dong et al. (page 06) rejected per-chunk hash placement for backup streams on locality grounds. This is primary storage with a local cache, so page 04 measures the fragmentation cost directly, and super-chunk placement is the knob if it is large.
 </p>
 
 <PageNav num="03" />
