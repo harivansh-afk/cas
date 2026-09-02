@@ -16,7 +16,7 @@
 <div class="eyebrow-row">
 	<span class="eyebrow">research specification</span>
 	<span class="links">
-		<a class="site-link" href="{base}/spec.pdf" target="_blank" rel="noopener" aria-label="PDF of the specification" title="PDF">
+		<a class="site-link" href="{base}/pdf" aria-label="PDF of the specification" title="PDF">
 			<PdfIcon />
 		</a>
 		<a class="site-link" href={repo} target="_blank" rel="noopener" aria-label="source on GitHub" title="source on GitHub">
