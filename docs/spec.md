@@ -708,7 +708,7 @@ The same document after two different preambles is computed twice; that is the c
 
 ---
 
-# 06 Prior work
+# 06 Prior art
 
 Swept on 2026-09-01; sources and what was actually opened are in `docs/review/`.
 

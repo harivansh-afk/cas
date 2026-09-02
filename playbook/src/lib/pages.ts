@@ -16,5 +16,5 @@ export const pages: Page[] = [
 	{ num: '03', title: 'Multiple hosts', description: 'Part 2: placement and transfer across hosts' },
 	{ num: '04', title: 'Remote read', description: 'Part 3: cold read latency by transport' },
 	{ num: '05', title: 'Plan', description: 'Hardware, schedule, gates, risks' },
-	{ num: '06', title: 'Prior work', description: 'Nearest systems and what this adds' }
+	{ num: '06', title: 'Prior art', description: 'Nearest systems and what this adds' }
 ];
