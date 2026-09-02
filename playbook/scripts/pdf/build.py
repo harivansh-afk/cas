@@ -154,6 +154,8 @@ def main() -> None:
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(WORK / "spec.pdf", out)
+    # `vite dev` serves static/, not build/, so the index link works there too.
+    shutil.copy(WORK / "spec.pdf", ROOT / "static" / "spec.pdf")
     print(out)
 
 
