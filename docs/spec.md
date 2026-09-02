@@ -76,11 +76,9 @@ A chunk that is hot anywhere is in some host's memory, and **a peer's memory ove
 
 Three costs come with any deduplicating store, and we measure them rather than assume them: write amplification (every byte is written to the staging log and again to the chunk store), compactor interference (compaction shares the guest's disk), and index memory (one entry per chunk, in RAM).
 
-One cost is specific to crossing hosts: the network sits on the read path for cold chunks.
+One cost is specific to distributing across multiple hosts is that the network sits on the read path for cold chunks.
 
-A guest read whose chunk lives on another host pays one round trip.
-
-Part 3 measures that round trip over TCP and over RDMA (remote direct memory access), from the peer's memory and from the peer's NVMe.
+Part 3 measures that round trip over TCP and over RDMA, from the peer's memory as well as peer's local NVMe.
 
 It then measures prefetch: the daemon knows from the manifest which chunks come next, so it fetches them before the guest asks, and the round trip overlaps with work the guest is already doing instead of adding to it.
 

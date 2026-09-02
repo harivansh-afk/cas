@@ -2,6 +2,7 @@ Write like a careful human scholar. Formal, exact, quiet. Not like a chatbot.
 Do not invent data, results, or citations. Mark gaps as NEED DATA or NEED CITE.
 
 SOUND
+- terminology must be consistent.
 - Short to medium sentences. One claim per sentence.
 - Concrete nouns. Precise verbs. No atmosphere.
 - Hedge only as far as the design allows.
