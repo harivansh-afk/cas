@@ -6,8 +6,8 @@
 
 <PageHead num="00" />
 <p class="lede">
-	<mark>Deduplication in ZFS and dm-vdo is scoped to one pool: a chunk present on every host of a fleet is stored once per host, and a migrating guest copies every block of its image. Content addressing removes the scope, since a chunk named by the hash of its bytes has the same name on every host and can be stored once, transferred by name, and cached at one owner. This study builds a content-addressed block backend for virtual machines under unmodified QEMU and measures, on two hosts, the capacity, transfer, and cache gains against the latency of a cold read over the network.</mark><br />
-	In ZFS and dm-vdo the hash is a key in a side table and the block is still addressed by its location on disk; in a content-addressed store the hash is the address.
+	<mark>Content addressing names a chunk of data by the hash of its bytes, so equal bytes have one name wherever they are stored. In a fleet of hosts that name is the same on every host, which lets the fleet store a shared chunk once, transfer a guest by its list of names, and cache a chunk at one owner. This study builds a content-addressed block backend for virtual machines under unmodified QEMU and measures, on two hosts, those three gains against the latency of a cold read over the network.</mark><br />
+	Deduplication in ZFS and dm-vdo hashes blocks too, but the hash is a key in a table scoped to one pool and the block is still addressed by its location on disk, so nothing the table knows leaves the host.
 </p>
 <p>
 	Three things follow: a guest is provisioned or migrated by moving its manifest, each unique chunk is stored k times across the fleet instead of once per host, and a chunk many guests read is served from its owner's memory. Pages 03 and 04 measure each.<br />
