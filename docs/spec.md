@@ -54,7 +54,7 @@ That is the other end of the design space, and page 06 places this study against
 
 A chunk named by its hash has the same name on every host, so placement is a function of the content itself.
 
-Three things follow, and each is a measured claim in part 2.
+Three things follow, and each is a measured claim in parts 2 and 3.
 
 **Transfer.**
 
@@ -96,7 +96,7 @@ In fleet class the daemon first sends the bytes themselves (not the manifest, si
 
 Every hyperconverged product works in fleet class.
 
-Part 2 measures the price of the difference: one round trip and one remote fdatasync per FLUSH, on TCP and on RDMA.
+Parts 2 and 3 measure the price of the difference: one round trip and one remote fdatasync per FLUSH, on TCP, and on RDMA if that arm lands.
 
 ## Hypotheses
 
@@ -112,11 +112,13 @@ Provisioning and migrating a guest between hosts move the manifest plus the unco
 
 With one copy per chunk, the two-host testbed stores at most 55% of what two per-host deduplication stores hold.
 
+Two hosts is the floor of this gain: Meyer and Bolosky showed deduplication savings grow with the log of the number of machines in one domain, so a larger fleet gains more, not less.
+
 **3. The cost of a read over the network.**
 
 A chunk served from the owner's memory arrives faster than a local NVMe read on both TCP and RDMA.
 
-From the owner's NVMe it costs at most 30% over local on TCP and 15% on RDMA.
+From the owner's NVMe it costs at most 40% over local on TCP and 15% on RDMA.
 
 With enough reads in flight, remote sequential throughput matches local.
 
@@ -124,7 +126,7 @@ With enough reads in flight, remote sequential throughput matches local.
 
 Fleet class costs one round trip and one peer fdatasync per FLUSH.
 
-Its write p99 at QD1 is within 3x of local class on TCP and within 2x on RDMA.
+Its write p99 at QD1 is within 3x of local class on TCP, and within 2x on RDMA if the ibverbs arm lands.
 
 In local class, a lost host loses exactly the acknowledged bytes not yet compacted to an owner, and that window is reported in seconds.
 
@@ -338,7 +340,7 @@ Fleet class is what every hyperconverged product does before it acknowledges, an
 |---|---|---|
 | daemon crash | everything: replay the staging log from D, re-run compaction | same |
 | host crash, power loss | everything acked: FLUSH was fdatasync on local NVMe | same |
-| host lost | acknowledged bytes not yet compacted to an owner, exactly (D, E], are lost; R0 and R1 lose everything | nothing acked is lost: the journal peer replays (D, E] onto a new host |
+| host lost | acknowledged bytes not yet compacted to an owner, exactly (D, E], are lost; R0 and R1 lose everything | the staging tail survives: the journal peer replays (D, E] onto a new host; chunks the lost host owned survive only if k ≥ 2, as in the row below |
 | peer lost, k = 1 | chunks it owned are unreadable until it returns, and lost if its disk is; a read that needs one waits or fails with an error, never returns stale bytes |
 
 Two rules hold in both classes.
@@ -369,7 +371,7 @@ Three more cases have tests because each has stalled a guest in a production sys
 
 ## Garbage collection
 
-A chunk is live if any staging log or any manifest on any host references it.
+A chunk is live if any manifest on any host references it, or if an in-flight compaction has pinned it.
 
 Each host sends its owner the live set for an epoch with `LIVE`, and the owner sweeps with `FALLOC_FL_PUNCH_HOLE` over dead records; there are no reference counts.
 
@@ -533,13 +535,13 @@ The design supports any N; the testbed has two hosts, so k takes two values, and
 
 With k = 1, a host that goes down takes its chunks with it until it returns; a read that needs one waits or fails with an error, and nothing is lost if the disk comes back.
 
-Surviving a host dark at two hosts costs a full mirror, which is k = 2.
+Surviving a host dark at two hosts costs a full mirror of chunks (k = 2) plus fleet class for the staging tail.
 
 [figure: Left, replicated: k equals 2, every chunk is on both hosts, compaction sends each new unique chunk once, and no read is ever remote. Right, partitioned: k equals 1, each chunk lives on the host its hash selects, fleet capacity is one copy per chunk, and about half of a guest's cold reads go to the other host.]
 
 ## Provisioning
 
-A new guest on host B from an image whose chunks exist anywhere: copy the manifest, 32 bytes per chunk, about 80 MB for a 40 GB image at 16K chunks. Every chunk it names already exists at its owner.
+A new guest on host B from an image whose chunks exist anywhere: copy the manifest, at least 32 bytes per chunk, about 80 MB for a 40 GB image at 16K chunks. Every chunk it names already exists at its owner.
 
 In replicated mode no other data is transferred.
 
@@ -601,7 +603,7 @@ In fleet class, the staging tail goes to the image's journal peer on every FLUSH
 
 The class costs one round trip plus one remote fdatasync per FLUSH, and it is measured as write p99 at QD1 against local class, on TCP, and on RDMA if the ibverbs arm lands.
 
-This is the one place where RDMA is the whole cost rather than a tenth of it.
+This is the one place where the transport is a large share of the cost rather than a tenth of it.
 
 ## Measurements
 
@@ -703,7 +705,7 @@ Reported: guest p99 and host device reads per guest byte.
 
 ## The FLUSH round trip
 
-Fleet class on page 03 puts one round trip and one remote fdatasync in front of every FLUSH acknowledgment, and there is no 80 µs of media to hide behind, so the round trip is the cost.
+Fleet class on page 03 puts one round trip and one remote fdatasync in front of every FLUSH acknowledgment, and there is no 80 µs of media to hide behind, so the round trip and the peer's fdatasync are the whole cost.
 
 It is measured here with the same discipline as the read rows: write p99 at QD1 for local class, for fleet class over the daemon on TCP, and for fleet class over ibverbs if that arm lands, with the peer's fdatasync time reported separately so the transport's share is visible.
 
@@ -720,7 +722,7 @@ None of this touches the architecture, which runs on kernel TCP and would run on
 ## Hypothesis 3, restated
 
 - A chunk from the owner's memory arrives faster than a local NVMe read, on TCP and on RDMA.
-- From the owner's NVMe it costs at most 30% over local on TCP and 15% on RDMA, at QD1, 4K.
+- From the owner's NVMe it costs at most 40% over local on TCP and 15% on RDMA, at QD1, 4K.
 - At depth at or above the bandwidth-delay point, remote sequential throughput is within 10% of local.
 - Partitioned boot storm p99 with profile prefetch is within 25% of replicated.
 
@@ -788,7 +790,7 @@ When the schedule slips, items come off from the top.
 2. Super-chunk placement.
 3. R2 dm-vdo.
 4. Profile prefetch (depth prefetch stays).
-5. Fleet class over TCP. Hypothesis 4 then stands on the literature's numbers and says so.
+5. Fleet class over TCP. Hypothesis 4 is then reported as untested, with the literature's numbers as the estimate.
 6. Partitioned mode. Replicated mode alone still gives hypothesis 2's transfer result.
 
 Not removed under any slip: part 1, the nvmet TCP and RDMA probes, and the daemon over TCP.

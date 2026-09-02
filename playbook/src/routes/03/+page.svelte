@@ -15,7 +15,7 @@
 	k is the number of owners per chunk.<br />
 	The design supports any N; the testbed has two hosts, so k takes two values, and they are two different experiments.<br />
 	With k = 1, a host that goes down takes its chunks with it until it returns; a read that needs one waits or fails with an error, and nothing is lost if the disk comes back.<br />
-	Surviving a host dark at two hosts costs a full mirror, which is k = 2.
+	Surviving a host dark at two hosts costs a full mirror of chunks (k = 2) plus fleet class for the staging tail.
 </p>
 
 <Diagram
@@ -43,7 +43,7 @@
 
 <h2>Provisioning</h2>
 <p>
-	A new guest on host B from an image whose chunks exist anywhere: copy the manifest, 32 bytes per chunk, about 80 MB for a 40 GB image at 16K chunks. Every chunk it names already exists at its owner.<br />
+	A new guest on host B from an image whose chunks exist anywhere: copy the manifest, at least 32 bytes per chunk, about 80 MB for a 40 GB image at 16K chunks. Every chunk it names already exists at its owner.<br />
 	In replicated mode no other data is transferred.<br />
 	In partitioned mode no other data is transferred either, because chunks are fetched on first read.<br />
 	<mark>Provisioning cost is the size of the manifest.</mark>
@@ -94,7 +94,7 @@
 <p>
 	In fleet class, the staging tail goes to the image's journal peer on every FLUSH and the ack waits for the peer's fdatasync, which is what every production system in this space does.<br />
 	The class costs one round trip plus one remote fdatasync per FLUSH, and it is measured as write p99 at QD1 against local class, on TCP, and on RDMA if the ibverbs arm lands.<br />
-	This is the one place where RDMA is the whole cost rather than a tenth of it.
+	This is the one place where the transport is a large share of the cost rather than a tenth of it.
 </p>
 
 <h2>Measurements</h2>

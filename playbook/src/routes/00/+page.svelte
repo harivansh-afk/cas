@@ -69,7 +69,7 @@
 <h2>Advantages of content-addressing your data</h2>
 <p>
 	A chunk named by its hash has the same name on every host, so placement is a function of the content itself.<br />
-	Three things follow, and each is a measured claim in part 2.
+	Three things follow, and each is a measured claim in parts 2 and 3.
 </p>
 <p>
 	<strong>Transfer.</strong><br />
@@ -103,7 +103,7 @@
 	In local class, the default, the daemon acknowledges after fdatasync on this host, which is the same contract a local disk gives; if the host is lost before compaction has shipped those bytes to their owner, they are lost with it.<br />
 	In fleet class the daemon first sends the bytes themselves (not the manifest, since the manifest points at bytes that exist nowhere else yet) to a fixed peer, waits for the peer's fdatasync, and then acknowledges; the bytes now survive the loss of this host.<br />
 	Every hyperconverged product works in fleet class.<br />
-	Part 2 measures the price of the difference: one round trip and one remote fdatasync per FLUSH, on TCP and on RDMA.
+	Parts 2 and 3 measure the price of the difference: one round trip and one remote fdatasync per FLUSH, on TCP, and on RDMA if that arm lands.
 </p>
 
 <h2>Hypotheses</h2>
@@ -115,18 +115,19 @@
 <p>
 	<strong>2. Multi-host benefits.</strong><br />
 	Provisioning and migrating a guest between hosts move the manifest plus the uncompacted tail, within 10% of that bound.<br />
-	With one copy per chunk, the two-host testbed stores at most 55% of what two per-host deduplication stores hold.
+	With one copy per chunk, the two-host testbed stores at most 55% of what two per-host deduplication stores hold.<br />
+	Two hosts is the floor of this gain: Meyer and Bolosky showed deduplication savings grow with the log of the number of machines in one domain, so a larger fleet gains more, not less.
 </p>
 <p>
 	<strong>3. The cost of a read over the network.</strong><br />
 	A chunk served from the owner's memory arrives faster than a local NVMe read on both TCP and RDMA.<br />
-	From the owner's NVMe it costs at most 30% over local on TCP and 15% on RDMA.<br />
+	From the owner's NVMe it costs at most 40% over local on TCP and 15% on RDMA.<br />
 	With enough reads in flight, remote sequential throughput matches local.
 </p>
 <p>
 	<strong>4. The cost of durability before acknowledgment.</strong><br />
 	Fleet class costs one round trip and one peer fdatasync per FLUSH.<br />
-	Its write p99 at QD1 is within 3x of local class on TCP and within 2x on RDMA.<br />
+	Its write p99 at QD1 is within 3x of local class on TCP, and within 2x on RDMA if the ibverbs arm lands.<br />
 	In local class, a lost host loses exactly the acknowledged bytes not yet compacted to an owner, and that window is reported in seconds.
 </p>
 <p class="note">

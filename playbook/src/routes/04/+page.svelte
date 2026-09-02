@@ -106,7 +106,7 @@
 
 <h2>The FLUSH round trip</h2>
 <p>
-	Fleet class on page 03 puts one round trip and one remote fdatasync in front of every FLUSH acknowledgment, and there is no 80 µs of media to hide behind, so the round trip is the cost.<br />
+	Fleet class on page 03 puts one round trip and one remote fdatasync in front of every FLUSH acknowledgment, and there is no 80 µs of media to hide behind, so the round trip and the peer's fdatasync are the whole cost.<br />
 	It is measured here with the same discipline as the read rows: write p99 at QD1 for local class, for fleet class over the daemon on TCP, and for fleet class over ibverbs if that arm lands, with the peer's fdatasync time reported separately so the transport's share is visible.
 </p>
 
@@ -121,7 +121,7 @@
 <h2>Hypothesis 3, restated</h2>
 <ul class="plain">
 	<li>A chunk from the owner's memory arrives faster than a local NVMe read, on TCP and on RDMA.</li>
-	<li>From the owner's NVMe it costs at most 30% over local on TCP and 15% on RDMA, at QD1, 4K.</li>
+	<li>From the owner's NVMe it costs at most 40% over local on TCP and 15% on RDMA, at QD1, 4K.</li>
 	<li>At depth at or above the bandwidth-delay point, remote sequential throughput is within 10% of local.</li>
 	<li>Partitioned boot storm p99 with profile prefetch is within 25% of replicated.</li>
 </ul>

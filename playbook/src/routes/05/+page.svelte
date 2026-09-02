@@ -74,7 +74,7 @@
 	<li>Super-chunk placement.</li>
 	<li>R2 dm-vdo.</li>
 	<li>Profile prefetch (depth prefetch stays).</li>
-	<li>Fleet class over TCP. Hypothesis 4 then stands on the literature's numbers and says so.</li>
+	<li>Fleet class over TCP. Hypothesis 4 is then reported as untested, with the literature's numbers as the estimate.</li>
 	<li>Partitioned mode. Replicated mode alone still gives hypothesis 2's transfer result.</li>
 </ol>
 <p>

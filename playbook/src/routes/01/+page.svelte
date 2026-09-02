@@ -171,7 +171,7 @@
 		<tbody>
 			<tr><td class="k">daemon crash</td><td>everything: replay the staging log from D, re-run compaction</td><td>same</td></tr>
 			<tr><td class="k">host crash, power loss</td><td>everything acked: FLUSH was fdatasync on local NVMe</td><td>same</td></tr>
-			<tr><td class="k">host lost</td><td>acknowledged bytes not yet compacted to an owner, exactly (D, E], are lost; R0 and R1 lose everything</td><td>nothing acked is lost: the journal peer replays (D, E] onto a new host</td></tr>
+			<tr><td class="k">host lost</td><td>acknowledged bytes not yet compacted to an owner, exactly (D, E], are lost; R0 and R1 lose everything</td><td>the staging tail survives: the journal peer replays (D, E] onto a new host; chunks the lost host owned survive only if k ≥ 2, as in the row below</td></tr>
 			<tr><td class="k">peer lost, k = 1</td><td colspan="2">chunks it owned are unreadable until it returns, and lost if its disk is; a read that needs one waits or fails with an error, never returns stale bytes</td></tr>
 		</tbody>
 	</table>
@@ -199,7 +199,7 @@
 
 <h2>Garbage collection</h2>
 <p>
-	A chunk is live if any staging log or any manifest on any host references it.<br />
+	A chunk is live if any manifest on any host references it, or if an in-flight compaction has pinned it.<br />
 	Each host sends its owner the live set for an epoch with <code>LIVE</code>, and the owner sweeps with <code>FALLOC_FL_PUNCH_HOLE</code> over dead records; there are no reference counts.<br />
 	ZFS frees an overwritten block the moment its reference count drops; this design does not, so space leaks between sweeps.<br />
 	The sweep therefore runs before every capacity measurement, and the bytes it reclaims are reported beside the capacity number as the leak; concurrent collection is out of scope.
