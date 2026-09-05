@@ -52,9 +52,8 @@ def prepare_output(path: Path) -> Path:
     # QEMU parses commas inside -drive/-virtfs even when the shell quotes paths.
     if any(character in str(path) for character in (",", "\n", "\r")):
         raise ValueError("output path cannot contain commas or line breaks")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.mkdir()  # No exist_ok: old results must never make a failed run pass.
-    return path.resolve()
+    path.mkdir(parents=True)  # No exist_ok: old results must never make a failed run pass.
+    return path
 
 
 def capture(argv: list[str]) -> dict:
