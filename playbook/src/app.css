@@ -176,20 +176,6 @@ mark {
 	-webkit-box-decoration-break: clone;
 }
 
-/* coined term: vocabulary this study defines — links to the terms appendix on page 00 */
-.term {
-	text-decoration: underline dotted;
-	text-decoration-color: color-mix(in srgb, #d97706 55%, transparent);
-	text-decoration-thickness: 1px;
-	text-underline-offset: 0.2em;
-}
-a.term {
-	color: inherit;
-}
-a.term:hover {
-	text-decoration-style: solid;
-}
-
 .eyebrow {
 	display: block;
 	font-size: 0.6875rem; /* 11px */
@@ -201,46 +187,6 @@ a.term:hover {
 
 .lede {
 	font-size: 0.9375rem;
-}
-.lede strong {
-	color: var(--text-primary);
-}
-
-/* ---------- requirements ---------- */
-ul.reqs {
-	list-style: none;
-	margin-bottom: 1.25rem;
-}
-ul.reqs li {
-	padding: 0.625rem 0;
-	border-bottom: 1px solid var(--border-subtle);
-	line-height: 1.65;
-}
-/* a nested list closes flush with its parent row: no doubled rules */
-li > ul.reqs,
-li > ol.steps {
-	margin-top: 0.5rem;
-	margin-bottom: 0.25rem;
-}
-ul.reqs ul.reqs li:last-child {
-	border-bottom: 0;
-}
-
-.rid {
-	display: inline-block;
-	font-size: 0.6875rem;
-	font-weight: var(--weight-strong);
-	letter-spacing: 0.05em;
-	color: var(--text-secondary);
-	background: var(--code-bg);
-	border: 1px solid var(--border);
-	border-radius: 4px;
-	padding: 0.0625rem 0.4375rem;
-	margin-right: 0.625rem;
-	position: relative;
-	top: -1px;
-	white-space: nowrap;
-	font-variant-numeric: tabular-nums;
 }
 
 .tag-stretch {
@@ -286,17 +232,6 @@ code {
 	border: 1px solid var(--border);
 	padding: 0.125em 0.375em;
 	border-radius: 4px;
-}
-
-pre {
-	font-size: 0.8125rem;
-	line-height: 1.6;
-	background: var(--code-bg);
-	border: 1px solid var(--border);
-	border-radius: var(--radius);
-	padding: 0.875rem 1rem;
-	overflow-x: auto;
-	margin: 1.5rem 0;
 }
 
 /* figures break out of the text column on wide screens; tables stay in it and scroll */
@@ -386,7 +321,6 @@ table.spec tbody tr:hover td.k {
 table.spec td.k {
 	color: var(--text-primary);
 	font-weight: var(--weight-strong);
-	white-space: normal;
 	min-width: 12ch;
 	max-width: 26ch;
 }
@@ -441,4 +375,3 @@ figcaption {
 		padding: 0.5rem 0.625rem;
 	}
 }
-

@@ -219,7 +219,7 @@
 
 <h2>Protocol</h2>
 <div class="table-scroll">
-	<table class="spec prose">
+	<table class="spec">
 		<thead>
 			<tr><th>Message</th><th>Reply</th><th>Used by</th></tr>
 		</thead>
@@ -260,7 +260,7 @@
 	Fleet class is what <a href="https://www.nutanixbible.com/4g-book-of-aos-data-io-path.html" target="_blank" rel="noopener">Nutanix AOS</a> and <a href="https://experistg.com/wp-content/uploads/2019/12/The-technology-enabling-HPE-SimpliVity-data-efficiency.pdf" target="_blank" rel="noopener">HPE SimpliVity</a> do before they acknowledge, and page 04 measures what it costs.
 </p>
 <div class="table-scroll">
-	<table class="spec prose">
+	<table class="spec">
 		<thead>
 			<tr><th>Failure</th><th>Local class</th><th>Fleet class</th></tr>
 		</thead>
@@ -291,7 +291,7 @@
 
 <h2>Provenance</h2>
 <div class="table-scroll">
-	<table class="spec prose">
+	<table class="spec">
 		<thead>
 			<tr><th>Component</th><th>Source</th><th>License</th></tr>
 		</thead>

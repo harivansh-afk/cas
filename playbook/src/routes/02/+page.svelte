@@ -20,7 +20,7 @@
 	Its own pool on the same device, created and destroyed per run, opened by QEMU as a block device.
 </p>
 <div class="table-scroll">
-	<table class="spec prose">
+	<table class="spec">
 		<thead>
 			<tr><th>Setting</th><th>Value</th><th>Why</th></tr>
 		</thead>

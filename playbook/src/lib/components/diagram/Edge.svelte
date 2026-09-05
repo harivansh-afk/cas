@@ -5,12 +5,11 @@
 
 	/**
 	 * A connector. Give it `points` (at least two); it draws a polyline with an arrowhead.
-	 * label sits beside the midpoint of the segment chosen by `labelSeg` (default: the last).
+	 * The label sits beside the midpoint of the last segment.
 	 */
 	let {
 		points,
 		label,
-		labelSeg,
 		labelDy = -6,
 		labelDx = 0,
 		tone = 'default',
@@ -19,7 +18,6 @@
 	}: {
 		points: [number, number][];
 		label?: string;
-		labelSeg?: number;
 		labelDy?: number;
 		labelDx?: number;
 		tone?: 'default' | 'accent' | 'muted';
@@ -30,7 +28,7 @@
 	const { uid } = getContext<{ uid: string }>('diagram');
 
 	const d = $derived(points.map(([px, py], i) => `${i === 0 ? 'M' : 'L'}${px} ${py}`).join(' '));
-	const seg = $derived(labelSeg ?? points.length - 2);
+	const seg = $derived(points.length - 2);
 	const mid = $derived.by(() => {
 		const [ax, ay] = points[seg];
 		const [bx, by] = points[seg + 1];
@@ -46,6 +44,6 @@
 <g {opacity}>
 	<path {d} fill="none" {stroke} stroke-width={tone === 'accent' ? 1.5 : 1.25} stroke-dasharray={dashed ? '4 3' : undefined} marker-end={marker} />
 	{#if label}
-		<text x={mid[0]} y={mid[1]} text-anchor="middle" font-size="10.5" fill={tone === 'accent' ? '#d97706' : 'currentColor'} opacity={tone === 'accent' ? 1 : 0.75}>{label}</text>
+		<text x={mid[0]} y={mid[1]} text-anchor="middle" font-size="10.5" fill={stroke} opacity={tone === 'accent' ? 1 : 0.75}>{label}</text>
 	{/if}
 </g>
