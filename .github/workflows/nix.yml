@@ -1,0 +1,61 @@
+# Runs on the GitHub mirror. Forgejo Actions remain unchanged.
+name: nix
+
+on:
+  push:
+    paths:
+      - 'flake.nix'
+      - 'flake.lock'
+      - 'nix/**'
+      - 'templates/**'
+      - 'experiments/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**'
+      - '.github/workflows/nix.yml'
+  pull_request:
+    paths:
+      - 'flake.nix'
+      - 'flake.lock'
+      - 'nix/**'
+      - 'templates/**'
+      - 'experiments/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**'
+      - '.github/workflows/nix.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check Nix formatting
+        run: nix fmt -- --check flake.nix nix/*.nix templates/test-host/flake.nix
+      - name: Evaluate both architectures
+        run: nix flake check --no-build --all-systems
+      - name: Build and test on x86_64
+        run: nix flake check --print-build-logs
+      - name: Build the guest and runner
+        run: nix build .#vm-smoke --out-link result-vm --print-build-logs
+      - name: Verify guest IO through KVM
+        run: result-vm/bin/cas-vm-smoke --output results/ci-raw-smoke
+      - name: Keep run evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-vm-smoke
+          path: |
+            results/ci-raw-smoke/summary.json
+            results/ci-raw-smoke/console.log
+            results/ci-raw-smoke/build.json
+            results/ci-raw-smoke/flake.lock
+            results/ci-raw-smoke/guest/
+          if-no-files-found: ignore

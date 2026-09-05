@@ -1,0 +1,15 @@
+; Functional write/readback check, not a paper latency workload.
+[raw-smoke]
+filename=/dev/disk/by-id/virtio-cas-experiment
+ioengine=io_uring
+direct=1
+rw=write
+bs=4k
+size=64m
+iodepth=1
+numjobs=1
+verify=crc32c
+do_verify=1
+verify_fatal=1
+refill_buffers=1
+end_fsync=1
