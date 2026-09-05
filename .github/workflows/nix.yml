@@ -11,6 +11,7 @@ on:
       - 'experiments/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'rust-toolchain.toml'
       - 'crates/**'
       - '.github/workflows/nix.yml'
   pull_request:
@@ -22,6 +23,7 @@ on:
       - 'experiments/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'rust-toolchain.toml'
       - 'crates/**'
       - '.github/workflows/nix.yml'
 
@@ -38,7 +40,7 @@ jobs:
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Check Nix formatting
-        run: nix fmt -- --check flake.nix nix/*.nix templates/test-host/flake.nix
+        run: nix fmt -- --check flake.nix nix/*.nix nix/modules/*.nix nix/tests/*.nix templates/test-host/flake.nix
       - name: Evaluate both architectures
         run: nix flake check --no-build --all-systems
       - name: Build and test on x86_64

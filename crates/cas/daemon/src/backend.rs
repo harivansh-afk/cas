@@ -35,16 +35,17 @@ const _: () = assert!(size_of::<Block>() == BLOCK && align_of::<Block>() == BLOC
 struct Buffer(Vec<Block>);
 impl Buffer {
     fn new(len: usize) -> Self {
-        Self(vec![Block([0; BLOCK]); len.div_ceil(BLOCK)])
+        assert!(len.is_multiple_of(BLOCK));
+        Self(vec![Block([0; BLOCK]); len / BLOCK])
     }
-    fn bytes(&self, len: usize) -> &[u8] {
+    fn bytes(&self) -> &[u8] {
         // SAFETY: Block has no padding, is initialized, and Vec owns contiguous
         // blocks. The returned slice borrows the allocation and stays in bounds.
-        unsafe { std::slice::from_raw_parts(self.0.as_ptr().cast(), len) }
+        unsafe { std::slice::from_raw_parts(self.0.as_ptr().cast(), self.0.len() * BLOCK) }
     }
-    fn bytes_mut(&mut self, len: usize) -> &mut [u8] {
+    fn bytes_mut(&mut self) -> &mut [u8] {
         // SAFETY: same layout as bytes(); &mut self exclusively borrows it.
-        unsafe { std::slice::from_raw_parts_mut(self.0.as_mut_ptr().cast(), len) }
+        unsafe { std::slice::from_raw_parts_mut(self.0.as_mut_ptr().cast(), self.0.len() * BLOCK) }
     }
 }
 
@@ -257,24 +258,17 @@ impl Backend {
         let mut buffer = Buffer::new(request.len);
         let fd = types::Fd(self.file.as_raw_fd());
         let entry = match request.kind {
-            IN => opcode::Read::new(
-                fd,
-                buffer.bytes_mut(request.len).as_mut_ptr(),
-                request.len as u32,
-            )
-            .offset(request.offset)
-            .build(),
+            IN => opcode::Read::new(fd, buffer.bytes_mut().as_mut_ptr(), request.len as u32)
+                .offset(request.offset)
+                .build(),
             OUT => {
                 let mut offset = 0;
                 for s in &request.segments {
-                    mem.read_slice(
-                        &mut buffer.bytes_mut(request.len)[offset..offset + s.len],
-                        s.addr,
-                    )
-                    .map_err(other)?;
+                    mem.read_slice(&mut buffer.bytes_mut()[offset..offset + s.len], s.addr)
+                        .map_err(other)?;
                     offset += s.len;
                 }
-                opcode::Write::new(fd, buffer.bytes(request.len).as_ptr(), request.len as u32)
+                opcode::Write::new(fd, buffer.bytes().as_ptr(), request.len as u32)
                     .offset(request.offset)
                     .build()
             }
@@ -322,7 +316,7 @@ impl Backend {
             }
             let written = match r.kind {
                 IN => {
-                    Self::copy_to_guest(mem, r, pending.buffer.bytes(r.len))?;
+                    Self::copy_to_guest(mem, r, pending.buffer.bytes())?;
                     self.counters.reads += 1;
                     self.counters.read_bytes += r.len as u64;
                     r.len as u32
