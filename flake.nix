@@ -26,43 +26,63 @@
         system:
         let
           pkgs = import nixpkgs { inherit system; };
-          guest = nixpkgs.lib.nixosSystem {
-            inherit system;
-            modules = [ ./nix/guest.nix ];
-          };
-          vm = guest.config.system.build.vm;
-          buildInfo = pkgs.writeText "cas-vm-build.json" (
-            builtins.toJSON {
+          cas = pkgs.callPackage ./nix/package.nix { };
+          guestFor =
+            backend:
+            nixpkgs.lib.nixosSystem {
               inherit system;
-              source_revision = self.rev or self.dirtyRev or null;
-              source_path = toString self.outPath;
-              nixpkgs_revision = nixpkgs.rev;
-              vm = toString vm;
-              qemu_version = pkgs.qemu_kvm.version;
-              fio_version = pkgs.fio.version;
-              guest_kernel = guest.config.boot.kernelPackages.kernel.version;
-              guest_memory_mib = guest.config.virtualisation.memorySize;
-              guest_vcpus = guest.config.virtualisation.cores;
-            }
-          );
-          smoke = pkgs.writeShellApplication {
-            name = "cas-vm-smoke";
-            runtimeInputs = [
-              pkgs.python3
-              pkgs.util-linux
-              pkgs.git
-            ];
-            text = ''
-              exec python3 ${./experiments/run-vm.py} \
-                --vm ${vm}/bin/run-cas-guest-vm \
-                --build-info ${buildInfo} \
-                --lock ${./flake.lock} "$@"
-            '';
-          };
+              modules = [
+                ./nix/guest.nix
+                { _module.args.casBackend = backend; }
+              ];
+            };
+          smokeFor =
+            backend:
+            let
+              guest = guestFor backend;
+              vm = guest.config.system.build.vm;
+              buildInfo = pkgs.writeText "cas-vm-build.json" (
+                builtins.toJSON {
+                  inherit system backend;
+                  source_revision = self.rev or self.dirtyRev or null;
+                  source_path = toString self.outPath;
+                  nixpkgs_revision = nixpkgs.rev;
+                  vm = toString vm;
+                  daemon = if backend == "daemon" then "${cas}/bin/cas-daemon" else null;
+                  qemu_version = pkgs.qemu_kvm.version;
+                  fio_version = pkgs.fio.version;
+                  guest_kernel = guest.config.boot.kernelPackages.kernel.version;
+                  guest_memory_mib = guest.config.virtualisation.memorySize;
+                  guest_vcpus = guest.config.virtualisation.cores;
+                }
+              );
+            in
+            pkgs.writeShellApplication {
+              name = "cas-vm-smoke";
+              runtimeInputs = [
+                pkgs.python3
+                pkgs.util-linux
+                pkgs.git
+              ];
+              text = ''
+                exec python3 ${./experiments/run-vm.py} \
+                  --vm ${vm}/bin/run-cas-guest-vm \
+                  --build-info ${buildInfo} \
+                  --lock ${./flake.lock} "$@"
+              '';
+            };
+          vm = (guestFor "raw").config.system.build.vm;
+          smoke = smokeFor "raw";
+          daemonSmoke = smokeFor "daemon";
         in
         {
-          inherit pkgs vm smoke;
-          cas = pkgs.callPackage ./nix/package.nix { };
+          inherit
+            pkgs
+            vm
+            smoke
+            cas
+            daemonSmoke
+            ;
         }
       );
     in
@@ -76,6 +96,7 @@
           default = env.cas;
           cas = env.cas;
           vm-smoke = env.smoke;
+          daemon-smoke = env.daemonSmoke;
           test-guest = env.vm;
         }
       );

@@ -2,6 +2,7 @@
   lib,
   pkgs,
   modulesPath,
+  casBackend ? "raw",
   ...
 }:
 {
@@ -23,11 +24,22 @@
     qemu = {
       forceAccel = true; # Refuse to turn an unavailable KVM into a TCG run.
       networkingOptions = lib.mkForce [ "-nic none" ];
+      enableSharedMemory = casBackend == "daemon";
       options = [
-        ''-drive "if=none,id=experiment,file=$CAS_RAW_IMAGE,format=raw,cache=none,aio=io_uring,werror=report,rerror=report"''
-        "-device virtio-blk-pci,drive=experiment,serial=cas-experiment,logical_block_size=4096,physical_block_size=4096,num-queues=1"
         "-no-reboot"
-      ];
+      ]
+      ++ (
+        if casBackend == "daemon" then
+          [
+            ''-chardev "socket,id=cas,path=$CAS_VHOST_SOCKET"''
+            "-device vhost-user-blk-pci,chardev=cas,num-queues=1,queue-size=128"
+          ]
+        else
+          [
+            ''-drive "if=none,id=experiment,file=$CAS_RAW_IMAGE,format=raw,cache=none,aio=io_uring,werror=report,rerror=report"''
+            "-device virtio-blk-pci,drive=experiment,serial=cas-experiment,logical_block_size=4096,physical_block_size=4096,num-queues=1"
+          ]
+      );
     };
     sharedDirectories.results = {
       source = ''"$CAS_RESULTS_DIR"'';
@@ -37,8 +49,9 @@
   };
 
   environment.etc."cas/smoke.fio".source = ../experiments/fio/smoke.fio;
+  environment.etc."cas/queue.fio".source = ../experiments/fio/queue.fio;
   systemd.services.cas-smoke = {
-    description = "Verify guest IO through the raw-file control path";
+    description = "Verify guest IO through the selected block backend";
     wantedBy = [ "multi-user.target" ];
     after = [
       "local-fs.target"
@@ -64,6 +77,10 @@
       fio --version > /results/guest-fio-version.txt
       lsblk --json --bytes --output NAME,TYPE,SIZE,LOG-SEC,PHY-SEC > /results/guest-disks.json
       fio --output-format=json+ --output=/results/fio.json /etc/cas/smoke.fio
+      ${lib.optionalString (casBackend == "daemon") ''
+        cp /etc/cas/queue.fio /results/queue.fio
+        fio --output-format=json+ --output=/results/queue.json /etc/cas/queue.fio
+      ''}
     '';
     postStop = ''
       printf '{"schema_version":1,"service_result":"%s","exit_code":"%s","exit_status":"%s"}\n' \

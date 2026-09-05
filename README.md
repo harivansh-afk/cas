@@ -70,3 +70,13 @@ results/              local artifacts, ignored by Git
 
 `Cargo.lock` is committed. Future storage formats and experimental parameters
 will be versioned; the initial staging format is provisional.
+
+To exercise the guest through the raw-file `cas-daemon` adapter:
+
+```sh
+nix build .#daemon-smoke --out-link result-daemon
+result-daemon/bin/cas-vm-smoke --output results/daemon-run
+```
+
+See the [daemon test guide](docs/testbed.md#qemu-through-cas-daemon) for results
+and the remaining staging/recovery work.

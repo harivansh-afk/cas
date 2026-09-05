@@ -39,5 +39,5 @@ running versions and disk/cache state for every measurement. Add a second
 `nixosConfigurations.node-b` with its own identity and disk IDs for the peer.
 
 The template installs experiment tools and `casctl`. It does not start workloads,
-create a ZFS comparator, or start the forthcoming CAS daemon. Result archives
+create a ZFS comparator, or automatically start the CAS daemon. Result archives
 belong on the OS disk; raw test images belong on the experiment disk.

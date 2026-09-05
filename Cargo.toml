@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/cas-core", "crates/cas-cli"]
+members = ["crates/cas-core", "crates/cas-cli", "crates/cas-daemon"]
 resolver = "3"
 
 [workspace.package]

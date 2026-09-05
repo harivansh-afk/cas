@@ -9,7 +9,7 @@ c6525-100g nodes for paper measurements, with a dedicated NVMe under test.
 Development checks do not supply R0 or establish any hypothesis.
 
 The Nix flake now supplies a reusable development guest, a pinned QEMU launcher,
-and a guest fio write/readback check. [The testbed guide](../docs/testbed.md)
+and guest fio write/readback checks through raw QEMU and `cas-daemon`. [The testbed guide](../docs/testbed.md)
 describes its outputs and the dedicated-host template. Before R0 measurements,
 add the workload matrix, CPU affinity, per-run filesystem/cache controls, and
 device-counter capture. Run the same guest jobs against the passthrough daemon

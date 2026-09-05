@@ -1,0 +1,20 @@
+[package]
+name = "cas-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+clap.workspace = true
+libc.workspace = true
+serde_json.workspace = true
+vhost-user-backend = "0.23"
+vhost = { version = "0.17", features = ["vhost-user-backend"] }
+vm-memory = { version = "0.18", features = ["backend-mmap", "backend-atomic"] }
+virtio-queue = "0.18"
+vmm-sys-util = "0.15"
+io-uring = "0.7"
+
+[lints]
+workspace = true

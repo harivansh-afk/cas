@@ -1,6 +1,6 @@
 # Implementation checklist
 
-The storage foundation is merged. The VM backend and research measurements are still ahead.
+The storage foundation and raw-file VM daemon are implemented. Staging integration and research measurements are still ahead.
 Tick items as their code, tests, or results land. Details: [implementation plan](docs/implementation.md).
 
 ## Done
@@ -12,9 +12,11 @@ Tick items as their code, tests, or results land. Details: [implementation plan]
 - [x] Pin the Nix environment and boot a QEMU/fio guest for a raw-disk write/readback check.
 - [x] Add a NixOS bare-metal host template with separate OS and XFS test disks.
 
-## Next: get a VM using our backend
+- [x] Route QEMU reads, writes, and FLUSH through a single-queue io_uring daemon; verify guest data.
 
-- [ ] Connect guest reads, writes, and FLUSH to the backend using io_uring.
+## Next: connect the staging store
+
+- [ ] Replace the daemon's raw-file IO with the staging store and preserve FLUSH ordering.
 - [ ] Verify guest data after a backend restart, including requests in flight and multiple queues.
 - [ ] Arrange the CloudLab pair and dedicated test disks for paper measurements.
 - [ ] Measure the raw-file baseline and compare the backend's guest latency.

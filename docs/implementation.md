@@ -21,7 +21,7 @@ process on the guest IO path.
 
 Keep the workspace small. `cas-core` owns storage semantics and their tests.
 `cas-cli` provides executable checks and will acquire census and administrative
-commands. Add `cas-daemon` when the vhost-user adapter starts; isolate Linux
+commands. `cas-daemon` contains the raw-file vhost-user adapter; isolate Linux
 request handling, queue ownership, and io_uring there. Add core modules for
 chunking, manifests, compaction, placement, and protocol as each milestone needs
 them. The shared chunker must be used by both census and compactor.
@@ -47,11 +47,11 @@ primary sources on 2026-09-05; they have not been compiled together here.
 | [`tempfile` 3](https://docs.rs/tempfile/latest/tempfile/) | Temporary filesystem fixtures | Test dependency |
 | [`blake3` 1.8](https://docs.rs/blake3/latest/blake3/) | Chunk content IDs and verification of fetched chunks | Census and compactor |
 | [`fastcdc` 5, `v2020`](https://docs.rs/fastcdc/latest/fastcdc/v2020/index.html) | CDC arm, through one shared 4 KiB snapping adapter | Census and compactor |
-| [`vhost-user-backend` 0.23 / `vhost` 0.17](https://github.com/rust-vmm/vhost/blob/main/vhost-user-backend/Cargo.toml) | QEMU protocol and queue lifecycle | Next iteration; recovery gap below |
+| [`vhost-user-backend` 0.23 / `vhost` 0.17](https://github.com/rust-vmm/vhost/blob/main/vhost-user-backend/Cargo.toml) | QEMU protocol and queue lifecycle | Raw-file adapter implemented; recovery gap below |
 | [`vm-memory` 0.18, `virtio-queue` 0.18, `virtio-bindings` 0.2.7, `vmm-sys-util` 0.15](https://github.com/rust-vmm/vhost/blob/main/Cargo.toml) | Guest memory, descriptors, feature definitions, eventfds | Pin as a compatible rust-vmm family |
 | [`io-uring` 0.7](https://docs.rs/io-uring/latest/io_uring/) | Asynchronous file IO, fdatasync completions, and TCP | Daemon |
 
-The daemon will use the low-level io_uring crate. Its fsync opcode exposes the
+The daemon uses the low-level io_uring crate. Its fsync opcode exposes the
 data-sync flag. No general async runtime is needed for the initial event loop.
 [io_uring Fsync API](https://docs.rs/io-uring/latest/io_uring/opcode/struct.Fsync.html)
 
@@ -139,20 +139,32 @@ QEMU/KVM guest with fio verification, and a bare-metal host template. The raw
 guest uses io_uring through stock QEMU; our staging library remains synchronous.
 
 Not implemented: existing-image import, a compacted base, timed background
-fdatasync, bounded staging/governor, the daemon's io_uring and QEMU adapters,
+fdatasync, bounded staging/governor, staging integration into the daemon,
 chunk store, census, remote protocol, snapshots, or migration. No paper
 measurement is reported.
 
-## Immediate next iteration: R0 and the QEMU adapter
+## Raw-file QEMU adapter status
+
+`cas-daemon` connects QEMU to a regular raw file through vhost-user and
+`io_uring`. It has one split virtqueue, bounded aligned buffers, read/write/FLUSH
+completion, and a device ID. The Nix daemon runner checks the existing guest
+workload and a queued write/readback job with repeated FLUSH. Reports include
+backend IO counts, errors, and outstanding requests at disconnect.
+
+The staging library is not yet connected to this adapter. DISCARD, WRITE_ZEROES,
+multiple queues, and transparent backend restart are pending. See the
+[testbed guide](testbed.md#qemu-through-cas-daemon) for commands and limits.
+
+## Next iteration: staging integration and R0
 
 Use the same guest definition for R0 and R3. Before a performance run, capture
 the dedicated drive's read and fdatasync times, CPU pinning, cache settings, and
 the exact software versions. The environment inventory here is only the first
 part of that run record.
 
-The first device implementation accepts reads, writes, FLUSH, DISCARD, and
-WRITE_ZEROES through split virtqueues. Add queue-wide completion accounting,
-aligned bounce buffers with a counter, and io_uring submission/completion. Keep
+The full device implementation will accept reads, writes, FLUSH, DISCARD, and
+WRITE_ZEROES through split virtqueues. Extend the existing completion accounting
+to multiple queues and preserve the staging store's durability fences. Keep
 the compactor off the device's FLUSH lock when it is introduced.
 
 Two source findings affect this work:

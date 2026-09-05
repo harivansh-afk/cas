@@ -47,15 +47,21 @@ jobs:
         run: nix build .#vm-smoke --out-link result-vm --print-build-logs
       - name: Verify guest IO through KVM
         run: result-vm/bin/cas-vm-smoke --output results/ci-raw-smoke
+      - name: Build the daemon guest and runner
+        run: nix build .#daemon-smoke --out-link result-daemon --print-build-logs
+      - name: Verify guest IO through cas-daemon
+        run: result-daemon/bin/cas-vm-smoke --output results/ci-daemon-smoke
       - name: Keep run evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: raw-vm-smoke
+          name: vm-smoke
           path: |
-            results/ci-raw-smoke/summary.json
-            results/ci-raw-smoke/console.log
-            results/ci-raw-smoke/build.json
-            results/ci-raw-smoke/flake.lock
-            results/ci-raw-smoke/guest/
+            results/ci-*-smoke/summary.json
+            results/ci-*-smoke/console.log
+            results/ci-*-smoke/build.json
+            results/ci-*-smoke/flake.lock
+            results/ci-*-smoke/guest/
+            results/ci-*-smoke/daemon.json
+            results/ci-*-smoke/daemon.log
           if-no-files-found: ignore

@@ -73,6 +73,42 @@ host device counters. The dated Ubuntu/Debian fleet also remains to be built;
 this NixOS guest is a development fixture. CAS integration will replace the
 guest's data-disk backend while retaining the guest workload.
 
+## QEMU through cas-daemon
+
+```sh
+nix build .#daemon-smoke --out-link result-daemon
+result-daemon/bin/cas-vm-smoke --output results/first-daemon-run
+```
+
+This runner starts `cas-daemon` on a private Unix socket and boots the same guest
+with `vhost-user-blk-pci` and shared memory. The daemon opens the fresh raw image
+with `O_DIRECT`, takes an exclusive file lock, and serves one split virtqueue.
+It supports reads, writes, FLUSH, and device identification. IO offsets and total
+lengths must be 4 KiB aligned; virtio sector addresses remain in 512-byte units.
+Requests use owned aligned buffers, with at most 128 requests in flight and a
+1 MiB limit per request. The report counts each bounced data request.
+
+The daemon submits file IO through `io_uring`. A FLUSH submits `fdatasync` with
+`IO_DRAIN`, waiting for earlier submitted IO and ordering subsequent submissions.
+A request succeeds only after its full completion; read data is copied to guest
+memory before publishing status. Invalid requests return IOERR when they have a
+valid status byte; malformed chains without one stop queue processing. The host
+watchdog retains evidence and fails a stalled guest.
+
+The guest runs the original 64 MiB write/readback job, then another 64 MiB job at
+queue depth 32 with a flush every 32 writes. The runner checks both fio results,
+requires successful daemon exit, and validates daemon byte counts, FLUSH count,
+concurrent IO, zero errors, and no outstanding requests at disconnect. Results
+include `daemon.json`, `daemon.log`, and `guest/queue.json`. QEMU and daemon
+process groups are terminated on failure or timeout. `--disk-dir` also works
+with this runner.
+
+The daemon accepts one connection. Staging-store integration, DISCARD,
+WRITE_ZEROES, multiple queues, reconnect/replay, and crash recovery remain
+pending. These checks do not establish the paper's G1 latency target or G2
+recovery gate. [API and protocol references](vhost-user-notes.md) record the
+source checks behind the adapter.
+
 ## Dedicated NixOS hosts
 
 The common module installs the pinned QEMU/fio tools and `casctl`, sets UTC and
