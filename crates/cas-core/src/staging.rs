@@ -383,9 +383,37 @@ impl StagingLog {
     }
 }
 
+impl Drop for StagingLog {
+    fn drop(&mut self) {
+        // A duplicated or temporarily inherited descriptor can outlive this
+        // handle. Explicit unlock releases our flock without waiting for the
+        // last close of that open file description. Drop does not FLUSH data.
+        let _ = self.file.unlock();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropping_writer_releases_lock_even_with_a_duplicate_descriptor() {
+        let directory = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let path = directory.path().join("image.log");
+        let mut log = StagingLog::create(&path, (4 * BLOCK_SIZE) as u64).unwrap();
+        log.write(0, &vec![1; BLOCK_SIZE]).unwrap();
+        log.flush().unwrap();
+        // dup and fork share the open file description and its flock. Keep a
+        // duplicate alive to reproduce delayed last-close without a timing race.
+        let duplicate = log.file.try_clone().unwrap();
+        assert!(StagingLog::open(&path).is_err());
+        drop(log);
+        let reopened = StagingLog::open(&path).unwrap();
+        assert_eq!(reopened.read(0, BLOCK_SIZE).unwrap(), vec![1; BLOCK_SIZE]);
+        drop(duplicate);
+        // Closing the old duplicate must not release the new writer's lock.
+        assert!(StagingLog::open(&path).is_err());
+    }
 
     #[test]
     fn failed_append_poisoning_prevents_a_later_flush_ack() {

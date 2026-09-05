@@ -113,7 +113,7 @@ fn one_writer_and_create_new_protect_existing_logs() {
     assert!(StagingLog::open(&path).is_err());
     assert!(StagingLog::create(&path, image_bytes()).is_err());
     drop(log);
-    assert!(StagingLog::open(&path).is_ok());
+    StagingLog::open(&path).unwrap();
 }
 
 #[test]
