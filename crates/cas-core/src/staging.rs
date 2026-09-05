@@ -132,6 +132,19 @@ fn encode(record: Record, payload: &[u8]) -> Aligned {
 }
 
 impl StagingLog {
+    fn empty(file: File, image_bytes: u64) -> Self {
+        Self {
+            file,
+            image_bytes,
+            next_offset: BLOCK_SIZE as u64,
+            appended: 0,
+            durable: 0,
+            blocks: BTreeMap::new(),
+            poisoned: false,
+            recovered_tail_bytes: 0,
+        }
+    }
+
     /// Creates a zero-initialized logical image. Never replaces an existing log.
     /// This does not import a raw image or implement a compacted base manifest.
     pub fn create(path: impl AsRef<Path>, image_bytes: u64) -> Result<Self> {
@@ -153,16 +166,7 @@ impl StagingLog {
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
         File::open(parent)?.sync_all()?;
-        Ok(Self {
-            file,
-            image_bytes,
-            next_offset: BLOCK_SIZE as u64,
-            appended: 0,
-            durable: 0,
-            blocks: BTreeMap::new(),
-            poisoned: false,
-            recovered_tail_bytes: 0,
-        })
+        Ok(Self::empty(file, image_bytes))
     }
 
     /// Replays through the last complete, checksum-valid FLUSH fence. Later
@@ -199,16 +203,8 @@ impl StagingLog {
                 break;
             }
         }
-        let mut log = Self {
-            file,
-            image_bytes,
-            next_offset: BLOCK_SIZE as u64 + committed_slots * RECORD_SIZE as u64,
-            appended: 0,
-            durable: 0,
-            blocks: BTreeMap::new(),
-            poisoned: false,
-            recovered_tail_bytes: 0,
-        };
+        let mut log = Self::empty(file, image_bytes);
+        log.next_offset += committed_slots * RECORD_SIZE as u64;
         for slot in 0..committed_slots {
             let position = BLOCK_SIZE as u64 + slot * RECORD_SIZE as u64;
             direct::read(&log.file, &mut buffer, position)?;
@@ -275,7 +271,18 @@ impl StagingLog {
         }
     }
 
-    fn append(&mut self, record: Record, payload: &[u8]) -> Result<()> {
+    fn append(&mut self, kind: u64, offset: u64, length: u64, payload: &[u8]) -> Result<u64> {
+        let sequence = if kind == FENCE {
+            self.appended
+        } else {
+            self.appended.checked_add(1).ok_or(Error::Exhausted)?
+        };
+        let record = Record {
+            kind,
+            sequence,
+            offset,
+            length,
+        };
         let end = self
             .next_offset
             .checked_add(RECORD_SIZE as u64)
@@ -287,10 +294,8 @@ impl StagingLog {
         }
         self.apply(record, self.next_offset);
         self.next_offset = end;
-        if record.kind != FENCE {
-            self.appended = record.sequence;
-        }
-        Ok(())
+        self.appended = sequence;
+        Ok(sequence)
     }
 
     /// Returns the final append sequence, or None for an empty request.
@@ -302,14 +307,10 @@ impl StagingLog {
             return Err(Error::RequestTooLarge);
         }
         for (index, block) in bytes.chunks_exact(BLOCK_SIZE).enumerate() {
-            let sequence = self.appended.checked_add(1).ok_or(Error::Exhausted)?;
             self.append(
-                Record {
-                    kind: WRITE,
-                    sequence,
-                    offset: offset + (index * BLOCK_SIZE) as u64,
-                    length: BLOCK_SIZE as u64,
-                },
+                WRITE,
+                offset + (index * BLOCK_SIZE) as u64,
+                BLOCK_SIZE as u64,
                 block,
             )?;
         }
@@ -324,17 +325,7 @@ impl StagingLog {
         if length == 0 {
             return Ok(None);
         }
-        let sequence = self.appended.checked_add(1).ok_or(Error::Exhausted)?;
-        self.append(
-            Record {
-                kind: ZERO,
-                sequence,
-                offset,
-                length,
-            },
-            &[],
-        )?;
-        Ok(Some(sequence))
+        self.append(ZERO, offset, length, &[]).map(Some)
     }
 
     /// The fence and preceding writes are covered by one fdatasync. E advances
@@ -342,15 +333,7 @@ impl StagingLog {
     pub fn flush(&mut self) -> Result<u64> {
         self.healthy()?;
         if self.appended != self.durable {
-            self.append(
-                Record {
-                    kind: FENCE,
-                    sequence: self.appended,
-                    offset: 0,
-                    length: 0,
-                },
-                &[],
-            )?;
+            self.append(FENCE, 0, 0, &[])?;
             if let Err(error) = self.file.sync_data() {
                 self.poisoned = true;
                 return Err(error.into());

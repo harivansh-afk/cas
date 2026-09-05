@@ -16,21 +16,6 @@ enum Command {
     StagingCheck { path: PathBuf },
 }
 
-#[cfg(target_os = "linux")]
-#[derive(serde::Serialize)]
-struct StagingCheckReport {
-    schema_version: u32,
-    check: &'static str,
-    passed: bool,
-    path: PathBuf,
-    io: &'static str,
-    implementation: &'static str,
-    durable_sequence: u64,
-    log_bytes: u64,
-    discarded_unflushed_tail_bytes: u64,
-    paper_gate: Option<&'static str>,
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     match Cli::parse().command {
         Command::StagingCheck { path } => staging_check(path),
@@ -55,27 +40,28 @@ fn staging_check(path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     drop(log);
 
     let reopened = StagingLog::open(&path)?;
+    let status = reopened.status();
     if reopened.read(0, BLOCK_SIZE)? != durable_bytes
         || reopened.read(BLOCK_SIZE as u64, BLOCK_SIZE)? != vec![0; BLOCK_SIZE]
-        || reopened.status().durable != durable
+        || status.durable != durable
     {
         return Err("staging recovery did not reproduce the flushed image".into());
     }
-    let status = reopened.status();
+    let path = serde_json::to_value(path)?;
     println!(
-        "{}",
-        serde_json::to_string_pretty(&StagingCheckReport {
-            schema_version: 1,
-            check: "staging_flush_reopen",
-            passed: true,
-            path,
-            io: "O_DIRECT",
-            implementation: "synchronous_reference",
-            durable_sequence: status.durable,
-            log_bytes: status.log_bytes,
-            discarded_unflushed_tail_bytes: status.recovered_tail_bytes,
-            paper_gate: None,
-        })?
+        "{:#}",
+        serde_json::json!({
+            "schema_version": 1,
+            "check": "staging_flush_reopen",
+            "passed": true,
+            "path": path,
+            "io": "O_DIRECT",
+            "implementation": "synchronous_reference",
+            "durable_sequence": status.durable,
+            "log_bytes": status.log_bytes,
+            "discarded_unflushed_tail_bytes": status.recovered_tail_bytes,
+            "paper_gate": null,
+        })
     );
     Ok(())
 }
