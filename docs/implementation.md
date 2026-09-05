@@ -119,8 +119,11 @@ A valid fence establishes the replay bound under the crash/torn-write model.
 CRC32 is not authentication. Arbitrary media corruption that destroys the final
 fence cannot always be distinguished from a torn unacknowledged fence; this
 format does not provide an independent durable copy of the acknowledged E.
-Power-cut testing, sync-error injection, and the final recovery format remain
-part of the durability work.
+Tests inject a short write after persisting one aligned block and a sync error
+after appending a fence. Both must poison the writer without advancing its
+acknowledged durable prefix. The injection is thread-local and compiled only
+for unit tests. Power-cut testing and the final recovery format remain part of
+the durability work.
 
 Each new file's header is synced and its parent directory is fsynced before
 creation returns. Direct IO alone does not establish durability, and fsync on

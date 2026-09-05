@@ -25,8 +25,11 @@ for the NixOS host template, deployment steps, and remaining paper-baseline work
 
 ## Build and check
 
-Requires Rust 1.89 or newer, Cargo, and a C linker. The storage tests require
-Linux and a filesystem supporting 4 KiB-aligned `O_DIRECT`; they create temporary
+Development, CI, and Nix builds use Rust 1.98.1 from `rust-toolchain.toml`.
+Enter `nix develop` for the complete toolchain and C linker, or use rustup, which
+reads the same file. The workspace requires Rust 1.98 or newer.
+
+The storage tests require Linux and a filesystem supporting 4 KiB-aligned `O_DIRECT`; they create temporary
 regular files inside the checkout. There is no buffered-IO fallback.
 
 ```sh
@@ -60,7 +63,11 @@ Missing tools are recorded. It does not create filesystems or run benchmarks.
 ```text
 crates/cas-core/       durability tracking, aligned IO, staging/replay
 crates/cas-cli/        casctl and machine-readable checks
-experiments/          environment capture; measurement procedures added by gate
+nix/modules/          reusable NixOS host and disk configuration
+nix/tests/            VM guest and host configuration checks
+nix/package.nix       Rust package, built with the shared toolchain
+templates/test-host/  dedicated-host flake template
+experiments/          environment inventory, disk preflight, VM runner and tests
 docs/implementation.md  implementation decisions and milestone status
 docs/spec.md          research specification
 docs/review/          source investigations behind the specification
@@ -68,5 +75,12 @@ playbook/             paper website and PDF
 results/              local artifacts, ignored by Git
 ```
 
-`Cargo.lock` is committed. Future storage formats and experimental parameters
-will be versioned; the initial staging format is provisional.
+`crates/cas-core/src/staging/format.rs` owns the on-disk encoding; `staging.rs` owns
+log operations and recovery. Unit tests live beside private code; integration
+tests live in each crate's `tests/` directory.
+
+`Cargo.lock` and `flake.lock` are committed. Update `rust-toolchain.toml` and the
+locked rust-overlay input together when adopting a new stable compiler; run
+`just check` and `just nix-check` inside `nix develop`.
+
+Future storage formats and experimental parameters will be versioned; the initial staging format is provisional.

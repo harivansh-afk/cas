@@ -8,7 +8,7 @@ test:
     cargo test --workspace --locked
 
 nix-check:
-    nix fmt -- --check flake.nix nix/*.nix templates/test-host/flake.nix
+    nix fmt -- --check flake.nix nix/*.nix nix/modules/*.nix nix/tests/*.nix templates/test-host/flake.nix
     nix flake check --no-build --all-systems
     nix flake check
 

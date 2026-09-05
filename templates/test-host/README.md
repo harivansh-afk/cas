@@ -20,6 +20,19 @@ nix flake lock
 nix build .#nixosConfigurations.node-a.config.system.build.toplevel
 ```
 
+Before installation, run the repository's read-only disk check **on the target**,
+using the same two paths as the host configuration. With a checkout and `uv` on
+the target:
+
+```sh
+uv run experiments/check-disks.py /dev/disk/by-id/OS_DISK /dev/disk/by-id/TEST_DISK
+```
+
+The check follows aliases, compares kernel device numbers, and rejects regular
+files and partitions. It does not establish that a disk is expendable or detect
+multiple block devices backed by the same SAN storage; verify the intended
+physical disks against the target's inventory too.
+
 From the CAS repository's `nix develop` shell, install using the absolute path
 to this host flake and the target's SSH address:
 

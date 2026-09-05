@@ -6,12 +6,14 @@ on:
     paths:
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'rust-toolchain.toml'
       - 'crates/**'
       - '.github/workflows/implementation.yml'
   pull_request:
     paths:
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'rust-toolchain.toml'
       - 'crates/**'
       - '.github/workflows/implementation.yml'
 
@@ -23,9 +25,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.89.0
-        with:
-          components: rustfmt, clippy
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
