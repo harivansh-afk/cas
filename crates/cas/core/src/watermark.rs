@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 pub struct DurablePrefix {
     issued: u64,
     confirmed: u64,
-    pending: BTreeSet<u64>,
+    confirmed_out_of_order: BTreeSet<u64>,
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -33,9 +33,9 @@ impl DurablePrefix {
             return Err(Error::Unissued(sequence));
         }
         if sequence > self.confirmed {
-            self.pending.insert(sequence);
+            self.confirmed_out_of_order.insert(sequence);
             while let Some(next) = self.confirmed.checked_add(1) {
-                if !self.pending.remove(&next) {
+                if !self.confirmed_out_of_order.remove(&next) {
                     break;
                 }
                 self.confirmed = next;

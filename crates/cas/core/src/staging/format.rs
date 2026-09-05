@@ -1,7 +1,7 @@
 //! Fixed-size, little-endian staging format. Numeric record tags stay on disk.
 
 use super::RECORD_SIZE;
-use crate::{BLOCK_SIZE, direct::Aligned};
+use crate::{BLOCK_SIZE, aligned::AlignedBuffer};
 
 const CHECKSUM_OFFSET: usize = BLOCK_SIZE - 4;
 const FILE_MAGIC: &[u8; 8] = b"CASLOG01";
@@ -86,9 +86,9 @@ pub(super) fn decode(bytes: &[u8]) -> Option<Record> {
     }
 }
 
-pub(super) fn encode(record: Record, payload: &[u8]) -> Aligned {
-    let mut buffer = Aligned::new(RECORD_SIZE);
-    let bytes = buffer.bytes_mut();
+pub(super) fn encode(record: Record, payload: &[u8]) -> AlignedBuffer {
+    let mut buffer = AlignedBuffer::new(RECORD_SIZE);
+    let bytes = buffer.as_mut_slice();
     bytes[..8].copy_from_slice(RECORD_MAGIC);
     put_u64(bytes, KIND_OFFSET, record.kind as u64);
     put_u64(bytes, SEQUENCE_OFFSET, record.sequence);
@@ -99,9 +99,9 @@ pub(super) fn encode(record: Record, payload: &[u8]) -> Aligned {
     buffer
 }
 
-pub(super) fn encode_header(image_bytes: u64) -> Aligned {
-    let mut header = Aligned::new(BLOCK_SIZE);
-    let bytes = header.bytes_mut();
+pub(super) fn encode_header(image_bytes: u64) -> AlignedBuffer {
+    let mut header = AlignedBuffer::new(BLOCK_SIZE);
+    let bytes = header.as_mut_slice();
     bytes[..8].copy_from_slice(FILE_MAGIC);
     put_u64(bytes, IMAGE_BYTES_OFFSET, image_bytes);
     put_u64(bytes, RECORD_SIZE_OFFSET, RECORD_SIZE as u64);

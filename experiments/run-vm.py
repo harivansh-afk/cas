@@ -16,6 +16,9 @@ import time
 
 IO_BYTES = 64 * 1024 * 1024
 DISK_BYTES = 128 * 1024 * 1024
+# Linux 6.17.13 can leave io-wq workers asleep for their five-second idle timeout.
+# See docs/review/daemon-lifetime.md. Keep process shutdown bounded.
+DAEMON_SHUTDOWN_SECONDS = 10
 
 
 def read_json(path: Path) -> dict:
@@ -189,7 +192,11 @@ def run(args: argparse.Namespace) -> int:
         if daemon is not None:
             verify_guest(read_json(results / "completion.json"), read_json(results / "queue.json"), "queue-smoke")
             summary["verified_bytes"] = 2 * IO_BYTES
-            summary["daemon_exit"] = daemon.wait(timeout=5)
+            shutdown_started = time.monotonic()
+            try:
+                summary["daemon_exit"] = daemon.wait(timeout=DAEMON_SHUTDOWN_SECONDS)
+            finally:
+                summary["daemon_shutdown_seconds"] = time.monotonic() - shutdown_started
             if summary["daemon_exit"] != 0:
                 raise ValueError("daemon failed; see daemon.log")
             summary["daemon"] = read_json(output / "daemon.json")

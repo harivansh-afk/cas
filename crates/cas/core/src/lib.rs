@@ -1,5 +1,4 @@
-//! Research storage primitives. The synchronous staging log is a correctness
-//! reference; the QEMU/io_uring daemon and compaction pipeline are not built yet.
+//! Staging log, durability tracking, and shared IO buffers.
 
 pub mod watermark;
 
@@ -10,3 +9,8 @@ mod direct;
 pub mod staging;
 
 pub const BLOCK_SIZE: usize = 4096;
+
+pub mod aligned;
+
+/// Maximum byte payload accepted by staging and the VM adapter.
+pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;

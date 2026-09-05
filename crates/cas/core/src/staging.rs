@@ -6,11 +6,10 @@ use std::fs::File;
 use std::io;
 use std::path::Path;
 
-use crate::BLOCK_SIZE;
-use crate::direct::{self, Aligned};
+use crate::{BLOCK_SIZE, MAX_REQUEST_BYTES};
+use crate::{aligned::AlignedBuffer, direct};
 
 pub const RECORD_SIZE: usize = 2 * BLOCK_SIZE;
-pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 mod format;
 
 use format::{Record, RecordKind, decode, decode_header, encode, encode_header};
@@ -23,9 +22,9 @@ pub enum Error {
     Header,
     #[error("corrupt record in the committed prefix at file offset {0}")]
     Corrupt(u64),
-    #[error("range must be within the image and aligned to 4096 bytes")]
+    #[error("range must be within the image and aligned to {BLOCK_SIZE} bytes")]
     Range,
-    #[error("read/write request exceeds 1 MiB")]
+    #[error("read/write request exceeds {MAX_REQUEST_BYTES} bytes")]
     RequestTooLarge,
     #[error("writer stopped after an IO failure; reopen to recover")]
     Poisoned,
@@ -102,18 +101,18 @@ impl StagingLog {
         if original_length < BLOCK_SIZE as u64 {
             return Err(Error::Header);
         }
-        let mut header = Aligned::new(BLOCK_SIZE);
+        let mut header = AlignedBuffer::new(BLOCK_SIZE);
         direct::read(&file, &mut header, 0)?;
-        let image_bytes = decode_header(header.bytes()).ok_or(Error::Header)?;
+        let image_bytes = decode_header(header.as_slice()).ok_or(Error::Header)?;
         let slots = (original_length - BLOCK_SIZE as u64) / RECORD_SIZE as u64;
         let mut committed_slots = 0;
-        let mut buffer = Aligned::new(RECORD_SIZE);
+        let mut buffer = AlignedBuffer::new(RECORD_SIZE);
         // Fixed slots prevent guest payloads resembling a fence from becoming
         // metadata. Reverse scan establishes the bound before validating replay.
         for slot in (0..slots).rev() {
             let position = BLOCK_SIZE as u64 + slot * RECORD_SIZE as u64;
             direct::read(&file, &mut buffer, position)?;
-            if decode(buffer.bytes()).is_some_and(|record| record.kind == RecordKind::Fence) {
+            if decode(buffer.as_slice()).is_some_and(|record| record.kind == RecordKind::Fence) {
                 committed_slots = slot + 1;
                 break;
             }
@@ -123,7 +122,7 @@ impl StagingLog {
         for slot in 0..committed_slots {
             let position = BLOCK_SIZE as u64 + slot * RECORD_SIZE as u64;
             direct::read(&log.file, &mut buffer, position)?;
-            let record = decode(buffer.bytes()).ok_or(Error::Corrupt(position))?;
+            let record = decode(buffer.as_slice()).ok_or(Error::Corrupt(position))?;
             if record.kind == RecordKind::Fence {
                 if record.sequence != log.appended {
                     return Err(Error::Corrupt(position));
@@ -276,17 +275,17 @@ impl StagingLog {
             return Err(Error::RequestTooLarge);
         }
         let mut result = vec![0; length];
-        let mut buffer = Aligned::new(RECORD_SIZE);
+        let mut buffer = AlignedBuffer::new(RECORD_SIZE);
         let (blocks, _) = result.as_chunks_mut::<BLOCK_SIZE>();
         for (index, block) in blocks.iter_mut().enumerate() {
             let logical_offset = offset + (index * BLOCK_SIZE) as u64;
             if let Some(&position) = self.blocks.get(&logical_offset) {
                 direct::read(&self.file, &mut buffer, position)?;
-                let record = decode(buffer.bytes()).ok_or(Error::Corrupt(position))?;
+                let record = decode(buffer.as_slice()).ok_or(Error::Corrupt(position))?;
                 if record.kind != RecordKind::Write || record.offset != logical_offset {
                     return Err(Error::Corrupt(position));
                 }
-                block.copy_from_slice(&buffer.bytes()[BLOCK_SIZE..]);
+                block.copy_from_slice(&buffer.as_slice()[BLOCK_SIZE..]);
             }
         }
         Ok(result)

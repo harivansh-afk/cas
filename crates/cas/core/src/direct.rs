@@ -1,40 +1,13 @@
-//! The only unsafe allocation code. No buffered-IO fallback.
+//! Linux direct IO and file exclusion. No buffered-IO fallback.
 
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::Path;
 
+#[cfg(test)]
 use crate::BLOCK_SIZE;
-
-#[repr(C, align(4096))]
-#[derive(Clone)]
-struct Block([u8; BLOCK_SIZE]);
-
-const _: () = assert!(size_of::<Block>() == BLOCK_SIZE && align_of::<Block>() == BLOCK_SIZE);
-
-pub(crate) struct Aligned(Vec<Block>);
-
-impl Aligned {
-    pub(crate) fn new(length: usize) -> Self {
-        assert!(length > 0 && length.is_multiple_of(BLOCK_SIZE));
-        Self(vec![Block([0; BLOCK_SIZE]); length / BLOCK_SIZE])
-    }
-
-    pub(crate) fn bytes(&self) -> &[u8] {
-        // SAFETY: Block is exactly 4096 initialized bytes with no padding, and
-        // Vec stores its blocks contiguously. The slice borrows the allocation.
-        unsafe { std::slice::from_raw_parts(self.0.as_ptr().cast(), self.0.len() * BLOCK_SIZE) }
-    }
-
-    pub(crate) fn bytes_mut(&mut self) -> &mut [u8] {
-        // SAFETY: the blocks contain initialized bytes with no padding, and
-        // &mut self gives this slice exclusive access to the entire allocation.
-        unsafe {
-            std::slice::from_raw_parts_mut(self.0.as_mut_ptr().cast(), self.0.len() * BLOCK_SIZE)
-        }
-    }
-}
+use crate::aligned::AlignedBuffer;
 
 pub(crate) fn open(path: &Path, create: bool) -> io::Result<File> {
     let file = OpenOptions::new()
@@ -50,14 +23,14 @@ pub(crate) fn open(path: &Path, create: bool) -> io::Result<File> {
     Ok(file)
 }
 
-pub(crate) fn read(file: &File, buffer: &mut Aligned, offset: u64) -> io::Result<()> {
+pub(crate) fn read(file: &File, buffer: &mut AlignedBuffer, offset: u64) -> io::Result<()> {
     let read = loop {
-        match file.read_at(buffer.bytes_mut(), offset) {
+        match file.read_at(buffer.as_mut_slice(), offset) {
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             result => break result?,
         }
     };
-    if read != buffer.bytes().len() {
+    if read != buffer.as_slice().len() {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
             "short direct read",
@@ -66,23 +39,23 @@ pub(crate) fn read(file: &File, buffer: &mut Aligned, offset: u64) -> io::Result
     Ok(())
 }
 
-pub(crate) fn write(file: &File, buffer: &Aligned, offset: u64) -> io::Result<()> {
+pub(crate) fn write(file: &File, buffer: &AlignedBuffer, offset: u64) -> io::Result<()> {
     #[cfg(test)]
     if faults::take(faults::Fault::ShortWrite) {
         // Persist one aligned block, then report the short write through the
         // same length check as the real syscall result.
-        let written = file.write_at(&buffer.bytes()[..BLOCK_SIZE], offset)?;
-        return check_write_length(written, buffer.bytes().len());
+        let written = file.write_at(&buffer.as_slice()[..BLOCK_SIZE], offset)?;
+        return check_write_length(written, buffer.as_slice().len());
     }
     let written = loop {
-        match file.write_at(buffer.bytes(), offset) {
+        match file.write_at(buffer.as_slice(), offset) {
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             result => break result?,
         }
     };
     // A short direct write may leave a partial record. Never retry through a
     // potentially unaligned suffix; the caller poisons the writer on error.
-    check_write_length(written, buffer.bytes().len())
+    check_write_length(written, buffer.as_slice().len())
 }
 
 fn check_write_length(written: usize, expected: usize) -> io::Result<()> {

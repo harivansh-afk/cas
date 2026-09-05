@@ -28,21 +28,21 @@ fn staging_check(path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     use cas_core::staging::StagingLog;
 
     let mut log = StagingLog::create(&path, (4 * BLOCK_SIZE) as u64)?;
-    let durable_bytes = vec![0x41; BLOCK_SIZE];
+    let durable_bytes = [0x41; BLOCK_SIZE];
     log.write(0, &durable_bytes)?;
-    log.write(BLOCK_SIZE as u64, &vec![0x42; BLOCK_SIZE])?;
+    log.write(BLOCK_SIZE as u64, &[0x42; BLOCK_SIZE])?;
     log.zero(BLOCK_SIZE as u64, BLOCK_SIZE as u64)?;
     if log.zero(0, 0)?.is_some() {
         return Err("empty discard allocated a sequence".into());
     }
     let durable = log.flush()?;
-    log.write(0, &vec![0x43; BLOCK_SIZE])?;
+    log.write(0, &[0x43; BLOCK_SIZE])?;
     drop(log);
 
     let reopened = StagingLog::open(&path)?;
     let status = reopened.status();
     if reopened.read(0, BLOCK_SIZE)? != durable_bytes
-        || reopened.read(BLOCK_SIZE as u64, BLOCK_SIZE)? != vec![0; BLOCK_SIZE]
+        || reopened.read(BLOCK_SIZE as u64, BLOCK_SIZE)? != [0; BLOCK_SIZE]
         || status.durable != durable
     {
         return Err("staging recovery did not reproduce the flushed image".into());

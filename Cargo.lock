@@ -96,12 +96,15 @@ dependencies = [
 name = "cas-daemon"
 version = "0.1.0"
 dependencies = [
+ "cas-core",
  "clap",
  "io-uring",
  "libc",
  "serde_json",
+ "tempfile",
  "vhost",
  "vhost-user-backend",
+ "virtio-bindings",
  "virtio-queue",
  "vm-memory",
  "vmm-sys-util",
