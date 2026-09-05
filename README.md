@@ -61,8 +61,8 @@ Missing tools are recorded. It does not create filesystems or run benchmarks.
 ## Layout
 
 ```text
-crates/cas-core/       durability tracking, aligned IO, staging/replay
-crates/cas-cli/        casctl and machine-readable checks
+crates/cas/core/       durability tracking, aligned IO, staging/replay
+crates/cas/cli/        casctl and machine-readable checks
 nix/modules/          reusable NixOS host and disk configuration
 nix/tests/            VM guest and host configuration checks
 nix/package.nix       Rust package, built with the shared toolchain
@@ -75,7 +75,7 @@ playbook/             paper website and PDF
 results/              local artifacts, ignored by Git
 ```
 
-`crates/cas-core/src/staging/format.rs` owns the on-disk encoding; `staging.rs` owns
+`crates/cas/core/src/staging/format.rs` owns the on-disk encoding; `staging.rs` owns
 log operations and recovery. Unit tests live beside private code; integration
 tests live in each crate's `tests/` directory.
 

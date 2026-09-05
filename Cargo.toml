@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/cas-core", "crates/cas-cli"]
+members = ["crates/cas/core", "crates/cas/cli"]
 resolver = "3"
 
 [workspace.package]
@@ -9,7 +9,7 @@ rust-version = "1.98"
 publish = false
 
 [workspace.dependencies]
-cas-core = { path = "crates/cas-core" }
+cas-core = { path = "crates/cas/core" }
 clap = { version = "4.6", features = ["derive"] }
 crc32fast = "1.5"
 libc = "0.2"
