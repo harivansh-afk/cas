@@ -1,6 +1,6 @@
 # Implementation plan
 
-Status: first iteration, 2026-09-05. Research baseline: specification v10 at
+Status: staging reference and Nix test environment, 2026-09-05. Research baseline: specification v10 at
 `74c8976`. This document tracks implementation; it does not revise the paper's
 hypotheses or mark its gates as passed.
 
@@ -134,9 +134,14 @@ forged fence bytes inside guest payloads, and sequence-prefix ordering. They ran
 on Spark's aarch64 Linux/ext4 development filesystem. They do not establish G1,
 the QEMU multiqueue condition, guest `fio --verify`, or power-loss recovery.
 
+The [Nix test environment](testbed.md) now provides a pinned toolchain, a raw-disk
+QEMU/KVM guest with fio verification, and a bare-metal host template. The raw
+guest uses io_uring through stock QEMU; our staging library remains synchronous.
+
 Not implemented: existing-image import, a compacted base, timed background
-fdatasync, bounded staging/governor, io_uring, QEMU, chunk store, census, remote
-protocol, snapshots, or migration. No paper measurement is reported.
+fdatasync, bounded staging/governor, the daemon's io_uring and QEMU adapters,
+chunk store, census, remote protocol, snapshots, or migration. No paper
+measurement is reported.
 
 ## Immediate next iteration: R0 and the QEMU adapter
 

@@ -11,6 +11,18 @@ order, dependencies, acceptance gates, and outstanding design decisions.
 
 Follow [TODO.md](TODO.md) for the short implementation checklist.
 
+## Nix environment and test guest
+
+```sh
+nix develop
+nix build .#vm-smoke --out-link result-vm
+result-vm/bin/cas-vm-smoke --output results/first-vm-run
+```
+
+This boots a KVM guest, writes and verifies a new raw disk, and saves its logs and
+fio JSON. It is a functional development check. See [the testbed guide](docs/testbed.md)
+for the NixOS host template, deployment steps, and remaining paper-baseline work.
+
 ## Build and check
 
 Requires Rust 1.89 or newer, Cargo, and a C linker. The storage tests require

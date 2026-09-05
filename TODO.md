@@ -9,10 +9,11 @@ Tick items as their code, tests, or results land. Details: [implementation plan]
 - [x] Build the staging log: writes, flush-to-disk, zero ranges, and recovery.
 - [x] Test crashes, torn writes, corruption, ordering, and writer locks.
 - [x] Add a command-line recovery check, environment capture, and CI.
+- [x] Pin the Nix environment and boot a QEMU/fio guest for a raw-disk write/readback check.
+- [x] Add a NixOS bare-metal host template with separate OS and XFS test disks.
 
 ## Next: get a VM using our backend
 
-- [ ] Set up a reproducible QEMU/fio environment and test guest.
 - [ ] Connect guest reads, writes, and FLUSH to the backend using io_uring.
 - [ ] Verify guest data after a backend restart, including requests in flight and multiple queues.
 - [ ] Arrange the CloudLab pair and dedicated test disks for paper measurements.
