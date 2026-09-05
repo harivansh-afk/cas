@@ -1,44 +1,38 @@
 //! The only unsafe allocation code. No buffered-IO fallback.
 
-use std::alloc::{Layout, alloc_zeroed, dealloc, handle_alloc_error};
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::Path;
-use std::ptr::NonNull;
 
 use crate::BLOCK_SIZE;
 
-pub(crate) struct Aligned {
-    pointer: NonNull<u8>,
-    layout: Layout,
-}
+#[repr(C, align(4096))]
+#[derive(Clone)]
+struct Block([u8; BLOCK_SIZE]);
+
+const _: () = assert!(size_of::<Block>() == BLOCK_SIZE && align_of::<Block>() == BLOCK_SIZE);
+
+pub(crate) struct Aligned(Vec<Block>);
 
 impl Aligned {
     pub(crate) fn new(length: usize) -> Self {
         assert!(length > 0 && length.is_multiple_of(BLOCK_SIZE));
-        let layout = Layout::from_size_align(length, BLOCK_SIZE).unwrap();
-        // SAFETY: layout has a positive size and a valid power-of-two alignment.
-        let pointer = unsafe { alloc_zeroed(layout) };
-        let pointer = NonNull::new(pointer).unwrap_or_else(|| handle_alloc_error(layout));
-        Self { pointer, layout }
+        Self(vec![Block([0; BLOCK_SIZE]); length / BLOCK_SIZE])
     }
 
     pub(crate) fn bytes(&self) -> &[u8] {
-        // SAFETY: allocation is initialized, live, and borrowed for this slice.
-        unsafe { std::slice::from_raw_parts(self.pointer.as_ptr(), self.layout.size()) }
+        // SAFETY: Block is exactly 4096 initialized bytes with no padding, and
+        // Vec stores its blocks contiguously. The slice borrows the allocation.
+        unsafe { std::slice::from_raw_parts(self.0.as_ptr().cast(), self.0.len() * BLOCK_SIZE) }
     }
 
     pub(crate) fn bytes_mut(&mut self) -> &mut [u8] {
-        // SAFETY: &mut self guarantees exclusive access to the live allocation.
-        unsafe { std::slice::from_raw_parts_mut(self.pointer.as_ptr(), self.layout.size()) }
-    }
-}
-
-impl Drop for Aligned {
-    fn drop(&mut self) {
-        // SAFETY: pointer was allocated with this layout and is freed once.
-        unsafe { dealloc(self.pointer.as_ptr(), self.layout) };
+        // SAFETY: the blocks contain initialized bytes with no padding, and
+        // &mut self gives this slice exclusive access to the entire allocation.
+        unsafe {
+            std::slice::from_raw_parts_mut(self.0.as_mut_ptr().cast(), self.0.len() * BLOCK_SIZE)
+        }
     }
 }
 
