@@ -9,6 +9,8 @@ contiguous durability tracking. The daemon, census, and paper experiments remain
 in development. [Implementation plan](docs/implementation.md) records the build
 order, dependencies, acceptance gates, and outstanding design decisions.
 
+Follow [TODO.md](TODO.md) for the short implementation checklist.
+
 ## Build and check
 
 Requires Rust 1.89 or newer, Cargo, and a C linker. The storage tests require
