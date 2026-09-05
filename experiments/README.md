@@ -4,6 +4,10 @@
 and worktree state. It reports missing commands without substituting another
 measurement. Run it through `uv` as shown in the root README.
 
+`check-disks.py OS_DISK DATA_DISK` runs on the provisioning target and verifies
+that the two `/dev/disk/by-id` paths identify distinct whole block devices.
+It only reads device metadata; it never formats or writes a disk.
+
 Spark is a development host. The specification names a pair of CloudLab
 c6525-100g nodes for paper measurements, with a dedicated NVMe under test.
 Development checks do not supply R0 or establish any hypothesis.

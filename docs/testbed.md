@@ -14,7 +14,8 @@ nix flake check
 
 The shell contains Rust, QEMU, fio, XFS tools, `uv`, `just`, the Nix formatter,
 `nixos-rebuild`, and `nixos-anywhere`. `nix build .#cas` builds and tests the Rust
-workspace using the same locked Nixpkgs and Cargo dependencies. Linux ARM64 and
+workspace using the same Rust toolchain selected by `rust-toolchain.toml`,
+with locked rust-overlay, Nixpkgs, and Cargo dependencies. Linux ARM64 and
 x86_64 outputs are provided; the guest must match the host architecture.
 
 Build and run the guest as separate commands:
@@ -126,7 +127,10 @@ nix flake init --template /absolute/path/to/cas#test-host
 
 Follow the generated README to fill in actual disk IDs, SSH keys, architecture,
 drivers, and networking. Missing keys and placeholder disk IDs fail configuration
-assertions. Installation through `nixos-anywhere` formats the declared disks;
+assertions. These assertions compare path strings, so run
+`experiments/check-disks.py` on the target as described in the template README
+to reject aliases of the same block device and partition paths. Installation
+through `nixos-anywhere` formats the declared disks;
 subsequent configuration updates use `nixos-rebuild`. No real node identities or
 devices are invented in this repository. The CloudLab pair and its boot/install
 path are still pending.

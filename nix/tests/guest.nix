@@ -48,8 +48,8 @@
     };
   };
 
-  environment.etc."cas/smoke.fio".source = ../experiments/fio/smoke.fio;
-  environment.etc."cas/queue.fio".source = ../experiments/fio/queue.fio;
+  environment.etc."cas/smoke.fio".source = ../../experiments/fio/smoke.fio;
+  environment.etc."cas/queue.fio".source = ../../experiments/fio/queue.fio;
   systemd.services.cas-smoke = {
     description = "Verify guest IO through the selected block backend";
     wantedBy = [ "multi-user.target" ];
