@@ -17,3 +17,9 @@ vm-build:
 
 vm-smoke output:
     ./result-vm/bin/cas-vm-smoke --output {{quote(output)}}
+
+daemon-build:
+    nix build .#daemon-smoke --out-link result-daemon
+
+daemon-smoke output:
+    ./result-daemon/bin/cas-vm-smoke --output {{quote(output)}}

@@ -25,7 +25,7 @@ def read_json(path: Path) -> dict:
     return value
 
 
-def verify_guest(completion: dict, fio: dict) -> None:
+def verify_guest(completion: dict, fio: dict, job_name: str = "raw-smoke") -> None:
     if (
         completion.get("schema_version") != 1
         or completion.get("service_result") != "success"
@@ -37,12 +37,24 @@ def verify_guest(completion: dict, fio: dict) -> None:
     if not isinstance(jobs, list) or len(jobs) != 1 or not isinstance(jobs[0], dict):
         raise ValueError("fio did not report exactly one job")
     job = jobs[0]
-    if job.get("jobname") != "raw-smoke" or job.get("error") != 0:
+    if job.get("jobname") != job_name or job.get("error") != 0:
         raise ValueError("fio job failed or has an unexpected name")
     for direction in ("write", "read"):
         stats = job.get(direction)
         if not isinstance(stats, dict) or stats.get("io_bytes") != IO_BYTES:
             raise ValueError(f"fio did not complete the expected {direction} byte count")
+
+
+def verify_daemon(report: dict) -> None:
+    if (report.get("schema_version") != 1 or report.get("backend") != "raw_io_uring"
+        or report.get("connection_ok") is not True or report.get("errors") != 0
+        or report.get("pending_at_disconnect") != 0 or report.get("queues") != 1):
+        raise ValueError("daemon did not report a clean run")
+    for name, minimum in (("write_bytes", 2 * IO_BYTES), ("read_bytes", 2 * IO_BYTES),
+                          ("flushes", 2), ("bounce_requests", 1), ("peak_inflight", 2)):
+        value = report.get(name)
+        if not isinstance(value, int) or value < minimum:
+            raise ValueError(f"daemon did not complete expected {name}")
 
 
 def prepare_output(path: Path) -> Path:
@@ -101,6 +113,9 @@ def run(args: argparse.Namespace) -> int:
         "guest_exit": None,
     }
     process = None
+    daemon = None
+    daemon_log = None
+    socket_directory = None
     started = time.monotonic()
     try:
         # Fail before boot rather than silently measuring CPU emulation.
@@ -108,6 +123,8 @@ def run(args: argparse.Namespace) -> int:
             pass
         build = read_json(args.build_info)
         summary["build"] = build
+        if build.get("backend") == "daemon":
+            summary["artifact"] = "development_daemon_vm_smoke"
         if build["system"] != f"{platform.machine()}-linux":
             raise ValueError("guest architecture must match the KVM host")
         shutil.copyfile(args.lock, output / "flake.lock")
@@ -141,6 +158,23 @@ def run(args: argparse.Namespace) -> int:
             "TMPDIR": str(temporary),
             "USE_TMPDIR": "1",
         })
+        if build.get("backend") == "daemon":
+            # AF_UNIX paths are short; repository/result paths need not be.
+            socket_directory = tempfile.TemporaryDirectory(prefix="cas-vhost-", dir="/tmp")
+            socket = Path(socket_directory.name) / "block.sock"
+            env["CAS_VHOST_SOCKET"] = str(socket)
+            daemon_log = (output / "daemon.log").open("wb")
+            daemon = subprocess.Popen(
+                [build["daemon"], "--socket", str(socket), "--image", str(image),
+                 "--report", str(output / "daemon.json")],
+                cwd=output, env=env, stdin=subprocess.DEVNULL,
+                stdout=daemon_log, stderr=subprocess.STDOUT, start_new_session=True,
+            )
+            deadline = time.monotonic() + 5
+            while not socket.is_socket():
+                if daemon.poll() is not None or time.monotonic() >= deadline:
+                    raise ValueError("daemon failed to open its socket; see daemon.log")
+                time.sleep(0.02)
         command = [str(args.vm)]
         summary["launcher"] = command
         with (output / "console.log").open("wb") as console:
@@ -152,12 +186,26 @@ def run(args: argparse.Namespace) -> int:
         if summary["guest_exit"] != 0:
             raise ValueError(f"QEMU exited with {summary['guest_exit']}; see console.log")
         verify_guest(read_json(results / "completion.json"), read_json(results / "fio.json"))
+        if daemon is not None:
+            verify_guest(read_json(results / "completion.json"), read_json(results / "queue.json"), "queue-smoke")
+            summary["verified_bytes"] = 2 * IO_BYTES
+            summary["daemon_exit"] = daemon.wait(timeout=5)
+            if summary["daemon_exit"] != 0:
+                raise ValueError("daemon failed; see daemon.log")
+            summary["daemon"] = read_json(output / "daemon.json")
+            verify_daemon(summary["daemon"])
         summary["passed"] = True
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:
         summary["error"] = str(error)
     finally:
         if process is not None:
             stop_vm(process)
+        if daemon is not None:
+            stop_vm(daemon)
+        if daemon_log is not None:
+            daemon_log.close()
+        if socket_directory is not None:
+            socket_directory.cleanup()
         summary["wall_seconds_including_boot"] = time.monotonic() - started
         (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps({"passed": summary["passed"], "results": str(output), "paper_gate": None}))
