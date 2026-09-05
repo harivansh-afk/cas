@@ -53,13 +53,36 @@ impl DurablePrefix {
 /// These bounds alone do not establish that a disk operation completed.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Watermarks {
-    pub e: u64,
-    pub d: u64,
-    pub o: u64,
+    e: u64,
+    d: u64,
+    o: u64,
 }
 
 impl Watermarks {
-    pub fn advance(&mut self, next: Self) -> Result<(), Error> {
+    pub fn confirmed_append(&self) -> u64 {
+        self.e
+    }
+
+    pub fn durable_manifest(&self) -> u64 {
+        self.d
+    }
+
+    pub fn durable_owners(&self) -> u64 {
+        self.o
+    }
+
+    /// Advance E, D, and O together, preserving O <= D <= E and monotonicity.
+    pub fn advance(
+        &mut self,
+        confirmed_append: u64,
+        durable_manifest: u64,
+        durable_owners: u64,
+    ) -> Result<(), Error> {
+        let next = Self {
+            e: confirmed_append,
+            d: durable_manifest,
+            o: durable_owners,
+        };
         if next.o > next.d
             || next.d > next.e
             || next.e < self.e
@@ -121,7 +144,10 @@ mod tests {
     fn owner_and_manifest_prefixes_cannot_overtake_durability() {
         let mut marks = Watermarks::default();
         let valid = Watermarks { e: 9, d: 7, o: 3 };
-        marks.advance(valid).unwrap();
+        marks.advance(valid.e, valid.d, valid.o).unwrap();
+        assert_eq!(marks.confirmed_append(), 9);
+        assert_eq!(marks.durable_manifest(), 7);
+        assert_eq!(marks.durable_owners(), 3);
         for invalid in [
             Watermarks { e: 8, ..valid },
             Watermarks { d: 6, ..valid },
@@ -129,7 +155,10 @@ mod tests {
             Watermarks { d: 10, ..valid },
             Watermarks { o: 8, ..valid },
         ] {
-            assert_eq!(marks.advance(invalid), Err(Error::InvalidWatermark));
+            assert_eq!(
+                marks.advance(invalid.e, invalid.d, invalid.o),
+                Err(Error::InvalidWatermark)
+            );
             assert_eq!(marks, valid);
         }
     }

@@ -67,6 +67,13 @@ pub(crate) fn read(file: &File, buffer: &mut Aligned, offset: u64) -> io::Result
 }
 
 pub(crate) fn write(file: &File, buffer: &Aligned, offset: u64) -> io::Result<()> {
+    #[cfg(test)]
+    if faults::take(faults::Fault::ShortWrite) {
+        // Persist one aligned block, then report the short write through the
+        // same length check as the real syscall result.
+        let written = file.write_at(&buffer.bytes()[..BLOCK_SIZE], offset)?;
+        return check_write_length(written, buffer.bytes().len());
+    }
     let written = loop {
         match file.write_at(buffer.bytes(), offset) {
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -75,11 +82,55 @@ pub(crate) fn write(file: &File, buffer: &Aligned, offset: u64) -> io::Result<()
     };
     // A short direct write may leave a partial record. Never retry through a
     // potentially unaligned suffix; the caller poisons the writer on error.
-    if written != buffer.bytes().len() {
+    check_write_length(written, buffer.bytes().len())
+}
+
+fn check_write_length(written: usize, expected: usize) -> io::Result<()> {
+    if written != expected {
         return Err(io::Error::new(
             io::ErrorKind::WriteZero,
             "short direct write",
         ));
     }
     Ok(())
+}
+
+pub(crate) fn sync_data(file: &File) -> io::Result<()> {
+    #[cfg(test)]
+    if faults::take(faults::Fault::Sync) {
+        return Err(io::Error::from_raw_os_error(libc::EIO));
+    }
+    file.sync_data()
+}
+
+// One-shot, thread-local syscall faults keep concurrent tests independent.
+// This module and both injection sites are absent from production builds.
+#[cfg(test)]
+pub(crate) mod faults {
+    use std::cell::Cell;
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Fault {
+        ShortWrite,
+        Sync,
+    }
+
+    thread_local! {
+        static NEXT: Cell<Option<Fault>> = const { Cell::new(None) };
+    }
+
+    pub(crate) fn inject(fault: Fault) {
+        NEXT.with(|next| assert!(next.replace(Some(fault)).is_none()));
+    }
+
+    pub(super) fn take(fault: Fault) -> bool {
+        NEXT.with(|next| {
+            if next.get() == Some(fault) {
+                next.set(None);
+                true
+            } else {
+                false
+            }
+        })
+    }
 }

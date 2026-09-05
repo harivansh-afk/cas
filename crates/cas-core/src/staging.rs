@@ -11,12 +11,9 @@ use crate::direct::{self, Aligned};
 
 pub const RECORD_SIZE: usize = 2 * BLOCK_SIZE;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-const CHECKSUM_OFFSET: usize = BLOCK_SIZE - 4;
-const FILE_MAGIC: &[u8; 8] = b"CASLOG01";
-const RECORD_MAGIC: &[u8; 8] = b"CASREC01";
-const WRITE: u64 = 1;
-const ZERO: u64 = 2;
-const FENCE: u64 = 3;
+mod format;
+
+use format::{Record, RecordKind, decode, decode_header, encode, encode_header};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -61,76 +58,6 @@ pub struct StagingLog {
     recovered_tail_bytes: u64,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct Record {
-    kind: u64,
-    sequence: u64,
-    offset: u64,
-    length: u64,
-}
-
-fn get_u64(bytes: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
-}
-
-fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
-    bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
-}
-
-fn checksum(bytes: &[u8]) -> u32 {
-    let mut crc = crc32fast::Hasher::new();
-    crc.update(&bytes[..CHECKSUM_OFFSET]);
-    crc.update(&bytes[BLOCK_SIZE..]);
-    crc.finalize()
-}
-
-fn seal(bytes: &mut [u8]) {
-    let crc = checksum(bytes);
-    bytes[CHECKSUM_OFFSET..BLOCK_SIZE].copy_from_slice(&crc.to_le_bytes());
-}
-
-fn checksum_valid(bytes: &[u8]) -> bool {
-    let stored = u32::from_le_bytes(bytes[CHECKSUM_OFFSET..BLOCK_SIZE].try_into().unwrap());
-    checksum(bytes) == stored
-}
-
-fn decode(bytes: &[u8]) -> Option<Record> {
-    if &bytes[..8] != RECORD_MAGIC || !checksum_valid(bytes) {
-        return None;
-    }
-    let record = Record {
-        kind: get_u64(bytes, 8),
-        sequence: get_u64(bytes, 16),
-        offset: get_u64(bytes, 24),
-        length: get_u64(bytes, 32),
-    };
-    match record.kind {
-        WRITE if record.length == BLOCK_SIZE as u64 => Some(record),
-        ZERO if record.length > 0 && bytes[BLOCK_SIZE..].iter().all(|b| *b == 0) => Some(record),
-        FENCE
-            if record.offset == 0
-                && record.length == 0
-                && bytes[BLOCK_SIZE..].iter().all(|b| *b == 0) =>
-        {
-            Some(record)
-        }
-        _ => None,
-    }
-}
-
-fn encode(record: Record, payload: &[u8]) -> Aligned {
-    let mut buffer = Aligned::new(RECORD_SIZE);
-    let bytes = buffer.bytes_mut();
-    bytes[..8].copy_from_slice(RECORD_MAGIC);
-    put_u64(bytes, 8, record.kind);
-    put_u64(bytes, 16, record.sequence);
-    put_u64(bytes, 24, record.offset);
-    put_u64(bytes, 32, record.length);
-    bytes[BLOCK_SIZE..BLOCK_SIZE + payload.len()].copy_from_slice(payload);
-    seal(bytes);
-    buffer
-}
-
 impl StagingLog {
     fn empty(file: File, image_bytes: u64) -> Self {
         Self {
@@ -153,11 +80,7 @@ impl StagingLog {
             return Err(Error::Range);
         }
         let file = direct::open(path, true)?;
-        let mut header = Aligned::new(BLOCK_SIZE);
-        header.bytes_mut()[..8].copy_from_slice(FILE_MAGIC);
-        put_u64(header.bytes_mut(), 8, image_bytes);
-        put_u64(header.bytes_mut(), 16, RECORD_SIZE as u64);
-        seal(header.bytes_mut());
+        let header = encode_header(image_bytes);
         direct::write(&file, &header, 0)?;
         file.sync_all()?;
         // A synced file does not by itself make a newly created name durable.
@@ -181,15 +104,7 @@ impl StagingLog {
         }
         let mut header = Aligned::new(BLOCK_SIZE);
         direct::read(&file, &mut header, 0)?;
-        let image_bytes = get_u64(header.bytes(), 8);
-        if &header.bytes()[..8] != FILE_MAGIC
-            || !checksum_valid(header.bytes())
-            || get_u64(header.bytes(), 16) != RECORD_SIZE as u64
-            || image_bytes == 0
-            || !image_bytes.is_multiple_of(BLOCK_SIZE as u64)
-        {
-            return Err(Error::Header);
-        }
+        let image_bytes = decode_header(header.bytes()).ok_or(Error::Header)?;
         let slots = (original_length - BLOCK_SIZE as u64) / RECORD_SIZE as u64;
         let mut committed_slots = 0;
         let mut buffer = Aligned::new(RECORD_SIZE);
@@ -198,7 +113,7 @@ impl StagingLog {
         for slot in (0..slots).rev() {
             let position = BLOCK_SIZE as u64 + slot * RECORD_SIZE as u64;
             direct::read(&file, &mut buffer, position)?;
-            if decode(buffer.bytes()).is_some_and(|record| record.kind == FENCE) {
+            if decode(buffer.bytes()).is_some_and(|record| record.kind == RecordKind::Fence) {
                 committed_slots = slot + 1;
                 break;
             }
@@ -209,7 +124,7 @@ impl StagingLog {
             let position = BLOCK_SIZE as u64 + slot * RECORD_SIZE as u64;
             direct::read(&log.file, &mut buffer, position)?;
             let record = decode(buffer.bytes()).ok_or(Error::Corrupt(position))?;
-            if record.kind == FENCE {
+            if record.kind == RecordKind::Fence {
                 if record.sequence != log.appended {
                     return Err(Error::Corrupt(position));
                 }
@@ -262,17 +177,27 @@ impl StagingLog {
     }
 
     fn apply(&mut self, record: Record, position: u64) {
-        if record.kind == WRITE {
-            self.blocks.insert(record.offset, position);
-        } else if record.kind == ZERO {
-            let end = record.offset + record.length;
-            self.blocks
-                .retain(|offset, _| *offset < record.offset || *offset >= end);
+        match record.kind {
+            RecordKind::Write => {
+                self.blocks.insert(record.offset, position);
+            }
+            RecordKind::Zero => {
+                let end = record.offset + record.length;
+                self.blocks
+                    .retain(|offset, _| *offset < record.offset || *offset >= end);
+            }
+            RecordKind::Fence => {}
         }
     }
 
-    fn append(&mut self, kind: u64, offset: u64, length: u64, payload: &[u8]) -> Result<u64> {
-        let sequence = if kind == FENCE {
+    fn append(
+        &mut self,
+        kind: RecordKind,
+        offset: u64,
+        length: u64,
+        payload: &[u8],
+    ) -> Result<u64> {
+        let sequence = if kind == RecordKind::Fence {
             self.appended
         } else {
             self.appended.checked_add(1).ok_or(Error::Exhausted)?
@@ -306,9 +231,10 @@ impl StagingLog {
         if bytes.len() > MAX_REQUEST_BYTES {
             return Err(Error::RequestTooLarge);
         }
-        for (index, block) in bytes.chunks_exact(BLOCK_SIZE).enumerate() {
+        let (blocks, _) = bytes.as_chunks::<BLOCK_SIZE>();
+        for (index, block) in blocks.iter().enumerate() {
             self.append(
-                WRITE,
+                RecordKind::Write,
                 offset + (index * BLOCK_SIZE) as u64,
                 BLOCK_SIZE as u64,
                 block,
@@ -325,7 +251,7 @@ impl StagingLog {
         if length == 0 {
             return Ok(None);
         }
-        self.append(ZERO, offset, length, &[]).map(Some)
+        self.append(RecordKind::Zero, offset, length, &[]).map(Some)
     }
 
     /// The fence and preceding writes are covered by one fdatasync. E advances
@@ -333,8 +259,8 @@ impl StagingLog {
     pub fn flush(&mut self) -> Result<u64> {
         self.healthy()?;
         if self.appended != self.durable {
-            self.append(FENCE, 0, 0, &[])?;
-            if let Err(error) = self.file.sync_data() {
+            self.append(RecordKind::Fence, 0, 0, &[])?;
+            if let Err(error) = direct::sync_data(&self.file) {
                 self.poisoned = true;
                 return Err(error.into());
             }
@@ -351,12 +277,13 @@ impl StagingLog {
         }
         let mut result = vec![0; length];
         let mut buffer = Aligned::new(RECORD_SIZE);
-        for (index, block) in result.chunks_exact_mut(BLOCK_SIZE).enumerate() {
+        let (blocks, _) = result.as_chunks_mut::<BLOCK_SIZE>();
+        for (index, block) in blocks.iter_mut().enumerate() {
             let logical_offset = offset + (index * BLOCK_SIZE) as u64;
             if let Some(&position) = self.blocks.get(&logical_offset) {
                 direct::read(&self.file, &mut buffer, position)?;
                 let record = decode(buffer.bytes()).ok_or(Error::Corrupt(position))?;
-                if record.kind != WRITE || record.offset != logical_offset {
+                if record.kind != RecordKind::Write || record.offset != logical_offset {
                     return Err(Error::Corrupt(position));
                 }
                 block.copy_from_slice(&buffer.bytes()[BLOCK_SIZE..]);
@@ -396,6 +323,66 @@ mod tests {
         drop(duplicate);
         // Closing the old duplicate must not release the new writer's lock.
         assert!(StagingLog::open(&path).is_err());
+    }
+
+    #[test]
+    fn short_write_poisoning_preserves_the_previous_flush() {
+        let directory = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let path = directory.path().join("image.log");
+        let mut log = StagingLog::create(&path, (4 * BLOCK_SIZE) as u64).unwrap();
+        log.write(0, &[1; BLOCK_SIZE]).unwrap();
+        log.flush().unwrap();
+        let before = log.status();
+
+        direct::faults::inject(direct::faults::Fault::ShortWrite);
+        assert!(
+            matches!(log.write(0, &[2; BLOCK_SIZE]), Err(Error::Io(error))
+            if error.kind() == io::ErrorKind::WriteZero)
+        );
+        assert_eq!(log.status(), before);
+        assert_eq!(
+            log.file.metadata().unwrap().len(),
+            before.log_bytes + BLOCK_SIZE as u64
+        );
+        assert!(matches!(log.flush(), Err(Error::Poisoned)));
+        assert!(matches!(
+            log.write(0, &[3; BLOCK_SIZE]),
+            Err(Error::Poisoned)
+        ));
+        drop(log);
+
+        let recovered = StagingLog::open(path).unwrap();
+        assert_eq!(recovered.status().durable, before.durable);
+        assert_eq!(recovered.status().recovered_tail_bytes, BLOCK_SIZE as u64);
+        assert_eq!(recovered.read(0, BLOCK_SIZE).unwrap(), [1; BLOCK_SIZE]);
+    }
+
+    #[test]
+    fn failed_sync_never_acknowledges_the_new_prefix() {
+        let directory = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let path = directory.path().join("image.log");
+        let mut log = StagingLog::create(&path, (4 * BLOCK_SIZE) as u64).unwrap();
+        log.write(0, &[1; BLOCK_SIZE]).unwrap();
+        let durable = log.flush().unwrap();
+        log.write(0, &[2; BLOCK_SIZE]).unwrap();
+
+        direct::faults::inject(direct::faults::Fault::Sync);
+        assert!(matches!(log.flush(), Err(Error::Io(error))
+            if error.raw_os_error() == Some(libc::EIO)));
+        assert_eq!(log.status().durable, durable);
+        assert!(matches!(log.flush(), Err(Error::Poisoned)));
+        assert!(matches!(
+            log.zero(0, BLOCK_SIZE as u64),
+            Err(Error::Poisoned)
+        ));
+        assert!(matches!(log.read(0, BLOCK_SIZE), Err(Error::Poisoned)));
+        drop(log);
+
+        // A complete but unacknowledged fence may survive; recovery must still
+        // produce a complete batch, not assume the failed sync erased it.
+        let recovered = StagingLog::open(path).unwrap();
+        assert_eq!(recovered.status().durable, durable + 1);
+        assert_eq!(recovered.read(0, BLOCK_SIZE).unwrap(), [2; BLOCK_SIZE]);
     }
 
     #[test]

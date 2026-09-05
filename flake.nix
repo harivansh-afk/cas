@@ -3,6 +3,10 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     disko = {
       url = "github:nix-community/disko";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -14,6 +18,7 @@
       self,
       nixpkgs,
       disko,
+      rust-overlay,
       ...
     }:
     let
@@ -25,10 +30,18 @@
       environments = forSystems (
         system:
         let
-          pkgs = import nixpkgs { inherit system; };
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ rust-overlay.overlays.default ];
+          };
+          toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+          rustPlatform = pkgs.makeRustPlatform {
+            cargo = toolchain;
+            rustc = toolchain;
+          };
           guest = nixpkgs.lib.nixosSystem {
             inherit system;
-            modules = [ ./nix/guest.nix ];
+            modules = [ ./nix/tests/guest.nix ];
           };
           vm = guest.config.system.build.vm;
           buildInfo = pkgs.writeText "cas-vm-build.json" (
@@ -61,8 +74,13 @@
           };
         in
         {
-          inherit pkgs vm smoke;
-          cas = pkgs.callPackage ./nix/package.nix { };
+          inherit
+            pkgs
+            vm
+            smoke
+            toolchain
+            ;
+          cas = pkgs.callPackage ./nix/package.nix { inherit rustPlatform; };
         }
       );
     in
@@ -96,10 +114,7 @@
         {
           default = pkgs.mkShell {
             packages = with pkgs; [
-              cargo
-              rustc
-              rustfmt
-              clippy
+              environments.${system}.toolchain
               just
               uv
               qemu_kvm
@@ -118,14 +133,22 @@
 
       nixosModules = {
         test-host = { pkgs, ... }: {
-          imports = [ ./nix/host.nix ];
+          imports = [ ./nix/modules/host.nix ];
           environment.systemPackages = [ self.packages.${pkgs.stdenv.hostPlatform.system}.cas ];
         };
-        bare-metal = {
+        bare-metal = { config, ... }: {
           imports = [
             self.nixosModules.test-host
             disko.nixosModules.disko
-            ./nix/disks.nix
+            ./nix/modules/disks.nix
+          ];
+          boot.loader.systemd-boot.enable = true;
+          boot.loader.efi.canTouchEfiVariables = false;
+          assertions = [
+            {
+              assertion = config.cas.testbed.authorizedKeys != [ ];
+              message = "Configure an administrator SSH public key before provisioning a test host.";
+            }
           ];
         };
       };
@@ -148,7 +171,7 @@
             python3 -m unittest discover -s experiments/tests -v
             touch "$out"
           '';
-          host-config = import ./nix/check-host.nix {
+          host-config = import ./nix/tests/host-config.nix {
             inherit nixpkgs system;
             inherit (self) nixosModules;
             pkgs = env.pkgs;
