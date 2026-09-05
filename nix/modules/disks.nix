@@ -12,18 +12,13 @@ in
       type = lib.types.str;
       description = "Stable /dev/disk/by-id path of the separate, expendable test disk.";
     };
-    authorizedKeys = lib.mkOption {
-      type = lib.types.listOf lib.types.str;
-      default = [ ];
-      description = "SSH public keys permitted to administer this dedicated host.";
-    };
   };
 
   config = {
     assertions = [
       {
         assertion = cfg.osDisk != cfg.dataDisk;
-        message = "CAS testbed OS and experiment disks must be different devices.";
+        message = "CAS testbed OS and experiment disk paths must differ; verify device identity on the target before provisioning.";
       }
       {
         assertion =
@@ -35,23 +30,8 @@ in
             ];
         message = "Fill in real, stable OS and experiment disk IDs before building a bare-metal host.";
       }
-      {
-        assertion = cfg.authorizedKeys != [ ];
-        message = "Configure an administrator SSH public key before provisioning a test host.";
-      }
     ];
 
-    boot.loader.systemd-boot.enable = true;
-    boot.loader.efi.canTouchEfiVariables = false;
-    services.openssh = {
-      enable = true;
-      settings = {
-        PasswordAuthentication = false;
-        KbdInteractiveAuthentication = false;
-        PermitRootLogin = "prohibit-password";
-      };
-    };
-    users.users.root.openssh.authorizedKeys.keys = cfg.authorizedKeys;
     disko.devices.disk = {
       os = {
         type = "disk";

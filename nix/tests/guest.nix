@@ -36,7 +36,7 @@
     };
   };
 
-  environment.etc."cas/smoke.fio".source = ../experiments/fio/smoke.fio;
+  environment.etc."cas/smoke.fio".source = ../../experiments/fio/smoke.fio;
   systemd.services.cas-smoke = {
     description = "Verify guest IO through the raw-file control path";
     wantedBy = [ "multi-user.target" ];
