@@ -93,7 +93,7 @@
 
 <h2>Measurements</h2>
 <div class="table-scroll">
-	<table class="spec prose">
+	<table class="spec">
 		<thead>
 			<tr><th>Flow</th><th>Daemon</th><th>Baseline</th><th>Read against</th></tr>
 		</thead>

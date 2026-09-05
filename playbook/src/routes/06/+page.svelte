@@ -12,7 +12,7 @@
 
 <h2>Nearest systems</h2>
 <div class="table-scroll">
-	<table class="spec prose">
+	<table class="spec">
 		<thead>
 			<tr><th>Work</th><th>What it is</th><th>How this differs</th></tr>
 		</thead>
@@ -31,7 +31,7 @@
 
 <h2>Remote fetch in prior systems</h2>
 <div class="table-scroll">
-	<table class="spec prose">
+	<table class="spec">
 		<thead>
 			<tr><th>Work</th><th>What it measured</th><th>What it leaves open</th></tr>
 		</thead>

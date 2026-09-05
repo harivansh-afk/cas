@@ -42,7 +42,7 @@
 	<Node x={215} y={96} w={84} h={20} title="≈ 21 µs" tone="accent" />
 	<Note x={20} y={140} tone="accent" size={10} text="peer memory, daemon on TCP, estimate" />
 	<Node x={215} y={126} w={100} h={20} title="20 to 30 µs" tone="accent" />
-	<Bracket x={335} y1={66} y2={146} label={['shorter than the local NVMe bar', 'the case hash placement makes common']} tone="accent" />
+	<Bracket x={335} y1={66} y2={146} label={['shorter than the local NVMe bar', 'the case hash placement makes common']} />
 
 	<Note x={20} y={184} size={10} text="peer NVMe over RDMA" />
 	<Node x={215} y={170} w={368} h={20} title="≈ 92 µs" tone="outline" />
@@ -59,7 +59,7 @@
 	The other rows exist to show what the kernel stack and the userspace hop each cost.
 </p>
 <div class="table-scroll">
-	<table class="spec prose">
+	<table class="spec">
 		<thead>
 			<tr><th>Probe</th><th>What it isolates</th><th>Code</th></tr>
 		</thead>

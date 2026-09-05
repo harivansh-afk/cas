@@ -29,7 +29,7 @@
 
 <h2>Schedule</h2>
 <div class="table-scroll">
-	<table class="spec prose">
+	<table class="spec">
 		<thead>
 			<tr><th>Weeks</th><th>Build</th><th>Measure</th></tr>
 		</thead>

@@ -14,17 +14,10 @@ function Span(el)
   if el.classes:includes("tag-stretch") then
     return pandoc.SmallCaps({ pandoc.Str("[") } .. el.content .. { pandoc.Str("]") })
   end
-  if el.classes:includes("rid") then
-    return pandoc.Code(pandoc.utils.stringify(el))
-  end
   return el.content
 end
 
--- Coined terms link to the glossary on page 00; on paper they are just words.
 function Link(el)
-  if el.classes:includes("term") then
-    return el.content
-  end
   -- Page-relative links (./03, ./00#terms) point nowhere in a PDF.
   if el.target:match("^%./") or el.target:match("^#") then
     return el.content
