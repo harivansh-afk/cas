@@ -5,6 +5,7 @@ pub mod watermark;
 
 #[cfg(target_os = "linux")]
 mod direct;
+
 #[cfg(target_os = "linux")]
 pub mod staging;
 
