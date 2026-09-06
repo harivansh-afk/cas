@@ -75,6 +75,7 @@ class DaemonEvidenceTests(unittest.TestCase):
     def setUp(self):
         self.report = {
             "schema_version": 1, "backend": "raw_io_uring", "connection_ok": True,
+            "flush_negotiated": True,
             "errors": 0, "pending_at_disconnect": 0, "queues": 1,
             "write_bytes": 2 * runner.IO_BYTES, "read_bytes": 2 * runner.IO_BYTES,
             "flushes": 514, "bounce_requests": 65536, "peak_inflight": 32,
@@ -86,6 +87,7 @@ class DaemonEvidenceTests(unittest.TestCase):
     def test_failed_incomplete_or_serial_run_cannot_pass(self):
         for field, value in [
             ("connection_ok", False), ("errors", 1), ("pending_at_disconnect", 1),
+            ("flush_negotiated", False), ("flush_negotiated", None),
             ("write_bytes", runner.IO_BYTES), ("read_bytes", 0), ("flushes", 0),
             ("peak_inflight", 1), ("backend", "raw"), ("bounce_requests", None),
         ]:

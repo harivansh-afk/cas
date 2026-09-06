@@ -51,6 +51,7 @@ def verify_guest(completion: dict, fio: dict, job_name: str = "raw-smoke") -> No
 def verify_daemon(report: dict) -> None:
     if (report.get("schema_version") != 1 or report.get("backend") != "raw_io_uring"
         or report.get("connection_ok") is not True or report.get("errors") != 0
+        or report.get("flush_negotiated") is not True
         or report.get("pending_at_disconnect") != 0 or report.get("queues") != 1):
         raise ValueError("daemon did not report a clean run")
     for name, minimum in (("write_bytes", 2 * IO_BYTES), ("read_bytes", 2 * IO_BYTES),

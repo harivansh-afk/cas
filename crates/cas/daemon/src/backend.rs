@@ -10,6 +10,10 @@ use cas_core::{BLOCK_SIZE, MAX_REQUEST_BYTES, aligned::AlignedBuffer};
 use io_uring::{IoUring, opcode, squeue, types};
 use vhost::vhost_user::message::VhostUserProtocolFeatures;
 use vhost_user_backend::{ShutdownHandle, VhostUserBackendMut, VringMutex, VringState, VringT};
+use virtio_bindings::bindings::{
+    virtio_blk::{VIRTIO_BLK_F_BLK_SIZE, VIRTIO_BLK_F_FLUSH},
+    virtio_config::VIRTIO_F_VERSION_1,
+};
 use virtio_queue::QueueT;
 use vm_memory::{
     Bytes, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryLoadGuard, GuestMemoryMmap,
@@ -21,6 +25,8 @@ use vmm_sys_util::eventfd::{EFD_CLOEXEC, EFD_NONBLOCK, EventFd};
 use crate::request::{self, Completion, DEVICE_ID, Request, Segment, Status};
 
 const QUEUE_SIZE: usize = 128;
+const REQUIRED_FEATURES: u64 =
+    (1 << VIRTIO_F_VERSION_1) | (1 << VIRTIO_BLK_F_BLK_SIZE) | (1 << VIRTIO_BLK_F_FLUSH);
 pub(super) const COMPLETION_EVENT: u16 = 2; // 0 is the queue; 1 is the framework's exit event.
 
 // Each pending operation owns exactly the storage the kernel can still access.
@@ -71,6 +77,7 @@ pub(super) struct Backend {
     counters: Counters,
     shutdown: Option<ShutdownHandle>,
     failure: Option<String>,
+    negotiated_features: u64,
 }
 
 /// The queue lock serializes publication with SET_VRING_ENABLE/GET_VRING_BASE.
@@ -147,6 +154,7 @@ impl Backend {
             counters: Counters::default(),
             shutdown: None,
             failure: None,
+            negotiated_features: 0,
         })
     }
     pub fn set_shutdown_handle(&mut self, handle: ShutdownHandle) {
@@ -154,6 +162,15 @@ impl Backend {
     }
     pub fn failure(&self) -> Option<&str> {
         self.failure.as_deref()
+    }
+    fn fail(&mut self, message: String) {
+        if self.failure.is_none() {
+            self.failure = Some(message);
+            self.counters.errors += 1;
+        }
+        if let Some(shutdown) = &self.shutdown {
+            shutdown.shutdown();
+        }
     }
     pub fn completion_fd(&self) -> RawFd {
         self.completion_event.as_raw_fd()
@@ -165,6 +182,8 @@ impl Backend {
         let c = &self.counters;
         serde_json::json!({
             "schema_version":1, "fatal_error":self.failure, "backend":"raw_io_uring", "connection_ok":connection_ok,
+            "negotiated_features":self.negotiated_features,
+            "flush_negotiated":self.negotiated_features & (1 << VIRTIO_BLK_F_FLUSH) != 0,
             "pending_at_disconnect":pending_at_disconnect, "reads":c.reads, "writes":c.writes,
             "flushes":c.flushes, "read_bytes":c.read_bytes, "write_bytes":c.write_bytes,
             "errors":c.errors, "bounce_requests":c.bounce_requests, "peak_inflight":c.peak_inflight, "queues":1
@@ -313,6 +332,12 @@ impl Backend {
         }
     }
     fn process(&mut self, vring: &VringMutex) -> io::Result<()> {
+        if let Some(failure) = &self.failure {
+            return Err(io::Error::other(failure.clone()));
+        }
+        if self.negotiated_features & REQUIRED_FEATURES != REQUIRED_FEATURES {
+            return Err(io::Error::other("IO before required feature negotiation"));
+        }
         let mem = self
             .memory
             .as_ref()
@@ -404,20 +429,23 @@ impl VhostUserBackendMut for Backend {
     fn features(&self) -> u64 {
         use vhost::vhost_user::message::VhostUserVirtioFeatures;
         use virtio_bindings::bindings::{
-            virtio_blk::{
-                VIRTIO_BLK_F_BLK_SIZE, VIRTIO_BLK_F_FLUSH, VIRTIO_BLK_F_SEG_MAX,
-                VIRTIO_BLK_F_SIZE_MAX,
-            },
-            virtio_config::VIRTIO_F_VERSION_1,
+            virtio_blk::{VIRTIO_BLK_F_SEG_MAX, VIRTIO_BLK_F_SIZE_MAX},
             virtio_ring::VIRTIO_RING_F_INDIRECT_DESC,
         };
         (1 << VIRTIO_BLK_F_SIZE_MAX)
             | (1 << VIRTIO_BLK_F_SEG_MAX)
-            | (1 << VIRTIO_BLK_F_BLK_SIZE)
-            | (1 << VIRTIO_BLK_F_FLUSH)
+            | REQUIRED_FEATURES
             | (1 << VIRTIO_RING_F_INDIRECT_DESC)
-            | (1 << VIRTIO_F_VERSION_1)
             | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits()
+    }
+    fn acked_features(&mut self, features: u64) {
+        self.negotiated_features = features;
+        if features & REQUIRED_FEATURES != REQUIRED_FEATURES {
+            // This research adapter supports a modern Linux guest with 4 KiB
+            // blocks and writeback caching. Refuse unsupported negotiation
+            // before IO rather than acknowledge unsynchronized writes as stable.
+            self.fail("guest must negotiate VERSION_1, BLK_SIZE, and FLUSH".into());
+        }
     }
     fn protocol_features(&self) -> VhostUserProtocolFeatures {
         VhostUserProtocolFeatures::CONFIG
@@ -471,11 +499,7 @@ impl VhostUserBackendMut for Backend {
             self.process(&vrings[0])
         })();
         if let Err(error) = &result {
-            self.failure = Some(error.to_string());
-            self.counters.errors += 1;
-            if let Some(shutdown) = &self.shutdown {
-                shutdown.shutdown();
-            }
+            self.fail(error.to_string());
         }
         result
     }
@@ -496,6 +520,39 @@ mod tests {
         vring.set_queue_ready(true);
         vring.set_enabled(true);
         (mem, vring)
+    }
+
+    #[test]
+    fn renegotiation_cannot_resume_a_failed_backend() {
+        let directory = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let path = directory.path().join("image.raw");
+        File::create(&path)
+            .unwrap()
+            .set_len(BLOCK_SIZE as u64)
+            .unwrap();
+        let mut backend = Backend::new(&path).unwrap();
+        let (memory, vring) = queue();
+        let mem = memory.memory();
+        mem.write_obj(0x6000u64, vm_memory::GuestAddress(0x1000))
+            .unwrap();
+        mem.write_obj(16u32, vm_memory::GuestAddress(0x1008))
+            .unwrap();
+        mem.write_obj(1u16, vm_memory::GuestAddress(0x2002))
+            .unwrap();
+        backend.update_memory(memory).unwrap();
+        backend.acked_features(backend.features() & !(1 << VIRTIO_BLK_F_FLUSH));
+        backend.acked_features(backend.features());
+        assert!(
+            backend
+                .handle_event(0, EventSet::IN, std::slice::from_ref(&vring), 0)
+                .is_err()
+        );
+        assert_eq!(
+            backend.failure(),
+            Some("guest must negotiate VERSION_1, BLK_SIZE, and FLUSH")
+        );
+        assert_eq!(vring.queue_next_avail(), 0);
+        assert_eq!(backend.pending_count(), 0);
     }
 
     #[test]

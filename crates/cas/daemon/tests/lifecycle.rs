@@ -204,7 +204,7 @@ impl FrontendQueue {
         self.kick.write(1).unwrap();
     }
 
-    fn request(&mut self, kind: u32) {
+    fn request_layout(&mut self, kind: u32, fragmented: bool) {
         let mut header = [0; 16];
         header[..4].copy_from_slice(&kind.to_le_bytes());
         self.mem.write_slice(&header, GuestAddress(0x4000)).unwrap();
@@ -223,6 +223,30 @@ impl FrontendQueue {
             2
         };
         self.descriptor(status_index, 0x6000, 1, VRING_DESC_F_WRITE as u16, 0);
+        if fragmented {
+            if kind == VIRTIO_BLK_T_OUT {
+                // Split the header, then share its final bytes with the data.
+                self.mem.write_slice(&header, GuestAddress(0x4ff0)).unwrap();
+                self.descriptor(0, 0x4ff0, 8, VRING_DESC_F_NEXT as u16, 1);
+                self.descriptor(
+                    1,
+                    0x4ff8,
+                    8 + BLOCK_SIZE as u32,
+                    VRING_DESC_F_NEXT as u16,
+                    2,
+                );
+            } else {
+                self.descriptor(0, 0x4000, 8, VRING_DESC_F_NEXT as u16, 1);
+                self.descriptor(1, 0x4008, 8, VRING_DESC_F_NEXT as u16, 2);
+                let (addr, len) = if kind == VIRTIO_BLK_T_IN {
+                    (0x5000, BLOCK_SIZE as u32 + 1)
+                } else {
+                    (0x6000, 1)
+                };
+                // Read payload and status share the final writable descriptor.
+                self.descriptor(2, addr, len, VRING_DESC_F_WRITE as u16, 0);
+            }
+        }
         self.kick();
         loop {
             match self.call.read() {
@@ -261,6 +285,15 @@ fn frontend_disconnect_exits_cleanly() {
 
 #[test]
 fn completed_write_flush_read_exits_cleanly() {
+    write_flush_read(false);
+}
+
+#[test]
+fn fragmented_write_flush_read_exits_cleanly() {
+    write_flush_read(true);
+}
+
+fn write_flush_read(fragmented: bool) {
     let mut daemon = Daemon::spawn();
     let mut queue = FrontendQueue::connect(&mut daemon);
     let expected = [0x5a; BLOCK_SIZE];
@@ -268,13 +301,13 @@ fn completed_write_flush_read_exits_cleanly() {
         .mem
         .write_slice(&expected, GuestAddress(0x5000))
         .unwrap();
-    queue.request(VIRTIO_BLK_T_OUT);
-    queue.request(VIRTIO_BLK_T_FLUSH);
+    queue.request_layout(VIRTIO_BLK_T_OUT, fragmented);
+    queue.request_layout(VIRTIO_BLK_T_FLUSH, fragmented);
     queue
         .mem
         .write_slice(&[0; BLOCK_SIZE], GuestAddress(0x5000))
         .unwrap();
-    queue.request(VIRTIO_BLK_T_IN);
+    queue.request_layout(VIRTIO_BLK_T_IN, fragmented);
     let mut actual = [0; BLOCK_SIZE];
     queue
         .mem
@@ -288,6 +321,7 @@ fn completed_write_flush_read_exits_cleanly() {
     assert!(status.success(), "{}", daemon.stderr());
     assert_eq!(report["connection_ok"], true);
     assert!(report["fatal_error"].is_null());
+    assert_eq!(report["flush_negotiated"], true);
     assert_eq!(report["pending_at_disconnect"], 0);
     assert_eq!(report["errors"], 0);
     assert_eq!(report["writes"], 1);
@@ -299,6 +333,41 @@ fn completed_write_flush_read_exits_cleanly() {
         fs::read(daemon.directory.path().join("image.raw")).unwrap(),
         expected
     );
+}
+
+#[test]
+fn missing_required_features_closes_frontend_before_io() {
+    use virtio_bindings::bindings::{
+        virtio_blk::{VIRTIO_BLK_F_BLK_SIZE, VIRTIO_BLK_F_FLUSH},
+        virtio_config::VIRTIO_F_VERSION_1,
+    };
+    for feature in [
+        VIRTIO_BLK_F_FLUSH,
+        VIRTIO_BLK_F_BLK_SIZE,
+        VIRTIO_F_VERSION_1,
+    ] {
+        let mut daemon = Daemon::spawn();
+        let stream = daemon.connect();
+        let mut observer = stream.try_clone().unwrap();
+        let frontend = Frontend::from_stream(stream, 1);
+        frontend.set_owner().unwrap();
+        let features = frontend.get_features().unwrap() & !(1 << feature);
+        frontend.set_features(features).unwrap();
+        let (status, report) = daemon.wait();
+        assert!(!status.success(), "{}", daemon.stderr());
+        assert_eq!(
+            report["fatal_error"],
+            "guest must negotiate VERSION_1, BLK_SIZE, and FLUSH"
+        );
+        assert_eq!(report["negotiated_features"], features);
+        assert_eq!(report["writes"], 0);
+        assert_eq!(report["pending_at_disconnect"], 0);
+        assert_eq!(
+            fs::read(daemon.directory.path().join("image.raw")).unwrap(),
+            vec![0; BLOCK_SIZE]
+        );
+        assert_eq!(observer.read(&mut [0]).unwrap(), 0);
+    }
 }
 
 #[test]
