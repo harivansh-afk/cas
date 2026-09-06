@@ -53,6 +53,12 @@ jobs:
         run: nix build .#daemon-smoke --out-link result-daemon --print-build-logs
       - name: Verify guest IO through cas-daemon
         run: result-daemon/bin/cas-vm-smoke --output results/ci-daemon-smoke
+      - name: Build the staging guest and runner
+        run: nix build .#staging-smoke --out-link result-staging --print-build-logs
+      - name: Verify guest IO through staging
+        run: result-staging/bin/cas-vm-smoke --output results/ci-staging-smoke
+      - name: Verify staging after killing the daemon
+        run: result-staging/bin/cas-vm-smoke --recovery --output results/ci-recovery-smoke
       - name: Keep run evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -66,4 +72,11 @@ jobs:
             results/ci-*-smoke/guest/
             results/ci-*-smoke/daemon.json
             results/ci-*-smoke/daemon.log
+            results/ci-recovery-smoke/write/console.log
+            results/ci-recovery-smoke/write/daemon.log
+            results/ci-recovery-smoke/write/guest/
+            results/ci-recovery-smoke/read/console.log
+            results/ci-recovery-smoke/read/daemon.log
+            results/ci-recovery-smoke/read/daemon.json
+            results/ci-recovery-smoke/read/guest/
           if-no-files-found: ignore

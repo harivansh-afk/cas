@@ -1,17 +1,21 @@
 //! Real socket/worker regressions. Requires host io_uring and direct file IO.
 use std::fs::{self, File};
 use std::io::{self, Read};
+use std::os::unix::fs::FileExt;
 use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use cas_core::BLOCK_SIZE;
+use cas_core::{
+    BLOCK_SIZE,
+    staging::{RECORD_SIZE, StagingLog},
+};
 use tempfile::TempDir;
 use vhost::vhost_user::{Frontend, VhostUserFrontend};
 use vhost::{VhostBackend, VhostUserMemoryRegionInfo, VringConfigData};
 use virtio_bindings::bindings::virtio_blk::{
-    VIRTIO_BLK_S_OK, VIRTIO_BLK_T_FLUSH, VIRTIO_BLK_T_IN, VIRTIO_BLK_T_OUT,
+    VIRTIO_BLK_S_IOERR, VIRTIO_BLK_S_OK, VIRTIO_BLK_T_FLUSH, VIRTIO_BLK_T_IN, VIRTIO_BLK_T_OUT,
 };
 use virtio_bindings::bindings::virtio_ring::{VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
 use vm_memory::{Bytes, FileOffset, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
@@ -28,29 +32,55 @@ struct Daemon {
 
 impl Daemon {
     fn spawn() -> Self {
+        Self::spawn_backend(false)
+    }
+
+    fn spawn_backend(staging: bool) -> Self {
         let directory = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
-        let image = directory.path().join("image.raw");
-        File::create(&image)
-            .unwrap()
-            .set_len(BLOCK_SIZE as u64)
-            .unwrap();
-        let stderr = File::create(directory.path().join("stderr")).unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_cas-daemon"))
-            .arg("--socket")
-            .arg(directory.path().join("vhost.sock"))
-            .arg("--image")
-            .arg(image)
-            .arg("--report")
-            .arg(directory.path().join("report.json"))
-            .stdout(Stdio::null())
-            .stderr(stderr)
-            .spawn()
-            .unwrap();
+        if !staging {
+            File::create(directory.path().join("image.raw"))
+                .unwrap()
+                .set_len(BLOCK_SIZE as u64)
+                .unwrap();
+        }
+        let child = Self::start(&directory, staging, staging);
         Self {
             child,
             directory,
             deadline: Instant::now() + DEADLINE,
         }
+    }
+
+    fn start(directory: &TempDir, staging: bool, create: bool) -> Child {
+        let stderr = File::create(directory.path().join("stderr")).unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cas-daemon"));
+        command
+            .arg("--socket")
+            .arg(directory.path().join("vhost.sock"))
+            .arg("--image")
+            .arg(directory.path().join("image.raw"))
+            .arg("--report")
+            .arg(directory.path().join("report.json"));
+        if staging {
+            command.args(["--backend", "staging"]);
+        }
+        if create {
+            command.arg("--create-bytes").arg(BLOCK_SIZE.to_string());
+        }
+        command
+            .stdout(Stdio::null())
+            .stderr(stderr)
+            .spawn()
+            .unwrap()
+    }
+
+    fn crash_and_reopen(&mut self) {
+        self.child.kill().unwrap();
+        assert!(!self.child.wait().unwrap().success());
+        fs::remove_file(self.directory.path().join("vhost.sock")).unwrap();
+        fs::remove_file(self.directory.path().join("report.json")).unwrap();
+        self.child = Self::start(&self.directory, true, false);
+        self.deadline = Instant::now() + DEADLINE;
     }
 
     fn stderr(&self) -> String {
@@ -195,8 +225,14 @@ impl FrontendQueue {
     }
 
     fn kick(&mut self) {
+        self.kick_head(0);
+    }
+
+    fn kick_head(&mut self, head: u16) {
         let slot = 0x2004 + u64::from(self.next_avail % 128) * 2;
-        self.mem.write_obj(0u16, GuestAddress(slot)).unwrap();
+        self.mem
+            .write_obj(head.to_le(), GuestAddress(slot))
+            .unwrap();
         self.next_avail += 1;
         self.mem
             .write_obj(self.next_avail.to_le(), GuestAddress(0x2002))
@@ -205,6 +241,10 @@ impl FrontendQueue {
     }
 
     fn request_layout(&mut self, kind: u32, fragmented: bool) {
+        self.request_status(kind, fragmented, VIRTIO_BLK_S_OK as u8);
+    }
+
+    fn request_status(&mut self, kind: u32, fragmented: bool, expected_status: u8) {
         let mut header = [0; 16];
         header[..4].copy_from_slice(&kind.to_le_bytes());
         self.mem.write_slice(&header, GuestAddress(0x4000)).unwrap();
@@ -263,7 +303,7 @@ impl FrontendQueue {
         }
         assert_eq!(
             self.mem.read_obj::<u8>(GuestAddress(0x6000)).unwrap(),
-            VIRTIO_BLK_S_OK as u8
+            expected_status
         );
         assert_eq!(
             u16::from_le(self.mem.read_obj::<u16>(GuestAddress(0x3002)).unwrap()),
@@ -285,16 +325,21 @@ fn frontend_disconnect_exits_cleanly() {
 
 #[test]
 fn completed_write_flush_read_exits_cleanly() {
-    write_flush_read(false);
+    write_flush_read(false, false);
 }
 
 #[test]
 fn fragmented_write_flush_read_exits_cleanly() {
-    write_flush_read(true);
+    write_flush_read(false, true);
 }
 
-fn write_flush_read(fragmented: bool) {
-    let mut daemon = Daemon::spawn();
+#[test]
+fn staging_fragmented_write_flush_read_exits_cleanly() {
+    write_flush_read(true, true);
+}
+
+fn write_flush_read(staging: bool, fragmented: bool) {
+    let mut daemon = Daemon::spawn_backend(staging);
     let mut queue = FrontendQueue::connect(&mut daemon);
     let expected = [0x5a; BLOCK_SIZE];
     queue
@@ -329,10 +374,16 @@ fn write_flush_read(fragmented: bool) {
     assert_eq!(report["flushes"], 1);
     assert_eq!(report["write_bytes"], BLOCK_SIZE);
     assert_eq!(report["read_bytes"], BLOCK_SIZE);
-    assert_eq!(
-        fs::read(daemon.directory.path().join("image.raw")).unwrap(),
-        expected
-    );
+    let path = daemon.directory.path().join("image.raw");
+    let actual = if staging {
+        assert_eq!(report["backend"], "staging_sync");
+        assert_eq!(report["staging"]["appended"], 1);
+        assert_eq!(report["staging"]["durable"], 1);
+        StagingLog::open(path).unwrap().read(0, BLOCK_SIZE).unwrap()
+    } else {
+        fs::read(path).unwrap()
+    };
+    assert_eq!(actual, expected);
 }
 
 #[test]
@@ -392,4 +443,129 @@ fn malformed_chain_closes_frontend_and_reports_worker_failure() {
         0,
         "frontend socket remained open"
     );
+}
+
+#[test]
+fn queued_staging_flush_survives_kill_and_discards_later_overwrite() {
+    let mut daemon = Daemon::spawn_backend(true);
+    let mut queue = FrontendQueue::connect(&mut daemon);
+    // Submit all four requests without waiting: A, FLUSH, B, READ. Each request
+    // has separate guest buffers, descriptors, and status storage.
+    for (index, (kind, value)) in [
+        (VIRTIO_BLK_T_OUT, 0x5a),
+        (VIRTIO_BLK_T_FLUSH, 0),
+        (VIRTIO_BLK_T_OUT, 0xa5),
+        (VIRTIO_BLK_T_IN, 0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let base = 0x4000 + index as u64 * 0x2000;
+        let head = index as u16 * 3;
+        queue
+            .mem
+            .write_obj(kind.to_le(), GuestAddress(base))
+            .unwrap();
+        queue
+            .mem
+            .write_slice(&[value; BLOCK_SIZE], GuestAddress(base + 0x100))
+            .unwrap();
+        queue
+            .mem
+            .write_obj(0xffu8, GuestAddress(base + 0x1100))
+            .unwrap();
+        queue.descriptor(head, base, 16, VRING_DESC_F_NEXT as u16, head + 1);
+        let status_index = if kind == VIRTIO_BLK_T_FLUSH {
+            head + 1
+        } else {
+            let flags = VRING_DESC_F_NEXT
+                | if kind == VIRTIO_BLK_T_IN {
+                    VRING_DESC_F_WRITE
+                } else {
+                    0
+                };
+            queue.descriptor(
+                head + 1,
+                base + 0x100,
+                BLOCK_SIZE as u32,
+                flags as u16,
+                head + 2,
+            );
+            head + 2
+        };
+        queue.descriptor(status_index, base + 0x1100, 1, VRING_DESC_F_WRITE as u16, 0);
+        queue.kick_head(head);
+    }
+    while u16::from_le(queue.mem.read_obj::<u16>(GuestAddress(0x3002)).unwrap()) != 4 {
+        assert!(
+            Instant::now() < queue.deadline,
+            "queued requests did not complete; {}",
+            daemon.stderr()
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    for index in 0..4 {
+        assert_eq!(
+            queue
+                .mem
+                .read_obj::<u8>(GuestAddress(0x5100 + index * 0x2000))
+                .unwrap(),
+            VIRTIO_BLK_S_OK as u8
+        );
+    }
+    let mut bytes = [0; BLOCK_SIZE];
+    queue
+        .mem
+        .read_slice(&mut bytes, GuestAddress(0xa100))
+        .unwrap();
+    assert_eq!(bytes, [0xa5; BLOCK_SIZE]);
+    daemon.crash_and_reopen();
+    drop(queue);
+    let mut queue = FrontendQueue::connect(&mut daemon);
+    queue.request_layout(VIRTIO_BLK_T_IN, true);
+    queue
+        .mem
+        .read_slice(&mut bytes, GuestAddress(0x5000))
+        .unwrap();
+    assert_eq!(bytes, [0x5a; BLOCK_SIZE]);
+    drop(queue);
+    let (status, report) = daemon.wait();
+    assert!(status.success(), "{}", daemon.stderr());
+    assert_eq!(report["errors"], 0);
+    assert_eq!(report["staging"]["durable"], 1);
+    assert_eq!(report["staging"]["appended"], 1);
+    assert_eq!(report["staging"]["recovered_tail_bytes"], RECORD_SIZE);
+}
+
+#[test]
+fn staging_corruption_reports_ioerr_and_stops_the_connection() {
+    let mut daemon = Daemon::spawn_backend(true);
+    let mut queue = FrontendQueue::connect(&mut daemon);
+    queue
+        .mem
+        .write_slice(&[0x5a; BLOCK_SIZE], GuestAddress(0x5000))
+        .unwrap();
+    queue.request_layout(VIRTIO_BLK_T_OUT, false);
+    queue.request_layout(VIRTIO_BLK_T_FLUSH, false);
+    // Corrupt a committed payload through an independent descriptor. The next
+    // guest read must report the checksum failure, never return unchecked bytes.
+    File::options()
+        .write(true)
+        .open(daemon.directory.path().join("image.raw"))
+        .unwrap()
+        .write_all_at(&[0], (2 * BLOCK_SIZE) as u64)
+        .unwrap();
+    queue.request_status(VIRTIO_BLK_T_IN, false, VIRTIO_BLK_S_IOERR as u8);
+    let (status, report) = daemon.wait();
+    assert!(!status.success());
+    assert_eq!(report["connection_ok"], false);
+    assert!(
+        report["fatal_error"]
+            .as_str()
+            .unwrap()
+            .contains("corrupt record")
+    );
+    assert_eq!(report["reads"], 0);
+    assert_eq!(report["staging"]["durable"], 1);
+    assert_eq!(queue.observer.read(&mut [0]).unwrap(), 0);
 }

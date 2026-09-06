@@ -24,12 +24,12 @@
     qemu = {
       forceAccel = true; # Refuse to turn an unavailable KVM into a TCG run.
       networkingOptions = lib.mkForce [ "-nic none" ];
-      enableSharedMemory = casBackend == "daemon";
+      enableSharedMemory = casBackend != "raw";
       options = [
         "-no-reboot"
       ]
       ++ (
-        if casBackend == "daemon" then
+        if casBackend != "raw" then
           [
             ''-chardev "socket,id=cas,path=$CAS_VHOST_SOCKET"''
             "-device vhost-user-blk-pci,chardev=cas,num-queues=1,queue-size=128"
@@ -50,6 +50,7 @@
 
   environment.etc."cas/smoke.fio".source = ../../experiments/fio/smoke.fio;
   environment.etc."cas/queue.fio".source = ../../experiments/fio/queue.fio;
+  environment.etc."cas/recovery.fio".source = ../../experiments/fio/recovery.fio;
   systemd.services.cas-smoke = {
     description = "Verify guest IO through the selected block backend";
     wantedBy = [ "multi-user.target" ];
@@ -76,8 +77,28 @@
       uname -a > /results/guest-kernel.txt
       fio --version > /results/guest-fio-version.txt
       lsblk --json --bytes --output NAME,TYPE,SIZE,LOG-SEC,PHY-SEC > /results/guest-disks.json
+      ${lib.optionalString (casBackend == "staging") ''
+        if test -f /results/recovery-phase; then
+          cp /etc/cas/recovery.fio /results/recovery.fio
+          case "$(cat /results/recovery-phase)" in
+            write)
+              fio --section=recovery-write --output-format=json+ --output=/results/recovery.json /etc/cas/recovery.fio
+              blockdev --flushbufs "$disk"
+              printf '{"schema_version":1,"phase":"write_flushed"}\n' > /results/write-flushed.tmp
+              mv /results/write-flushed.tmp /results/write-flushed.json
+              # The host kills the daemon while this guest waits after FLUSH.
+              sleep infinity
+              ;;
+            read)
+              fio --section=recovery-read --output-format=json+ --output=/results/recovery.json /etc/cas/recovery.fio
+              exit 0
+              ;;
+            *) exit 1 ;;
+          esac
+        fi
+      ''}
       fio --output-format=json+ --output=/results/fio.json /etc/cas/smoke.fio
-      ${lib.optionalString (casBackend == "daemon") ''
+      ${lib.optionalString (casBackend != "raw") ''
         cp /etc/cas/queue.fio /results/queue.fio
         fio --output-format=json+ --output=/results/queue.json /etc/cas/queue.fio
       ''}

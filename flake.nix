@@ -61,7 +61,7 @@
                   source_path = toString self.outPath;
                   nixpkgs_revision = nixpkgs.rev;
                   vm = toString vm;
-                  daemon = if backend == "daemon" then "${cas}/bin/cas-daemon" else null;
+                  daemon = if backend != "raw" then "${cas}/bin/cas-daemon" else null;
                   qemu_version = pkgs.qemu_kvm.version;
                   fio_version = pkgs.fio.version;
                   guest_kernel = guest.config.boot.kernelPackages.kernel.version;
@@ -87,6 +87,7 @@
           vm = (guestFor "raw").config.system.build.vm;
           smoke = smokeFor "raw";
           daemonSmoke = smokeFor "daemon";
+          stagingSmoke = smokeFor "staging";
         in
         {
           inherit
@@ -95,6 +96,7 @@
             smoke
             cas
             daemonSmoke
+            stagingSmoke
             toolchain
             ;
         }
@@ -111,6 +113,7 @@
           cas = env.cas;
           vm-smoke = env.smoke;
           daemon-smoke = env.daemonSmoke;
+          staging-smoke = env.stagingSmoke;
           test-guest = env.vm;
         }
       );

@@ -1,13 +1,10 @@
 //! Queue execution: retain owned IO until completion and publish against one memory snapshot.
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use cas_core::{BLOCK_SIZE, MAX_REQUEST_BYTES, aligned::AlignedBuffer};
-use io_uring::{IoUring, opcode, squeue, types};
 use vhost::vhost_user::message::VhostUserProtocolFeatures;
 use vhost_user_backend::{ShutdownHandle, VhostUserBackendMut, VringMutex, VringState, VringT};
 use virtio_bindings::bindings::{
@@ -23,32 +20,16 @@ use vmm_sys_util::event::{EventConsumer, EventFlag, EventNotifier};
 use vmm_sys_util::eventfd::{EFD_CLOEXEC, EFD_NONBLOCK, EventFd};
 
 use crate::request::{self, Completion, DEVICE_ID, Request, Segment, Status};
+use crate::storage::{Operation, Storage};
 
 const QUEUE_SIZE: usize = 128;
 const REQUIRED_FEATURES: u64 =
     (1 << VIRTIO_F_VERSION_1) | (1 << VIRTIO_BLK_F_BLK_SIZE) | (1 << VIRTIO_BLK_F_FLUSH);
 pub(super) const COMPLETION_EVENT: u16 = 2; // 0 is the queue; 1 is the framework's exit event.
 
-// Each pending operation owns exactly the storage the kernel can still access.
-enum Operation {
-    Read {
-        segments: Vec<Segment>,
-        buffer: AlignedBuffer,
-    },
-    Write(AlignedBuffer),
-    Flush,
-}
-impl Operation {
-    fn expected_bytes(&self) -> usize {
-        match self {
-            Self::Read { buffer, .. } | Self::Write(buffer) => buffer.as_slice().len(),
-            Self::Flush => 0,
-        }
-    }
-}
 struct PendingRequest {
     completion: Completion,
-    operation: Operation,
+    segments: Vec<Segment>,
 }
 
 #[derive(Default)]
@@ -64,8 +45,7 @@ struct Counters {
 }
 
 pub(super) struct Backend {
-    ring: IoUring,
-    file: File,
+    storage: Storage,
     completion_event: EventFd,
     exit: (EventConsumer, EventNotifier),
     // The framework replaces its atomic map before calling update_memory.
@@ -122,33 +102,27 @@ fn pop(
 }
 
 impl Backend {
+    #[cfg(test)]
     pub fn new(path: &Path) -> io::Result<Self> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_DIRECT | libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(path)?;
-        let meta = file.metadata()?;
-        if !meta.is_file() || meta.len() == 0 || !meta.len().is_multiple_of(BLOCK_SIZE as u64) {
-            return Err(io::Error::other(
-                "image must be a nonempty, block-aligned regular file",
-            ));
-        }
-        file.try_lock().map_err(io::Error::from)?;
-        let ring = IoUring::new(QUEUE_SIZE as u32)?;
+        Self::open(path, false, None)
+    }
+    pub fn open(path: &Path, staging: bool, create_bytes: Option<u64>) -> io::Result<Self> {
         let completion_event = EventFd::new(EFD_NONBLOCK | EFD_CLOEXEC)?;
-        ring.submitter()
-            .register_eventfd(completion_event.as_raw_fd())?;
+        let storage = if staging {
+            Storage::staging(path, create_bytes, &completion_event, QUEUE_SIZE)?
+        } else {
+            Storage::raw(path, &completion_event, QUEUE_SIZE)?
+        };
+        let capacity_bytes = storage.image_bytes();
         let exit = vmm_sys_util::event::new_event_consumer_and_notifier(
             EventFlag::NONBLOCK | EventFlag::CLOEXEC,
         )?;
         Ok(Self {
-            ring,
-            file,
+            storage,
             completion_event,
             exit,
             memory: None,
-            capacity_bytes: meta.len(),
+            capacity_bytes,
             pending: BTreeMap::new(),
             next_id: 0,
             counters: Counters::default(),
@@ -181,7 +155,12 @@ impl Backend {
     pub fn report(&self, pending_at_disconnect: usize, connection_ok: bool) -> serde_json::Value {
         let c = &self.counters;
         serde_json::json!({
-            "schema_version":1, "fatal_error":self.failure, "backend":"raw_io_uring", "connection_ok":connection_ok,
+            "schema_version":1, "fatal_error":self.failure, "backend":self.storage.name(), "connection_ok":connection_ok,
+            "staging":self.storage.status().map(|s| serde_json::json!({
+                "image_bytes":s.image_bytes, "appended":s.appended, "durable":s.durable,
+                "log_bytes":s.log_bytes, "mapped_blocks":s.mapped_blocks,
+                "recovered_tail_bytes":s.recovered_tail_bytes
+            })),
             "negotiated_features":self.negotiated_features,
             "flush_negotiated":self.negotiated_features & (1 << VIRTIO_BLK_F_FLUSH) != 0,
             "pending_at_disconnect":pending_at_disconnect, "reads":c.reads, "writes":c.writes,
@@ -209,8 +188,7 @@ impl Backend {
         state: &mut VringState,
         request: Request,
     ) -> io::Result<()> {
-        let fd = types::Fd(self.file.as_raw_fd());
-        let (completion, operation, entry) = match request {
+        let (completion, segments, operation) = match request {
             Request::GetId {
                 completion,
                 segments,
@@ -226,21 +204,14 @@ impl Backend {
             Request::Unsupported(completion) => {
                 return self.finish(mem, state, completion, Status::Unsupported, None);
             }
-            Request::Read(data) => {
-                let mut buffer = AlignedBuffer::new(data.len);
-                let entry =
-                    opcode::Read::new(fd, buffer.as_mut_slice().as_mut_ptr(), data.len as u32)
-                        .offset(data.offset)
-                        .build();
-                (
-                    data.completion,
-                    Operation::Read {
-                        segments: data.segments,
-                        buffer,
-                    },
-                    entry,
-                )
-            }
+            Request::Read(data) => (
+                data.completion,
+                data.segments,
+                Operation::Read {
+                    offset: data.offset,
+                    buffer: AlignedBuffer::new(data.len),
+                },
+            ),
             Request::Write(data) => {
                 let mut buffer = AlignedBuffer::new(data.len);
                 let mut offset = 0;
@@ -252,36 +223,31 @@ impl Backend {
                     .map_err(io::Error::other)?;
                     offset += segment.len;
                 }
-                let entry = opcode::Write::new(fd, buffer.as_slice().as_ptr(), data.len as u32)
-                    .offset(data.offset)
-                    .build();
-                (data.completion, Operation::Write(buffer), entry)
+                (
+                    data.completion,
+                    Vec::new(),
+                    Operation::Write {
+                        offset: data.offset,
+                        buffer,
+                    },
+                )
             }
-            Request::Flush(completion) => (
-                completion,
-                Operation::Flush,
-                opcode::Fsync::new(fd)
-                    .flags(types::FsyncFlags::DATASYNC)
-                    .build()
-                    .flags(squeue::Flags::IO_DRAIN),
-            ),
+            Request::Flush(completion) => (completion, Vec::new(), Operation::Flush),
         };
         let next_id = self
             .next_id
             .checked_add(1)
             .ok_or_else(|| io::Error::other("request IDs exhausted"))?;
-        let entry = entry.user_data(self.next_id);
-        // SAFETY: owned aligned storage and the file stay alive until the CQE.
-        // PendingRequest owns the buffer after this push; drain handles errors/shutdown.
-        unsafe { self.ring.submission().push(&entry) }.map_err(io::Error::other)?;
-        if !matches!(operation, Operation::Flush) {
+        let has_buffer = !matches!(operation, Operation::Flush);
+        self.storage.enqueue(self.next_id, operation)?;
+        if has_buffer {
             self.counters.bounce_requests += 1;
         }
         self.pending.insert(
             self.next_id,
             PendingRequest {
                 completion,
-                operation,
+                segments,
             },
         );
         self.next_id = next_id;
@@ -290,36 +256,34 @@ impl Backend {
     }
     fn complete(&mut self, mem: &GuestMemoryMmap, state: &mut VringState) -> io::Result<()> {
         loop {
-            let completion = self
-                .ring
-                .completion()
-                .next()
-                .map(|c| (c.user_data(), c.result()));
-            let Some((id, result)) = completion else {
+            let Some(completed) = self.storage.try_complete()? else {
                 return Ok(());
             };
             let pending = self
                 .pending
-                .remove(&id)
+                .remove(&completed.id)
                 .ok_or_else(|| io::Error::other("unknown IO completion"))?;
-            let expected = pending.operation.expected_bytes();
-            if result != expected as i32 {
+            let expected = completed.operation.expected_bytes();
+            if let Err(error) = completed.result {
                 self.finish(mem, state, pending.completion, Status::IoError, None)?;
+                if self.storage.status().is_some() {
+                    return Err(error);
+                }
                 continue;
             }
-            match pending.operation {
-                Operation::Read { segments, buffer } => {
+            match completed.operation {
+                Operation::Read { buffer, .. } => {
                     self.finish(
                         mem,
                         state,
                         pending.completion,
                         Status::Ok,
-                        Some((&segments, buffer.as_slice())),
+                        Some((&pending.segments, buffer.as_slice())),
                     )?;
                     self.counters.reads += 1;
                     self.counters.read_bytes += expected as u64;
                 }
-                Operation::Write(_) => {
+                Operation::Write { .. } => {
                     self.finish(mem, state, pending.completion, Status::Ok, None)?;
                     self.counters.writes += 1;
                     self.counters.write_bytes += expected as u64;
@@ -383,7 +347,7 @@ impl Backend {
                 },
             }
         }
-        self.ring.submit()?;
+        self.storage.submit()?;
         if consumed == QUEUE_SIZE {
             // Immediate responses do not fill pending. Yield the mutex anyway,
             // and self-wake so a consumed/coalesced kick cannot strand requests.
@@ -394,26 +358,21 @@ impl Backend {
     /// Reap IO after disconnect without touching guest queues or memory.
     pub fn drain(&mut self) -> io::Result<()> {
         while !self.pending.is_empty() {
-            match self.ring.submit_and_wait(1) {
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                result => {
-                    result?;
+            let completed = match self.storage.wait_complete() {
+                Ok(completed) => completed,
+                Err(error) => {
+                    self.fail(error.to_string());
+                    return Err(error);
                 }
-            }
-            for completion in self.ring.completion() {
-                self.pending.remove(&completion.user_data());
+            };
+            self.pending
+                .remove(&completed.id)
+                .ok_or_else(|| io::Error::other("unknown IO completion while draining"))?;
+            if let Err(error) = completed.result {
+                self.fail(error.to_string());
             }
         }
         Ok(())
-    }
-}
-impl Drop for Backend {
-    fn drop(&mut self) {
-        if self.drain().is_err() {
-            // Do not free storage the kernel might still access. The process
-            // owns this leak until exit, only after an unrecoverable ring error.
-            std::mem::forget(std::mem::take(&mut self.pending));
-        }
     }
 }
 
@@ -508,6 +467,7 @@ impl VhostUserBackendMut for Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
     use vm_memory::GuestAddress;
 
     fn queue() -> (GuestMemoryAtomic<GuestMemoryMmap>, VringMutex) {

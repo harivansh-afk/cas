@@ -92,7 +92,47 @@ class DaemonEvidenceTests(unittest.TestCase):
             ("peak_inflight", 1), ("backend", "raw"), ("bounce_requests", None),
         ]:
             with self.subTest(field=field), self.assertRaises(ValueError):
-                runner.verify_daemon({**self.report, field: value})
+                runner.verify_daemon({**self.report, field: value}, self.report["backend"])
+
+
+class StagingEvidenceTests(DaemonEvidenceTests):
+    def setUp(self):
+        super().setUp()
+        self.report["backend"] = "staging_sync"
+        self.report["staging"] = {
+            "image_bytes": runner.DISK_BYTES,
+            "appended": 2 * runner.IO_BYTES // 4096,
+            "durable": 2 * runner.IO_BYTES // 4096,
+        }
+
+    def test_complete_daemon_run(self):
+        runner.verify_daemon(self.report, "staging_sync")
+
+    def test_missing_or_unflushed_prefix_cannot_pass(self):
+        for staging in [None, {}, {**self.report["staging"], "durable": 0},
+                        {**self.report["staging"], "appended": self.report["staging"]["appended"] + 1},
+                        {**self.report["staging"], "image_bytes": 4096}]:
+            with self.subTest(staging=staging), self.assertRaises(ValueError):
+                runner.verify_daemon({**self.report, "staging": staging}, "staging_sync")
+
+    def test_recovery_requires_read_only_io_and_the_replayed_prefix(self):
+        self.report["write_bytes"] = 0
+        self.report["read_bytes"] = runner.IO_BYTES
+        self.report["staging"]["durable"] = runner.IO_BYTES // 4096
+        self.report["staging"]["appended"] = runner.IO_BYTES // 4096
+        runner.verify_daemon(self.report, "staging_sync", read_only=True)
+        for field, value in [("write_bytes", 4096), ("read_bytes", 0)]:
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                runner.verify_daemon({**self.report, field: value}, "staging_sync", read_only=True)
+
+    def test_recovery_fio_cannot_pass_after_rewriting_the_data(self):
+        fio = {"jobs": [{"jobname": "recovery-read", "error": 0,
+                        "read": {"io_bytes": runner.IO_BYTES}, "write": {"io_bytes": 0}}]}
+        completion = {"schema_version": 1, "service_result": "success", "exit_code": "exited", "exit_status": "0"}
+        runner.verify_guest(completion, fio, "recovery-read", read_only=True)
+        fio["jobs"][0]["write"]["io_bytes"] = runner.IO_BYTES
+        with self.assertRaises(ValueError):
+            runner.verify_guest(completion, fio, "recovery-read", read_only=True)
 
 
 if __name__ == "__main__":

@@ -1,19 +1,26 @@
-//! Single-queue vhost-user block device backed by a regular file and io_uring.
+//! Single-queue vhost-user block device with raw and staging storage modes.
 mod backend;
 mod request;
+mod storage;
 
 use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use vhost::vhost_user::{Error as ProtocolError, Listener};
 use vhost_user_backend::{Error as DaemonError, VhostUserDaemon};
 use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
 use vmm_sys_util::epoll::EventSet;
 
+#[derive(Clone, Copy, ValueEnum)]
+enum BackendKind {
+    Raw,
+    Staging,
+}
+
 #[derive(Parser)]
-#[command(about = "Serve an existing scratch raw image over vhost-user (one connection)")]
+#[command(about = "Serve a scratch raw image or staging log over vhost-user (one connection)")]
 struct Args {
     #[arg(long)]
     socket: PathBuf,
@@ -21,6 +28,11 @@ struct Args {
     image: PathBuf,
     #[arg(long)]
     report: PathBuf,
+    #[arg(long, value_enum, default_value = "raw")]
+    backend: BackendKind,
+    /// Create a new staging log with this logical capacity; never replaces a file.
+    #[arg(long)]
+    create_bytes: Option<u64>,
 }
 
 // The upstream error does not implement std::error::Error.
@@ -30,6 +42,9 @@ fn daemon_error(error: DaemonError) -> io::Error {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+    if args.create_bytes.is_some() && !matches!(args.backend, BackendKind::Staging) {
+        return Err("--create-bytes requires --backend staging".into());
+    }
     // Do not replace someone else's socket or evidence.
     if args.socket.symlink_metadata().is_ok() {
         return Err("socket path already exists".into());
@@ -38,7 +53,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .write(true)
         .create_new(true)
         .open(&args.report)?;
-    let backend = backend::Backend::new(&args.image)?;
+    let backend = backend::Backend::open(
+        &args.image,
+        matches!(args.backend, BackendKind::Staging),
+        args.create_bytes,
+    )?;
     let completion_fd = backend.completion_fd();
     let backend = Arc::new(Mutex::new(backend));
     let mut daemon = VhostUserDaemon::new(
@@ -82,17 +101,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|_| io::Error::other("backend worker panicked"))?;
     let pending_at_disconnect = backend.pending_count();
     eprintln!("cas-daemon: draining {pending_at_disconnect} requests");
-    backend.drain()?;
+    let drain_result = backend.drain();
     serde_json::to_writer_pretty(
         report,
         &backend.report(
             pending_at_disconnect,
-            result.is_ok() && backend.failure().is_none(),
+            result.is_ok() && drain_result.is_ok() && backend.failure().is_none(),
         ),
     )?;
     if let Some(failure) = backend.failure() {
         return Err(io::Error::other(failure).into());
     }
+    drain_result?;
     result.map_err(daemon_error)?;
     Ok(())
 }

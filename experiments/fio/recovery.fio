@@ -1,0 +1,24 @@
+; Separate invocations across a killed backend and a fresh guest boot.
+[global]
+filename=/dev/disk/by-id/virtio-cas-experiment
+ioengine=io_uring
+direct=1
+bs=4k
+size=64m
+iodepth=32
+numjobs=1
+verify=crc32c
+verify_fatal=1
+refill_buffers=1
+
+[recovery-write]
+rw=write
+do_verify=0
+fsync=32
+end_fsync=1
+
+[recovery-read]
+rw=read
+; The writer's seed and submission sequence belong to the previous process.
+verify_header_seed=0
+verify_write_sequence=0

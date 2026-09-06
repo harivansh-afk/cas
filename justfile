@@ -23,3 +23,12 @@ daemon-build:
 
 daemon-smoke output:
     ./result-daemon/bin/cas-vm-smoke --output {{quote(output)}}
+
+staging-build:
+    nix build .#staging-smoke --out-link result-staging
+
+staging-smoke output:
+    ./result-staging/bin/cas-vm-smoke --output {{quote(output)}}
+
+staging-recovery output:
+    ./result-staging/bin/cas-vm-smoke --recovery --output {{quote(output)}}
