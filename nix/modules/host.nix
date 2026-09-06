@@ -43,7 +43,6 @@
       util-linux
       git
       just
-      uv
     ];
   };
 }

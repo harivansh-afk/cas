@@ -73,12 +73,11 @@
             pkgs.writeShellApplication {
               name = "cas-vm-smoke";
               runtimeInputs = [
-                pkgs.python3
                 pkgs.util-linux
                 pkgs.git
               ];
               text = ''
-                exec python3 ${./experiments/run-vm.py} \
+                exec ${cas}/bin/cas-harness vm \
                   --vm ${vm}/bin/run-cas-guest-vm \
                   --build-info ${buildInfo} \
                   --lock ${./flake.lock} "$@"
@@ -136,7 +135,6 @@
             packages = with pkgs; [
               environments.${system}.toolchain
               just
-              uv
               qemu_kvm
               fio
               xfsprogs
@@ -185,12 +183,6 @@
         in
         {
           cas = env.cas;
-          runner = env.pkgs.runCommand "cas-runner-tests" { nativeBuildInputs = [ env.pkgs.python3 ]; } ''
-            cp -r ${./experiments} experiments
-            chmod -R u+w experiments
-            python3 -m unittest discover -s experiments/tests -v
-            touch "$out"
-          '';
           host-config = import ./nix/tests/host-config.nix {
             inherit nixpkgs system;
             inherit (self) nixosModules;
