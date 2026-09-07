@@ -1,4 +1,6 @@
-//! Real socket/worker regressions. Requires host io_uring and direct file IO.
+// Real socket/worker regressions
+// Requires host io_uring and direct file IO.
+
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::os::unix::fs::FileExt;
@@ -142,7 +144,7 @@ impl Daemon {
 
 impl Drop for Daemon {
     fn drop(&mut self) {
-        // Also runs on assertion failure; never leave a blocked daemon behind.
+        // Also runs on assertion failure so as to never leave a blocked daemon behind
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
