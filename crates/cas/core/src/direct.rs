@@ -1,4 +1,5 @@
-//! Linux direct IO and file exclusion. No buffered-IO fallback.
+// Linux direct IO and file exclusion
+// No buffered IO
 
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -42,7 +43,7 @@ pub(crate) fn read(file: &File, buffer: &mut AlignedBuffer, offset: u64) -> io::
 pub(crate) fn write(file: &File, buffer: &AlignedBuffer, offset: u64) -> io::Result<()> {
     #[cfg(test)]
     if faults::take(faults::Fault::ShortWrite) {
-        // Persist one aligned block, then report the short write through the
+        // Persist one aligned block, then report the short write through
         // same length check as the real syscall result.
         let written = file.write_at(&buffer.as_slice()[..BLOCK_SIZE], offset)?;
         return check_write_length(written, buffer.as_slice().len());

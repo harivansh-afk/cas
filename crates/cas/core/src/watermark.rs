@@ -1,4 +1,4 @@
-//! Contiguous confirmations: completing N never hides an unfinished N - 1.
+// Contiguous confirmations: completing N never hides an unfinished N - 1.
 
 use std::collections::BTreeSet;
 
@@ -26,8 +26,8 @@ impl DurablePrefix {
         Ok(self.issued)
     }
 
-    /// Duplicate acknowledgments are idempotent. Out-of-order acknowledgments
-    /// are retained until all preceding appends have been confirmed.
+    /// Duplicate acknowledgments are idempotent. 
+    /// Out-of-order acknowledgments are retained until all preceding appends have been confirmed.
     pub fn confirm(&mut self, sequence: u64) -> Result<u64, Error> {
         if sequence == 0 || sequence > self.issued {
             return Err(Error::Unissued(sequence));

@@ -1,5 +1,5 @@
-//! Synchronous, local-class staging reference. See docs/implementation.md for
-//! the provisional format and the distinction between these tests and G1/G2.
+// Synchronous, local-class staging reference
+// See docs/implementation.md for provisional format and the distinction between these tests and G1/G2
 
 use std::collections::BTreeMap;
 use std::fs::File;

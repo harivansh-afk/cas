@@ -1,4 +1,4 @@
-//! Staging log, durability tracking, and shared IO buffers.
+// Staging log, durability tracking, and shared IO buffers.
 
 pub mod watermark;
 
@@ -12,5 +12,5 @@ pub const BLOCK_SIZE: usize = 4096;
 
 pub mod aligned;
 
-/// Maximum byte payload accepted by staging and the VM adapter.
+/// Maximum byte payload accepted by staging and VM adapter
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;

@@ -1,4 +1,4 @@
-//! Fixed-size, little-endian staging format. Numeric record tags stay on disk.
+// Fixed-size, little-endian staging format
 
 use super::RECORD_SIZE;
 use crate::{BLOCK_SIZE, aligned::AlignedBuffer};
