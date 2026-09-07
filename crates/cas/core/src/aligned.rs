@@ -23,7 +23,7 @@ impl AlignedBuffer {
     pub fn as_slice(&self) -> &[u8] {
         // SAFETY: Block is exactly 4096 initialized bytes with no padding
         //
-        // Vec stores its blocks contiguously 
+        // Vec stores its blocks contiguously.
         // The slice borrows the allocation
         unsafe { std::slice::from_raw_parts(self.0.as_ptr().cast(), self.0.len() * BLOCK_SIZE) }
     }

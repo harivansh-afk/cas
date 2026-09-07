@@ -26,7 +26,7 @@ impl DurablePrefix {
         Ok(self.issued)
     }
 
-    /// Duplicate acknowledgments are idempotent. 
+    /// Duplicate acknowledgments are idempotent.
     /// Out-of-order acknowledgments are retained until all preceding appends have been confirmed.
     pub fn confirm(&mut self, sequence: u64) -> Result<u64, Error> {
         if sequence == 0 || sequence > self.issued {
