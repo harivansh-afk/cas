@@ -1,4 +1,5 @@
-//! Queue execution: retain owned IO until completion and publish against one memory snapshot.
+// Queue execution: retain owned IO until completion and publish against one memory snapshot.
+
 use std::collections::BTreeMap;
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};

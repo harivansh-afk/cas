@@ -1,5 +1,6 @@
-//! Owned storage operations. The staging reference runs in submission order on
-//! one worker; raw IO retains its io_uring baseline and kernel-owned buffers.
+// Owned storage operations. The staging reference runs in submission order on one worker
+// Raw IO retains its io_uring baseline and kernel-owned buffers.
+
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io;

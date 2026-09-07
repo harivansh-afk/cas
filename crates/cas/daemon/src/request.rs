@@ -1,4 +1,6 @@
-//! Decode the virtio wire format once; execution receives validated operations.
+// Decode the virtio wire format once
+// Execution receives validated operations
+
 use std::io;
 
 use cas_core::{BLOCK_SIZE, MAX_REQUEST_BYTES};

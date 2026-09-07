@@ -1,4 +1,5 @@
-//! Single-queue vhost-user block device with raw and staging storage modes.
+// Single-queue vhost-user block device with raw and staging storage modes.
+
 mod backend;
 mod request;
 mod storage;
