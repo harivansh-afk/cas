@@ -13,6 +13,12 @@
     };
   };
 
+  # Layout:
+  #   nix/package.nix   the Rust workspace, exposed as pkgs.cas via the overlay
+  #   nix/smoke.nix     cas-vm-smoke, one runner per block backend
+  #   nix/guest/        the NixOS guest those runners boot
+  #   nix/modules/      NixOS modules for dedicated test hosts
+  #   nix/checks/       evaluation-only checks for `nix flake check`
   outputs =
     {
       self,
@@ -22,151 +28,109 @@
       ...
     }:
     let
+      inherit (nixpkgs) lib;
+
       systems = [
         "aarch64-linux"
         "x86_64-linux"
       ];
-      forSystems = nixpkgs.lib.genAttrs systems;
-      environments = forSystems (
-        system:
-        let
-          pkgs = import nixpkgs {
-            inherit system;
-            overlays = [ rust-overlay.overlays.default ];
-          };
-          toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
-          rustPlatform = pkgs.makeRustPlatform {
-            cargo = toolchain;
-            rustc = toolchain;
-          };
-          cas = pkgs.callPackage ./nix/package.nix { inherit rustPlatform; };
-          guestFor =
-            backend:
-            nixpkgs.lib.nixosSystem {
+
+      # Call `f` once per supported system with a package set carrying this
+      # flake's overlay, so every output can refer to `pkgs.cas`.
+      eachSystem =
+        f:
+        lib.genAttrs systems (
+          system:
+          f (
+            import nixpkgs {
               inherit system;
-              modules = [
-                ./nix/tests/guest.nix
-                { _module.args.casBackend = backend; }
-              ];
-            };
-          smokeFor =
-            backend:
-            let
-              guest = guestFor backend;
-              vm = guest.config.system.build.vm;
-              buildInfo = pkgs.writeText "cas-vm-build.json" (
-                builtins.toJSON {
-                  inherit system backend;
-                  source_revision = self.rev or self.dirtyRev or null;
-                  source_path = toString self.outPath;
-                  nixpkgs_revision = nixpkgs.rev;
-                  vm = toString vm;
-                  daemon = if backend != "raw" then "${cas}/bin/cas-daemon" else null;
-                  qemu_version = pkgs.qemu_kvm.version;
-                  fio_version = pkgs.fio.version;
-                  guest_kernel = guest.config.boot.kernelPackages.kernel.version;
-                  guest_memory_mib = guest.config.virtualisation.memorySize;
-                  guest_vcpus = guest.config.virtualisation.cores;
-                }
-              );
-            in
-            pkgs.writeShellApplication {
-              name = "cas-vm-smoke";
-              runtimeInputs = [
-                pkgs.util-linux
-                pkgs.git
-              ];
-              text = ''
-                exec ${cas}/bin/cas-harness vm \
-                  --vm ${vm}/bin/run-cas-guest-vm \
-                  --build-info ${buildInfo} \
-                  --lock ${./flake.lock} "$@"
-              '';
-            };
-          vm = (guestFor "raw").config.system.build.vm;
-          smoke = smokeFor "raw";
-          daemonSmoke = smokeFor "daemon";
-          stagingSmoke = smokeFor "staging";
-        in
-        {
-          inherit
-            pkgs
-            vm
-            smoke
-            cas
-            daemonSmoke
-            stagingSmoke
-            toolchain
-            ;
-        }
-      );
+              overlays = [ self.overlays.default ];
+            }
+          )
+        );
+
+      # The guest as a NixOS system, configured for one block backend.
+      guestFor =
+        pkgs: backend:
+        lib.nixosSystem {
+          modules = [
+            ./nix/guest
+            {
+              nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system;
+              cas.guest.backend = backend;
+            }
+          ];
+        };
+
+      # The cas-vm-smoke runner for one backend.
+      smokeFor =
+        pkgs: backend:
+        pkgs.callPackage ./nix/smoke.nix {
+          inherit backend;
+          guest = guestFor pkgs backend;
+          provenance = {
+            source_revision = self.rev or self.dirtyRev or null;
+            source_path = toString self.outPath;
+            nixpkgs_revision = nixpkgs.rev;
+            lock = ./flake.lock;
+          };
+        };
     in
     {
-      packages = forSystems (
-        system:
-        let
-          env = environments.${system};
-        in
-        {
-          default = env.cas;
-          cas = env.cas;
-          vm-smoke = env.smoke;
-          daemon-smoke = env.daemonSmoke;
-          staging-smoke = env.stagingSmoke;
-          test-guest = env.vm;
-        }
-      );
+      # Adds `cas` (and the rust-bin toolchain it is built with) to a nixpkgs.
+      overlays.default = lib.composeManyExtensions [
+        rust-overlay.overlays.default
+        (final: _prev: { cas = final.callPackage ./nix/package.nix { }; })
+      ];
 
-      apps = forSystems (system: {
+      packages = eachSystem (pkgs: {
+        default = pkgs.cas;
+        inherit (pkgs) cas;
+        vm-smoke = smokeFor pkgs "raw";
+        daemon-smoke = smokeFor pkgs "daemon";
+        staging-smoke = smokeFor pkgs "staging";
+        test-guest = (guestFor pkgs "raw").config.system.build.vm;
+      });
+
+      apps = eachSystem (pkgs: {
         vm-smoke = {
           type = "app";
-          program = "${environments.${system}.smoke}/bin/cas-vm-smoke";
+          program = lib.getExe (smokeFor pkgs "raw");
           meta.description = "Run a KVM guest write/readback check on a new raw disk";
         };
       });
 
-      devShells = forSystems (
-        system:
-        let
-          pkgs = environments.${system}.pkgs;
-        in
-        {
-          default = pkgs.mkShell {
-            packages = with pkgs; [
-              environments.${system}.toolchain
-              just
-              qemu_kvm
-              fio
-              xfsprogs
-              util-linux
-              nixfmt
-              nixos-rebuild
-              nixos-anywhere
-            ];
-          };
-        }
-      );
+      devShells = eachSystem (pkgs: {
+        default = pkgs.mkShell {
+          packages = with pkgs; [
+            cas.toolchain
+            just
+            qemu_kvm
+            fio
+            xfsprogs
+            util-linux
+            nixfmt
+            nixos-rebuild
+            nixos-anywhere
+          ];
+        };
+      });
 
-      formatter = forSystems (system: environments.${system}.pkgs.nixfmt);
+      # treefmt wrapper around nixfmt; `nix fmt` formats the tree, `nix fmt -- --ci` checks it.
+      formatter = eachSystem (pkgs: pkgs.nixfmt-tree);
 
       nixosModules = {
-        test-host = { pkgs, ... }: {
-          imports = [ ./nix/modules/host.nix ];
-          environment.systemPackages = [ self.packages.${pkgs.stdenv.hostPlatform.system}.cas ];
+        # Tools, SSH, and measurement defaults for any dedicated test host.
+        test-host = {
+          imports = [ ./nix/modules/test-host.nix ];
+          nixpkgs.overlays = [ self.overlays.default ];
         };
-        bare-metal = { config, ... }: {
+        # test-host plus a disko disk layout and UEFI boot for nixos-anywhere.
+        bare-metal = {
           imports = [
             self.nixosModules.test-host
             disko.nixosModules.disko
-            ./nix/modules/disks.nix
-          ];
-          boot.loader.systemd-boot.enable = true;
-          boot.loader.efi.canTouchEfiVariables = false;
-          assertions = [
-            {
-              assertion = config.cas.testbed.authorizedKeys != [ ];
-              message = "Configure an administrator SSH public key before provisioning a test host.";
-            }
+            ./nix/modules/bare-metal.nix
           ];
         };
       };
@@ -176,19 +140,12 @@
         description = "UEFI bare-metal CAS research host (fill disk IDs and SSH keys)";
       };
 
-      checks = forSystems (
-        system:
-        let
-          env = environments.${system};
-        in
-        {
-          cas = env.cas;
-          host-config = import ./nix/tests/host-config.nix {
-            inherit nixpkgs system;
-            inherit (self) nixosModules;
-            pkgs = env.pkgs;
-          };
-        }
-      );
+      checks = eachSystem (pkgs: {
+        inherit (pkgs) cas;
+        host-config = import ./nix/checks/host-config.nix {
+          inherit nixpkgs pkgs;
+          inherit (self) nixosModules;
+        };
+      });
     };
 }

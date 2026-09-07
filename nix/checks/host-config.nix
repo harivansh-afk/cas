@@ -1,16 +1,21 @@
+# Evaluate the bare-metal host module against fixture values and assert the
+# layout it produces. Nothing is built or deployed; this catches module
+# regressions in `nix flake check`.
 {
   nixpkgs,
   nixosModules,
   pkgs,
-  system,
 }:
 let
+  system = pkgs.stdenv.hostPlatform.system;
+
   host = nixpkgs.lib.nixosSystem {
-    inherit system;
     modules = [
       nixosModules.bare-metal
       {
+        nixpkgs.hostPlatform = system;
         networking.hostName = "cas-config-check";
+        system.stateVersion = "26.05";
         cas.testbed = {
           osDisk = "/dev/disk/by-id/test-fixture-os";
           dataDisk = "/dev/disk/by-id/test-fixture-data";
@@ -19,7 +24,6 @@ let
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA fixture"
           ];
         };
-        system.stateVersion = "26.05";
       }
     ];
   };

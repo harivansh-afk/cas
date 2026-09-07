@@ -1,6 +1,14 @@
+# disko layout for a bare-metal test host: an ext4 OS disk and a separate,
+# expendable XFS experiment disk mounted at /srv/cas-testbed.
+#
+# Both paths must be stable /dev/disk/by-id entries. The assertions here only
+# compare strings; run `cas-harness check-disks` on the target to prove the two
+# paths are different physical devices before installing.
 { config, lib, ... }:
 let
   cfg = config.cas.testbed;
+  isDiskId = disk: builtins.match "/dev/disk/by-id/[^/]+" disk != null;
+  isPlaceholder = lib.hasInfix "REPLACE";
 in
 {
   options.cas.testbed = {
@@ -21,13 +29,10 @@ in
         message = "CAS testbed OS and experiment disk paths must differ; verify device identity on the target before provisioning.";
       }
       {
-        assertion =
-          builtins.all
-            (disk: builtins.match "/dev/disk/by-id/[^/]+" disk != null && !(lib.hasInfix "REPLACE" disk))
-            [
-              cfg.osDisk
-              cfg.dataDisk
-            ];
+        assertion = lib.all (disk: isDiskId disk && !isPlaceholder disk) [
+          cfg.osDisk
+          cfg.dataDisk
+        ];
         message = "Fill in real, stable OS and experiment disk IDs before building a bare-metal host.";
       }
     ];
@@ -60,6 +65,7 @@ in
           };
         };
       };
+
       experiment = {
         type = "disk";
         device = cfg.dataDisk;
