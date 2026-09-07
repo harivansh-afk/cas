@@ -38,7 +38,7 @@ jobs:
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Check Nix formatting
-        run: nix fmt -- --check flake.nix nix/*.nix nix/modules/*.nix nix/tests/*.nix templates/test-host/flake.nix
+        run: nix fmt -- --ci
       - name: Evaluate both architectures
         run: nix flake check --no-build --all-systems
       - name: Build and test on x86_64
