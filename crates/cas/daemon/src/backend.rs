@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
+use std::sync::atomic::Ordering;
 
 use cas_core::{BLOCK_SIZE, MAX_REQUEST_BYTES, aligned::AlignedBuffer};
 use vhost::vhost_user::message::VhostUserProtocolFeatures;
@@ -20,6 +21,7 @@ use vmm_sys_util::epoll::EventSet;
 use vmm_sys_util::event::{EventConsumer, EventFlag, EventNotifier};
 use vmm_sys_util::eventfd::{EFD_CLOEXEC, EFD_NONBLOCK, EventFd};
 
+use crate::fault::{Fault, Point};
 use crate::request::{self, Completion, DEVICE_ID, Request, Segment, Status};
 use crate::storage::{Operation, Storage};
 
@@ -59,6 +61,10 @@ pub(super) struct Backend {
     shutdown: Option<ShutdownHandle>,
     failure: Option<String>,
     negotiated_features: u64,
+    restartable: bool,
+    restored_used: Option<u16>,
+    restored_pending: u16,
+    fault: Option<Fault>,
 }
 
 /// The queue lock serializes publication with SET_VRING_ENABLE/GET_VRING_BASE.
@@ -69,6 +75,7 @@ fn publish(
     completion: Completion,
     status: Status,
     data: Option<(&[Segment], &[u8])>,
+    fault: Option<&mut Fault>,
 ) -> io::Result<()> {
     if !state.is_enabled() || !state.get_queue().ready() {
         return Err(io::Error::other(
@@ -85,6 +92,9 @@ fn publish(
     }
     mem.write_obj(status as u8, completion.status)
         .map_err(io::Error::other)?;
+    if let Some(fault) = fault {
+        fault.hit(Point::AfterStatus)?;
+    }
     state
         .get_queue_mut()
         .add_used(mem, completion.head, written as u32 + 1)
@@ -107,10 +117,29 @@ impl Backend {
     pub fn new(path: &Path) -> io::Result<Self> {
         Self::open(path, false, None)
     }
+    #[cfg(test)]
     pub fn open(path: &Path, staging: bool, create_bytes: Option<u64>) -> io::Result<Self> {
+        Self::open_with_recovery(path, staging, create_bytes, false, None)
+    }
+    pub fn open_with_recovery(
+        path: &Path,
+        staging: bool,
+        create_bytes: Option<u64>,
+        restartable: bool,
+        fault: Option<Fault>,
+    ) -> io::Result<Self> {
+        if restartable && !staging {
+            return Err(io::Error::other("restartable mode requires staging"));
+        }
         let completion_event = EventFd::new(EFD_NONBLOCK | EFD_CLOEXEC)?;
         let storage = if staging {
-            Storage::staging(path, create_bytes, &completion_event, QUEUE_SIZE)?
+            Storage::staging_with_durability(
+                path,
+                create_bytes,
+                &completion_event,
+                QUEUE_SIZE,
+                restartable,
+            )?
         } else {
             Storage::raw(path, &completion_event, QUEUE_SIZE)?
         };
@@ -130,6 +159,10 @@ impl Backend {
             shutdown: None,
             failure: None,
             negotiated_features: 0,
+            restartable,
+            restored_used: None,
+            restored_pending: 0,
+            fault,
         })
     }
     pub fn set_shutdown_handle(&mut self, handle: ShutdownHandle) {
@@ -157,6 +190,7 @@ impl Backend {
         let c = &self.counters;
         serde_json::json!({
             "schema_version":1, "fatal_error":self.failure, "backend":self.storage.name(), "connection_ok":connection_ok,
+            "restartable":self.restartable, "restored_used":self.restored_used, "restored_pending":self.restored_pending,
             "staging":self.storage.status().map(|s| serde_json::json!({
                 "image_bytes":s.image_bytes, "appended":s.appended, "durable":s.durable,
                 "log_bytes":s.log_bytes, "mapped_blocks":s.mapped_blocks,
@@ -177,7 +211,7 @@ impl Backend {
         status: Status,
         data: Option<(&[Segment], &[u8])>,
     ) -> io::Result<()> {
-        let result = publish(mem, state, completion, status, data);
+        let result = publish(mem, state, completion, status, data, self.fault.as_mut());
         if status != Status::Ok {
             self.counters.errors += 1;
         }
@@ -189,6 +223,12 @@ impl Backend {
         state: &mut VringState,
         request: Request,
     ) -> io::Result<()> {
+        if matches!(&request, Request::Write(_))
+            && let Some(fault) = &mut self.fault
+        {
+            fault.next_write();
+            fault.hit(Point::BeforeSubmit)?;
+        }
         let (completion, segments, operation) = match request {
             Request::GetId {
                 completion,
@@ -285,7 +325,13 @@ impl Backend {
                     self.counters.read_bytes += expected as u64;
                 }
                 Operation::Write { .. } => {
+                    if let Some(fault) = &mut self.fault {
+                        fault.hit(Point::AfterStorage)?;
+                    }
                     self.finish(mem, state, pending.completion, Status::Ok, None)?;
+                    if let Some(fault) = &mut self.fault {
+                        fault.hit(Point::AfterUsed)?;
+                    }
                     self.counters.writes += 1;
                     self.counters.write_bytes += expected as u64;
                 }
@@ -309,9 +355,36 @@ impl Backend {
             .ok_or_else(|| io::Error::other("guest memory missing"))?
             .clone();
         let mut state = vring.get_mut();
+        if self.restartable && self.restored_used.is_none() {
+            if !state.is_enabled() || !state.get_queue().ready() {
+                return Ok(());
+            }
+            let queue = state.get_queue_mut();
+            let used = queue
+                .used_idx(&*mem, Ordering::Acquire)
+                .map_err(io::Error::other)?
+                .0;
+            let available = queue
+                .avail_idx(&*mem, Ordering::Acquire)
+                .map_err(io::Error::other)?
+                .0;
+            let outstanding = available.wrapping_sub(used);
+            if outstanding > queue.size() {
+                return Err(io::Error::other("invalid restartable queue distance"));
+            }
+            // Exactly one request may execute before its used entry is published.
+            // Thus used.idx is also the consumption cursor, including after wrap.
+            // Writes are durable before publication; replay of the unpublished
+            // request cannot overwrite a later completed request.
+            queue.set_next_used(used);
+            queue.set_next_avail(used);
+            self.restored_used = Some(used);
+            self.restored_pending = outstanding;
+        }
         self.complete(&mem, &mut state)?;
         let mut consumed = 0;
-        while self.pending.len() < QUEUE_SIZE && consumed < QUEUE_SIZE {
+        let limit = if self.restartable { 1 } else { QUEUE_SIZE };
+        while self.pending.len() < limit && consumed < QUEUE_SIZE {
             let Some(mut chain) = pop(mem.clone(), &mut state) else {
                 break;
             };
@@ -543,6 +616,7 @@ mod tests {
             completion,
             Status::Ok,
             Some((&segments, &[0x5a; BLOCK_SIZE])),
+            None,
         )
         .unwrap();
         assert_eq!(accepted.read_obj::<u8>(GuestAddress(0x6000)).unwrap(), 0x5a);
@@ -589,7 +663,8 @@ mod tests {
                     &mut vring.get_mut(),
                     completion,
                     Status::Ok,
-                    Some((&segments, &[0x5a; BLOCK_SIZE]))
+                    Some((&segments, &[0x5a; BLOCK_SIZE])),
+                    None,
                 )
                 .is_err()
             );

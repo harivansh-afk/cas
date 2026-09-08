@@ -1,0 +1,14 @@
+; One fio process writes and verifies across a backend crash, without rebooting.
+[live-recovery]
+filename=/dev/disk/by-id/virtio-cas-experiment
+ioengine=io_uring
+direct=1
+bs=4k
+size=4m
+iodepth=32
+numjobs=1
+rw=write
+verify=crc32c
+verify_fatal=1
+refill_buffers=1
+end_fsync=1

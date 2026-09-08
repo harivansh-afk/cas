@@ -26,6 +26,8 @@ use crate::{
 // daemon-lifetime review; this is a shutdown limit, not an IO timing metric.
 const DAEMON_SHUTDOWN: Duration = Duration::from_secs(10);
 
+mod live;
+
 #[derive(clap::Args)]
 pub struct Args {
     /// New results directory. Existing results are never overwritten.
@@ -37,6 +39,12 @@ pub struct Args {
     /// Kill staging after guest FLUSH, then verify from a fresh guest.
     #[arg(long)]
     recovery: bool,
+    /// Restart a serial, write-through staging daemon while the same guest runs.
+    #[arg(long, conflicts_with = "recovery")]
+    live_recovery: bool,
+    /// Deterministic boundary at the 32nd write in the live-recovery check.
+    #[arg(long, default_value = "after-storage", value_parser = ["before-submit", "after-storage", "after-status", "after-used"])]
+    crash_at: String,
     /// Timeout in seconds for each guest boot.
     #[arg(long, default_value_t = 90, value_parser = clap::value_parser!(u64).range(1..=100))]
     timeout: u64,
@@ -72,6 +80,8 @@ struct PhaseEvidence {
     daemon: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     flush_marker: Option<FlushMarker>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live_recovery: Option<Value>,
 }
 
 #[derive(Serialize)]
@@ -354,13 +364,19 @@ fn execute(args: &mut Args, summary: &mut Summary) -> io::Result<()> {
     let value: Value = read_json(&args.build_info)?;
     summary.build = Some(value.clone());
     let build: Build = serde_json::from_value(value)?;
-    if args.recovery && build.backend != Backend::Staging {
-        return Err(io::Error::other("--recovery requires the staging runner"));
+    if (args.recovery || args.live_recovery) && build.backend != Backend::Staging {
+        return Err(io::Error::other("recovery requires the staging runner"));
     }
     summary.artifact = format!(
         "development_{}_vm_{}",
         build.backend.name(),
-        if args.recovery { "recovery" } else { "smoke" }
+        if args.live_recovery {
+            "live_recovery"
+        } else if args.recovery {
+            "recovery"
+        } else {
+            "smoke"
+        }
     );
     if build.system != format!("{}-linux", summary.host_machine) {
         return Err(io::Error::other(
@@ -399,7 +415,9 @@ fn execute(args: &mut Args, summary: &mut Summary) -> io::Result<()> {
         ],
         &args.output,
     ));
-    if args.recovery {
+    if args.live_recovery {
+        live::execute(args, &build, &image, &mut summary.guest)?;
+    } else if args.recovery {
         for (name, phase) in [("write", Phase::Write), ("read", Phase::Read)] {
             let output = args.output.join(name);
             fs::create_dir(&output)?;
@@ -508,6 +526,8 @@ mod tests {
             output: dir.path().into(),
             disk_dir: None,
             recovery: false,
+            live_recovery: false,
+            crash_at: "after-storage".into(),
             timeout: 1,
             vm,
             build_info: PathBuf::new(),

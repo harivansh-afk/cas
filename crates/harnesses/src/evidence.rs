@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 pub const IO_BYTES: u64 = 64 * 1024 * 1024;
 pub const DISK_BYTES: u64 = 128 * 1024 * 1024;
+pub const LIVE_BYTES: u64 = 4 * 1024 * 1024;
 
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> io::Result<T> {
     serde_json::from_reader(File::open(path)?)
@@ -124,6 +125,11 @@ pub struct DaemonReport {
     bounce_requests: u64,
     peak_inflight: u64,
     staging: Option<StagingReport>,
+    #[serde(default)]
+    restartable: bool,
+    restored_used: Option<u16>,
+    #[serde(default)]
+    restored_pending: u16,
 }
 #[derive(Deserialize)]
 struct StagingReport {
@@ -133,6 +139,34 @@ struct StagingReport {
 }
 
 impl DaemonReport {
+    pub fn verify_live(&self, crash_at: &str) -> io::Result<()> {
+        let expected = LIVE_BYTES / BLOCK_SIZE as u64
+            + u64::from(matches!(crash_at, "after-storage" | "after-status"));
+        if self.schema_version != 1
+            || self.backend != "staging_sync"
+            || !self.connection_ok
+            || !self.flush_negotiated
+            || !self.restartable
+            || self.errors != 0
+            || self.pending_at_disconnect != 0
+            || self.queues != 1
+            || self.peak_inflight != 1
+            || self.restored_used.is_none_or(|used| used == 0)
+            || self.restored_pending == 0
+            || self.restored_pending > 128
+            || self.read_bytes < LIVE_BYTES
+            || self.write_bytes == 0
+            || self.flushes == 0
+            || self.staging.as_ref().is_none_or(|s| {
+                s.image_bytes != DISK_BYTES || s.appended != expected || s.durable != expected
+            })
+        {
+            return Err(io::Error::other(
+                "live recovery did not report serial replay and durable IO",
+            ));
+        }
+        Ok(())
+    }
     pub fn verify(&self, backend: Backend, read_only: bool) -> io::Result<()> {
         if self.schema_version != 1
             || self.backend != backend.storage()
@@ -329,6 +363,50 @@ mod tests {
         let mut report = daemon(Backend::Daemon, false);
         report.as_object_mut().unwrap().remove("errors");
         assert!(!valid_daemon(report, Backend::Daemon, false));
+    }
+
+    #[test]
+    fn live_recovery_requires_serial_replay_and_the_expected_durable_prefix() {
+        for point in [
+            "before-submit",
+            "after-storage",
+            "after-status",
+            "after-used",
+        ] {
+            let mut base = daemon(Backend::Staging, false);
+            base["restartable"] = json!(true);
+            base["restored_used"] = json!(31);
+            base["restored_pending"] = json!(32);
+            base["peak_inflight"] = json!(1);
+            let blocks = LIVE_BYTES / BLOCK_SIZE as u64
+                + u64::from(matches!(point, "after-storage" | "after-status"));
+            base["staging"]["appended"] = json!(blocks);
+            base["staging"]["durable"] = json!(blocks);
+            let valid = |value| {
+                serde_json::from_value::<DaemonReport>(value)
+                    .is_ok_and(|report| report.verify_live(point).is_ok())
+            };
+            assert!(valid(base.clone()));
+            for (field, value) in [
+                ("restartable", json!(false)),
+                ("restored_used", json!(null)),
+                ("restored_pending", json!(0)),
+                ("restored_pending", json!(129)),
+                ("peak_inflight", json!(2)),
+                ("errors", json!(1)),
+                ("pending_at_disconnect", json!(1)),
+                ("read_bytes", json!(LIVE_BYTES - 1)),
+            ] {
+                let mut report = base.clone();
+                report[field] = value;
+                assert!(!valid(report), "{point}: {field}");
+            }
+            for field in ["appended", "durable"] {
+                let mut report = base.clone();
+                report["staging"][field] = json!(blocks - 1);
+                assert!(!valid(report));
+            }
+        }
     }
 
     #[test]

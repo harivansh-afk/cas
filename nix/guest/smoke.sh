@@ -15,6 +15,14 @@ uname -a > /results/guest-kernel.txt
 fio --version > /results/guest-fio-version.txt
 lsblk --json --bytes --output NAME,TYPE,SIZE,LOG-SEC,PHY-SEC > /results/guest-disks.json
 
+if [ "$backend" = staging ] && [ -f /results/live-recovery ]; then
+  cp /etc/cas/live.fio /results/live.fio
+  cat /proc/sys/kernel/random/boot_id > /results/boot-before.txt
+  fio --output-format=json+ --output=/results/live.json /etc/cas/live.fio
+  cat /proc/sys/kernel/random/boot_id > /results/boot-after.txt
+  exit 0
+fi
+
 # Recovery runs boot the staging guest twice. The host writes the phase file
 # before each boot: "write" to fill and flush, then "read" to verify after the
 # daemon was killed and restarted.

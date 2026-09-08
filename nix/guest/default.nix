@@ -25,7 +25,7 @@ let
   experimentDisk =
     if vhostUser then
       [
-        ''-chardev "socket,id=cas,path=$CAS_VHOST_SOCKET"''
+        ''-chardev "socket,id=cas,path=$CAS_VHOST_SOCKET,reconnect-ms=''${CAS_RECONNECT_MS:-0}"''
         "-device vhost-user-blk-pci,chardev=cas,num-queues=1,queue-size=128"
       ]
     else

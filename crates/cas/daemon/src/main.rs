@@ -1,6 +1,7 @@
 // Single-queue vhost-user block device with raw and staging storage modes.
 
 mod backend;
+mod fault;
 mod request;
 mod storage;
 
@@ -34,6 +35,12 @@ struct Args {
     /// Create a new staging log with this logical capacity; never replaces a file.
     #[arg(long)]
     create_bytes: Option<u64>,
+    /// Serial staging recovery: make each write durable before publishing completion.
+    #[arg(long)]
+    restartable: bool,
+    /// Test-only pause at a write boundary; an external harness must kill/resume us.
+    #[command(flatten)]
+    fault: fault::FaultArgs,
 }
 
 // The upstream error does not implement std::error::Error.
@@ -46,6 +53,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.create_bytes.is_some() && !matches!(args.backend, BackendKind::Staging) {
         return Err("--create-bytes requires --backend staging".into());
     }
+    if args.restartable && !matches!(args.backend, BackendKind::Staging) {
+        return Err("--restartable requires --backend staging".into());
+    }
+    let fault = args.fault.validate(args.restartable)?;
     // Do not replace someone else's socket or evidence.
     if args.socket.symlink_metadata().is_ok() {
         return Err("socket path already exists".into());
@@ -54,10 +65,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .write(true)
         .create_new(true)
         .open(&args.report)?;
-    let backend = backend::Backend::open(
+    let backend = backend::Backend::open_with_recovery(
         &args.image,
         matches!(args.backend, BackendKind::Staging),
         args.create_bytes,
+        args.restartable,
+        fault,
     )?;
     let completion_fd = backend.completion_fd();
     let backend = Arc::new(Mutex::new(backend));

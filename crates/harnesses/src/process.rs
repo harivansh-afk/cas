@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     fn descendants_stop_on_drop_and_when_the_launcher_exits() {
-        for ending in ["wait", "exit 0"] {
+        for ending in ["wait", "kill -STOP $$; wait", "exit 0"] {
             let dir = tempfile::tempdir().unwrap();
             let pid_file = dir.path().join("pid");
             let mut command = Command::new("sh");

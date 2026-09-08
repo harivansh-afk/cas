@@ -85,11 +85,22 @@ impl Storage {
         }))
     }
 
+    #[cfg(test)]
     pub fn staging(
         path: &Path,
         create_bytes: Option<u64>,
         event: &EventFd,
         capacity: usize,
+    ) -> io::Result<Self> {
+        Self::staging_with_durability(path, create_bytes, event, capacity, false)
+    }
+
+    pub fn staging_with_durability(
+        path: &Path,
+        create_bytes: Option<u64>,
+        event: &EventFd,
+        capacity: usize,
+        durable_writes: bool,
     ) -> io::Result<Self> {
         let mut log = match create_bytes {
             Some(bytes) => StagingLog::create(path, bytes),
@@ -116,7 +127,15 @@ impl Storage {
                             "staging worker stopped after an IO failure",
                         ))
                     } else {
-                        operation.execute(&mut log).map_err(io::Error::other)
+                        operation
+                            .execute(&mut log)
+                            .and_then(|()| {
+                                if durable_writes && matches!(operation, Operation::Write { .. }) {
+                                    log.flush()?;
+                                }
+                                Ok(())
+                            })
+                            .map_err(io::Error::other)
                     };
                     failed |= result.is_err();
                     if output
@@ -137,7 +156,8 @@ impl Storage {
                         break;
                     }
                 }
-                // Closing the channel does not flush. Only a guest FLUSH creates a fence.
+                // Closing the channel does not flush. Ordinary staging fences
+                // on guest FLUSH; restartable staging also fences every write.
             })?;
         Ok(Self::Staging(Staging {
             sender: Some(sender),

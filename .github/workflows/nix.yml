@@ -57,6 +57,11 @@ jobs:
         run: result-staging/bin/cas-vm-smoke --output results/ci-staging-smoke
       - name: Verify staging after killing the daemon
         run: result-staging/bin/cas-vm-smoke --recovery --output results/ci-recovery-smoke
+      - name: Verify live serial recovery at write boundaries
+        run: |
+          for point in before-submit after-storage after-status after-used; do
+            result-staging/bin/cas-vm-smoke --live-recovery --crash-at "$point" --output "results/ci-live-$point-smoke"
+          done
       - name: Keep run evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -77,4 +82,7 @@ jobs:
             results/ci-recovery-smoke/read/daemon.log
             results/ci-recovery-smoke/read/daemon.json
             results/ci-recovery-smoke/read/guest/
+            results/ci-live-*-smoke/daemon-*.log
+            results/ci-live-*-smoke/daemon-*.json
+            results/ci-live-*-smoke/pause.json
           if-no-files-found: ignore
