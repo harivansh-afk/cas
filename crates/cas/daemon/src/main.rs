@@ -6,6 +6,7 @@ mod request;
 mod storage;
 
 use std::io;
+use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -40,7 +41,27 @@ struct Args {
     restartable: bool,
     /// Test-only pause at a write boundary; an external harness must kill/resume us.
     #[command(flatten)]
-    fault: fault::FaultArgs,
+    pause: Option<PauseArgs>,
+}
+
+#[derive(clap::Args)]
+#[group(requires_all = ["pause_at", "pause_after", "pause_marker"], requires = "restartable")]
+struct PauseArgs {
+    // Requirements belong to the optional group, not to ordinary daemon runs.
+    #[arg(long, value_enum, required = false)]
+    pause_at: fault::Point,
+    #[arg(long, required = false)]
+    pause_after: NonZeroU64,
+    #[arg(long, required = false)]
+    pause_marker: PathBuf,
+}
+
+impl TryFrom<PauseArgs> for fault::Pause {
+    type Error = io::Error;
+
+    fn try_from(args: PauseArgs) -> io::Result<Self> {
+        Self::new(args.pause_at, args.pause_after, args.pause_marker)
+    }
 }
 
 // The upstream error does not implement std::error::Error.
@@ -56,7 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.restartable && !matches!(args.backend, BackendKind::Staging) {
         return Err("--restartable requires --backend staging".into());
     }
-    let fault = args.fault.validate(args.restartable)?;
+    let fault = fault::Fault::new(args.pause.map(TryInto::try_into).transpose()?);
     // Do not replace someone else's socket or evidence.
     if args.socket.symlink_metadata().is_ok() {
         return Err("socket path already exists".into());
@@ -129,4 +150,61 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     drain_result?;
     result.map_err(daemon_error)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn pause_options_are_optional_but_require_a_complete_restartable_configuration() {
+        let base = [
+            "cas-daemon",
+            "--socket",
+            "socket",
+            "--image",
+            "image",
+            "--report",
+            "report",
+        ];
+        assert!(Args::try_parse_from(base).unwrap().pause.is_none());
+        let valid = [
+            "--restartable",
+            "--pause-at",
+            "after-storage",
+            "--pause-after",
+            "32",
+            "--pause-marker",
+            "pause.json",
+        ];
+        assert!(
+            Args::try_parse_from(base.into_iter().chain(valid))
+                .unwrap()
+                .pause
+                .is_some()
+        );
+        for invalid in [
+            vec!["--pause-at", "after-storage"],
+            vec!["--restartable", "--pause-after", "32"],
+            vec![
+                "--pause-at",
+                "after-storage",
+                "--pause-after",
+                "32",
+                "--pause-marker",
+                "pause.json",
+            ],
+            vec![
+                "--restartable",
+                "--pause-at",
+                "after-storage",
+                "--pause-after",
+                "0",
+                "--pause-marker",
+                "pause.json",
+            ],
+        ] {
+            assert!(Args::try_parse_from(base.into_iter().chain(invalid)).is_err());
+        }
+    }
 }

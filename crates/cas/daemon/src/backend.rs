@@ -64,7 +64,7 @@ pub(super) struct Backend {
     restartable: bool,
     restored_used: Option<u16>,
     restored_pending: u16,
-    fault: Option<Fault>,
+    fault: Fault,
 }
 
 /// The queue lock serializes publication with SET_VRING_ENABLE/GET_VRING_BASE.
@@ -75,7 +75,7 @@ fn publish(
     completion: Completion,
     status: Status,
     data: Option<(&[Segment], &[u8])>,
-    fault: Option<&mut Fault>,
+    fault: &mut Fault,
 ) -> io::Result<()> {
     if !state.is_enabled() || !state.get_queue().ready() {
         return Err(io::Error::other(
@@ -92,9 +92,7 @@ fn publish(
     }
     mem.write_obj(status as u8, completion.status)
         .map_err(io::Error::other)?;
-    if let Some(fault) = fault {
-        fault.hit(Point::AfterStatus)?;
-    }
+    fault.hit(Point::AfterStatus)?;
     state
         .get_queue_mut()
         .add_used(mem, completion.head, written as u32 + 1)
@@ -119,14 +117,14 @@ impl Backend {
     }
     #[cfg(test)]
     pub fn open(path: &Path, staging: bool, create_bytes: Option<u64>) -> io::Result<Self> {
-        Self::open_with_recovery(path, staging, create_bytes, false, None)
+        Self::open_with_recovery(path, staging, create_bytes, false, Fault::default())
     }
     pub fn open_with_recovery(
         path: &Path,
         staging: bool,
         create_bytes: Option<u64>,
         restartable: bool,
-        fault: Option<Fault>,
+        fault: Fault,
     ) -> io::Result<Self> {
         if restartable && !staging {
             return Err(io::Error::other("restartable mode requires staging"));
@@ -211,7 +209,7 @@ impl Backend {
         status: Status,
         data: Option<(&[Segment], &[u8])>,
     ) -> io::Result<()> {
-        let result = publish(mem, state, completion, status, data, self.fault.as_mut());
+        let result = publish(mem, state, completion, status, data, &mut self.fault);
         if status != Status::Ok {
             self.counters.errors += 1;
         }
@@ -223,11 +221,9 @@ impl Backend {
         state: &mut VringState,
         request: Request,
     ) -> io::Result<()> {
-        if matches!(&request, Request::Write(_))
-            && let Some(fault) = &mut self.fault
-        {
-            fault.next_write();
-            fault.hit(Point::BeforeSubmit)?;
+        if matches!(&request, Request::Write(_)) {
+            self.fault.next_write();
+            self.fault.hit(Point::BeforeSubmit)?;
         }
         let (completion, segments, operation) = match request {
             Request::GetId {
@@ -325,13 +321,9 @@ impl Backend {
                     self.counters.read_bytes += expected as u64;
                 }
                 Operation::Write { .. } => {
-                    if let Some(fault) = &mut self.fault {
-                        fault.hit(Point::AfterStorage)?;
-                    }
+                    self.fault.hit(Point::AfterStorage)?;
                     self.finish(mem, state, pending.completion, Status::Ok, None)?;
-                    if let Some(fault) = &mut self.fault {
-                        fault.hit(Point::AfterUsed)?;
-                    }
+                    self.fault.hit(Point::AfterUsed)?;
                     self.counters.writes += 1;
                     self.counters.write_bytes += expected as u64;
                 }
@@ -616,7 +608,7 @@ mod tests {
             completion,
             Status::Ok,
             Some((&segments, &[0x5a; BLOCK_SIZE])),
-            None,
+            &mut Fault::default(),
         )
         .unwrap();
         assert_eq!(accepted.read_obj::<u8>(GuestAddress(0x6000)).unwrap(), 0x5a);
@@ -664,7 +656,7 @@ mod tests {
                     completion,
                     Status::Ok,
                     Some((&segments, &[0x5a; BLOCK_SIZE])),
-                    None,
+                    &mut Fault::default(),
                 )
                 .is_err()
             );

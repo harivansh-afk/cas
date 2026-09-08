@@ -11,6 +11,8 @@ virtio-bindings = "0.2.7"
 clap.workspace = true
 libc.workspace = true
 serde_json.workspace = true
+serde.workspace = true
+tempfile.workspace = true
 vhost-user-backend = "0.23"
 vhost = { workspace = true, features = ["vhost-user-backend"] }
 vm-memory = { version = "0.18", features = ["backend-mmap", "backend-atomic"] }
@@ -19,7 +21,6 @@ vmm-sys-util = "0.15"
 io-uring = "0.7"
 
 [dev-dependencies]
-tempfile.workspace = true
 vhost = { workspace = true, features = ["vhost-user-frontend"] }
 
 [lints]
