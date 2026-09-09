@@ -11,6 +11,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Count fixed 4/16 KiB content in immutable raw images; first image is the base.
+    /// Zero chunks are excluded. Normalize guest free space before scanning.
+    Census {
+        #[arg(required = true, num_args = 1..)]
+        images: Vec<PathBuf>,
+    },
     /// Create a new test log, exercise FLUSH/reopen, and emit a JSON check result.
     /// The path must not exist; the file is retained for inspection.
     StagingCheck { path: PathBuf },
@@ -18,6 +24,30 @@ enum Command {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     match Cli::parse().command {
+        Command::Census { images } => {
+            let results = cas_core::census::CHUNK_SIZES
+                .into_iter()
+                .map(|size| cas_core::census::scan(&images, size))
+                .collect::<Result<Vec<_>, _>>()?;
+            if results[0]
+                .images
+                .iter()
+                .zip(&results[1].images)
+                .any(|(first, second)| first.blake3 != second.blake3)
+            {
+                return Err("images changed between census passes".into());
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "schema_version": 1,
+                    "hash": "BLAKE3-256",
+                    "scope": "raw bytes; all-zero chunks excluded; no allocation or lineage inferred",
+                    "results": results,
+                }))?
+            );
+            Ok(())
+        }
         Command::StagingCheck { path } => staging_check(path),
     }
 }

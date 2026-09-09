@@ -90,6 +90,7 @@
         daemon-smoke = smokeFor pkgs "daemon" false;
         staging-smoke = smokeFor pkgs "staging" false;
         dev-vm = smokeFor pkgs "staging" true;
+        census-pilot = pkgs.callPackage ./nix/census.nix { };
         test-guest = (guestFor pkgs "raw" false).config.system.build.vm;
       });
 
@@ -112,6 +113,7 @@
             iproute2
             jq
             xfsprogs
+            e2fsprogs
             util-linux
             nixfmt
             nixos-rebuild
@@ -146,6 +148,7 @@
 
       checks = eachSystem (pkgs: {
         inherit (pkgs) cas;
+        census-pilot = self.packages.${pkgs.stdenv.hostPlatform.system}.census-pilot;
         host-config = import ./nix/checks/host-config.nix {
           inherit nixpkgs pkgs;
           inherit (self) nixosModules;

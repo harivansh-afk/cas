@@ -1,5 +1,6 @@
 // Staging log, durability tracking, and shared IO buffers.
 
+pub mod census;
 pub mod watermark;
 
 #[cfg(target_os = "linux")]
