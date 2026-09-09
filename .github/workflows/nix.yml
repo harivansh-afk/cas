@@ -62,6 +62,10 @@ jobs:
           for point in before-submit after-storage after-status after-used; do
             result-staging/bin/cas-vm-smoke --live-recovery --crash-at "$point" --output "results/ci-live-$point-smoke"
           done
+      - name: Build the interactive guest
+        run: nix build .#dev-vm --out-link result-dev --print-build-logs
+      - name: Verify SSH access and manual CAS IO
+        run: nix develop -c bash crates/harnesses/tests/ssh.sh result-dev/bin/cas-dev-vm results/ci-ssh-smoke
       - name: Keep run evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -85,4 +89,11 @@ jobs:
             results/ci-live-*-smoke/daemon-*.log
             results/ci-live-*-smoke/daemon-*.json
             results/ci-live-*-smoke/pause.json
+            results/ci-ssh-smoke/*.log
+            results/ci-ssh-smoke/listener.txt
+            results/ci-ssh-smoke/session/*.json
+            results/ci-ssh-smoke/session/*.log
+            results/ci-ssh-smoke/session/flake.lock
+            results/ci-ssh-smoke/session/known_hosts
+            results/ci-ssh-smoke/session/guest/
           if-no-files-found: ignore

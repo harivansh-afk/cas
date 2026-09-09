@@ -1,8 +1,9 @@
 # The NixOS guest booted by cas-vm-smoke.
 #
-# A minimal, network-less KVM guest with a tmpfs root and one experiment disk.
+# A minimal KVM guest with a tmpfs root and one experiment disk.
 # At boot the cas-smoke service runs the fio jobs from crates/harnesses/fio
-# against that disk, writes results to a host-shared directory, and powers off.
+# against that disk and writes results to a host-shared directory. Smoke guests
+# have no network and power off; interactive guests stay available over SSH.
 #
 # `cas.guest.backend` chooses how the experiment disk reaches the guest:
 #   raw      QEMU's own virtio-blk on a raw image file ($CAS_RAW_IMAGE)
@@ -56,6 +57,8 @@ in
 {
   imports = [ (modulesPath + "/virtualisation/qemu-vm.nix") ];
 
+  options.cas.guest.interactive = lib.mkEnableOption "SSH access after the guest IO checks";
+
   options.cas.guest.backend = lib.mkOption {
     type = lib.types.enum [
       "raw"
@@ -70,7 +73,46 @@ in
     networking.hostName = "cas-guest";
     system.stateVersion = "26.05";
     documentation.enable = false;
-    services.openssh.enable = false;
+    services.openssh = lib.mkIf cfg.interactive {
+      enable = true;
+      hostKeys = [
+        {
+          type = "ed25519";
+          path = "/etc/ssh/ssh_host_ed25519_key";
+        }
+      ];
+      settings = {
+        PermitRootLogin = "prohibit-password";
+        PasswordAuthentication = false;
+        KbdInteractiveAuthentication = false;
+      };
+    };
+    systemd.services.sshd = lib.mkIf cfg.interactive {
+      unitConfig.RequiresMountsFor = [ "/results" ];
+      preStart = ''
+        install -Dm600 /results/authorized_keys /etc/ssh/authorized_keys.d/root
+      '';
+      postStart = ''
+        cp /etc/ssh/ssh_host_ed25519_key.pub /results/host-key.tmp
+        mv /results/host-key.tmp /results/host-key.pub
+      '';
+    };
+    environment.systemPackages = lib.optionals cfg.interactive [
+      pkgs.fio
+      (pkgs.writeShellApplication {
+        name = "cas-poweroff";
+        runtimeInputs = with pkgs; [
+          util-linux
+          coreutils
+          systemd
+        ];
+        text = ''
+          blockdev --flushbufs /dev/disk/by-id/virtio-cas-experiment
+          sync
+          systemctl --force --force poweroff
+        '';
+      })
+    ];
     services.timesyncd.enable = false;
 
     virtualisation = {
@@ -83,7 +125,14 @@ in
 
       qemu = {
         forceAccel = true; # Refuse to turn an unavailable KVM into a TCG run.
-        networkingOptions = lib.mkForce [ "-nic none" ];
+        networkingOptions = lib.mkForce (
+          if cfg.interactive then
+            [
+              ''-nic "user,model=virtio-net-pci,restrict=on,hostfwd=tcp:127.0.0.1:$CAS_SSH_PORT-:22"''
+            ]
+          else
+            [ "-nic none" ]
+        );
         # vhost-user needs guest memory in a file QEMU can share with the daemon.
         enableSharedMemory = vhostUser;
         options = [ "-no-reboot" ] ++ experimentDisk;
@@ -112,7 +161,7 @@ in
         Type = "oneshot";
         TimeoutStartSec = 70;
         ExecStart = "${lib.getExe smoke} ${cfg.backend}";
-        ExecStopPost = lib.getExe finish;
+        ExecStopPost = "${lib.getExe finish} ${if cfg.interactive then "interactive" else "smoke"}";
       };
     };
   };

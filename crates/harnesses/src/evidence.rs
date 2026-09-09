@@ -52,6 +52,8 @@ impl Backend {
 #[derive(Deserialize)]
 pub struct Build {
     pub system: String,
+    #[serde(default)]
+    pub interactive: bool,
     pub backend: Backend,
     pub daemon: Option<std::path::PathBuf>,
 }
@@ -167,7 +169,7 @@ impl DaemonReport {
         }
         Ok(())
     }
-    pub fn verify(&self, backend: Backend, read_only: bool) -> io::Result<()> {
+    pub fn verify(&self, backend: Backend, read_only: bool, interactive: bool) -> io::Result<()> {
         if self.schema_version != 1
             || self.backend != backend.storage()
             || !self.connection_ok
@@ -198,7 +200,8 @@ impl DaemonReport {
                 .as_ref()
                 .ok_or_else(|| io::Error::other("missing staging report"))?;
             if staging.image_bytes != DISK_BYTES
-                || staging.appended != expected / BLOCK_SIZE as u64
+                || staging.appended < expected / BLOCK_SIZE as u64
+                || (!interactive && staging.appended != expected / BLOCK_SIZE as u64)
                 || staging.durable != staging.appended
             {
                 return Err(io::Error::other(
@@ -255,7 +258,7 @@ mod tests {
     }
     fn valid_daemon(value: Value, backend: Backend, read_only: bool) -> bool {
         serde_json::from_value::<DaemonReport>(value)
-            .is_ok_and(|report| report.verify(backend, read_only).is_ok())
+            .is_ok_and(|report| report.verify(backend, read_only, false).is_ok())
     }
 
     #[test]
@@ -345,6 +348,19 @@ mod tests {
             report["staging"] = value;
             assert!(!valid_daemon(report, Backend::Staging, false));
         }
+    }
+
+    #[test]
+    fn interactive_io_may_extend_but_must_flush_the_staging_prefix() {
+        let mut value = daemon(Backend::Staging, false);
+        value["staging"]["appended"] = json!(33792);
+        value["staging"]["durable"] = json!(33792);
+        let report: DaemonReport = serde_json::from_value(value.clone()).unwrap();
+        assert!(report.verify(Backend::Staging, false, true).is_ok());
+        assert!(report.verify(Backend::Staging, false, false).is_err());
+        value["staging"]["durable"] = json!(32768);
+        let report: DaemonReport = serde_json::from_value(value).unwrap();
+        assert!(report.verify(Backend::Staging, false, true).is_err());
     }
 
     #[test]

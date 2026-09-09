@@ -26,6 +26,7 @@ use crate::{
 // daemon-lifetime review; this is a shutdown limit, not an IO timing metric.
 const DAEMON_SHUTDOWN: Duration = Duration::from_secs(10);
 
+mod interactive;
 mod live;
 
 #[derive(clap::Args)]
@@ -42,6 +43,12 @@ pub struct Args {
     /// Restart a serial, write-through staging daemon while the same guest runs.
     #[arg(long, conflicts_with = "recovery")]
     live_recovery: bool,
+    /// Public key for the dev-vm guest. Private keys and authorized_keys options are rejected.
+    #[arg(long, conflicts_with_all = ["recovery", "live_recovery"])]
+    ssh_key: Option<PathBuf>,
+    /// Spark loopback port forwarded to guest SSH (dev-vm only).
+    #[arg(long, default_value_t = 23479, requires = "ssh_key", value_parser = clap::value_parser!(u16).range(1024..))]
+    ssh_port: u16,
     /// Deterministic boundary at the 32nd write in the live-recovery check.
     #[arg(long, default_value = "after-storage", value_parser = ["before-submit", "after-storage", "after-status", "after-used"])]
     crash_at: String,
@@ -68,6 +75,8 @@ struct PhaseEvidence {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     launcher: Vec<PathBuf>,
     guest_exit: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ssh_port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     verified_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -231,6 +240,10 @@ fn execute_guest(
         )?;
     }
     let mut env = environment(image, &results, &temporary);
+    if build.interactive {
+        interactive::prepare(args, &results, &mut env)?;
+        evidence.ssh_port = Some(args.ssh_port);
+    }
     // Socket paths must fit AF_UNIX even when the output directory is long.
     let socket_directory = if build.backend != Backend::Raw {
         Some(
@@ -320,29 +333,34 @@ fn execute_guest(
         evidence.guest_exit = Some(process::exit_code(guest.stop()?));
         return Ok(());
     }
-    let status = guest.wait(Duration::from_secs(args.timeout))?;
+    let status = if build.interactive {
+        interactive::ready(args, &results, &mut guest, daemon.as_mut())?;
+        verify_io(&results, build.backend, read_only, evidence)?;
+        interactive::announce(args, &results)?;
+        loop {
+            process::check_interrupt()?;
+            if let Some(status) = guest.poll()? {
+                break status;
+            }
+            if let Some(child) = daemon.as_mut()
+                && child.poll()?.is_some()
+            {
+                // On poweroff the backend may exit before QEMU's launcher.
+                // Bound that handoff so a dead backend cannot leave us waiting.
+                break guest.wait(DAEMON_SHUTDOWN)?;
+            }
+            thread::sleep(process::POLL);
+        }
+    } else {
+        guest.wait(Duration::from_secs(args.timeout))?
+    };
     evidence.guest_exit = Some(process::exit_code(status));
     if !status.success() {
         return Err(io::Error::other(format!(
             "QEMU exited with {status}; see console.log"
         )));
     }
-    read_json::<GuestCompletion>(&results.join("completion.json"))?.verify()?;
-    if read_only {
-        read_json::<Fio>(&results.join("recovery.json"))?.verify("recovery-read", 0, IO_BYTES)?;
-        evidence.verified_bytes = Some(IO_BYTES);
-    } else {
-        read_json::<Fio>(&results.join("fio.json"))?.verify("raw-smoke", IO_BYTES, IO_BYTES)?;
-        evidence.verified_bytes = Some(IO_BYTES);
-        if daemon.is_some() {
-            read_json::<Fio>(&results.join("queue.json"))?.verify(
-                "queue-smoke",
-                IO_BYTES,
-                IO_BYTES,
-            )?;
-            evidence.verified_bytes = Some(2 * IO_BYTES);
-        }
-    }
+    verify_io(&results, build.backend, read_only, evidence)?;
     if let Some(daemon) = &mut daemon {
         let start = Instant::now();
         let status = daemon.wait(DAEMON_SHUTDOWN);
@@ -354,7 +372,36 @@ fn execute_guest(
         }
         let value: Value = read_json(&output.join("daemon.json"))?;
         evidence.daemon = Some(value.clone());
-        serde_json::from_value::<DaemonReport>(value)?.verify(build.backend, read_only)?;
+        serde_json::from_value::<DaemonReport>(value)?.verify(
+            build.backend,
+            read_only,
+            build.interactive,
+        )?;
+    }
+    Ok(())
+}
+
+fn verify_io(
+    results: &Path,
+    backend: Backend,
+    read_only: bool,
+    evidence: &mut PhaseEvidence,
+) -> io::Result<()> {
+    read_json::<GuestCompletion>(&results.join("completion.json"))?.verify()?;
+    if read_only {
+        read_json::<Fio>(&results.join("recovery.json"))?.verify("recovery-read", 0, IO_BYTES)?;
+        evidence.verified_bytes = Some(IO_BYTES);
+    } else {
+        read_json::<Fio>(&results.join("fio.json"))?.verify("raw-smoke", IO_BYTES, IO_BYTES)?;
+        evidence.verified_bytes = Some(IO_BYTES);
+        if backend != Backend::Raw {
+            read_json::<Fio>(&results.join("queue.json"))?.verify(
+                "queue-smoke",
+                IO_BYTES,
+                IO_BYTES,
+            )?;
+            evidence.verified_bytes = Some(2 * IO_BYTES);
+        }
     }
     Ok(())
 }
@@ -364,13 +411,20 @@ fn execute(args: &mut Args, summary: &mut Summary) -> io::Result<()> {
     let value: Value = read_json(&args.build_info)?;
     summary.build = Some(value.clone());
     let build: Build = serde_json::from_value(value)?;
+    if build.interactive != args.ssh_key.is_some() {
+        return Err(io::Error::other(
+            "dev-vm requires --ssh-key; smoke runners do not support SSH",
+        ));
+    }
     if (args.recovery || args.live_recovery) && build.backend != Backend::Staging {
         return Err(io::Error::other("recovery requires the staging runner"));
     }
     summary.artifact = format!(
         "development_{}_vm_{}",
         build.backend.name(),
-        if args.live_recovery {
+        if build.interactive {
+            "interactive"
+        } else if args.live_recovery {
             "live_recovery"
         } else if args.recovery {
             "recovery"
@@ -527,6 +581,8 @@ mod tests {
             disk_dir: None,
             recovery: false,
             live_recovery: false,
+            ssh_key: None,
+            ssh_port: 23479,
             crash_at: "after-storage".into(),
             timeout: 1,
             vm,
@@ -535,6 +591,7 @@ mod tests {
         };
         let build = Build {
             system: "test".into(),
+            interactive: false,
             backend: Backend::Raw,
             daemon: None,
         };

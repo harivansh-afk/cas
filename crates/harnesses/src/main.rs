@@ -19,7 +19,7 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Boot the pinned guest, verify its IO, and retain all run evidence.
+    /// Boot the pinned guest for automated checks or an interactive SSH session.
     Vm(vm::Args),
     /// Capture host settings and tool versions without running a benchmark.
     Preflight {
@@ -62,6 +62,44 @@ fn main() -> ExitCode {
         Err(error) => {
             eprintln!("cas-harness: {error}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ssh_options_do_not_change_smoke_defaults_or_combine_with_recovery() {
+        let parse = |extra: &[&str]| {
+            Args::try_parse_from(
+                [
+                    "cas-harness",
+                    "vm",
+                    "--output",
+                    "run",
+                    "--vm",
+                    "vm",
+                    "--build-info",
+                    "build",
+                    "--lock",
+                    "lock",
+                ]
+                .into_iter()
+                .chain(extra.iter().copied()),
+            )
+        };
+        assert!(parse(&[]).is_ok());
+        assert!(parse(&["--ssh-key", "id.pub"]).is_ok());
+        assert!(parse(&["--ssh-key", "id.pub", "--ssh-port", "23480"]).is_ok());
+        for args in [
+            vec!["--ssh-port", "23480"],
+            vec!["--ssh-key", "id.pub", "--ssh-port", "0"],
+            vec!["--ssh-key", "id.pub", "--recovery"],
+            vec!["--ssh-key", "id.pub", "--live-recovery"],
+        ] {
+            assert!(parse(&args).is_err(), "{args:?}");
         }
     }
 }

@@ -51,23 +51,23 @@
 
       # The guest as a NixOS system, configured for one block backend.
       guestFor =
-        pkgs: backend:
+        pkgs: backend: interactive:
         lib.nixosSystem {
           modules = [
             ./nix/guest
             {
               nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system;
-              cas.guest.backend = backend;
+              cas.guest = { inherit backend interactive; };
             }
           ];
         };
 
       # The cas-vm-smoke runner for one backend.
       smokeFor =
-        pkgs: backend:
+        pkgs: backend: interactive:
         pkgs.callPackage ./nix/smoke.nix {
           inherit backend;
-          guest = guestFor pkgs backend;
+          guest = guestFor pkgs backend interactive;
           provenance = {
             source_revision = self.rev or self.dirtyRev or null;
             source_path = toString self.outPath;
@@ -86,16 +86,17 @@
       packages = eachSystem (pkgs: {
         default = pkgs.cas;
         inherit (pkgs) cas;
-        vm-smoke = smokeFor pkgs "raw";
-        daemon-smoke = smokeFor pkgs "daemon";
-        staging-smoke = smokeFor pkgs "staging";
-        test-guest = (guestFor pkgs "raw").config.system.build.vm;
+        vm-smoke = smokeFor pkgs "raw" false;
+        daemon-smoke = smokeFor pkgs "daemon" false;
+        staging-smoke = smokeFor pkgs "staging" false;
+        dev-vm = smokeFor pkgs "staging" true;
+        test-guest = (guestFor pkgs "raw" false).config.system.build.vm;
       });
 
       apps = eachSystem (pkgs: {
         vm-smoke = {
           type = "app";
-          program = lib.getExe (smokeFor pkgs "raw");
+          program = lib.getExe (smokeFor pkgs "raw" false);
           meta.description = "Run a KVM guest write/readback check on a new raw disk";
         };
       });
@@ -107,6 +108,9 @@
             just
             qemu_kvm
             fio
+            openssh
+            iproute2
+            jq
             xfsprogs
             util-linux
             nixfmt

@@ -10,6 +10,7 @@
   writeText,
   util-linux,
   git,
+  openssh,
   qemu_kvm,
   fio,
   cas,
@@ -23,12 +24,13 @@
 }:
 let
   vm = guest.config.system.build.vm;
+  inherit (guest.config.cas.guest) interactive;
 
   # Read by `cas-harness vm` (crates/harnesses/src/evidence.rs) and copied into
   # each result directory as build.json. Keys are part of that contract.
   buildInfo = writeText "cas-vm-build.json" (
     builtins.toJSON {
-      inherit backend;
+      inherit backend interactive;
       inherit (guest.config.nixpkgs.hostPlatform) system;
       inherit (provenance) source_revision source_path nixpkgs_revision;
       vm = toString vm;
@@ -42,11 +44,12 @@ let
   );
 in
 writeShellApplication {
-  name = "cas-vm-smoke";
+  name = if interactive then "cas-dev-vm" else "cas-vm-smoke";
   runtimeInputs = [
     util-linux
     git
-  ];
+  ]
+  ++ lib.optional interactive openssh;
   text = ''
     exec ${lib.getExe' cas "cas-harness"} vm \
       --vm ${vm}/bin/run-cas-guest-vm \
@@ -54,5 +57,9 @@ writeShellApplication {
       --lock ${provenance.lock} \
       "$@"
   '';
-  meta.description = "Run the KVM guest fio check against the ${backend} block backend";
+  meta.description =
+    if interactive then
+      "Boot a CAS development guest with SSH"
+    else
+      "Run the KVM guest fio check against the ${backend} block backend";
 }
