@@ -31,35 +31,7 @@ while read -r date sha; do
   curl --fail --location --retry 2 --max-time 30 --output "$date.manifest" "$url/noble-server-cloudimg-arm64.manifest"
   qemu-img info --output=json "$date.qcow2" > "$date.qcow2.json"
   qemu-img convert -f qcow2 -O raw "$date.qcow2" "$date.raw"
-  sfdisk --json "$date.raw" > "$date.partitions.json"
-  # Select the one Linux filesystem partition; omit EFI and boot partitions.
-  read -r offset length < <(jq -er '
-    .partitiontable | .sectorsize as $sector |
-    [.partitions[] | select(.type == "0FC63DAF-8483-4772-8E79-3D69D8477DE4")] |
-    if length == 1 then .[0] | [.start * $sector, .size * $sector] | @tsv
-    else error("expected one Linux root partition") end
-  ' "$date.partitions.json")
-  dd if="$date.raw" of="$date.root.raw" bs=4M iflag=skip_bytes,count_bytes \
-    skip="$offset" count="$length" conv=sparse status=none
-  # Read the original guest allocation bitmap. Do not use e2image here: it
-  # regenerates backup metadata, changing some allocated bytes.
-  dumpe2fs "$date.root.raw" > "$date.allocation.txt" 2> "$date.dumpe2fs.log"
-  block_size=$(awk '/^Block size:/ {print $3}' "$date.allocation.txt")
-  block_count=$(awk '/^Block count:/ {print $3}' "$date.allocation.txt")
-  [[ "$block_size" == 4096 && "$block_count" =~ ^[0-9]+$ ]]
-  truncate --size="$((block_count * block_size))" "$date.root.raw"
-  awk '/^  Free blocks:/ {
-    sub(/^  Free blocks: */, ""); gsub(/,/, "");
-    for (i=1; i<=NF; i++) {
-      split($i, bounds, "-"); start=bounds[1]; end=(bounds[2] == "" ? start : bounds[2]);
-      printf "%.0f %.0f\n", start * 4096, (end - start + 1) * 4096;
-    }
-  }' "$date.allocation.txt" > "$date.free-ranges.txt"
-  while read -r offset length; do
-    fallocate --punch-hole --offset "$offset" --length "$length" "$date.root.raw"
-  done < "$date.free-ranges.txt"
-  dumpe2fs -h "$date.root.raw" > "$date.ext4.txt" 2>&1
-  e2fsck -fn "$date.root.raw" > "$date.fsck.txt" 2>&1
+  cas-normalize-root "$date.raw" "$date"
   chmod a-w "$date.qcow2" "$date.raw" "$date.root.raw"
 done <<'IMAGES'
 20260705 7df0201546f75b8bcc1044594c806c35749421ad3c9bc1be2a3ab806cfae39cc

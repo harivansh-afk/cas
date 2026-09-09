@@ -21,6 +21,20 @@ pub struct Census {
     pub fleet_unique_bytes: u64,
     pub within_image_duplicate_bytes: u64,
     pub cross_image_duplicate_bytes: u64,
+    /// Treat the first input as a held-out ancestor; count only the other images.
+    pub descendants: Descendants,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct Descendants {
+    pub independently_unique_bytes: u64,
+    pub fleet_unique_bytes: u64,
+    /// Distinct descendant content also present anywhere in the ancestor.
+    pub base_present_unique_bytes: u64,
+    /// Redundant copies across descendants whose content already existed in the ancestor.
+    pub base_content_duplicate_bytes: u64,
+    /// Redundant copies across descendants whose content was absent from the ancestor.
+    pub novel_content_duplicate_bytes: u64,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -53,6 +67,7 @@ pub fn scan(paths: &[PathBuf], chunk_bytes: usize) -> io::Result<Census> {
     let mut base_offsets = Vec::new();
     let mut images = Vec::new();
     let mut fleet_unique_bytes = 0;
+    let mut descendants = Descendants::default();
     for (index, path) in paths.iter().enumerate() {
         let mut input = BufReader::with_capacity(1024 * 1024, File::open(path)?);
         if !input.get_ref().metadata()?.is_file() {
@@ -88,23 +103,40 @@ pub fn scan(paths: &[PathBuf], chunk_bytes: usize) -> io::Result<Census> {
             if let Some(hash) = hash {
                 let len = len as u64;
                 image.nonzero_chunk_bytes += len;
-                if local.insert(hash) {
+                let locally_new = local.insert(hash);
+                if locally_new {
                     image.unique_bytes += len;
                 }
-                match seen.get(&hash) {
-                    Some(&0) if index > 0 => {
+                match seen.get_mut(&hash) {
+                    Some((first, last)) if *first == 0 && index > 0 => {
+                        if *last == 0 {
+                            descendants.fleet_unique_bytes += len;
+                            descendants.base_present_unique_bytes += len;
+                        } else if locally_new {
+                            descendants.base_content_duplicate_bytes += len;
+                        }
+                        *last = index;
                         if base_offsets.get(offset) == Some(&Some(hash)) {
                             image.base_in_place_bytes += len;
                         } else {
                             image.base_elsewhere_bytes += len;
                         }
                     }
-                    Some(&first) if first < index => image.prior_image_only_bytes += len,
+                    Some((first, last)) if *first < index => {
+                        image.prior_image_only_bytes += len;
+                        if locally_new {
+                            descendants.novel_content_duplicate_bytes += len;
+                        }
+                        *last = index;
+                    }
                     Some(_) => image.within_image_only_bytes += len,
                     None => {
-                        seen.insert(hash, index);
+                        seen.insert(hash, (index, index));
                         image.new_unique_bytes += len;
                         fleet_unique_bytes += len;
+                        if index > 0 {
+                            descendants.fleet_unique_bytes += len;
+                        }
                     }
                 }
             } else {
@@ -123,6 +155,9 @@ pub fn scan(paths: &[PathBuf], chunk_bytes: usize) -> io::Result<Census> {
             )));
         }
         image.blake3 = digest.finalize().to_hex().to_string();
+        if index > 0 {
+            descendants.independently_unique_bytes += image.unique_bytes;
+        }
         images.push(image);
     }
     let nonzero_chunk_bytes = images
@@ -138,6 +173,7 @@ pub fn scan(paths: &[PathBuf], chunk_bytes: usize) -> io::Result<Census> {
         fleet_unique_bytes,
         within_image_duplicate_bytes: nonzero_chunk_bytes - independently_unique_bytes,
         cross_image_duplicate_bytes: independently_unique_bytes - fleet_unique_bytes,
+        descendants,
     })
 }
 
@@ -164,6 +200,48 @@ mod tests {
         let bytes: Vec<_> = blocks.iter().flat_map(|&byte| [byte; 4096]).collect();
         std::fs::write(&path, bytes).unwrap();
         path
+    }
+
+    #[test]
+    fn ancestor_is_held_out_and_novel_sharing_excludes_local_repeats() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = fixture(dir.path(), "base", &[1, 2]);
+        let first = fixture(dir.path(), "first", &[1, 3, 3]);
+        let second = fixture(dir.path(), "second", &[1, 3, 4]);
+        let result = scan(&[base.clone(), first.clone(), second.clone()], 4096).unwrap();
+        let d = result.descendants;
+        assert_eq!(d.independently_unique_bytes, 5 * 4096);
+        assert_eq!(d.fleet_unique_bytes, 3 * 4096);
+        assert_eq!(d.base_present_unique_bytes, 4096);
+        assert_eq!(d.base_content_duplicate_bytes, 4096);
+        assert_eq!(d.novel_content_duplicate_bytes, 4096);
+        let reversed = scan(&[base, second, first], 4096).unwrap().descendants;
+        assert_eq!(d.fleet_unique_bytes, reversed.fleet_unique_bytes);
+        assert_eq!(
+            d.base_content_duplicate_bytes,
+            reversed.base_content_duplicate_bytes
+        );
+        assert_eq!(
+            d.novel_content_duplicate_bytes,
+            reversed.novel_content_duplicate_bytes
+        );
+    }
+
+    #[test]
+    fn clone_fleet_has_only_base_duplicates_and_unused_base_content_is_excluded() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = fixture(dir.path(), "base", &[1, 2, 3, 4]);
+        for size in CHUNK_SIZES {
+            let d = scan(&vec![base.clone(); 4], size).unwrap().descendants;
+            assert_eq!(d.independently_unique_bytes, 3 * 16384);
+            assert_eq!(d.fleet_unique_bytes, 16384);
+            assert_eq!(d.base_content_duplicate_bytes, 2 * 16384);
+            assert_eq!(d.novel_content_duplicate_bytes, 0);
+            let empty = fixture(dir.path(), "empty", &[]);
+            let d = scan(&[base.clone(), empty], size).unwrap().descendants;
+            assert_eq!(d.fleet_unique_bytes, 0);
+            assert_eq!(d.base_present_unique_bytes, 0);
+        }
     }
 
     #[test]

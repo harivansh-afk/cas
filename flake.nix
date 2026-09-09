@@ -90,7 +90,8 @@
         daemon-smoke = smokeFor pkgs "daemon" false;
         staging-smoke = smokeFor pkgs "staging" false;
         dev-vm = smokeFor pkgs "staging" true;
-        census-pilot = pkgs.callPackage ./nix/census.nix { };
+        census-pilot = (pkgs.callPackage ./nix/census.nix { }).pilot;
+        census-fleet = (pkgs.callPackage ./nix/census.nix { }).fleet;
         test-guest = (guestFor pkgs "raw" false).config.system.build.vm;
       });
 
@@ -149,6 +150,7 @@
       checks = eachSystem (pkgs: {
         inherit (pkgs) cas;
         census-pilot = self.packages.${pkgs.stdenv.hostPlatform.system}.census-pilot;
+        census-fleet = self.packages.${pkgs.stdenv.hostPlatform.system}.census-fleet;
         host-config = import ./nix/checks/host-config.nix {
           inherit nixpkgs pkgs;
           inherit (self) nixosModules;
