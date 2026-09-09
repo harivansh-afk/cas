@@ -23,6 +23,7 @@ enum Phase {
 }
 
 #[derive(Parser)]
+#[command(override_usage = "cas-census-fleet --image INPUT --output OUTPUT [--phase PHASE]")]
 pub struct Args {
     #[arg(long)]
     output: PathBuf,
