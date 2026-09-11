@@ -1,5 +1,6 @@
 //! Physical reservations and ordered publication, shared by sync and async IO.
 use std::fs::File;
+use std::io;
 use std::sync::Arc;
 
 use super::{Error, Log, Result, Segment, format};
@@ -23,6 +24,12 @@ impl Submission {
     }
     pub fn offset(&self) -> u64 {
         self.offset
+    }
+
+    /// Perform the full aligned write without publishing or synchronizing it.
+    /// A short write fails; it is never retried as an unaligned suffix.
+    pub fn write(&self) -> io::Result<()> {
+        crate::direct::write_bytes(self.file(), self.batch.bytes(), self.offset)
     }
     pub fn into_batch(self) -> Batch {
         self.batch

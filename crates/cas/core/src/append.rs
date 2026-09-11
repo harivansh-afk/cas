@@ -255,11 +255,7 @@ impl Log {
             result => result?,
         }
         let submission = self.prepare_append(builder)?;
-        let result = direct::write_bytes(
-            submission.file(),
-            submission.batch().bytes(),
-            submission.offset(),
-        );
+        let result = submission.write();
         self.fail_on_io(result)?;
         self.publish_append(&submission)?;
         Ok(submission.into_batch())
@@ -274,8 +270,7 @@ impl Log {
             return Ok(self.durable);
         }
         let fence = self.prepare_fence()?;
-        let result = direct::write_bytes(fence.file(), fence.batch().bytes(), fence.offset())
-            .and_then(|()| direct::sync_data(fence.file()));
+        let result = fence.write().and_then(|()| direct::sync_data(fence.file()));
         self.fail_on_io(result)?;
         self.complete_sync(&fence)
     }

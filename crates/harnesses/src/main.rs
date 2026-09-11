@@ -2,6 +2,7 @@
 mod evidence;
 mod fleet;
 mod host;
+mod persistence;
 mod process;
 mod source;
 mod suite;
@@ -26,6 +27,13 @@ enum Command {
     Suite(suite::Args),
     /// Recheck a retained suite, including every evidence hash and required scenario.
     VerifySuite {
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Recover real WAL bytes under deterministic unsynced-tail persistence schedules.
+    Persistence(persistence::Args),
+    /// Recheck every mandatory persistence case and retained artifact.
+    VerifyPersistence {
         #[arg(long)]
         output: PathBuf,
     },
@@ -56,6 +64,8 @@ fn run() -> io::Result<()> {
     match args.command {
         Command::Suite(args) => suite::run(args),
         Command::VerifySuite { output } => suite::verify(&output),
+        Command::Persistence(args) => persistence::run(args),
+        Command::VerifyPersistence { output } => persistence::verify(&output),
         Command::Fleet(args) => fleet::run(args),
         Command::Vm(args) => vm::run(args),
         Command::Preflight {
