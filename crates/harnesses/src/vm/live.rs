@@ -13,6 +13,62 @@ struct Pause {
     durable: Option<u64>,
 }
 
+pub(super) fn validate_options(args: &Args, backend: Backend) -> io::Result<()> {
+    let reference_point = matches!(
+        args.crash_at.as_str(),
+        "before-submit" | "after-storage" | "after-status" | "after-used"
+    );
+    if args.live_recovery && !reference_point && backend != Backend::LocalAsync {
+        return Err(io::Error::other("this crash point requires local-async"));
+    }
+    if args.replay_crash_at.is_some()
+        && (backend != Backend::LocalAsync || args.crash_at != "before-submit")
+    {
+        return Err(io::Error::other(
+            "interrupted replay requires local-async and --crash-at before-submit",
+        ));
+    }
+    Ok(())
+}
+
+fn wait_pause(
+    marker: &Path,
+    expected_point: &str,
+    writes: u64,
+    guest: &mut ManagedChild,
+    daemon: &mut ManagedChild,
+    deadline: Instant,
+) -> io::Result<Pause> {
+    while !marker.try_exists()? {
+        process::check_interrupt()?;
+        if guest.poll()?.is_some() || daemon.poll()?.is_some() || Instant::now() >= deadline {
+            return Err(io::Error::other(
+                "live recovery did not reach its requested boundary",
+            ));
+        }
+        thread::sleep(process::POLL);
+    }
+    let pause: Pause = read_json(marker)?;
+    if pause.schema_version != 1 || pause.point != expected_point || pause.writes != writes {
+        return Err(io::Error::other("invalid live recovery pause marker"));
+    }
+    Ok(pause)
+}
+
+fn kill(daemon: &mut ManagedChild, guest: &mut ManagedChild, socket: &Path) -> io::Result<i32> {
+    if guest.poll()?.is_some() {
+        return Err(io::Error::other("guest exited before backend kill"));
+    }
+    daemon.signal(libc::SIGKILL)?;
+    let killed = process::exit_code(daemon.wait(DAEMON_SHUTDOWN)?);
+    if killed != -libc::SIGKILL {
+        return Err(io::Error::other("live recovery did not kill its daemon"));
+    }
+    // The private socket's owning process has been reaped.
+    fs::remove_file(socket)?;
+    Ok(killed)
+}
+
 pub(super) fn execute(
     args: &Args,
     build: &Build,
@@ -37,90 +93,104 @@ pub(super) fn execute(
     let mut env = environment(image, &results, &temporary);
     env.insert("CAS_VHOST_SOCKET".into(), socket.clone().into());
     env.insert("CAS_RECONNECT_MS".into(), "100".into());
-    let spawn = |first: bool| -> io::Result<ManagedChild> {
-        let mut command = logged_command(
-            program,
-            output,
-            if first {
-                "daemon-before.log"
-            } else {
-                "daemon-after.log"
-            },
-            &env,
-        )?;
-        command
-            .arg("--socket")
-            .arg(&socket)
-            .arg("--image")
-            .arg(image)
-            .args(["--backend", build.backend.name(), "--restartable"])
-            .arg("--report")
-            .arg(output.join(if first {
-                "daemon-before.json"
-            } else {
-                "daemon-after.json"
-            }));
-        if first {
+    let deadline = Instant::now() + Duration::from_secs(args.timeout);
+    let spawn =
+        |name: &str, create: bool, pause: Option<(&str, u64, &Path)>| -> io::Result<ManagedChild> {
+            let mut command = logged_command(program, output, &format!("{name}.log"), &env)?;
             command
-                .arg("--create-bytes")
-                .arg(DISK_BYTES.to_string())
-                .arg("--pause-at")
-                .arg(&args.crash_at)
-                .args(["--pause-after", "32"])
-                .arg("--pause-marker")
-                .arg(&marker);
-        }
-        let mut child = ManagedChild::spawn(&mut command)?;
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !socket.metadata().is_ok_and(|m| m.file_type().is_socket()) {
-            process::check_interrupt()?;
-            if child.poll()?.is_some() || Instant::now() >= deadline {
-                return Err(io::Error::other("live daemon did not open its socket"));
+                .arg("--socket")
+                .arg(&socket)
+                .arg("--image")
+                .arg(image)
+                .args(["--backend", build.backend.name(), "--restartable"])
+                .arg("--report")
+                .arg(output.join(format!("{name}.json")));
+            if create {
+                command.arg("--create-bytes").arg(DISK_BYTES.to_string());
             }
-            thread::sleep(process::POLL);
-        }
-        Ok(child)
-    };
-    let mut daemon = spawn(true)?;
+            if let Some((point, after, marker)) = pause {
+                command
+                    .arg("--pause-at")
+                    .arg(point)
+                    .arg("--pause-after")
+                    .arg(after.to_string())
+                    .arg("--pause-marker")
+                    .arg(marker);
+            }
+            let mut child = ManagedChild::spawn(&mut command)?;
+            let startup = deadline.min(Instant::now() + Duration::from_secs(10));
+            while !socket.metadata().is_ok_and(|m| m.file_type().is_socket()) {
+                process::check_interrupt()?;
+                if child.poll()?.is_some() || Instant::now() >= startup {
+                    return Err(io::Error::other("live daemon did not open its socket"));
+                }
+                thread::sleep(process::POLL);
+            }
+            Ok(child)
+        };
+    let mut daemon = spawn("daemon-before", true, Some((&args.crash_at, 32, &marker)))?;
     evidence.launcher = vec![args.vm.clone()];
     let mut guest =
         ManagedChild::spawn(&mut logged_command(&args.vm, output, "console.log", &env)?)?;
     record_qemu(args, &mut guest, output)?;
-    let deadline = Instant::now() + Duration::from_secs(args.timeout);
-    while !marker.try_exists()? {
-        process::check_interrupt()?;
-        if guest.poll()?.is_some() || daemon.poll()?.is_some() || Instant::now() >= deadline {
-            return Err(io::Error::other(
-                "live recovery did not reach the requested write boundary",
-            ));
-        }
-        thread::sleep(process::POLL);
-    }
-    let pause: Pause = read_json(&marker)?;
-    if pause.schema_version != 1 || pause.point != args.crash_at || pause.writes != 32 {
-        return Err(io::Error::other("invalid live recovery pause marker"));
-    }
+    let pause = wait_pause(
+        &marker,
+        &args.crash_at,
+        32,
+        &mut guest,
+        &mut daemon,
+        deadline,
+    )?;
     if build.backend == Backend::LocalAsync {
         let (Some(p), Some(e)) = (pause.published, pause.durable) else {
             return Err(io::Error::other("missing pre-crash P/E evidence"));
         };
-        if e > p || (args.crash_at != "before-submit" && (p < 32 || p == e)) {
+        let published_cut = matches!(
+            args.crash_at.as_str(),
+            "after-storage" | "after-status" | "after-used" | "before-sync" | "after-sync"
+        );
+        if e > p || (published_cut && (p < 32 || p == e)) {
             return Err(io::Error::other(
                 "concurrent crash did not exercise a published unsynced prefix",
             ));
         }
     }
-    if guest.poll()?.is_some() {
-        return Err(io::Error::other("guest exited before backend kill"));
+    let killed = kill(&mut daemon, &mut guest, &socket)?;
+    let mut interrupted = Vec::new();
+    let mut previous_p = pause.published.unwrap_or(0);
+    if let Some(point) = &args.replay_crash_at {
+        for attempt in 1..=args.replay_restarts {
+            let marker = output.join(format!("pause-replay-{attempt}.json"));
+            let after = if point == "after-replay-append" {
+                1
+            } else {
+                32
+            };
+            daemon = spawn(
+                &format!("daemon-replay-{attempt}"),
+                false,
+                Some((point, after, &marker)),
+            )?;
+            let replay_pause =
+                wait_pause(&marker, point, after, &mut guest, &mut daemon, deadline)?;
+            let (Some(p), Some(e)) = (replay_pause.published, replay_pause.durable) else {
+                return Err(io::Error::other("missing interrupted-replay P/E evidence"));
+            };
+            if p < previous_p
+                || e > p
+                || (point == "after-replay-append" && p == previous_p)
+                || (point == "after-recovery-fence" && e != p)
+            {
+                return Err(io::Error::other(
+                    "interrupted replay violated its prefix boundary",
+                ));
+            }
+            let killed = kill(&mut daemon, &mut guest, &socket)?;
+            interrupted.push(serde_json::json!({"attempt":attempt,"point":point,"killed_daemon_exit":killed,"published":p,"durable":e}));
+            previous_p = p;
+        }
     }
-    daemon.signal(libc::SIGKILL)?;
-    let killed = process::exit_code(daemon.wait(DAEMON_SHUTDOWN)?);
-    if killed != -libc::SIGKILL {
-        return Err(io::Error::other("live recovery did not kill its daemon"));
-    }
-    // This socket lives in our private directory and its owner has been reaped.
-    fs::remove_file(&socket)?;
-    daemon = spawn(false)?;
+    daemon = spawn("daemon-after", false, None)?;
     if guest.poll()?.is_some() {
         return Err(io::Error::other("guest exited during backend replacement"));
     }
@@ -163,6 +233,7 @@ pub(super) fn execute(
         "crash_at": args.crash_at, "write_number": 32, "killed_daemon_exit": killed,
         "guest_boot_id": before.trim(), "guest_reboots": 0,
         "published_before_kill": pause.published, "durable_before_kill": pause.durable,
+        "interrupted_replays": interrupted,
         "mode": if build.backend == Backend::LocalAsync { "concurrent_retained_inflight" } else { "serial_write_through" },
     }));
     Ok(())

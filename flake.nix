@@ -90,6 +90,7 @@
           daemon = smokeFor pkgs "daemon" false;
           staging = smokeFor pkgs "staging" false;
           local = smokeFor pkgs "local" false;
+          async = smokeFor pkgs "local-async" false;
         in
         {
           default = pkgs.cas;
@@ -98,7 +99,7 @@
           daemon-smoke = daemon;
           staging-smoke = staging;
           local-smoke = local;
-          async-smoke = smokeFor pkgs "local-async" false;
+          async-smoke = async;
           checkpoints = pkgs.callPackage ./nix/checkpoints.nix {
             wrappers = {
               inherit
@@ -106,6 +107,7 @@
                 daemon
                 staging
                 local
+                async
                 ;
             };
             provenance = {

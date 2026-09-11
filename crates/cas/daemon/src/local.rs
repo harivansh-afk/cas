@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -181,11 +181,13 @@ pub struct Shared {
     metrics: Mutex<Metrics>,
     final_status: Mutex<append::Status>,
     pub health: Health,
+    pub injection: OnceLock<crate::fault::Injection>,
 }
 
 impl Shared {
     pub fn new(status: append::Status) -> Arc<Self> {
         Arc::new(Self {
+            injection: OnceLock::new(),
             pools: Pools::new(),
             metrics: Mutex::new(Metrics::default()),
             final_status: Mutex::new(status),
@@ -194,6 +196,18 @@ impl Shared {
                 ..ImageState::default()
             })),
         })
+    }
+
+    pub fn hit(&self, point: crate::fault::Point, count: u64) -> io::Result<()> {
+        let Some(injection) = self.injection.get() else {
+            return Ok(());
+        };
+        let snapshot = self
+            .health
+            .lock()
+            .map_err(|_| io::Error::other("completion gate poisoned"))?
+            .snapshot();
+        injection.hit(point, Some(count), snapshot)
     }
 
     pub fn reserve(&self, kind: Kind) -> Option<Permit> {

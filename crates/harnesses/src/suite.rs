@@ -9,29 +9,14 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{evidence, host, process, source};
+use crate::{evidence, host, persistence, process, source};
 
-const REQUIRED: [&str; 14] = [
-    "rust-format",
-    "clippy",
-    "rust-tests",
-    "diff-check",
-    "nix-format",
-    "nix-check",
-    "raw-qemu",
-    "raw-daemon",
-    "staging",
-    "fresh-recovery",
-    "live-before-submit",
-    "live-after-storage",
-    "live-after-status",
-    "live-after-used",
-];
+mod scenarios;
 
 #[derive(clap::Args)]
 pub struct Args {
-    /// Run all reference checks and, for C2, the packed synchronous backend.
-    #[arg(long, default_value = "C2", value_parser = ["C1", "C2"])]
+    /// Run source-bound reference, packed (C2), or concurrent recovery (C3) checks.
+    #[arg(long, default_value = "C2", value_parser = ["C1", "C2", "C3"])]
     checkpoint: String,
     /// Checkout whose exact contents must match the Nix build.
     #[arg(long, default_value = ".")]
@@ -146,11 +131,33 @@ fn validate_vm(directory: &Path, source: &Path) -> io::Result<Vec<String>> {
     ])
 }
 
+enum Validation<'a> {
+    Command,
+    Guest(&'a Path),
+    Persistence(&'a Path),
+}
+
+fn validate_model(directory: &Path, executable: &Path) -> io::Result<Vec<String>> {
+    let run = directory.join("run");
+    persistence::verify(&run)?;
+    let report: Value = evidence::read_json(&run.join("model.json"))?;
+    let actual: source::Entry = serde_json::from_value(report["binary"].clone())?;
+    if actual != source::entry(executable)? {
+        return Err(io::Error::other(
+            "persistence model used the wrong executable",
+        ));
+    }
+    Ok(vec![
+        "all persistence cases and negative controls passed".into(),
+        "model executable matched the build".into(),
+    ])
+}
+
 fn scenario(
     id: &str,
     command: &mut Command,
     output: &Path,
-    build_source: Option<&Path>,
+    validation: Validation<'_>,
     report: &mut Report,
 ) -> io::Result<()> {
     process::check_interrupt()?;
@@ -161,10 +168,12 @@ fn scenario(
         Err(io::Error::other(
             "scenario command failed; see retained logs",
         ))
-    } else if let Some(source) = build_source {
-        validate_vm(&directory, source)
     } else {
-        Ok(vec!["command exited successfully".into()])
+        match validation {
+            Validation::Command => Ok(vec!["command exited successfully".into()]),
+            Validation::Guest(source) => validate_vm(&directory, source),
+            Validation::Persistence(executable) => validate_model(&directory, executable),
+        }
     };
     let (passed, assertions, error) = match validation {
         Ok(assertions) => (true, assertions, None),
@@ -238,7 +247,8 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
             "guest_io": "direct fio; workload contents and seeds retained under source/crates/harnesses/fio",
             "host_payload_io": "O_DIRECT", "durability": "local; serial live reference flushes every write",
             "host_buffer_alignment_bytes":4096, "logical_block_bytes":4096, "virtio_sector_bytes":512,
-            "queue_count":1, "queue_entries":128,
+            "reference_queues":{"count":1, "entries":128},
+            "concurrent_queues":(args.checkpoint == "C3").then(|| json!({"count":4, "entries":256})),
             "scenario_deadline_seconds":115, "guest_boot_deadline_seconds":90,
             "cargo_features":"workspace defaults; resolved features in cargo-graph/stdout.log",
             "paper_gates":[],
@@ -283,69 +293,12 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
     }
     evidence::write_json(&output.join("executables.json"), &executables)?;
     fs::create_dir(output.join("scenarios"))?;
-    for (id, argv) in [
-        (
-            "rust-format",
-            vec!["cargo", "fmt", "--all", "--", "--check"],
-        ),
-        (
-            "clippy",
-            vec![
-                "cargo",
-                "clippy",
-                "--workspace",
-                "--all-targets",
-                "--locked",
-                "--",
-                "-D",
-                "warnings",
-            ],
-        ),
-        (
-            "rust-tests",
-            vec!["cargo", "test", "--workspace", "--locked"],
-        ),
-        ("diff-check", vec!["git", "diff", "HEAD", "--check"]),
-        ("nix-format", vec!["nix", "fmt", "--", "--ci"]),
-        ("nix-check", vec!["nix", "flake", "check"]),
-    ] {
+    for (id, argv) in scenarios::CHECKS {
         let mut command = Command::new(argv[0]);
         command.args(&argv[1..]).current_dir(&checkout);
-        scenario(id, &mut command, output, None, report)?;
+        scenario(id, &mut command, output, Validation::Command, report)?;
     }
-    let mut vm_scenarios = vec![
-        ("raw-qemu", "raw", vec![]),
-        ("raw-daemon", "daemon", vec![]),
-        ("staging", "staging", vec![]),
-        ("fresh-recovery", "staging", vec!["--recovery"]),
-        (
-            "live-before-submit",
-            "staging",
-            vec!["--live-recovery", "--crash-at", "before-submit"],
-        ),
-        (
-            "live-after-storage",
-            "staging",
-            vec!["--live-recovery", "--crash-at", "after-storage"],
-        ),
-        (
-            "live-after-status",
-            "staging",
-            vec!["--live-recovery", "--crash-at", "after-status"],
-        ),
-        (
-            "live-after-used",
-            "staging",
-            vec!["--live-recovery", "--crash-at", "after-used"],
-        ),
-    ];
-    if args.checkpoint == "C2" {
-        vm_scenarios.extend([
-            ("local-sync", "local", vec![]),
-            ("local-fresh-recovery", "local", vec!["--recovery"]),
-        ]);
-    }
-    for (id, wrapper, extra) in vm_scenarios {
+    for (id, wrapper, extra) in scenarios::vms(&args.checkpoint) {
         let mut command = Command::new(require_wrapper(&build, wrapper)?.join("bin/cas-vm-smoke"));
         command
             .args(extra)
@@ -354,7 +307,28 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
             .arg("--expect-source")
             .arg(&build.source_path)
             .current_dir(&checkout);
-        scenario(id, &mut command, output, Some(&build.source_path), report)?;
+        scenario(
+            id,
+            &mut command,
+            output,
+            Validation::Guest(&build.source_path),
+            report,
+        )?;
+    }
+    if args.checkpoint == "C3" {
+        let mut command = Command::new(&build.harness);
+        command
+            .arg("persistence")
+            .arg("--output")
+            .arg(output.join("scenarios/persistence-model/run"))
+            .current_dir(&checkout);
+        scenario(
+            "persistence-model",
+            &mut command,
+            output,
+            Validation::Persistence(&build.harness),
+            report,
+        )?;
     }
     source::compare(
         &inputs,
@@ -365,12 +339,9 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
 }
 
 fn validate_results(report: &Report) -> io::Result<()> {
-    let mut required = REQUIRED.to_vec();
-    if report.checkpoint == "C2" {
-        required.extend(["local-sync", "local-fresh-recovery"]);
-    }
+    let required = scenarios::required(&report.checkpoint);
     if report.schema_version != 1
-        || !matches!(report.checkpoint.as_str(), "C1" | "C2")
+        || !matches!(report.checkpoint.as_str(), "C1" | "C2" | "C3")
         || report.scenarios.len() != required.len()
     {
         return Err(io::Error::other(
@@ -450,12 +421,35 @@ pub fn verify(output: &Path) -> io::Result<()> {
             )));
         }
     }
+    if report.checkpoint == "C3" {
+        persistence::verify(&output.join("scenarios/persistence-model/run"))?;
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn c3_requires_every_concurrent_and_persistence_case() {
+        let mut report = passing_report();
+        report.checkpoint = "C3".into();
+        assert!(validate_results(&report).is_err());
+        for id in scenarios::required("C3") {
+            let scenario =
+                serde_json::from_value(serde_json::to_value(&report.scenarios["staging"]).unwrap())
+                    .unwrap();
+            report.scenarios.insert(id.into(), scenario);
+        }
+        assert_eq!(report.scenarios.len(), 32);
+        validate_results(&report).unwrap();
+        for id in scenarios::required("C3") {
+            let scenario = report.scenarios.remove(id).unwrap();
+            assert!(validate_results(&report).is_err(), "missing {id}");
+            report.scenarios.insert(id.into(), scenario);
+        }
+    }
 
     #[test]
     fn c2_requires_both_local_guest_scenarios() {
@@ -482,7 +476,7 @@ mod tests {
             ended_at_utc: String::new(),
             artifacts: BTreeMap::new(),
             error: None,
-            scenarios: REQUIRED
+            scenarios: scenarios::required("C1")
                 .into_iter()
                 .map(|id| {
                     (
@@ -530,7 +524,7 @@ mod tests {
     fn retained_evidence_cannot_disappear_after_success() {
         let directory = tempfile::tempdir().unwrap();
         let mut report = passing_report();
-        for id in REQUIRED {
+        for id in scenarios::required("C1") {
             let scenario = directory.path().join("scenarios").join(id);
             fs::create_dir_all(&scenario).unwrap();
             for file in ["stdout.log", "stderr.log"] {

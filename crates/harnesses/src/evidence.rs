@@ -266,6 +266,7 @@ impl LocalReport {
             || !inflight.active
             || inflight.saved_p > inflight.recovered_p
             || inflight.recovered_p > self.status.published
+            || (daemon.write_bytes == 0 && inflight.recovered_p != self.status.published)
             || inflight.replayed_requests != u64::from(daemon.restored_pending)
             || inflight.replayed_mutations > inflight.replayed_requests
             || inflight.replay_copy_bytes != inflight.replayed_mutations * BLOCK_SIZE as u64
@@ -342,7 +343,6 @@ impl DaemonReport {
                 || self.restored_used.is_none()
                 || self.restored_pending > 136
                 || self.read_bytes < LIVE_BYTES
-                || self.write_bytes == 0
                 || self.flushes == 0
             {
                 return Err(io::Error::other(
@@ -577,6 +577,37 @@ mod tests {
             *broken.pointer_mut(pointer).unwrap() = invalid;
             assert!(verify(broken).is_err(), "{pointer}");
         }
+    }
+
+    #[test]
+    fn fully_recovered_workload_can_finish_without_reissuing_writes() {
+        let mut value = local_daemon(Backend::LocalAsync, 0);
+        let prefix = LIVE_BYTES / BLOCK_SIZE as u64;
+        value["restartable"] = json!(true);
+        value["queues"] = json!(4);
+        value["queue_requests"] = json!([100, 100, 100, 100]);
+        value["read_bytes"] = json!(LIVE_BYTES);
+        value["restored_used"] = json!(0);
+        value["restored_pending"] = json!(4);
+        value["inflight"] = json!({"active":true, "replayed_requests":4,"replayed_mutations":0,
+            "replay_copy_bytes":0,"replayed_write_bytes":0,"saved_p":prefix,"recovered_p":prefix});
+        value["local"]["status"]["published"] = json!(prefix);
+        value["local"]["status"]["durable"] = json!(prefix);
+        value["local"]["metrics"]["io_queued"] = json!(1);
+        value["local"]["metrics"]["io_completed"] = json!(1);
+        value["local"]["metrics"]["peak_awaiting_cqe"] = json!(1);
+        let verify = |value| {
+            serde_json::from_value::<DaemonReport>(value)
+                .unwrap()
+                .verify_live(Backend::LocalAsync, "after-sync")
+        };
+        verify(value.clone()).unwrap();
+        let mut incomplete = value.clone();
+        incomplete["inflight"]["saved_p"] = json!(prefix - 1);
+        incomplete["inflight"]["recovered_p"] = json!(prefix - 1);
+        assert!(verify(incomplete).is_err());
+        value["read_bytes"] = json!(LIVE_BYTES - 1);
+        assert!(verify(value).is_err());
     }
 
     fn completion() -> Value {

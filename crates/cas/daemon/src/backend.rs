@@ -299,6 +299,19 @@ impl Backend {
             BackendKind::LocalAsync if live => Storage::local_live(path, create_bytes)?,
             BackendKind::LocalAsync => Storage::local_async(path, create_bytes, &completion_event)?,
         };
+        if let Some(injection) = fault.injection() {
+            let shared = match &storage {
+                Storage::Local(local) => Some(&local.shared),
+                Storage::Opening(opening) => Some(&opening.shared),
+                _ => None,
+            };
+            if let Some(shared) = shared {
+                shared
+                    .injection
+                    .set(injection)
+                    .map_err(|_| io::Error::other("fault injection already installed"))?;
+            }
+        }
         let recovery_deadline = match &storage {
             Storage::Opening(opening) => Some(opening.deadline),
             _ => None,
@@ -761,16 +774,23 @@ impl Backend {
             }
             let rejected = matches!(admission, Admission::Rejected);
             self.waiting[usize::from(queue)] = None;
+            let observed_write = (matches!(&request, Request::Write(_)) && !rejected)
+                .then(|| self.fault.upcoming_write());
+            self.fault
+                .set_snapshot(guard.as_ref().and_then(|state| state.snapshot()));
             let inflight = guard
                 .as_deref_mut()
                 .and_then(|state| state.carrier.as_mut())
                 .map(|carrier| {
                     let request = request.inflight(queue, next_avail.wrapping_sub(1));
-                    if rejected {
-                        carrier.reject(request)
-                    } else {
-                        carrier.admit(request)
-                    }
+                    carrier.admit_observed(request, rejected, |phase| {
+                        use cas_daemon::inflight::AdmissionPhase;
+                        let point = match phase {
+                            AdmissionPhase::Prepared => Point::AfterPrepared,
+                            AdmissionPhase::Active => Point::AfterActive,
+                        };
+                        self.fault.hit(point, observed_write)
+                    })
                 })
                 .transpose()?;
             if inflight.is_some_and(|entry| entry.serial != next_id) {

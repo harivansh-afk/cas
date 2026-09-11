@@ -2,6 +2,7 @@
 use std::io;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use clap::ValueEnum;
 use serde::Serialize;
@@ -10,7 +11,15 @@ use tempfile::NamedTempFile;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Point {
+    AfterPrepared,
+    AfterActive,
     BeforeSubmit,
+    AfterAppendCqe,
+    BeforeSync,
+    AfterSync,
+    AfterReplayAppend,
+    BeforeRecoveryFence,
+    AfterRecoveryFence,
     AfterStorage,
     AfterStatus,
     AfterUsed,
@@ -78,9 +87,45 @@ impl Pause {
     }
 }
 
+/// One pause shared by the frontend, IO reactor and recovery worker.
+#[derive(Clone)]
+pub struct Injection(Arc<Mutex<Option<Pause>>>);
+
+impl Injection {
+    fn take_pause(&self, point: Point, count: Option<u64>) -> Option<Pause> {
+        self.0
+            .lock()
+            .expect("fault injection poisoned")
+            .take_if(|pause| {
+                pause.point == point
+                    && count.is_some_and(|count| match point {
+                        Point::AfterAppendCqe
+                        | Point::BeforeSync
+                        | Point::AfterSync
+                        | Point::BeforeRecoveryFence
+                        | Point::AfterRecoveryFence => count >= pause.after.get(),
+                        _ => count == pause.after.get(),
+                    })
+            })
+    }
+
+    pub fn hit(
+        &self,
+        point: Point,
+        count: Option<u64>,
+        snapshot: Option<Snapshot>,
+    ) -> io::Result<()> {
+        let Some(pause) = self.take_pause(point, count) else {
+            return Ok(());
+        };
+        pause.publish(snapshot)?;
+        stop_process()
+    }
+}
+
 #[derive(Default)]
 pub struct Fault {
-    pause: Option<Pause>,
+    injection: Option<Injection>,
     writes: u64,
     snapshot: Option<Snapshot>,
 }
@@ -88,32 +133,38 @@ pub struct Fault {
 impl Fault {
     pub fn new(pause: Option<Pause>) -> Self {
         Self {
-            pause,
+            injection: pause.map(|pause| Injection(Arc::new(Mutex::new(Some(pause))))),
             writes: 0,
             snapshot: None,
         }
+    }
+
+    pub fn injection(&self) -> Option<Injection> {
+        self.injection.clone()
     }
 
     pub fn set_snapshot(&mut self, snapshot: Option<Snapshot>) {
         self.snapshot = snapshot;
     }
 
+    pub fn upcoming_write(&self) -> u64 {
+        self.writes.saturating_add(1)
+    }
+
     pub fn next_write(&mut self) -> u64 {
-        self.writes = self.writes.saturating_add(1);
+        self.writes = self.upcoming_write();
         self.writes
     }
 
+    #[cfg(test)]
     fn take_pause(&mut self, point: Point, write: Option<u64>) -> Option<Pause> {
-        self.pause
-            .take_if(|pause| pause.point == point && Some(pause.after.get()) == write)
+        self.injection.as_ref()?.take_pause(point, write)
     }
 
     pub fn hit(&mut self, point: Point, write: Option<u64>) -> io::Result<()> {
-        let Some(pause) = self.take_pause(point, write) else {
-            return Ok(());
-        };
-        pause.publish(self.snapshot)?;
-        stop_process()
+        self.injection.as_ref().map_or(Ok(()), |injection| {
+            injection.hit(point, write, self.snapshot)
+        })
     }
 }
 
@@ -129,6 +180,25 @@ fn stop_process() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_batch_pause_matches_a_covered_prefix_only_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let fault = Fault::new(Some(
+            Pause::new(
+                Point::BeforeSync,
+                NonZeroU64::new(32).unwrap(),
+                directory.path().join("pause.json"),
+            )
+            .unwrap(),
+        ));
+        let frontend = fault.injection().unwrap();
+        let worker = frontend.clone();
+        assert!(frontend.take_pause(Point::BeforeSync, Some(31)).is_none());
+        assert!(worker.take_pause(Point::AfterSync, Some(64)).is_none());
+        assert!(worker.take_pause(Point::BeforeSync, Some(64)).is_some());
+        assert!(frontend.take_pause(Point::BeforeSync, Some(128)).is_none());
+    }
 
     #[test]
     fn pause_matches_one_write_and_one_boundary_once() {

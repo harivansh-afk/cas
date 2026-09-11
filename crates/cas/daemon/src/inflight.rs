@@ -175,6 +175,12 @@ pub struct Carrier {
     image_bytes: u64,
 }
 
+#[derive(Clone, Copy)]
+pub enum AdmissionPhase {
+    Prepared,
+    Active,
+}
+
 impl Carrier {
     pub fn create(
         geometry: Geometry,
@@ -364,8 +370,21 @@ impl Carrier {
     }
 
     fn admit_outcome(&mut self, request: Request, rejected: bool) -> io::Result<Entry> {
+        self.admit_observed(request, rejected, |_| Ok(()))
+    }
+
+    /// Observe published admission phases before their next transition. An
+    /// interrupted observer leaves the preceding phase available to recovery.
+    pub fn admit_observed(
+        &mut self,
+        request: Request,
+        rejected: bool,
+        mut observe: impl FnMut(AdmissionPhase) -> io::Result<()>,
+    ) -> io::Result<Entry> {
         let entry = self.prepare(request, rejected)?;
+        observe(AdmissionPhase::Prepared)?;
         self.activate(entry)?;
+        observe(AdmissionPhase::Active)?;
         self.finish_admission(entry);
         Ok(entry)
     }

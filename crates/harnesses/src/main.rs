@@ -116,6 +116,31 @@ mod tests {
             )
         };
         assert!(parse(&[]).is_ok());
+        assert!(parse(&["--live-recovery", "--crash-at", "after-prepared"]).is_ok());
+        assert!(
+            parse(&[
+                "--live-recovery",
+                "--crash-at",
+                "before-submit",
+                "--replay-crash-at",
+                "after-replay-append",
+                "--replay-restarts",
+                "2",
+            ])
+            .is_ok()
+        );
+        assert!(parse(&["--replay-crash-at", "after-replay-append"]).is_err());
+        assert!(parse(&["--replay-restarts", "2"]).is_err());
+        assert!(
+            parse(&[
+                "--live-recovery",
+                "--replay-crash-at",
+                "after-replay-append",
+                "--replay-restarts",
+                "4",
+            ])
+            .is_err()
+        );
         assert!(parse(&["--device-reset"]).is_ok());
         for other in ["--recovery", "--live-recovery"] {
             assert!(parse(&["--device-reset", other]).is_err());

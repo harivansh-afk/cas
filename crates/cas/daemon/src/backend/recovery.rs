@@ -510,10 +510,21 @@ fn replay_storage(
         })?;
         publish(storage_replay.published())?;
         mutations += 1;
+        shared.hit(Point::AfterReplayAppend, mutations as u64)?;
     }
     deadline.check()?;
+    shared.hit(Point::BeforeRecoveryFence, storage_replay.published())?;
     let log = shared.finish_replay(storage_replay)?;
     deadline.check()?;
+    {
+        let mut state = shared
+            .health
+            .lock()
+            .map_err(|_| io::Error::other("completion gate poisoned"))?;
+        state.publish(log.status().published)?;
+        state.durable = log.status().durable;
+    }
+    shared.hit(Point::AfterRecoveryFence, log.status().published)?;
     Ok(Recovered {
         log,
         replay,

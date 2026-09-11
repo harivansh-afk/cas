@@ -403,6 +403,22 @@ impl Reactor {
         } else {
             None
         };
+        if error.is_none() {
+            use crate::fault::Point;
+            let boundary = match &pending.work {
+                Work::Append(append) => Some((
+                    Point::AfterAppendCqe,
+                    append.submission.batch().envelope().last,
+                )),
+                Work::Fence(fence) if fence.syncing => {
+                    Some((Point::AfterSync, fence.submission.batch().envelope().last))
+                }
+                _ => None,
+            };
+            if let Some((point, boundary)) = boundary {
+                self.worker.shared.hit(point, boundary)?;
+            }
+        }
         if let Some(error) = error {
             self.fail(&error);
         } else if matches!(pending.work, Work::Append(_)) && self.appends.front() != Some(&token) {
@@ -534,6 +550,10 @@ impl Reactor {
                         .ready_to_sync(&fence.submission)
                         .map_err(io::Error::other)?
                     {
+                        self.worker.shared.hit(
+                            crate::fault::Point::BeforeSync,
+                            fence.submission.batch().envelope().last,
+                        )?;
                         fence.syncing = true;
                         self.pending.insert(token, pending);
                         self.push(token)?;

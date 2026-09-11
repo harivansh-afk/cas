@@ -435,3 +435,47 @@ fn timed_out_pause_preserves_owners_and_no_late_write_can_succeed() {
     assert_eq!(run.shared.pools.requests.usage().current.requests, 0);
     contender.try_lock().unwrap();
 }
+
+#[test]
+fn thirty_second_io_deadline_fails_before_releasing_the_withheld_owner() {
+    let started = Instant::now();
+    let mut run = Run::start(false);
+    run.wait_for_b();
+    let deadline = started + IO_DEADLINE + Duration::from_secs(5);
+    while run.shared.health.lock().unwrap().failure.is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "IO timeout did not fail the image"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(started.elapsed() >= IO_DEADLINE);
+    let (later, status) = run.output.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert_eq!(later.id, 2);
+    assert!(later.result.is_err());
+    assert_eq!((status.published, status.durable), (0, 0));
+    drop(later);
+    assert_eq!(
+        run.shared.pools.append.usage().current.bytes,
+        MAX_BATCH_BYTES
+    );
+    let contender = std::fs::File::open(
+        run.directory
+            .path()
+            .join("log/segment-00000000000000000001.v2"),
+    )
+    .unwrap();
+    assert!(matches!(
+        contender.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    run.release();
+    let (older, status) = run.output.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert_eq!(older.id, 1);
+    assert!(older.result.is_err());
+    assert_eq!((status.published, status.durable), (0, 0));
+    drop(older);
+    assert_eq!(run.shared.pools.append.usage().current.bytes, 0);
+    assert_eq!(run.shared.pools.requests.usage().current.requests, 0);
+    contender.try_lock().unwrap();
+}
