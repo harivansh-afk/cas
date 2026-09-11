@@ -104,16 +104,39 @@ struct FioDirection {
 
 impl Fio {
     pub fn verify(&self, name: &str, write_bytes: u64, read_bytes: u64) -> io::Result<()> {
-        let [job] = self.jobs.as_slice() else {
-            return Err(io::Error::other("fio did not report exactly one job"));
-        };
-        if job.jobname != name || job.error != 0 {
-            return Err(io::Error::other("fio job failed or has an unexpected name"));
+        self.verify_jobs(name, write_bytes, read_bytes, 1)
+    }
+
+    pub fn verify_jobs(
+        &self,
+        name: &str,
+        write_bytes: u64,
+        read_bytes: u64,
+        jobs: usize,
+    ) -> io::Result<()> {
+        if self.jobs.len() != jobs
+            || jobs == 0
+            || !write_bytes.is_multiple_of(jobs as u64)
+            || !read_bytes.is_multiple_of(jobs as u64)
+        {
+            return Err(io::Error::other("fio job count differs from the workload"));
         }
-        if job.write.io_bytes != write_bytes || job.read.io_bytes != read_bytes {
-            return Err(io::Error::other(
-                "fio did not complete the expected byte counts",
-            ));
+        for (index, job) in self.jobs.iter().enumerate() {
+            let expected_name = if jobs == 1 {
+                name.to_owned()
+            } else {
+                format!("{name}-{index}")
+            };
+            if job.jobname != expected_name || job.error != 0 {
+                return Err(io::Error::other("fio job failed or has an unexpected name"));
+            }
+            if job.write.io_bytes != write_bytes / jobs as u64
+                || job.read.io_bytes != read_bytes / jobs as u64
+            {
+                return Err(io::Error::other(
+                    "fio did not complete the expected byte counts",
+                ));
+            }
         }
         Ok(())
     }
@@ -128,6 +151,8 @@ pub struct DaemonReport {
     errors: u64,
     pending_at_disconnect: u64,
     queues: u64,
+    #[serde(default)]
+    queue_requests: Vec<u64>,
     write_bytes: u64,
     read_bytes: u64,
     flushes: u64,
@@ -309,9 +334,11 @@ impl DaemonReport {
                 || !self.restartable
                 || self.errors != 0
                 || self.pending_at_disconnect != 0
-                || self.queues != 1
+                || self.queues != 4
+                || self.queue_requests.len() != 4
+                || self.queue_requests.contains(&0)
                 || self.restored_used.is_none()
-                || self.restored_pending > 128
+                || self.restored_pending > 136
                 || self.read_bytes < LIVE_BYTES
                 || self.write_bytes == 0
                 || self.flushes == 0
@@ -365,9 +392,17 @@ impl DaemonReport {
             || !self.flush_negotiated
             || self.errors != 0
             || self.pending_at_disconnect != 0
-            || self.queues != 1
+            || self.queues != if backend == Backend::LocalAsync { 4 } else { 1 }
         {
             return Err(io::Error::other("daemon did not report a clean run"));
+        }
+        if backend == Backend::LocalAsync
+            && !read_only
+            && (self.queue_requests.len() != 4 || self.queue_requests.contains(&0))
+        {
+            return Err(io::Error::other(
+                "four configured queues did not all execute requests",
+            ));
         }
         let expected = if read_only { IO_BYTES } else { 2 * IO_BYTES };
         let writes_ok = if read_only {
@@ -477,6 +512,36 @@ mod tests {
     }
     fn fio(name: &str, write_bytes: u64, read_bytes: u64) -> Value {
         json!({"jobs":[{"jobname":name,"error":0,"write":{"io_bytes":write_bytes},"read":{"io_bytes":read_bytes}}]})
+    }
+    #[test]
+    fn multiqueue_evidence_requires_every_named_job_and_its_full_readback() {
+        let jobs: Vec<_> = (0..4)
+            .map(|index| {
+                fio(&format!("queue-smoke-{index}"), IO_BYTES / 4, IO_BYTES / 4)["jobs"][0].clone()
+            })
+            .collect();
+        let value = json!({"jobs": jobs});
+        let verify = |value| {
+            serde_json::from_value::<Fio>(value).unwrap().verify_jobs(
+                "queue-smoke",
+                IO_BYTES,
+                IO_BYTES,
+                4,
+            )
+        };
+        verify(value.clone()).unwrap();
+        for (pointer, invalid) in [
+            ("/jobs/1/jobname", json!("queue-smoke-0")),
+            ("/jobs/2/error", json!(5)),
+            ("/jobs/3/read/io_bytes", json!(0)),
+        ] {
+            let mut broken = value.clone();
+            *broken.pointer_mut(pointer).unwrap() = invalid;
+            assert!(verify(broken).is_err(), "{pointer}");
+        }
+        let mut missing = value;
+        missing["jobs"].as_array_mut().unwrap().pop();
+        assert!(verify(missing).is_err());
     }
     fn daemon(backend: Backend, read_only: bool) -> Value {
         let bytes = if read_only { IO_BYTES } else { 2 * IO_BYTES };

@@ -14,7 +14,7 @@ use cas_core::{BLOCK_SIZE, MAX_REQUEST_BYTES, aligned::AlignedBuffer};
 use vhost::vhost_user::message::VhostUserProtocolFeatures;
 use vhost_user_backend::{ShutdownHandle, VhostUserBackendMut, VringMutex, VringState, VringT};
 use virtio_bindings::bindings::{
-    virtio_blk::{VIRTIO_BLK_F_BLK_SIZE, VIRTIO_BLK_F_FLUSH},
+    virtio_blk::{VIRTIO_BLK_F_BLK_SIZE, VIRTIO_BLK_F_FLUSH, VIRTIO_BLK_F_MQ},
     virtio_config::VIRTIO_F_VERSION_1,
 };
 use virtio_queue::{Queue, QueueOwnedT, QueueT};
@@ -27,22 +27,25 @@ use vmm_sys_util::eventfd::{EFD_CLOEXEC, EFD_NONBLOCK, EventFd};
 
 use crate::fault::{Fault, Point};
 use crate::request::{self, Completion, DEVICE_ID, Request, Segment, Status};
-use crate::storage::{CompletionData, Operation, Permit, Storage};
+use crate::storage::{CompletionData, Operation, Permit, QueueHead, Storage};
 use crate::{BackendKind, local};
 
 const QUEUE_SIZE: usize = 128;
 const REQUIRED_FEATURES: u64 =
     (1 << VIRTIO_F_VERSION_1) | (1 << VIRTIO_BLK_F_BLK_SIZE) | (1 << VIRTIO_BLK_F_FLUSH);
-pub(super) const COMPLETION_EVENT: u16 = 2; // 0 is the queue; 1 is the framework's exit event.
+const CONCURRENT_QUEUES: usize = 4;
+const CONCURRENT_QUEUE_SIZE: usize = 256;
 
 #[derive(Clone, Copy)]
 struct GuestCompletion {
+    queue: u16,
     target: Completion,
     inflight: Option<Entry>,
     write_number: Option<u64>,
 }
 
 struct Admitted {
+    queue: u16,
     id: u64,
     request: Request,
     permit: Permit,
@@ -84,6 +87,9 @@ pub(super) struct Backend {
     negotiated_features: u64,
     restartable: bool,
     live: Option<Session>,
+    concurrent: bool,
+    first_queue: usize,
+    queue_requests: [u64; CONCURRENT_QUEUES],
     restored_used: Option<u16>,
     restored_pending: u16,
     fault: Fault,
@@ -176,7 +182,7 @@ fn decode_chain(
     let head = chain.head_index();
     let mut descriptors = Vec::new();
     let mut has_next = false;
-    for descriptor in chain.by_ref().take(QUEUE_SIZE) {
+    for descriptor in chain.by_ref().take(CONCURRENT_QUEUE_SIZE) {
         has_next = descriptor.has_next();
         descriptors.push(Segment {
             addr: descriptor.addr(),
@@ -298,6 +304,9 @@ impl Backend {
             negotiated_features: 0,
             restartable,
             live: live.then(Session::default),
+            concurrent: matches!(kind, BackendKind::LocalAsync),
+            first_queue: 0,
+            queue_requests: [0; CONCURRENT_QUEUES],
             restored_used: None,
             restored_pending: 0,
             fault,
@@ -325,6 +334,10 @@ impl Backend {
     pub fn completion_fd(&self) -> RawFd {
         self.completion_event.as_raw_fd()
     }
+    pub fn completion_token(&self) -> u16 {
+        // Queue tokens precede the framework's exit event.
+        (self.num_queues() + 1) as u16
+    }
     pub fn pending_count(&self) -> usize {
         self.pending.len()
     }
@@ -345,7 +358,8 @@ impl Backend {
             "pending_at_disconnect":pending_at_disconnect, "reads":c.reads, "writes":c.writes,
             "flushes":c.flushes, "read_bytes":c.read_bytes, "write_bytes":c.write_bytes,
             "guest_payload_copy_bytes":c.guest_payload_copy_bytes,
-            "errors":c.errors, "bounce_requests":c.bounce_requests, "peak_inflight":c.peak_inflight, "queues":1
+            "errors":c.errors, "bounce_requests":c.bounce_requests, "peak_inflight":c.peak_inflight,
+            "queues":self.num_queues(), "queue_requests":&self.queue_requests[..self.num_queues()]
         })
     }
     fn finish(
@@ -379,6 +393,7 @@ impl Backend {
         health: Option<&mut local::ImageState>,
     ) -> io::Result<()> {
         let Admitted {
+            queue,
             id,
             request,
             permit,
@@ -386,6 +401,7 @@ impl Backend {
         } = admitted;
         let write_number = matches!(&request, Request::Write(_)).then(|| self.fault.next_write());
         let tracked = |target| GuestCompletion {
+            queue,
             target,
             inflight,
             write_number,
@@ -440,7 +456,10 @@ impl Backend {
                 let operation = if self.storage.is_local() {
                     self.storage.gather(
                         id,
-                        data.completion.head,
+                        QueueHead {
+                            queue,
+                            head: data.completion.head,
+                        },
                         data.offset,
                         data.len,
                         permit.take().expect("unsubmitted admission permit"),
@@ -493,7 +512,7 @@ impl Backend {
         self.counters.peak_inflight = self.counters.peak_inflight.max(self.pending.len());
         Ok(())
     }
-    fn complete(&mut self, mem: &GuestMemoryMmap, state: &mut VringState) -> io::Result<()> {
+    fn complete(&mut self, mem: &GuestMemoryMmap, vrings: &[VringMutex]) -> io::Result<()> {
         loop {
             let Some(completed) = self.storage.try_complete()? else {
                 return Ok(());
@@ -502,6 +521,8 @@ impl Backend {
                 .pending
                 .remove(&completed.id)
                 .ok_or_else(|| io::Error::other("unknown IO completion"))?;
+            let mut queue = vrings[usize::from(pending.completion.queue)].get_mut();
+            let state = &mut *queue;
             let gate = self.storage.completion_gate();
             let mut guard = gate
                 .as_ref()
@@ -576,7 +597,7 @@ impl Backend {
             }
         }
     }
-    fn process(&mut self, vring: &VringMutex) -> io::Result<()> {
+    fn process(&mut self, vrings: &[VringMutex]) -> io::Result<()> {
         if let Some(failure) = &self.failure {
             return Err(io::Error::other(failure.clone()));
         }
@@ -597,22 +618,41 @@ impl Backend {
             .as_ref()
             .ok_or_else(|| io::Error::other("guest memory missing"))?
             .clone();
+        if !self.activate_attachment(&mem, vrings)? {
+            return Ok(());
+        }
+        self.complete(&mem, vrings)?;
+        let count = vrings.len();
+        let first = self.first_queue % count;
+        self.first_queue = (first + 1) % count;
+        for offset in 0..count {
+            let queue = (first + offset) % count;
+            self.admit_queue(&mem, queue as u16, &vrings[queue])?;
+        }
+        self.storage.submit()
+    }
+
+    fn admit_queue(
+        &mut self,
+        mem: &GuestMemoryLoadGuard<GuestMemoryMmap>,
+        queue: u16,
+        vring: &VringMutex,
+    ) -> io::Result<()> {
         let mut state = vring.get_mut();
         if !state.is_enabled() || !state.get_queue().ready() {
             return Ok(());
         }
-        self.activate_attachment(&mem, &mut state)?;
         if self.restartable && self.live.is_none() && self.restored_used.is_none() {
             if !state.is_enabled() || !state.get_queue().ready() {
                 return Ok(());
             }
             let queue = state.get_queue_mut();
             let used = queue
-                .used_idx(&*mem, Ordering::Acquire)
+                .used_idx(&**mem, Ordering::Acquire)
                 .map_err(io::Error::other)?
                 .0;
             let available = queue
-                .avail_idx(&*mem, Ordering::Acquire)
+                .avail_idx(&**mem, Ordering::Acquire)
                 .map_err(io::Error::other)?
                 .0;
             let outstanding = available.wrapping_sub(used);
@@ -628,18 +668,20 @@ impl Backend {
             self.restored_used = Some(used);
             self.restored_pending = outstanding;
         }
-        self.complete(&mem, &mut state)?;
         let mut consumed = 0;
         let limit = if self.restartable && self.live.is_none() {
             1
+        } else if self.concurrent {
+            128 + 8 // Image-wide bulk and separately reserved control requests.
         } else {
             QUEUE_SIZE
         };
-        while self.pending.len() < limit && consumed < QUEUE_SIZE {
+        let queue_size = usize::from(state.get_queue().size());
+        while self.pending.len() < limit && consumed < queue_size {
             let Some(NextChain { chain, next_avail }) = peek(mem.clone(), &mut state)? else {
                 break;
             };
-            let request = decode_chain(&mem, chain, self.capacity_bytes)?;
+            let request = decode_chain(mem, chain, self.capacity_bytes)?;
             let next_id = self
                 .next_id
                 .checked_add(1)
@@ -661,7 +703,7 @@ impl Backend {
             let inflight = guard
                 .as_deref_mut()
                 .and_then(|state| state.carrier.as_mut())
-                .map(|carrier| carrier.admit(request.inflight(0, next_avail.wrapping_sub(1))))
+                .map(|carrier| carrier.admit(request.inflight(queue, next_avail.wrapping_sub(1))))
                 .transpose()?;
             if inflight.is_some_and(|entry| entry.serial != next_id) {
                 return Err(io::Error::other(
@@ -671,10 +713,17 @@ impl Backend {
             let id = self.next_id;
             self.next_id = next_id;
             state.get_queue_mut().set_next_avail(next_avail);
+            if matches!(
+                &request,
+                Request::Read(_) | Request::Write(_) | Request::Flush(_)
+            ) {
+                self.queue_requests[usize::from(queue)] += 1;
+            }
             self.enqueue(
-                &mem,
+                mem,
                 &mut state,
                 Admitted {
+                    queue,
                     id,
                     request,
                     permit,
@@ -684,8 +733,7 @@ impl Backend {
             )?;
             consumed += 1;
         }
-        self.storage.submit()?;
-        if consumed == QUEUE_SIZE {
+        if consumed == queue_size {
             // Immediate responses do not fill pending. Yield the mutex anyway,
             // and self-wake so a consumed/coalesced kick cannot strand requests.
             self.completion_event.write(1)?;
@@ -715,7 +763,7 @@ impl Backend {
         self.storage.finish()
     }
 
-    fn fail_pending(&mut self, vring: &VringMutex) {
+    fn fail_pending(&mut self, vrings: &[VringMutex]) {
         let Some(gate) = self.storage.completion_gate() else {
             return;
         };
@@ -726,8 +774,8 @@ impl Backend {
         let Some(memory) = &self.memory else {
             return;
         };
-        let mut state = vring.get_mut();
         for pending in self.pending.values_mut() {
+            let mut state = vrings[usize::from(pending.completion.queue)].get_mut();
             if !pending.error_published
                 && publish_tracked(
                     memory,
@@ -753,10 +801,18 @@ impl VhostUserBackendMut for Backend {
     type Bitmap = ();
     type Vring = VringMutex;
     fn num_queues(&self) -> usize {
-        1
+        if self.concurrent {
+            CONCURRENT_QUEUES
+        } else {
+            1
+        }
     }
     fn max_queue_size(&self) -> usize {
-        QUEUE_SIZE
+        if self.concurrent {
+            CONCURRENT_QUEUE_SIZE
+        } else {
+            QUEUE_SIZE
+        }
     }
     fn features(&self) -> u64 {
         use vhost::vhost_user::message::VhostUserVirtioFeatures;
@@ -767,6 +823,11 @@ impl VhostUserBackendMut for Backend {
         (1 << VIRTIO_BLK_F_SIZE_MAX)
             | (1 << VIRTIO_BLK_F_SEG_MAX)
             | REQUIRED_FEATURES
+            | if self.concurrent {
+                1 << VIRTIO_BLK_F_MQ
+            } else {
+                0
+            }
             | (1 << VIRTIO_RING_F_INDIRECT_DESC)
             | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits()
     }
@@ -781,6 +842,9 @@ impl VhostUserBackendMut for Backend {
     }
     fn protocol_features(&self) -> VhostUserProtocolFeatures {
         let mut features = VhostUserProtocolFeatures::CONFIG;
+        if self.concurrent {
+            features |= VhostUserProtocolFeatures::MQ;
+        }
         if self.live.is_some() {
             features |=
                 VhostUserProtocolFeatures::INFLIGHT_SHMFD | VhostUserProtocolFeatures::REPLY_ACK;
@@ -805,8 +869,9 @@ impl VhostUserBackendMut for Backend {
         let mut config = [0; 60];
         config[..8].copy_from_slice(&(self.capacity_bytes / request::SECTOR_BYTES).to_le_bytes());
         config[8..12].copy_from_slice(&(MAX_REQUEST_BYTES as u32).to_le_bytes());
-        config[12..16].copy_from_slice(&((QUEUE_SIZE - 2) as u32).to_le_bytes());
+        config[12..16].copy_from_slice(&((self.max_queue_size() - 2) as u32).to_le_bytes());
         config[20..24].copy_from_slice(&(BLOCK_SIZE as u32).to_le_bytes());
+        config[34..36].copy_from_slice(&(self.num_queues() as u16).to_le_bytes());
         let start = offset as usize;
         let Some(end) = start.checked_add(size as usize) else {
             return Vec::new();
@@ -838,19 +903,21 @@ impl VhostUserBackendMut for Backend {
                 return Err(io::Error::other("unexpected epoll event"));
             }
             match event {
-                0 => (), // The framework already consumed the kick.
-                COMPLETION_EVENT => match self.completion_event.read() {
-                    Ok(_) => (),
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => (),
-                    Err(error) => return Err(error),
-                },
+                queue if usize::from(queue) < self.num_queues() => (),
+                completion if completion == self.completion_token() => {
+                    match self.completion_event.read() {
+                        Ok(_) => (),
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => (),
+                        Err(error) => return Err(error),
+                    }
+                }
                 _ => return Err(io::Error::other("unknown event token")),
             }
-            self.process(&vrings[0])
+            self.process(vrings)
         })();
         if let Err(error) = &result {
             self.fail(error.to_string());
-            self.fail_pending(&vrings[0]);
+            self.fail_pending(vrings);
         }
         result
     }

@@ -997,3 +997,6 @@ fn concurrent_retained_fd_replays_without_flush_and_ignores_consumed_available_s
         }
     }
 }
+
+#[path = "lifecycle/multiqueue.rs"]
+mod multiqueue;

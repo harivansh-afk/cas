@@ -40,7 +40,9 @@ impl Session {
 }
 
 fn geometry(message: &VhostUserInflight) -> io::Result<Geometry> {
-    if message.num_queues != 1 || usize::from(message.queue_size) != QUEUE_SIZE {
+    if usize::from(message.num_queues) > CONCURRENT_QUEUES
+        || usize::from(message.queue_size) > CONCURRENT_QUEUE_SIZE
+    {
         return Err(io::Error::other(
             "inflight geometry differs from configured queues",
         ));
@@ -155,15 +157,12 @@ impl Backend {
     pub(super) fn activate_attachment(
         &mut self,
         mem: &GuestMemoryLoadGuard<GuestMemoryMmap>,
-        queue: &mut VringState,
-    ) -> io::Result<()> {
+        vrings: &[VringMutex],
+    ) -> io::Result<bool> {
         let Some(session) = &self.live else {
-            return Ok(());
+            return Ok(true);
         };
         let phase = session.phase;
-        if phase == Phase::Active {
-            return Ok(());
-        }
         if phase == Phase::AwaitingFd {
             return Err(io::Error::other("IO before inflight negotiation"));
         }
@@ -178,29 +177,64 @@ impl Backend {
             .carrier
             .as_mut()
             .ok_or_else(|| io::Error::other("missing retained carrier"))?;
-        if usize::from(queue.get_queue().size()) != QUEUE_SIZE {
-            return Err(io::Error::other("queue size differs from carrier"));
+        let geometry = carrier.geometry().message();
+        let mut queues: Vec<_> = vrings.iter().map(VringMutex::get_mut).collect();
+        let mut cursors = Vec::with_capacity(usize::from(geometry.num_queues));
+        for (index, queue) in queues.iter_mut().enumerate() {
+            let ready = queue.is_enabled() && queue.get_queue().ready();
+            if index >= usize::from(geometry.num_queues) {
+                if ready {
+                    return Err(io::Error::other(
+                        "enabled queue lies outside retained geometry",
+                    ));
+                }
+                continue;
+            }
+            let index = index as u16;
+            let initialized = carrier.queue_initialized(index)?;
+            if !ready {
+                if phase == Phase::Replay && initialized {
+                    // Another queue's SET messages must finish before replay.
+                    return Ok(false);
+                }
+                cursors.push(None);
+                continue;
+            }
+            if queue.get_queue().size() != geometry.queue_size {
+                return Err(io::Error::other("queue size differs from carrier"));
+            }
+            let used = queue
+                .get_queue()
+                .used_idx(&**mem, Ordering::Acquire)
+                .map_err(io::Error::other)?
+                .0;
+            if phase == Phase::Replay && !initialized && used != 0 {
+                return Err(io::Error::other("unused carrier has guest completions"));
+            }
+            if phase != Phase::Replay && !initialized {
+                carrier.initialize_queue(index, queue.get_queue().next_avail(), used)?;
+                queue.get_queue_mut().set_next_used(used);
+            }
+            cursors.push(Some(used));
         }
-        let used = queue
-            .get_queue()
-            .used_idx(&**mem, Ordering::Acquire)
-            .map_err(io::Error::other)?
-            .0;
-        if phase == Phase::Fresh {
-            carrier.initialize_queue(0, queue.get_queue().next_avail(), used)?;
-            queue.get_queue_mut().set_next_used(used);
+        if phase != Phase::Replay {
             self.live.as_mut().unwrap().phase = Phase::Active;
-            return Ok(());
+            return Ok(true);
         }
-        let initialized = carrier.queue_initialized(0)?;
-        if !initialized && used != 0 {
-            return Err(io::Error::other("unused carrier has guest completions"));
-        }
-        let replay = carrier.reconcile(&[initialized.then_some(used)])?;
+        let initialized: Vec<_> = (0..geometry.num_queues)
+            .map(|index| carrier.queue_initialized(index))
+            .collect::<io::Result<_>>()?;
+        let saved_used: Vec<_> = cursors
+            .iter()
+            .zip(&initialized)
+            .map(|(used, initialized)| if *initialized { *used } else { None })
+            .collect();
+        let replay = carrier.reconcile(&saved_used)?;
         // Decode all original heads before allowing any WAL repair. Never read
         // heads from old available slots: they can already have wrapped.
         let mut requests = Vec::with_capacity(replay.entries.len());
         for entry in &replay.entries {
+            let queue = &queues[usize::from(entry.request.queue)];
             let chain = virtio_queue::DescriptorChain::new(
                 mem.clone(),
                 vm_memory::GuestAddress(queue.get_queue().desc_table()),
@@ -264,14 +298,19 @@ impl Backend {
             mutations += 1;
         }
         let mut log = shared.finish_replay(storage_replay)?;
-        if !initialized {
-            carrier.initialize_queue(0, queue.get_queue().next_avail(), used)?;
+        for (index, (queue, used)) in queues.iter_mut().zip(&cursors).enumerate() {
+            let Some(used) = *used else { continue };
+            if !initialized[index] {
+                carrier.initialize_queue(index as u16, queue.get_queue().next_avail(), used)?;
+            }
+            queue
+                .get_queue_mut()
+                .set_next_avail(carrier.available(index as u16)?);
+            queue.get_queue_mut().set_next_used(used);
         }
-        queue.get_queue_mut().set_next_avail(carrier.available(0)?);
-        queue.get_queue_mut().set_next_used(used);
         state.durable = log.status().durable;
         self.next_id = replay.highest_serial;
-        self.restored_used = Some(used);
+        self.restored_used = Some(cursors.iter().flatten().copied().next().unwrap_or(0));
         self.restored_pending = replay.entries.len() as u16;
         let session = self.live.as_mut().unwrap();
         session.saved_p = replay.published;
@@ -292,10 +331,12 @@ impl Backend {
         // All mutations and the recovery fence are durable. Recovered reads
         // may see this newer prefix, and recovered FLUSHes cover their boundary.
         for (entry, request) in replay.entries.into_iter().zip(requests) {
+            let queue = &mut *queues[usize::from(entry.request.queue)];
             let _permit = shared
                 .reserve(request.admission_kind())
                 .ok_or_else(|| io::Error::other("replay completion reserve exhausted"))?;
             let completion = GuestCompletion {
+                queue: entry.request.queue,
                 target: request.completion(),
                 inflight: Some(entry),
                 write_number: None,
@@ -359,6 +400,6 @@ impl Backend {
             shared,
         )?));
         self.live.as_mut().unwrap().phase = Phase::Active;
-        Ok(())
+        Ok(true)
     }
 }

@@ -455,10 +455,11 @@ fn verify_io(
         read_json::<Fio>(&results.join("fio.json"))?.verify("raw-smoke", IO_BYTES, IO_BYTES)?;
         evidence.verified_bytes = Some(IO_BYTES);
         if backend != Backend::Raw {
-            read_json::<Fio>(&results.join("queue.json"))?.verify(
+            read_json::<Fio>(&results.join("queue.json"))?.verify_jobs(
                 "queue-smoke",
                 IO_BYTES,
                 IO_BYTES,
+                if backend == Backend::LocalAsync { 4 } else { 1 },
             )?;
             evidence.verified_bytes = Some(2 * IO_BYTES);
         }

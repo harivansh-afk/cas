@@ -20,6 +20,7 @@
 let
   cfg = config.cas.guest;
   vhostUser = cfg.backend != "raw";
+  concurrent = cfg.backend == "local-async";
 
   # QEMU flags that attach the experiment disk. The guest sees a 4 KiB-sector
   # virtio-blk device either way; only what stands behind it changes.
@@ -27,7 +28,9 @@ let
     if vhostUser then
       [
         ''-chardev "socket,id=cas,path=$CAS_VHOST_SOCKET,reconnect-ms=''${CAS_RECONNECT_MS:-0}"''
-        "-device vhost-user-blk-pci,chardev=cas,num-queues=1,queue-size=128"
+        "-device vhost-user-blk-pci,chardev=cas,num-queues=${
+          if concurrent then "4,queue-size=256" else "1,queue-size=128"
+        }"
       ]
     else
       [
@@ -120,7 +123,7 @@ in
     virtualisation = {
       diskImage = null; # Ephemeral tmpfs root; only the experiment disk persists.
       memorySize = 1024;
-      cores = 2;
+      cores = if concurrent then 4 else 2;
       graphics = false;
       writableStore = false;
       useHostCerts = false;
@@ -148,7 +151,21 @@ in
     };
 
     # fio job files, read by smoke.sh as /etc/cas/<job>.fio.
-    environment.etc.cas.source = ../../crates/harnesses/fio;
+    environment.etc = lib.mapAttrs' (
+      name: _:
+      lib.nameValuePair "cas/${name}" {
+        source =
+          ../../crates/harnesses/fio
+          + "/${
+            if concurrent && name == "queue.fio" then
+              "queue-mq.fio"
+            else if concurrent && name == "live.fio" then
+              "live-mq.fio"
+            else
+              name
+          }";
+      }
+    ) (builtins.readDir ../../crates/harnesses/fio);
 
     systemd.services.cas-smoke = {
       description = "Verify guest IO through the ${cfg.backend} block backend";

@@ -130,10 +130,15 @@ pub(super) fn execute(
         return Err(io::Error::other("live guest failed; see console.log"));
     }
     read_json::<GuestCompletion>(&results.join("completion.json"))?.verify()?;
-    read_json::<Fio>(&results.join("live.json"))?.verify(
+    read_json::<Fio>(&results.join("live.json"))?.verify_jobs(
         "live-recovery",
         LIVE_BYTES,
         LIVE_BYTES,
+        if build.backend == Backend::LocalAsync {
+            4
+        } else {
+            1
+        },
     )?;
     let before = fs::read_to_string(results.join("boot-before.txt"))?;
     let after = fs::read_to_string(results.join("boot-after.txt"))?;

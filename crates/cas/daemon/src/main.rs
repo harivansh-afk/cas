@@ -99,6 +99,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fault,
     )?;
     let completion_fd = backend.completion_fd();
+    let completion_token = backend.completion_token();
     let backend = Arc::new(Mutex::new(backend));
     let mut daemon = VhostUserDaemon::new(
         "cas-daemon".into(),
@@ -109,7 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     daemon.get_epoll_handlers()[0].register_listener(
         completion_fd,
         EventSet::IN,
-        u64::from(backend::COMPLETION_EVENT),
+        u64::from(completion_token),
     )?;
     let mut listener = Listener::new(&args.socket, false)?;
     {

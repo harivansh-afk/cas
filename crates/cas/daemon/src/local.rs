@@ -19,7 +19,7 @@ use cas_core::{
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::eventfd::{EFD_CLOEXEC, EFD_NONBLOCK};
 
-use crate::storage::{Completed, CompletionData, Operation};
+use crate::storage::{Completed, CompletionData, Operation, QueueHead};
 
 #[derive(Clone, Copy)]
 pub enum Kind {
@@ -352,7 +352,7 @@ impl Local {
     pub fn gather(
         &mut self,
         id: u64,
-        head: u16,
+        head: QueueHead,
         offset: u64,
         length: usize,
         permit: Permit,
@@ -375,8 +375,8 @@ impl Local {
                 RequestId {
                     serial,
                     attachment: self.status.epoch,
-                    queue: 0,
-                    head,
+                    queue: head.queue,
+                    head: head.head,
                 },
                 offset,
                 length,

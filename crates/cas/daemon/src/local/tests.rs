@@ -21,10 +21,20 @@ fn concurrent(path: &Path) -> Local {
 fn write(local: &mut Local, id: u64, offset: u64, length: usize, value: u8) {
     let permit = local.prepare(Kind::Write(length)).unwrap().unwrap();
     local
-        .gather(id, id as u16, offset, length, permit, |bytes| {
-            bytes.fill(value);
-            Ok(())
-        })
+        .gather(
+            id,
+            QueueHead {
+                queue: 0,
+                head: id as u16,
+            },
+            offset,
+            length,
+            permit,
+            |bytes| {
+                bytes.fill(value);
+                Ok(())
+            },
+        )
         .unwrap();
     local.seal().unwrap();
 }
@@ -164,7 +174,10 @@ fn guest_gathers_share_the_final_batch_and_release_after_completion() {
             local
                 .gather(
                     id,
-                    id as u16,
+                    QueueHead {
+                        queue: 0,
+                        head: id as u16,
+                    },
                     id * BLOCK_SIZE as u64,
                     BLOCK_SIZE,
                     permit,
@@ -224,10 +237,20 @@ fn allocation_cap_blocks_before_gather_but_reserved_flush_still_enters() {
             .unwrap()
             .unwrap();
         local
-            .gather(id, id as u16, 0, MAX_REQUEST_BYTES, permit, |bytes| {
-                bytes.fill(id as u8);
-                Ok(())
-            })
+            .gather(
+                id,
+                QueueHead {
+                    queue: 0,
+                    head: id as u16,
+                },
+                0,
+                MAX_REQUEST_BYTES,
+                permit,
+                |bytes| {
+                    bytes.fill(id as u8);
+                    Ok(())
+                },
+            )
             .unwrap();
         local.seal().unwrap();
     }
@@ -265,19 +288,33 @@ fn ordered_write_flush_overwrite_and_read_preserve_barriers() {
     let mut local = open(&path);
     let first = local.prepare(Kind::Write(BLOCK_SIZE)).unwrap().unwrap();
     local
-        .gather(0, 0, 0, BLOCK_SIZE, first, |bytes| {
-            bytes.fill(1);
-            Ok(())
-        })
+        .gather(
+            0,
+            QueueHead { queue: 0, head: 0 },
+            0,
+            BLOCK_SIZE,
+            first,
+            |bytes| {
+                bytes.fill(1);
+                Ok(())
+            },
+        )
         .unwrap();
     let flush = local.prepare(Kind::Control).unwrap().unwrap();
     local.enqueue(1, Operation::Flush, flush).unwrap();
     let second = local.prepare(Kind::Write(BLOCK_SIZE)).unwrap().unwrap();
     local
-        .gather(2, 2, 0, BLOCK_SIZE, second, |bytes| {
-            bytes.fill(2);
-            Ok(())
-        })
+        .gather(
+            2,
+            QueueHead { queue: 0, head: 2 },
+            0,
+            BLOCK_SIZE,
+            second,
+            |bytes| {
+                bytes.fill(2);
+                Ok(())
+            },
+        )
         .unwrap();
     let read = local.prepare(Kind::Read(BLOCK_SIZE)).unwrap().unwrap();
     local
@@ -315,20 +352,34 @@ fn failed_gather_and_disconnected_owner_release_without_an_extra_fence() {
     let permit = local.prepare(Kind::Write(BLOCK_SIZE)).unwrap().unwrap();
     assert!(
         local
-            .gather(0, 0, 0, BLOCK_SIZE, permit, |bytes| {
-                bytes[..512].fill(1);
-                Err(io::Error::other("guest mapping vanished"))
-            })
+            .gather(
+                0,
+                QueueHead { queue: 0, head: 0 },
+                0,
+                BLOCK_SIZE,
+                permit,
+                |bytes| {
+                    bytes[..512].fill(1);
+                    Err(io::Error::other("guest mapping vanished"))
+                }
+            )
             .is_err()
     );
     local.seal().unwrap();
     assert_eq!(local.shared.pools.append.usage().current.bytes, 0);
     let permit = local.prepare(Kind::Write(BLOCK_SIZE)).unwrap().unwrap();
     local
-        .gather(0, 0, 0, BLOCK_SIZE, permit, |bytes| {
-            bytes.fill(9);
-            Ok(())
-        })
+        .gather(
+            0,
+            QueueHead { queue: 0, head: 0 },
+            0,
+            BLOCK_SIZE,
+            permit,
+            |bytes| {
+                bytes.fill(9);
+                Ok(())
+            },
+        )
         .unwrap();
     let shared = Arc::clone(&local.shared);
     let pools = &shared.pools;

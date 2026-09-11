@@ -28,6 +28,12 @@ pub enum Permit {
     Local { _credits: local::Permit },
 }
 
+#[derive(Clone, Copy)]
+pub struct QueueHead {
+    pub queue: u16,
+    pub head: u16,
+}
+
 pub enum Operation {
     Read { offset: u64, buffer: AlignedBuffer },
     Write { offset: u64, buffer: AlignedBuffer },
@@ -143,7 +149,7 @@ impl Storage {
     pub fn gather(
         &mut self,
         id: u64,
-        head: u16,
+        head: QueueHead,
         offset: u64,
         length: usize,
         permit: Permit,
