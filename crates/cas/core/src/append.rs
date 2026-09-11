@@ -18,6 +18,7 @@ use segment::{Directory, Segment};
 
 pub use crate::direct::Alignment;
 pub use read::{ReadPlan, ReadRange};
+pub use recovery::{LiveRecovery, Mutation, Recovery};
 pub use submission::Submission;
 
 #[derive(Debug, thiserror::Error)]
@@ -210,6 +211,10 @@ impl Log {
         }
     }
 
+    pub fn config(&self) -> Config {
+        self.config
+    }
+
     fn rotate(&mut self, epoch: u64) -> Result<()> {
         let number = self
             .highest_segment
@@ -316,6 +321,8 @@ fn verify_read_crc(bytes: &[u8], crc: u32) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod recovery_tests;
 #[cfg(test)]
 mod submission_tests;
 #[cfg(test)]
