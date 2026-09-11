@@ -34,7 +34,7 @@ pub(super) const COMPLETION_EVENT: u16 = 2; // 0 is the queue; 1 is the framewor
 struct PendingRequest {
     completion: Completion,
     segments: Vec<Segment>,
-    _permit: Permit,
+    error_published: bool,
 }
 
 #[derive(Default)]
@@ -179,6 +179,7 @@ impl Backend {
             )?,
             BackendKind::Raw => Storage::raw(path, &completion_event, QUEUE_SIZE)?,
             BackendKind::Local => Storage::local(path, create_bytes, &completion_event)?,
+            BackendKind::LocalAsync => Storage::local_async(path, create_bytes, &completion_event)?,
         };
         let capacity_bytes = storage.image_bytes();
         let exit = vmm_sys_util::event::new_event_consumer_and_notifier(
@@ -209,6 +210,12 @@ impl Backend {
         self.failure.as_deref()
     }
     fn fail(&mut self, message: String) {
+        if let Some(gate) = self.storage.completion_gate() {
+            let mut failed = gate.lock().expect("completion gate poisoned");
+            if failed.is_none() {
+                *failed = Some(message.clone());
+            }
+        }
         if self.failure.is_none() {
             self.failure = Some(message);
             self.counters.errors += 1;
@@ -264,6 +271,7 @@ impl Backend {
         permit: Permit,
         next_id: u64,
     ) -> io::Result<()> {
+        let mut permit = Some(permit);
         if matches!(&request, Request::Write(_)) {
             self.fault.next_write();
             self.fault.hit(Point::BeforeSubmit)?;
@@ -299,6 +307,7 @@ impl Backend {
                         data.completion.head,
                         data.offset,
                         data.len,
+                        permit.take().expect("unsubmitted admission permit"),
                         |destination| {
                             gather(
                                 mem,
@@ -328,7 +337,11 @@ impl Backend {
         };
         let has_buffer = !matches!(operation, Some(Operation::Flush));
         if let Some(operation) = operation {
-            self.storage.enqueue(self.next_id, operation)?;
+            self.storage.enqueue_owned(
+                self.next_id,
+                operation,
+                permit.take().expect("unsubmitted admission permit"),
+            )?;
         }
         if has_buffer {
             self.counters.bounce_requests += 1;
@@ -338,7 +351,7 @@ impl Backend {
             PendingRequest {
                 completion,
                 segments,
-                _permit: permit,
+                error_published: false,
             },
         );
         self.next_id = next_id;
@@ -367,8 +380,8 @@ impl Backend {
                 .and_then(|guard| guard.as_ref())
                 .map(|error| io::Error::other(error.clone()));
             if let Err(error) = failure.map_or(completed.result, Err) {
-                // The request permit must outlive its returned READ allocation
-                // on failure too, including an error during status publication.
+                // Completed owns the permit after its data field. Its credit
+                // survives the READ buffer, including failed status publication.
                 drop(completed.data);
                 self.finish(mem, state, pending.completion, Status::IoError, None)?;
                 if self.storage.status().is_some() || self.storage.is_local() {
@@ -405,6 +418,11 @@ impl Backend {
     fn process(&mut self, vring: &VringMutex) -> io::Result<()> {
         if let Some(failure) = &self.failure {
             return Err(io::Error::other(failure.clone()));
+        }
+        if let Some(gate) = self.storage.completion_gate()
+            && let Some(error) = gate.lock().expect("completion gate poisoned").as_ref()
+        {
+            return Err(io::Error::other(error.clone()));
         }
         if self.negotiated_features & REQUIRED_FEATURES != REQUIRED_FEATURES {
             return Err(io::Error::other("IO before required feature negotiation"));
@@ -542,7 +560,39 @@ impl Backend {
             drop(completed.data);
             drop(pending);
         }
-        Ok(())
+        self.storage.finish()
+    }
+
+    fn fail_pending(&mut self, vring: &VringMutex) {
+        let Some(gate) = self.storage.completion_gate() else {
+            return;
+        };
+        let guard = gate.lock().expect("completion gate poisoned");
+        if guard.is_none() {
+            return;
+        }
+        let Some(memory) = &self.memory else {
+            return;
+        };
+        let mut state = vring.get_mut();
+        for pending in self.pending.values_mut() {
+            if !pending.error_published
+                && publish(
+                    memory,
+                    &mut state,
+                    pending.completion,
+                    Status::IoError,
+                    None,
+                    &mut self.fault,
+                )
+                .is_ok()
+            {
+                pending.error_published = true;
+                self.counters.errors += 1;
+            }
+        }
+        // Keep these entries for drain(), while the worker retains its kernel
+        // allocations and permits. No later completion writes guest memory.
     }
 }
 
@@ -629,6 +679,7 @@ impl VhostUserBackendMut for Backend {
         })();
         if let Err(error) = &result {
             self.fail(error.to_string());
+            self.fail_pending(&vrings[0]);
         }
         result
     }

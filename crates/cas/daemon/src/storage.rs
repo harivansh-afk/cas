@@ -60,6 +60,8 @@ pub struct Completed {
     pub id: u64,
     pub data: CompletionData,
     pub result: io::Result<()>,
+    // Owned data is destroyed before its admission and byte credits.
+    pub _permit: Option<local::Permit>,
 }
 
 pub enum CompletionData {
@@ -95,6 +97,19 @@ impl Storage {
         )?)))
     }
 
+    pub fn local_async(
+        path: &Path,
+        create_bytes: Option<u64>,
+        event: &EventFd,
+    ) -> io::Result<Self> {
+        Ok(Self::Local(Box::new(Local::open_with_execution(
+            path,
+            create_bytes,
+            event,
+            local::Execution::Concurrent,
+        )?)))
+    }
+
     pub fn prepare(&mut self, kind: local::Kind) -> io::Result<Option<Permit>> {
         match self {
             Self::Local(local) => local
@@ -122,10 +137,16 @@ impl Storage {
         head: u16,
         offset: u64,
         length: usize,
+        permit: Permit,
         gather: impl FnOnce(&mut [u8]) -> io::Result<()>,
     ) -> io::Result<()> {
         match self {
-            Self::Local(local) => local.gather(id, head, offset, length, gather),
+            Self::Local(local) => match permit {
+                Permit::Local { _credits } => {
+                    local.gather(id, head, offset, length, _credits, gather)
+                }
+                Permit::Reference => Err(io::Error::other("local write without admission credits")),
+            },
             _ => Err(io::Error::other("packed gather requires local storage")),
         }
     }
@@ -221,6 +242,7 @@ impl Storage {
                                 id,
                                 data: operation.into(),
                                 result,
+                                _permit: None,
                             },
                             log.status(),
                         ))
@@ -247,7 +269,7 @@ impl Storage {
         match self {
             Self::Raw(_) => "raw_io_uring",
             Self::Staging(_) => "staging_sync",
-            Self::Local(_) => "local_sync",
+            Self::Local(local) => local.name(),
         }
     }
 
@@ -267,10 +289,23 @@ impl Storage {
         }
     }
 
+    #[cfg(test)]
     pub fn enqueue(&mut self, id: u64, operation: Operation) -> io::Result<()> {
+        self.enqueue_owned(id, operation, Permit::Reference)
+    }
+
+    pub fn enqueue_owned(
+        &mut self,
+        id: u64,
+        operation: Operation,
+        permit: Permit,
+    ) -> io::Result<()> {
         match self {
             Self::Raw(raw) => raw.enqueue(id, operation),
-            Self::Local(local) => local.enqueue(id, operation),
+            Self::Local(local) => match permit {
+                Permit::Local { _credits } => local.enqueue(id, operation, _credits),
+                Permit::Reference => Err(io::Error::other("local IO without admission credits")),
+            },
             Self::Staging(staging) => staging
                 .sender
                 .as_ref()
@@ -286,6 +321,13 @@ impl Storage {
         }
         if let Self::Raw(raw) = self {
             raw.ring.submit()?;
+        }
+        Ok(())
+    }
+
+    pub fn finish(&mut self) -> io::Result<()> {
+        if let Self::Local(local) = self {
+            local.stop()?;
         }
         Ok(())
     }
@@ -407,6 +449,7 @@ impl Raw {
             id,
             data: operation.into(),
             result,
+            _permit: None,
         }))
     }
 }

@@ -48,6 +48,10 @@ impl From<&Submission> for Cohort {
 }
 
 impl Log {
+    pub fn covers_flush(&self, boundary: u64) -> bool {
+        self.fenced && self.durable >= boundary
+    }
+
     /// Check without consuming the final allocation. Pending and Rollover keep
     /// an admitted builder queued while older IO or its finite cohort drains.
     pub fn check_append(&self, builder: &Builder) -> Result<()> {

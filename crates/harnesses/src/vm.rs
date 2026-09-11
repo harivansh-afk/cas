@@ -162,7 +162,10 @@ fn prepare_output(path: &Path) -> io::Result<PathBuf> {
 }
 
 fn scratch_image(backend: Backend, directory: &Path) -> io::Result<PathBuf> {
-    if matches!(backend, Backend::Staging | Backend::Local) {
+    if matches!(
+        backend,
+        Backend::Staging | Backend::Local | Backend::LocalAsync
+    ) {
         return Ok(tempfile::Builder::new()
             .prefix("cas-staging-")
             .tempdir_in(directory)?
@@ -322,7 +325,10 @@ fn execute_guest(
             .arg(image)
             .arg("--report")
             .arg(output.join("daemon.json"));
-        if matches!(build.backend, Backend::Staging | Backend::Local) {
+        if matches!(
+            build.backend,
+            Backend::Staging | Backend::Local | Backend::LocalAsync
+        ) {
             command.args(["--backend", build.backend.name()]);
             if !read_only {
                 command.arg("--create-bytes").arg(DISK_BYTES.to_string());
@@ -479,7 +485,11 @@ fn execute(args: &mut Args, summary: &mut Summary) -> io::Result<()> {
         ));
     }
     if (args.live_recovery && build.backend != Backend::Staging)
-        || (args.recovery && !matches!(build.backend, Backend::Staging | Backend::Local))
+        || (args.recovery
+            && !matches!(
+                build.backend,
+                Backend::Staging | Backend::Local | Backend::LocalAsync
+            ))
     {
         return Err(io::Error::other(
             "unsupported backend for this recovery scenario",

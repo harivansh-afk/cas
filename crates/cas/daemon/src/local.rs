@@ -1,4 +1,5 @@
-//! Synchronous v2 worker. The queue thread gathers into its final append buffer.
+//! V2 adapters. The queue thread gathers into its final append allocation.
+mod reactor;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
@@ -14,6 +15,7 @@ use cas_core::{
     budget::{Amount, Budget, Credits, Share},
 };
 use vmm_sys_util::eventfd::EventFd;
+use vmm_sys_util::eventfd::{EFD_CLOEXEC, EFD_NONBLOCK};
 
 use crate::storage::{Completed, CompletionData, Operation};
 
@@ -22,6 +24,21 @@ pub enum Kind {
     Read(usize),
     Write(usize),
     Control,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Execution {
+    Synchronous,
+    Concurrent,
+}
+
+impl Execution {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Synchronous => "local_sync",
+            Self::Concurrent => "local_async",
+        }
+    }
 }
 
 pub struct Permit {
@@ -70,11 +87,18 @@ struct Metrics {
     admission_retained_peak: usize,
     encoding_retained_peak: usize,
     completion_retained_peak: usize,
+    io_queued: u64,
+    io_completed: u64,
+    peak_awaiting_cqe: usize,
+    reordered_appends: u64,
+    publication_wait_ns: u64,
+    cohort_pause_ns: u64,
 }
 
 struct Write {
     id: u64,
     bytes: usize,
+    permit: Permit,
 }
 
 struct Packing {
@@ -86,7 +110,14 @@ struct Packing {
 
 enum Command {
     Append(Packing),
-    Io(u64, Operation),
+    Io(Io),
+}
+
+struct Io {
+    id: u64,
+    operation: Operation,
+    permit: Permit,
+    boundary: u64,
 }
 
 type Response = (Completed, append::Status);
@@ -96,15 +127,28 @@ pub struct Local {
     sender: Option<mpsc::SyncSender<Command>>,
     receiver: Mutex<mpsc::Receiver<Response>>,
     worker: Option<JoinHandle<()>>,
+    input_wake: Option<EventFd>,
+    execution: Execution,
+    admitted: u64,
     packing: Option<Packing>,
     pools: Arc<Pools>,
     metrics: Arc<Mutex<Metrics>>,
+    final_status: Arc<Mutex<append::Status>>,
     pub health: Health,
     pub status: append::Status,
 }
 
 impl Local {
     pub fn open(path: &Path, create_bytes: Option<u64>, event: &EventFd) -> io::Result<Self> {
+        Self::open_with_execution(path, create_bytes, event, Execution::Synchronous)
+    }
+
+    pub fn open_with_execution(
+        path: &Path,
+        create_bytes: Option<u64>,
+        event: &EventFd,
+        execution: Execution,
+    ) -> io::Result<Self> {
         let log = match create_bytes {
             Some(image_bytes) => {
                 let mut identities = [0; 32];
@@ -127,6 +171,7 @@ impl Local {
         let pools = Arc::new(Pools::new());
         let metrics = Arc::new(Mutex::new(Metrics::default()));
         let health = Arc::new(Mutex::new(None));
+        let final_status = Arc::new(Mutex::new(status));
         let (sender, input) = mpsc::sync_channel(136);
         let (output, receiver) = mpsc::channel();
         let worker = Worker {
@@ -136,17 +181,34 @@ impl Local {
             pools: Arc::clone(&pools),
             metrics: Arc::clone(&metrics),
             health: Arc::clone(&health),
+            final_status: Arc::clone(&final_status),
+        };
+        let input_wake = if execution == Execution::Concurrent {
+            Some(EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK)?)
+        } else {
+            None
+        };
+        let task: Box<dyn FnOnce() + Send> = match &input_wake {
+            Some(wake) => {
+                let reactor = reactor::Reactor::new(worker, input, wake.try_clone()?)?;
+                Box::new(move || reactor.run())
+            }
+            None => Box::new(move || worker.run(input)),
         };
         let worker = thread::Builder::new()
-            .name("cas-local-sync".into())
-            .spawn(move || worker.run(input))?;
+            .name(execution.name().into())
+            .spawn(task)?;
         Ok(Self {
             sender: Some(sender),
             receiver: Mutex::new(receiver),
             worker: Some(worker),
+            input_wake,
+            execution,
+            admitted: status.published,
             packing: None,
             pools,
             metrics,
+            final_status,
             health,
             status,
         })
@@ -157,7 +219,11 @@ impl Local {
             .as_ref()
             .expect("live local worker")
             .try_send(command)
-            .map_err(io::Error::other)
+            .map_err(io::Error::other)?;
+        if let Some(wake) = &self.input_wake {
+            wake.write(1)?;
+        }
+        Ok(())
     }
 
     pub fn prepare(&mut self, kind: Kind) -> io::Result<Option<Permit>> {
@@ -230,6 +296,7 @@ impl Local {
         head: u16,
         offset: u64,
         length: usize,
+        permit: Permit,
         gather: impl FnOnce(&mut [u8]) -> io::Result<()>,
     ) -> io::Result<()> {
         let batch = self
@@ -239,6 +306,10 @@ impl Local {
         let serial = id
             .checked_add(1)
             .ok_or_else(|| io::Error::other("operation serial exhausted"))?;
+        let mutation = self
+            .admitted
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("mutation sequence exhausted"))?;
         batch
             .builder
             .write(
@@ -253,7 +324,12 @@ impl Local {
                 gather,
             )
             .map_err(io::Error::other)?;
-        batch.writes.push(Write { id, bytes: length });
+        self.admitted = mutation;
+        batch.writes.push(Write {
+            id,
+            bytes: length,
+            permit,
+        });
         let mut metrics = self.metrics.lock().expect("metrics poisoned");
         metrics.gathered_bytes += length as u64;
         metrics.gather_calls += 1;
@@ -269,14 +345,19 @@ impl Local {
         Ok(())
     }
 
-    pub fn enqueue(&mut self, id: u64, operation: Operation) -> io::Result<()> {
+    pub fn enqueue(&mut self, id: u64, operation: Operation, permit: Permit) -> io::Result<()> {
         if matches!(operation, Operation::Write { .. }) {
             return Err(io::Error::other(
                 "local writes must gather directly into an append batch",
             ));
         }
         self.seal()?;
-        self.send(Command::Io(id, operation))
+        self.send(Command::Io(Io {
+            id,
+            operation,
+            permit,
+            boundary: self.admitted,
+        }))
     }
 
     pub fn receive(&mut self, wait: bool) -> io::Result<Option<Completed>> {
@@ -300,20 +381,43 @@ impl Local {
     }
 
     pub fn report(&self) -> serde_json::Value {
-        serde_json::json!({ "status":self.status, "metrics":*self.metrics.lock().expect("metrics poisoned"),
+        let status = *self.final_status.lock().expect("status poisoned");
+        serde_json::json!({ "status":status, "metrics":*self.metrics.lock().expect("metrics poisoned"),
             "requests":self.pools.requests.usage(), "append":self.pools.append.usage(),
             "read":self.pools.read.usage(), "control":self.pools.control.usage(),
             "host_append":self.pools.append.host_usage(), "host_read":self.pools.read.host_usage() })
+    }
+
+    pub fn name(&self) -> &'static str {
+        self.execution.name()
+    }
+
+    pub fn stop(&mut self) -> io::Result<()> {
+        self.seal()?;
+        drop(self.sender.take());
+        if let Some(wake) = &self.input_wake {
+            let _ = wake.write(1);
+        }
+        if let Some(worker) = self.worker.take() {
+            worker
+                .join()
+                .map_err(|_| io::Error::other("local IO worker panicked"))?;
+        }
+        let receiver = self
+            .receiver
+            .get_mut()
+            .map_err(|_| io::Error::other("completion receiver poisoned"))?;
+        while let Ok((completed, status)) = receiver.try_recv() {
+            self.status = status;
+            drop(completed);
+        }
+        Ok(())
     }
 }
 
 impl Drop for Local {
     fn drop(&mut self) {
-        let _ = self.seal();
-        drop(self.sender.take());
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
+        let _ = self.stop();
     }
 }
 
@@ -331,10 +435,24 @@ struct Worker {
     pools: Arc<Pools>,
     metrics: Arc<Mutex<Metrics>>,
     health: Health,
+    final_status: Arc<Mutex<append::Status>>,
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        *self.final_status.lock().expect("status poisoned") = self.log.status();
+    }
 }
 
 impl Worker {
-    fn send(&self, id: u64, data: CompletionData, result: io::Result<()>) -> io::Result<()> {
+    fn send(
+        &self,
+        id: u64,
+        data: CompletionData,
+        result: io::Result<()>,
+        permit: Permit,
+    ) -> io::Result<()> {
+        *self.final_status.lock().expect("status poisoned") = self.log.status();
         if let Err(error) = &result {
             // The frontend holds this same gate through status and used publication.
             let mut failed = self
@@ -346,7 +464,15 @@ impl Worker {
             }
         }
         self.output
-            .send((Completed { id, data, result }, self.log.status()))
+            .send((
+                Completed {
+                    id,
+                    data,
+                    result,
+                    _permit: Some(permit),
+                },
+                self.log.status(),
+            ))
             .map_err(io::Error::other)?;
         self.wake.0.write(1)
     }
@@ -413,10 +539,16 @@ impl Worker {
                         write.id,
                         CompletionData::Write { bytes: write.bytes },
                         result,
+                        write.permit,
                     )?;
                 }
             }
-            Command::Io(id, mut operation) => {
+            Command::Io(Io {
+                id,
+                mut operation,
+                permit,
+                ..
+            }) => {
                 let result = if failed {
                     Err(io::Error::other("local image failed"))
                 } else {
@@ -431,7 +563,7 @@ impl Worker {
                         }
                     }
                 };
-                self.send(id, operation.into(), result)?;
+                self.send(id, operation.into(), result, permit)?;
             }
         }
         Ok(())

@@ -32,6 +32,8 @@ pub enum Backend {
     Daemon,
     Staging,
     Local,
+    #[serde(rename = "local-async")]
+    LocalAsync,
 }
 
 impl Backend {
@@ -41,6 +43,7 @@ impl Backend {
             Self::Daemon => "daemon",
             Self::Staging => "staging",
             Self::Local => "local",
+            Self::LocalAsync => "local-async",
         }
     }
     pub fn storage(self) -> &'static str {
@@ -48,6 +51,7 @@ impl Backend {
             Self::Raw | Self::Daemon => "raw_io_uring",
             Self::Staging => "staging_sync",
             Self::Local => "local_sync",
+            Self::LocalAsync => "local_async",
         }
     }
 }
@@ -179,6 +183,12 @@ struct LocalMetrics {
     admission_retained_peak: usize,
     encoding_retained_peak: usize,
     completion_retained_peak: usize,
+    #[serde(default)]
+    io_queued: u64,
+    #[serde(default)]
+    io_completed: u64,
+    #[serde(default)]
+    peak_awaiting_cqe: usize,
 }
 
 impl LocalReport {
@@ -228,6 +238,14 @@ impl LocalReport {
             if peak > 8 * 1024 * 1024 || (daemon.write_bytes != 0 && peak < BLOCK_SIZE) {
                 return Err(io::Error::other("invalid append lifetime measurement"));
             }
+        }
+        if daemon.backend == Backend::LocalAsync.storage()
+            && (metrics.io_queued == 0
+                || metrics.io_queued != metrics.io_completed
+                || metrics.peak_awaiting_cqe == 0
+                || metrics.peak_awaiting_cqe > 256)
+        {
+            return Err(io::Error::other("concurrent IO ownership did not drain"));
         }
         Ok(())
     }
@@ -302,7 +320,7 @@ impl DaemonReport {
                 ));
             }
         }
-        if backend == Backend::Local {
+        if matches!(backend, Backend::Local | Backend::LocalAsync) {
             self.local
                 .as_ref()
                 .ok_or_else(|| io::Error::other("missing local report"))?

@@ -265,7 +265,7 @@ impl Log {
         if self.cohort.is_some() || self.issued != self.published {
             return Err(Error::Pending);
         }
-        if self.fenced && self.durable == self.published {
+        if self.covers_flush(self.published) {
             return Ok(self.durable);
         }
         let fence = self.prepare_fence()?;

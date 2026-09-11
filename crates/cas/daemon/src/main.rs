@@ -22,6 +22,7 @@ enum BackendKind {
     Raw,
     Staging,
     Local,
+    LocalAsync,
 }
 
 #[derive(Parser)]

@@ -98,6 +98,7 @@
           daemon-smoke = daemon;
           staging-smoke = staging;
           local-smoke = local;
+          async-smoke = smokeFor pkgs "local-async" false;
           checkpoints = pkgs.callPackage ./nix/checkpoints.nix {
             wrappers = {
               inherit
