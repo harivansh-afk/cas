@@ -61,6 +61,9 @@ pub struct Args {
     build_info: PathBuf,
     #[arg(long, hide = true)]
     lock: PathBuf,
+    /// Require this exact Nix source before starting a VM (checkpoint suites).
+    #[arg(long, hide = true)]
+    expect_source: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy)]
@@ -220,6 +223,56 @@ fn logged_command(
     Ok(command)
 }
 
+/// Capture the expanded invocation of the actual QEMU process, not just its launcher.
+fn record_qemu(args: &Args, guest: &mut ManagedChild, output: &Path) -> io::Result<()> {
+    if args.expect_source.is_none() {
+        return Ok(());
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let mut pids = vec![guest.pid()];
+        let mut cursor = 0;
+        while cursor < pids.len() && cursor < 64 {
+            let pid = pids[cursor];
+            cursor += 1;
+            let root = PathBuf::from(format!("/proc/{pid}"));
+            if let Ok(executable) = fs::read_link(root.join("exe"))
+                && executable
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().contains("qemu-system-"))
+            {
+                let bytes = fs::read(root.join("cmdline"))?;
+                let argv: Vec<_> = bytes
+                    .split(|byte| *byte == 0)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| String::from_utf8_lossy(value).into_owned())
+                    .collect();
+                return evidence::write_json(
+                    &output.join("qemu.json"),
+                    &serde_json::json!({
+                        "pid":pid, "executable":executable, "argv":argv,
+                        "process_status":fs::read_to_string(root.join("status"))?,
+                    }),
+                );
+            }
+            if let Ok(children) = fs::read_to_string(root.join(format!("task/{pid}/children"))) {
+                pids.extend(
+                    children
+                        .split_whitespace()
+                        .filter_map(|pid| pid.parse::<u32>().ok()),
+                );
+            }
+        }
+        process::check_interrupt()?;
+        if guest.poll()?.is_some() || Instant::now() >= deadline {
+            return Err(io::Error::other(
+                "could not record the running QEMU invocation",
+            ));
+        }
+        thread::sleep(process::POLL);
+    }
+}
+
 fn execute_guest(
     args: &Args,
     build: &Build,
@@ -296,6 +349,7 @@ fn execute_guest(
     evidence.launcher = vec![args.vm.clone()];
     let mut guest =
         ManagedChild::spawn(&mut logged_command(&args.vm, output, "console.log", &env)?)?;
+    record_qemu(args, &mut guest, output)?;
     if matches!(phase, Phase::Write) {
         let daemon = daemon
             .as_mut()
@@ -407,8 +461,16 @@ fn verify_io(
 }
 
 fn execute(args: &mut Args, summary: &mut Summary) -> io::Result<()> {
-    File::options().read(true).write(true).open("/dev/kvm")?;
     let value: Value = read_json(&args.build_info)?;
+    if let Some(expected) = &args.expect_source
+        && (value["source_path"].as_str() != expected.to_str()
+            || value["harness"].as_str().map(Path::new) != Some(std::env::current_exe()?.as_path()))
+    {
+        return Err(io::Error::other(
+            "VM wrapper does not match the expected build",
+        ));
+    }
+    File::options().read(true).write(true).open("/dev/kvm")?;
     summary.build = Some(value.clone());
     let build: Build = serde_json::from_value(value)?;
     if build.interactive != args.ssh_key.is_some() {
@@ -588,6 +650,7 @@ mod tests {
             vm,
             build_info: PathBuf::new(),
             lock: PathBuf::new(),
+            expect_source: None,
         };
         let build = Build {
             system: "test".into(),

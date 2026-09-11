@@ -83,17 +83,32 @@
         (final: _prev: { cas = final.callPackage ./nix/package.nix { }; })
       ];
 
-      packages = eachSystem (pkgs: {
-        default = pkgs.cas;
-        inherit (pkgs) cas;
-        vm-smoke = smokeFor pkgs "raw" false;
-        daemon-smoke = smokeFor pkgs "daemon" false;
-        staging-smoke = smokeFor pkgs "staging" false;
-        dev-vm = smokeFor pkgs "staging" true;
-        census-pilot = (pkgs.callPackage ./nix/census.nix { }).pilot;
-        census-fleet = (pkgs.callPackage ./nix/census.nix { }).fleet;
-        test-guest = (guestFor pkgs "raw" false).config.system.build.vm;
-      });
+      packages = eachSystem (
+        pkgs:
+        let
+          raw = smokeFor pkgs "raw" false;
+          daemon = smokeFor pkgs "daemon" false;
+          staging = smokeFor pkgs "staging" false;
+        in
+        {
+          default = pkgs.cas;
+          inherit (pkgs) cas;
+          vm-smoke = raw;
+          daemon-smoke = daemon;
+          staging-smoke = staging;
+          checkpoints = pkgs.callPackage ./nix/checkpoints.nix {
+            wrappers = { inherit raw daemon staging; };
+            provenance = {
+              source_revision = self.rev or self.dirtyRev or null;
+              source_path = toString self.outPath;
+            };
+          };
+          dev-vm = smokeFor pkgs "staging" true;
+          census-pilot = (pkgs.callPackage ./nix/census.nix { }).pilot;
+          census-fleet = (pkgs.callPackage ./nix/census.nix { }).fleet;
+          test-guest = (guestFor pkgs "raw" false).config.system.build.vm;
+        }
+      );
 
       apps = eachSystem (pkgs: {
         vm-smoke = {
@@ -124,7 +139,13 @@
       });
 
       # treefmt wrapper around nixfmt; `nix fmt` formats the tree, `nix fmt -- --ci` checks it.
-      formatter = eachSystem (pkgs: pkgs.nixfmt-tree);
+      formatter = eachSystem (
+        pkgs:
+        pkgs.nixfmt-tree.override {
+          # Frozen source exhibits are evidence, not maintained build inputs.
+          settings.formatter.nixfmt.excludes = [ "docs/research/history/evidence/**" ];
+        }
+      );
 
       nixosModules = {
         # Tools, SSH, and measurement defaults for any dedicated test host.

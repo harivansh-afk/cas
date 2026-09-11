@@ -136,6 +136,7 @@ dependencies = [
 name = "cas-harness"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "cas-core",
  "clap",
  "libc",

@@ -7,6 +7,49 @@ use std::time::{Duration, Instant};
 
 struct Harness(Child);
 
+#[test]
+fn wrong_build_is_rejected_before_any_guest_is_started() {
+    let directory = tempfile::tempdir().unwrap();
+    let build = directory.path().join("build.json");
+    fs::write(
+        &build,
+        serde_json::to_vec(&serde_json::json!({
+            "source_path":"/wrong-source", "harness":env!("CARGO_BIN_EXE_cas-harness"),
+            "system":"aarch64-linux", "backend":"raw", "daemon":null,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let output = directory.path().join("run");
+    let result = Command::new(env!("CARGO_BIN_EXE_cas-harness"))
+        .args([
+            "vm",
+            "--vm",
+            "/nonexistent/guest",
+            "--lock",
+            "/nonexistent/lock",
+        ])
+        .arg("--build-info")
+        .arg(build)
+        .arg("--expect-source")
+        .arg("/expected-source")
+        .arg("--output")
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    let summary: serde_json::Value =
+        serde_json::from_slice(&fs::read(output.join("summary.json")).unwrap()).unwrap();
+    assert_eq!(summary["passed"], false);
+    assert!(
+        summary["error"]
+            .as_str()
+            .unwrap()
+            .contains("expected build")
+    );
+    assert!(!output.join("console.log").exists());
+}
+
 impl Drop for Harness {
     fn drop(&mut self) {
         if self.0.try_wait().unwrap().is_none() {

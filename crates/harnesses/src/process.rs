@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 pub const POLL: Duration = Duration::from_millis(20);
@@ -54,6 +54,10 @@ pub struct ManagedChild {
 }
 
 impl ManagedChild {
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     pub fn spawn(command: &mut Command) -> io::Result<Self> {
         check_interrupt()?;
         let child = command.process_group(0).stdin(Stdio::null()).spawn()?;
@@ -166,6 +170,51 @@ pub struct Capture {
     stderr: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandResult {
+    pub argv: Vec<String>,
+    pub started_at_utc: String,
+    pub ended_at_utc: String,
+    pub deadline_seconds: u64,
+    pub elapsed_seconds: f64,
+    pub exit_code: Option<i32>,
+    pub error: Option<String>,
+}
+
+/// Keep stdout/stderr even when spawning, waiting or the command itself fails.
+pub fn run_logged(
+    command: &mut Command,
+    directory: &std::path::Path,
+    timeout: Duration,
+) -> io::Result<CommandResult> {
+    std::fs::create_dir(directory)?;
+    let mut result = CommandResult {
+        argv: std::iter::once(command.get_program())
+            .chain(command.get_args())
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect(),
+        started_at_utc: crate::host::utc_now()?,
+        ended_at_utc: String::new(),
+        deadline_seconds: timeout.as_secs(),
+        elapsed_seconds: 0.0,
+        exit_code: None,
+        error: None,
+    };
+    command
+        .stdout(std::fs::File::create(directory.join("stdout.log"))?)
+        .stderr(std::fs::File::create(directory.join("stderr.log"))?);
+    let started = Instant::now();
+    match ManagedChild::spawn(command).and_then(|mut child| child.wait(timeout)) {
+        Ok(status) => result.exit_code = Some(exit_code(status)),
+        Err(error) => result.error = Some(error.to_string()),
+    }
+    result.elapsed_seconds = started.elapsed().as_secs_f64();
+    result.ended_at_utc = crate::host::utc_now()?;
+    crate::evidence::write_json(&directory.join("command.json"), &result)?;
+    Ok(result)
 }
 
 /// Temporary files avoid pipe backpressure and descendants holding a pipe open.

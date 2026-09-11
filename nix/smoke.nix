@@ -34,6 +34,10 @@ let
       inherit (guest.config.nixpkgs.hostPlatform) system;
       inherit (provenance) source_revision source_path nixpkgs_revision;
       vm = toString vm;
+      harness = lib.getExe' cas "cas-harness";
+      qemu = lib.getExe' qemu_kvm "qemu-system-${
+        if guest.config.nixpkgs.hostPlatform.isAarch64 then "aarch64" else "x86_64"
+      }";
       daemon = if backend == "raw" then null else lib.getExe' cas "cas-daemon";
       qemu_version = qemu_kvm.version;
       fio_version = fio.version;
@@ -56,6 +60,10 @@ writeShellApplication {
       --build-info ${buildInfo} \
       --lock ${provenance.lock} \
       "$@"
+  '';
+  derivationArgs.postCheck = ''
+    mkdir -p "$out/share/cas"
+    cp ${buildInfo} "$out/share/cas/build.json"
   '';
   meta.description =
     if interactive then

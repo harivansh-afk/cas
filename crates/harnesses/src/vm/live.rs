@@ -83,6 +83,7 @@ pub(super) fn execute(
     evidence.launcher = vec![args.vm.clone()];
     let mut guest =
         ManagedChild::spawn(&mut logged_command(&args.vm, output, "console.log", &env)?)?;
+    record_qemu(args, &mut guest, output)?;
     let deadline = Instant::now() + Duration::from_secs(args.timeout);
     while !marker.try_exists()? {
         process::check_interrupt()?;

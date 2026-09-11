@@ -3,6 +3,8 @@ mod evidence;
 mod fleet;
 mod host;
 mod process;
+mod source;
+mod suite;
 mod vm;
 
 use std::io;
@@ -20,6 +22,13 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run the source-bound development checkpoint suite from a Nix wrapper.
+    Suite(suite::Args),
+    /// Recheck a retained suite, including every evidence hash and required scenario.
+    VerifySuite {
+        #[arg(long)]
+        output: PathBuf,
+    },
     /// Build a dated ARM64 clone fleet and census each update epoch.
     Fleet(fleet::Args),
     /// Boot the pinned guest for automated checks or an interactive SSH session.
@@ -45,6 +54,8 @@ fn run() -> io::Result<()> {
     let args = Args::parse();
     process::install_signal_handlers()?;
     match args.command {
+        Command::Suite(args) => suite::run(args),
+        Command::VerifySuite { output } => suite::verify(&output),
         Command::Fleet(args) => fleet::run(args),
         Command::Vm(args) => vm::run(args),
         Command::Preflight {

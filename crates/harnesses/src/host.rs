@@ -122,6 +122,10 @@ pub fn preflight(label: &str, output: &Path, checkout: &Path) -> io::Result<()> 
     let mut paths = vec![
         PathBuf::from("/proc/meminfo"),
         PathBuf::from("/sys/kernel/mm/transparent_hugepage/enabled"),
+        PathBuf::from("/sys/devices/system/node/online"),
+        PathBuf::from("/sys/class/dmi/id/bios_vendor"),
+        PathBuf::from("/sys/class/dmi/id/bios_version"),
+        PathBuf::from("/sys/class/dmi/id/bios_date"),
     ];
     let mut governors: Vec<_> = fs::read_dir("/sys/devices/system/cpu")?
         .filter_map(Result::ok)
