@@ -9,6 +9,9 @@ mod direct;
 #[cfg(target_os = "linux")]
 pub mod staging;
 
+#[cfg(target_os = "linux")]
+pub mod append;
+
 pub const BLOCK_SIZE: usize = 4096;
 
 pub mod aligned;
