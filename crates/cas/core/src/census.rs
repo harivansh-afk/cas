@@ -93,10 +93,7 @@ pub fn scan(paths: &[PathBuf], chunk_bytes: usize) -> io::Result<Census> {
             let bytes = &buffer[..len];
             digest.update(bytes);
             image.logical_bytes += len as u64;
-            let hash = bytes
-                .iter()
-                .any(|&byte| byte != 0)
-                .then(|| blake3::hash(bytes));
+            let hash = crate::chunk::nonzero_hash(bytes);
             if index == 0 {
                 base_offsets.push(hash);
             }

@@ -1,6 +1,9 @@
 //! Credits precede allocations and stay owned until the resource is released.
 use std::sync::{Arc, Mutex};
 
+mod allocator;
+pub use allocator::BudgetAllocator;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Amount {
     pub bytes: usize,
@@ -35,22 +38,33 @@ impl Budget {
     }
 
     pub fn reserve(self: &Arc<Self>, amount: Amount) -> Option<Lease> {
+        self.claim(amount).then(|| Lease {
+            budget: Arc::clone(self),
+            amount,
+        })
+    }
+
+    fn claim(&self, amount: Amount) -> bool {
         let mut usage = self.usage.lock().expect("budget mutex poisoned");
         if amount.bytes > self.limit.bytes - usage.current.bytes
             || amount.requests > self.limit.requests - usage.current.requests
         {
             usage.rejected = usage.rejected.saturating_add(1);
-            return None;
+            return false;
         }
         usage.current.bytes += amount.bytes;
         usage.current.requests += amount.requests;
         usage.peak.bytes = usage.peak.bytes.max(usage.current.bytes);
         usage.peak.requests = usage.peak.requests.max(usage.current.requests);
         usage.admitted = usage.admitted.saturating_add(1);
-        Some(Lease {
-            budget: Arc::clone(self),
-            amount,
-        })
+        true
+    }
+
+    fn release(&self, amount: Amount) {
+        let mut usage = self.usage.lock().expect("budget mutex poisoned");
+        usage.current.bytes -= amount.bytes;
+        usage.current.requests -= amount.requests;
+        usage.released = usage.released.saturating_add(1);
     }
 }
 
@@ -63,10 +77,7 @@ pub struct Lease {
 
 impl Drop for Lease {
     fn drop(&mut self) {
-        let mut usage = self.budget.usage.lock().expect("budget mutex poisoned");
-        usage.current.bytes -= self.amount.bytes;
-        usage.current.requests -= self.amount.requests;
-        usage.released = usage.released.saturating_add(1);
+        self.budget.release(self.amount);
     }
 }
 
