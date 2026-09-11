@@ -2,23 +2,119 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::*;
 
+#[derive(Clone, Copy)]
+enum Case {
+    Reorder { short: bool, pause: bool },
+    Cohort { fail_sync: bool },
+}
+
 pub(super) struct Control {
-    pub short: bool,
+    case: Case,
     release: AtomicBool,
     maximum: AtomicU64,
     first_seen: AtomicBool,
+    sync_seen: AtomicBool,
 }
 
 impl Control {
     pub fn released(&self) -> bool {
         self.release.load(Ordering::Acquire)
     }
-    pub fn observe(&self, last: u64) {
-        self.maximum.fetch_max(last, Ordering::Release);
-        if last == 1 {
-            self.first_seen.store(true, Ordering::Release);
+
+    pub fn entry(&self, work: &Work, entry: squeue::Entry) -> squeue::Entry {
+        match (self.case, work) {
+            (Case::Reorder { short: true, .. }, Work::Append(append))
+                if append.submission.batch().envelope().first == 1 =>
+            {
+                // Persist only A's header; the CQE still requires its full length.
+                opcode::Write::new(
+                    types::Fd(append.submission.file().as_raw_fd()),
+                    append.submission.batch().bytes().as_ptr(),
+                    BLOCK_SIZE as u32,
+                )
+                .offset(append.submission.offset())
+                .build()
+            }
+            (Case::Cohort { fail_sync: true }, Work::Fence(fence)) if fence.syncing => {
+                opcode::Fsync::new(types::Fd(-1))
+                    .flags(types::FsyncFlags::DATASYNC)
+                    .build()
+            }
+            _ => entry,
         }
     }
+
+    pub fn hold(&self, work: &Work) -> bool {
+        match work {
+            Work::Append(append) => {
+                let envelope = append.submission.batch().envelope();
+                self.maximum.fetch_max(envelope.last, Ordering::Release);
+                if envelope.first == 1 {
+                    self.first_seen.store(true, Ordering::Release);
+                    matches!(self.case, Case::Reorder { .. }) && !self.released()
+                } else {
+                    false
+                }
+            }
+            Work::Fence(fence) if fence.syncing => {
+                self.sync_seen.store(true, Ordering::Release);
+                matches!(self.case, Case::Cohort { .. }) && !self.released()
+            }
+            _ => false,
+        }
+    }
+}
+
+fn append(shared: &Shared, id: u64, queue: u16, value: u8) -> Command {
+    let credits = shared
+        .pools
+        .append
+        .reserve(Amount {
+            bytes: MAX_BATCH_BYTES,
+            requests: 0,
+        })
+        .unwrap();
+    let permit = shared.reserve(Kind::Write(BLOCK_SIZE)).unwrap();
+    let mut builder = Builder::new(MAX_REQUEST_BYTES as u64, MAX_REQUEST_BYTES).unwrap();
+    builder
+        .write(
+            RequestId {
+                serial: id,
+                attachment: 1,
+                queue,
+                head: id as u16,
+            },
+            0,
+            BLOCK_SIZE,
+            |bytes| {
+                bytes.fill(value);
+                Ok(())
+            },
+        )
+        .unwrap();
+    Command::Append(Packing {
+        builder,
+        credits,
+        writes: vec![Write {
+            id,
+            bytes: BLOCK_SIZE,
+            permit,
+        }],
+    })
+}
+
+fn operation(shared: &Shared, id: u64, boundary: u64, operation: Operation) -> Command {
+    let kind = match &operation {
+        Operation::Read { buffer, .. } => Kind::Read(buffer.as_slice().len()),
+        Operation::Flush => Kind::Control,
+        Operation::Write { .. } => unreachable!(),
+    };
+    Command::Io(Io {
+        id,
+        boundary,
+        operation,
+        permit: shared.reserve(kind).unwrap(),
+    })
 }
 
 struct Run {
@@ -36,6 +132,10 @@ impl Run {
     }
 
     fn start_with_pause(short: bool, pause: bool) -> Self {
+        Self::spawn(Case::Reorder { short, pause })
+    }
+
+    fn spawn(case: Case) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let config = append::Config {
             store: [1; 16],
@@ -50,7 +150,6 @@ impl Run {
         )
         .unwrap();
         let shared = Shared::new(log.status());
-        let pools = &shared.pools;
         let (output, receiver) = mpsc::channel();
         let worker = Worker {
             log,
@@ -58,55 +157,33 @@ impl Run {
             wake: Wake(EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK).unwrap()),
             shared: Arc::clone(&shared),
         };
-        let (sender, input) = mpsc::sync_channel(4);
-        for serial in 1..=2 {
-            let credits = pools
-                .append
-                .reserve(Amount {
-                    bytes: MAX_BATCH_BYTES,
-                    requests: 0,
-                })
-                .unwrap();
-            let permit = Permit {
-                _request: pools
-                    .requests
-                    .reserve(Amount {
-                        bytes: 0,
-                        requests: 1,
-                    })
-                    .unwrap(),
-                _read: None,
-            };
-            let mut builder = Builder::new(config.image_bytes, MAX_REQUEST_BYTES).unwrap();
-            builder
-                .write(
-                    RequestId {
-                        serial,
-                        attachment: 1,
-                        queue: 0,
-                        head: serial as u16,
-                    },
-                    0,
-                    BLOCK_SIZE,
-                    |bytes| {
-                        bytes.fill(serial as u8);
-                        Ok(())
-                    },
-                )
-                .unwrap();
+        let (sender, input) = mpsc::sync_channel(8);
+        for id in 1..=2 {
             sender
-                .send(Command::Append(Packing {
-                    builder,
-                    credits,
-                    writes: vec![Write {
-                        id: serial,
-                        bytes: BLOCK_SIZE,
-                        permit,
-                    }],
-                }))
+                .send(append(&shared, id, (id - 1) as u16, id as u8))
                 .unwrap();
         }
-        let paused = pause.then(|| {
+        if matches!(case, Case::Cohort { .. }) {
+            sender
+                .send(operation(&shared, 3, 2, Operation::Flush))
+                .unwrap();
+            sender
+                .send(operation(
+                    &shared,
+                    4,
+                    2,
+                    Operation::Read {
+                        offset: 0,
+                        buffer: AlignedBuffer::new(BLOCK_SIZE),
+                    },
+                ))
+                .unwrap();
+            sender.send(append(&shared, 5, 0, 3)).unwrap();
+            sender
+                .send(operation(&shared, 6, 3, Operation::Flush))
+                .unwrap();
+        }
+        let paused = matches!(case, Case::Reorder { pause: true, .. }).then(|| {
             let (done, result) = mpsc::sync_channel(1);
             sender
                 .send(Command::Pause {
@@ -116,14 +193,15 @@ impl Run {
                 .unwrap();
             result
         });
-        // Both appends precede startup. Closing input disables idle sync, so the
-        // test also checks recovery of completed, unsynchronized host writes.
+        // Commands precede startup. Closing input disables idle sync; only
+        // explicit FLUSHes can advance E in these controlled runs.
         drop(sender);
         let control = Arc::new(Control {
-            short,
+            case,
             release: AtomicBool::new(false),
             maximum: AtomicU64::new(0),
             first_seen: AtomicBool::new(false),
+            sync_seen: AtomicBool::new(false),
         });
         let mut reactor = Reactor::new(
             worker,
@@ -165,6 +243,72 @@ impl Drop for Run {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+#[test]
+fn held_sync_keeps_a_finite_prefix_while_reads_progress_and_later_writes_wait() {
+    for fail_sync in [false, true] {
+        let mut run = Run::spawn(Case::Cohort { fail_sync });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !run.control.sync_seen.load(Ordering::Acquire) {
+            assert!(Instant::now() < deadline, "sync CQE was not observed");
+            thread::sleep(Duration::from_millis(1));
+        }
+        // Queue 0 and 1's overlapping writes publish before the held sync.
+        // The boundary-2 read can complete while that cohort is still pending.
+        for id in [1, 2, 4] {
+            let (completion, _) = run.output.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert_eq!(completion.id, id);
+            assert!(completion.result.is_ok());
+            if id == 4 {
+                let CompletionData::Read(bytes) = &completion.data else {
+                    panic!("expected read completion")
+                };
+                assert_eq!(bytes.as_slice(), &[2; BLOCK_SIZE]);
+            }
+        }
+        assert!(matches!(
+            run.output.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        assert_eq!(run.shared.final_status.lock().unwrap().published, 2);
+        assert_eq!(run.shared.health.lock().unwrap().durable, 0);
+        assert_eq!(run.shared.final_status.lock().unwrap().issued, 2);
+        assert_eq!(run.shared.metrics.lock().unwrap().batches_submitted, 2);
+        // The queued later batch retains its allocation without submitting it.
+        assert_eq!(
+            run.shared.pools.append.usage().current.bytes,
+            MAX_BATCH_BYTES
+        );
+        assert!(run.shared.pools.control.usage().current.bytes >= BLOCK_SIZE);
+
+        run.release();
+        for id in [3, 5, 6] {
+            let (completion, status) = run.output.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert_eq!(completion.id, id);
+            assert_eq!(completion.result.is_err(), fail_sync);
+            if fail_sync {
+                assert_eq!(status.published, 2);
+                assert_eq!(status.durable, 0);
+                assert!(run.shared.health.lock().unwrap().failure.is_some());
+            } else {
+                assert_eq!(status.published, if id == 3 { 2 } else { 3 });
+                assert_eq!(status.durable, if id == 6 { 3 } else { 2 });
+            }
+        }
+        let metrics = run.shared.metrics.lock().unwrap();
+        assert_eq!(metrics.batches_submitted, if fail_sync { 2 } else { 3 });
+        assert_eq!(metrics.io_queued, metrics.io_completed);
+        assert_eq!(metrics.io_queued, if fail_sync { 5 } else { 8 });
+        assert_eq!(
+            run.control.maximum.load(Ordering::Acquire),
+            if fail_sync { 2 } else { 3 }
+        );
+        assert_eq!(run.shared.pools.append.usage().current.bytes, 0);
+        assert_eq!(run.shared.pools.control.usage().current, Amount::default());
+        assert_eq!(run.shared.pools.read.usage().current, Amount::default());
+        assert_eq!(run.shared.pools.requests.usage().current, Amount::default());
     }
 }
 

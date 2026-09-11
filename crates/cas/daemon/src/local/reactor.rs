@@ -279,27 +279,13 @@ impl Reactor {
 
     fn push(&mut self, token: u64) -> io::Result<()> {
         let pending = self.pending.get_mut(&token).expect("owned IO before SQE");
-        let entry = pending.entry().user_data(token);
+        let entry = pending.entry();
         #[cfg(test)]
-        let entry = if self.control.as_ref().is_some_and(|control| control.short)
-            && matches!(&pending.work, Work::Append(append) if append.submission.batch().envelope().first == 1)
-        {
-            let Work::Append(append) = &pending.work else {
-                unreachable!()
-            };
-            // Persist only A's header. The expected CQE still requires its full
-            // encoded length, exactly as for a short write returned by the OS.
-            opcode::Write::new(
-                types::Fd(append.submission.file().as_raw_fd()),
-                append.submission.batch().bytes().as_ptr(),
-                BLOCK_SIZE as u32,
-            )
-            .offset(append.submission.offset())
-            .build()
-            .user_data(token)
-        } else {
-            entry
+        let entry = match &self.control {
+            Some(control) => control.entry(&pending.work, entry),
+            None => entry,
         };
+        let entry = entry.user_data(token);
         // SAFETY: pending owns every referenced buffer and the locked file.
         // No owner is removed until its CQE. Drop drains or retains all owners.
         unsafe { self.ring.submission().push(&entry) }.map_err(io::Error::other)?;
@@ -385,16 +371,11 @@ impl Reactor {
             };
             #[cfg(test)]
             if let Some(control) = &self.control
-                && let Some(Pending {
-                    work: Work::Append(append),
-                    ..
-                }) = self.pending.get(&token)
+                && let Some(pending) = self.pending.get(&token)
+                && control.hold(&pending.work)
             {
-                control.observe(append.submission.batch().envelope().last);
-                if append.submission.batch().envelope().first == 1 && !control.released() {
-                    self.withheld = Some((token, result));
-                    continue;
-                }
+                assert!(self.withheld.replace((token, result)).is_none());
+                continue;
             }
             self.complete_cqe(token, result)?;
         }

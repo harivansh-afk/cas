@@ -723,17 +723,17 @@ impl Worker {
                 writes,
             }) => {
                 let address = builder.allocation_address();
-                {
-                    let mut metrics = self.shared.metrics.lock().expect("metrics poisoned");
-                    metrics.batches_submitted += 1;
-                    metrics.encoding_retained_peak = metrics
-                        .encoding_retained_peak
-                        .max(self.shared.pools.append.usage().current.bytes);
-                }
                 let result = if failed {
                     drop(builder);
                     Err(io::Error::other("local image failed"))
                 } else {
+                    {
+                        let mut metrics = self.shared.metrics.lock().expect("metrics poisoned");
+                        metrics.batches_submitted += 1;
+                        metrics.encoding_retained_peak = metrics
+                            .encoding_retained_peak
+                            .max(self.shared.pools.append.usage().current.bytes);
+                    }
                     self.log
                         .append(builder)
                         .map_err(io::Error::other)
