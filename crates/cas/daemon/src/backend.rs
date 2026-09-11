@@ -1,5 +1,9 @@
 // Queue execution: retain owned IO until completion and publish against one memory snapshot.
 
+mod recovery;
+use cas_daemon::inflight::Entry;
+use recovery::Session;
+
 use std::collections::BTreeMap;
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};
@@ -31,8 +35,22 @@ const REQUIRED_FEATURES: u64 =
     (1 << VIRTIO_F_VERSION_1) | (1 << VIRTIO_BLK_F_BLK_SIZE) | (1 << VIRTIO_BLK_F_FLUSH);
 pub(super) const COMPLETION_EVENT: u16 = 2; // 0 is the queue; 1 is the framework's exit event.
 
+#[derive(Clone, Copy)]
+struct GuestCompletion {
+    target: Completion,
+    inflight: Option<Entry>,
+    write_number: Option<u64>,
+}
+
+struct Admitted {
+    id: u64,
+    request: Request,
+    permit: Permit,
+    inflight: Option<Entry>,
+}
+
 struct PendingRequest {
-    completion: Completion,
+    completion: GuestCompletion,
     segments: Vec<Segment>,
     error_published: bool,
 }
@@ -65,6 +83,7 @@ pub(super) struct Backend {
     failure: Option<String>,
     negotiated_features: u64,
     restartable: bool,
+    live: Option<Session>,
     restored_used: Option<u16>,
     restored_pending: u16,
     fault: Fault,
@@ -79,6 +98,7 @@ fn publish(
     status: Status,
     data: Option<(&[Segment], &[u8])>,
     fault: &mut Fault,
+    write_number: Option<u64>,
 ) -> io::Result<()> {
     if !state.is_enabled() || !state.get_queue().ready() {
         return Err(io::Error::other(
@@ -95,12 +115,87 @@ fn publish(
     }
     mem.write_obj(status as u8, completion.status)
         .map_err(io::Error::other)?;
-    fault.hit(Point::AfterStatus)?;
+    fault.hit(Point::AfterStatus, write_number)?;
     state
         .get_queue_mut()
         .add_used(mem, completion.head, written as u32 + 1)
         .map_err(io::Error::other)?;
     state.signal_used_queue()
+}
+
+fn publish_tracked(
+    mem: &GuestMemoryMmap,
+    state: &mut VringState,
+    completion: GuestCompletion,
+    status: Status,
+    data: Option<(&[Segment], &[u8])>,
+    fault: &mut Fault,
+    health: Option<&mut local::ImageState>,
+) -> io::Result<()> {
+    fault.set_snapshot(health.as_deref().and_then(local::ImageState::snapshot));
+    let used = state.get_queue().next_used();
+    let mut publish_used = || {
+        publish(
+            mem,
+            state,
+            completion.target,
+            status,
+            data,
+            fault,
+            completion.write_number,
+        )
+    };
+    if let Some(entry) = completion.inflight {
+        let health = health.ok_or_else(|| io::Error::other("completion lost its image lock"))?;
+        let carrier = health
+            .carrier
+            .as_mut()
+            .ok_or_else(|| io::Error::other("completion lost its carrier"))?;
+        let result = if health.failure.is_some() {
+            if status != Status::IoError {
+                return Err(io::Error::other("success after image failure"));
+            }
+            carrier.complete_error(entry, used, publish_used)
+        } else {
+            carrier.complete(entry, used, publish_used)
+        };
+        if let Err(error) = &result {
+            health.fail(error.to_string());
+        }
+        result
+    } else {
+        publish_used()
+    }
+}
+
+fn decode_chain(
+    mem: &GuestMemoryMmap,
+    mut chain: virtio_queue::DescriptorChain<GuestMemoryLoadGuard<GuestMemoryMmap>>,
+    capacity: u64,
+) -> io::Result<Request> {
+    let head = chain.head_index();
+    let mut descriptors = Vec::new();
+    let mut has_next = false;
+    for descriptor in chain.by_ref().take(QUEUE_SIZE) {
+        has_next = descriptor.has_next();
+        descriptors.push(Segment {
+            addr: descriptor.addr(),
+            len: descriptor.len() as usize,
+            writable: descriptor.is_write_only(),
+        });
+    }
+    if has_next {
+        return Err(io::Error::other(
+            "unterminated or oversized descriptor chain",
+        ));
+    }
+    let completion = Completion::from_descriptors(mem, head, &descriptors);
+    match request::parse(mem, head, descriptors, capacity) {
+        Ok(request) => Ok(request),
+        Err(_) => completion
+            .map(Request::Invalid)
+            .ok_or_else(|| io::Error::other("malformed request without writable status")),
+    }
 }
 
 struct NextChain {
@@ -165,9 +260,12 @@ impl Backend {
         restartable: bool,
         fault: Fault,
     ) -> io::Result<Self> {
-        if restartable && !matches!(kind, BackendKind::Staging) {
-            return Err(io::Error::other("restartable mode requires staging"));
+        if restartable && !matches!(kind, BackendKind::Staging | BackendKind::LocalAsync) {
+            return Err(io::Error::other(
+                "restartable mode requires staging or local-async",
+            ));
         }
+        let live = restartable && matches!(kind, BackendKind::LocalAsync);
         let completion_event = EventFd::new(EFD_NONBLOCK | EFD_CLOEXEC)?;
         let storage = match kind {
             BackendKind::Staging => Storage::staging_with_durability(
@@ -179,6 +277,7 @@ impl Backend {
             )?,
             BackendKind::Raw => Storage::raw(path, &completion_event, QUEUE_SIZE)?,
             BackendKind::Local => Storage::local(path, create_bytes, &completion_event)?,
+            BackendKind::LocalAsync if live => Storage::local_live(path, create_bytes)?,
             BackendKind::LocalAsync => Storage::local_async(path, create_bytes, &completion_event)?,
         };
         let capacity_bytes = storage.image_bytes();
@@ -198,6 +297,7 @@ impl Backend {
             failure: None,
             negotiated_features: 0,
             restartable,
+            live: live.then(Session::default),
             restored_used: None,
             restored_pending: 0,
             fault,
@@ -212,9 +312,7 @@ impl Backend {
     fn fail(&mut self, message: String) {
         if let Some(gate) = self.storage.completion_gate() {
             let mut failed = gate.lock().expect("completion gate poisoned");
-            if failed.is_none() {
-                *failed = Some(message.clone());
-            }
+            failed.fail(message.clone());
         }
         if self.failure.is_none() {
             self.failure = Some(message);
@@ -234,6 +332,7 @@ impl Backend {
         let c = &self.counters;
         serde_json::json!({
             "schema_version":1, "fatal_error":self.failure, "backend":self.storage.name(), "connection_ok":connection_ok,
+            "inflight":self.live.as_ref().map(Session::report),
             "restartable":self.restartable, "restored_used":self.restored_used, "restored_pending":self.restored_pending,
             "local":self.storage.local_report(),
             "staging":self.storage.status().map(|s| serde_json::json!({
@@ -253,11 +352,20 @@ impl Backend {
         &mut self,
         mem: &GuestMemoryMmap,
         state: &mut VringState,
-        completion: Completion,
+        completion: GuestCompletion,
         status: Status,
         data: Option<(&[Segment], &[u8])>,
+        health: Option<&mut local::ImageState>,
     ) -> io::Result<()> {
-        let result = publish(mem, state, completion, status, data, &mut self.fault);
+        let result = publish_tracked(
+            mem,
+            state,
+            completion,
+            status,
+            data,
+            &mut self.fault,
+            health,
+        );
         if status != Status::Ok {
             self.counters.errors += 1;
         }
@@ -267,15 +375,25 @@ impl Backend {
         &mut self,
         mem: &GuestMemoryMmap,
         state: &mut VringState,
-        request: Request,
-        permit: Permit,
-        next_id: u64,
+        admitted: Admitted,
+        health: Option<&mut local::ImageState>,
     ) -> io::Result<()> {
+        let Admitted {
+            id,
+            request,
+            permit,
+            inflight,
+        } = admitted;
+        let write_number = matches!(&request, Request::Write(_)).then(|| self.fault.next_write());
+        let tracked = |target| GuestCompletion {
+            target,
+            inflight,
+            write_number,
+        };
         let mut permit = Some(permit);
-        if matches!(&request, Request::Write(_)) {
-            self.fault.next_write();
-            self.fault.hit(Point::BeforeSubmit)?;
-        }
+        self.fault
+            .set_snapshot(health.as_deref().and_then(local::ImageState::snapshot));
+        self.fault.hit(Point::BeforeSubmit, write_number)?;
         let (completion, segments, operation) = match request {
             Request::GetId {
                 completion,
@@ -284,13 +402,31 @@ impl Backend {
                 return self.finish(
                     mem,
                     state,
-                    completion,
+                    tracked(completion),
                     Status::Ok,
                     Some((&segments, DEVICE_ID)),
+                    health,
                 );
             }
             Request::Unsupported(completion) => {
-                return self.finish(mem, state, completion, Status::Unsupported, None);
+                return self.finish(
+                    mem,
+                    state,
+                    tracked(completion),
+                    Status::Unsupported,
+                    None,
+                    health,
+                );
+            }
+            Request::Invalid(completion) => {
+                return self.finish(
+                    mem,
+                    state,
+                    tracked(completion),
+                    Status::IoError,
+                    None,
+                    health,
+                );
             }
             Request::Read(data) => (
                 data.completion,
@@ -303,7 +439,7 @@ impl Backend {
             Request::Write(data) => {
                 let operation = if self.storage.is_local() {
                     self.storage.gather(
-                        self.next_id,
+                        id,
                         data.completion.head,
                         data.offset,
                         data.len,
@@ -338,7 +474,7 @@ impl Backend {
         let has_buffer = !matches!(operation, Some(Operation::Flush));
         if let Some(operation) = operation {
             self.storage.enqueue_owned(
-                self.next_id,
+                id,
                 operation,
                 permit.take().expect("unsubmitted admission permit"),
             )?;
@@ -347,14 +483,13 @@ impl Backend {
             self.counters.bounce_requests += 1;
         }
         self.pending.insert(
-            self.next_id,
+            id,
             PendingRequest {
-                completion,
+                completion: tracked(completion),
                 segments,
                 error_published: false,
             },
         );
-        self.next_id = next_id;
         self.counters.peak_inflight = self.counters.peak_inflight.max(self.pending.len());
         Ok(())
     }
@@ -368,7 +503,7 @@ impl Backend {
                 .remove(&completed.id)
                 .ok_or_else(|| io::Error::other("unknown IO completion"))?;
             let gate = self.storage.completion_gate();
-            let guard = gate
+            let mut guard = gate
                 .as_ref()
                 .map(|gate| {
                     gate.lock()
@@ -377,18 +512,27 @@ impl Backend {
                 .transpose()?;
             let failure = guard
                 .as_ref()
-                .and_then(|guard| guard.as_ref())
+                .and_then(|guard| guard.failure.as_ref())
                 .map(|error| io::Error::other(error.clone()));
             if let Err(error) = failure.map_or(completed.result, Err) {
                 // Completed owns the permit after its data field. Its credit
                 // survives the READ buffer, including failed status publication.
                 drop(completed.data);
-                self.finish(mem, state, pending.completion, Status::IoError, None)?;
+                self.finish(
+                    mem,
+                    state,
+                    pending.completion,
+                    Status::IoError,
+                    None,
+                    guard.as_deref_mut(),
+                )?;
                 if self.storage.status().is_some() || self.storage.is_local() {
                     return Err(error);
                 }
                 continue;
             }
+            self.fault
+                .set_snapshot(guard.as_deref().and_then(local::ImageState::snapshot));
             match completed.data {
                 CompletionData::Read(buffer) => {
                     self.finish(
@@ -397,19 +541,36 @@ impl Backend {
                         pending.completion,
                         Status::Ok,
                         Some((&pending.segments, buffer.as_slice())),
+                        guard.as_deref_mut(),
                     )?;
                     self.counters.reads += 1;
                     self.counters.read_bytes += buffer.as_slice().len() as u64;
                 }
                 CompletionData::Write { bytes } => {
-                    self.fault.hit(Point::AfterStorage)?;
-                    self.finish(mem, state, pending.completion, Status::Ok, None)?;
-                    self.fault.hit(Point::AfterUsed)?;
+                    self.fault
+                        .hit(Point::AfterStorage, pending.completion.write_number)?;
+                    self.finish(
+                        mem,
+                        state,
+                        pending.completion,
+                        Status::Ok,
+                        None,
+                        guard.as_deref_mut(),
+                    )?;
+                    self.fault
+                        .hit(Point::AfterUsed, pending.completion.write_number)?;
                     self.counters.writes += 1;
                     self.counters.write_bytes += bytes as u64;
                 }
                 CompletionData::Flush => {
-                    self.finish(mem, state, pending.completion, Status::Ok, None)?;
+                    self.finish(
+                        mem,
+                        state,
+                        pending.completion,
+                        Status::Ok,
+                        None,
+                        guard.as_deref_mut(),
+                    )?;
                     self.counters.flushes += 1;
                 }
             }
@@ -420,7 +581,11 @@ impl Backend {
             return Err(io::Error::other(failure.clone()));
         }
         if let Some(gate) = self.storage.completion_gate()
-            && let Some(error) = gate.lock().expect("completion gate poisoned").as_ref()
+            && let Some(error) = gate
+                .lock()
+                .expect("completion gate poisoned")
+                .failure
+                .as_ref()
         {
             return Err(io::Error::other(error.clone()));
         }
@@ -433,7 +598,11 @@ impl Backend {
             .ok_or_else(|| io::Error::other("guest memory missing"))?
             .clone();
         let mut state = vring.get_mut();
-        if self.restartable && self.restored_used.is_none() {
+        if !state.is_enabled() || !state.get_queue().ready() {
+            return Ok(());
+        }
+        self.activate_attachment(&mem, &mut state)?;
+        if self.restartable && self.live.is_none() && self.restored_used.is_none() {
             if !state.is_enabled() || !state.get_queue().ready() {
                 return Ok(());
             }
@@ -461,75 +630,58 @@ impl Backend {
         }
         self.complete(&mem, &mut state)?;
         let mut consumed = 0;
-        let limit = if self.restartable { 1 } else { QUEUE_SIZE };
+        let limit = if self.restartable && self.live.is_none() {
+            1
+        } else {
+            QUEUE_SIZE
+        };
         while self.pending.len() < limit && consumed < QUEUE_SIZE {
-            let Some(NextChain {
-                mut chain,
-                next_avail,
-            }) = peek(mem.clone(), &mut state)?
-            else {
+            let Some(NextChain { chain, next_avail }) = peek(mem.clone(), &mut state)? else {
                 break;
             };
-            let head = chain.head_index();
-            let mut descriptors = Vec::new();
-            let mut has_next = false;
-            // Bound indirect tables too, not just the outer queue length.
-            for descriptor in chain.by_ref().take(QUEUE_SIZE) {
-                has_next = descriptor.has_next();
-                descriptors.push(Segment {
-                    addr: descriptor.addr(),
-                    len: descriptor.len() as usize,
-                    writable: descriptor.is_write_only(),
-                });
+            let request = decode_chain(&mem, chain, self.capacity_bytes)?;
+            let next_id = self
+                .next_id
+                .checked_add(1)
+                .ok_or_else(|| io::Error::other("request IDs exhausted"))?;
+            let gate = self.storage.completion_gate();
+            let mut guard = gate
+                .as_ref()
+                .map(|gate| {
+                    gate.lock()
+                        .map_err(|_| io::Error::other("completion gate poisoned"))
+                })
+                .transpose()?;
+            if let Some(error) = guard.as_ref().and_then(|guard| guard.failure.as_ref()) {
+                return Err(io::Error::other(error.clone()));
             }
-            if has_next {
+            let Some(permit) = self.storage.prepare(request.admission_kind())? else {
+                break;
+            };
+            let inflight = guard
+                .as_deref_mut()
+                .and_then(|state| state.carrier.as_mut())
+                .map(|carrier| carrier.admit(request.inflight(0, next_avail.wrapping_sub(1))))
+                .transpose()?;
+            if inflight.is_some_and(|entry| entry.serial != next_id) {
                 return Err(io::Error::other(
-                    "unterminated or oversized descriptor chain",
+                    "admission serial differs from retained carrier",
                 ));
             }
-            let completion = Completion::from_descriptors(&mem, head, &descriptors);
-            match request::parse(&mem, head, descriptors, self.capacity_bytes) {
-                Ok(request) => {
-                    let next_id = self
-                        .next_id
-                        .checked_add(1)
-                        .ok_or_else(|| io::Error::other("request IDs exhausted"))?;
-                    let kind = match &request {
-                        Request::Read(data) => local::Kind::Read(data.len),
-                        Request::Write(data) => local::Kind::Write(data.len),
-                        _ => local::Kind::Control,
-                    };
-                    let gate = self.storage.completion_gate();
-                    let guard = gate
-                        .as_ref()
-                        .map(|gate| {
-                            gate.lock()
-                                .map_err(|_| io::Error::other("completion gate poisoned"))
-                        })
-                        .transpose()?;
-                    if let Some(error) = guard.as_ref().and_then(|guard| guard.as_ref()) {
-                        return Err(io::Error::other(error.clone()));
-                    }
-                    let Some(permit) = self.storage.prepare(kind)? else {
-                        break;
-                    };
-                    state.get_queue_mut().set_next_avail(next_avail);
-                    self.enqueue(&mem, &mut state, request, permit, next_id)?;
-                }
-                Err(_) => {
-                    state.get_queue_mut().set_next_avail(next_avail);
-                    match completion {
-                        Some(completion) => {
-                            self.finish(&mem, &mut state, completion, Status::IoError, None)?
-                        }
-                        None => {
-                            return Err(io::Error::other(
-                                "malformed request without writable status",
-                            ));
-                        }
-                    }
-                }
-            }
+            let id = self.next_id;
+            self.next_id = next_id;
+            state.get_queue_mut().set_next_avail(next_avail);
+            self.enqueue(
+                &mem,
+                &mut state,
+                Admitted {
+                    id,
+                    request,
+                    permit,
+                    inflight,
+                },
+                guard.as_deref_mut(),
+            )?;
             consumed += 1;
         }
         self.storage.submit()?;
@@ -567,8 +719,8 @@ impl Backend {
         let Some(gate) = self.storage.completion_gate() else {
             return;
         };
-        let guard = gate.lock().expect("completion gate poisoned");
-        if guard.is_none() {
+        let mut guard = gate.lock().expect("completion gate poisoned");
+        if guard.failure.is_none() {
             return;
         }
         let Some(memory) = &self.memory else {
@@ -577,13 +729,14 @@ impl Backend {
         let mut state = vring.get_mut();
         for pending in self.pending.values_mut() {
             if !pending.error_published
-                && publish(
+                && publish_tracked(
                     memory,
                     &mut state,
                     pending.completion,
                     Status::IoError,
                     None,
                     &mut self.fault,
+                    Some(&mut guard),
                 )
                 .is_ok()
             {
@@ -627,7 +780,25 @@ impl VhostUserBackendMut for Backend {
         }
     }
     fn protocol_features(&self) -> VhostUserProtocolFeatures {
-        VhostUserProtocolFeatures::CONFIG
+        let mut features = VhostUserProtocolFeatures::CONFIG;
+        if self.live.is_some() {
+            features |=
+                VhostUserProtocolFeatures::INFLIGHT_SHMFD | VhostUserProtocolFeatures::REPLY_ACK;
+        }
+        features
+    }
+    fn get_inflight_fd(
+        &mut self,
+        message: &vhost::vhost_user::message::VhostUserInflight,
+    ) -> io::Result<(vhost::vhost_user::message::VhostUserInflight, std::fs::File)> {
+        self.create_attachment(message)
+    }
+    fn set_inflight_fd(
+        &mut self,
+        message: &vhost::vhost_user::message::VhostUserInflight,
+        file: std::fs::File,
+    ) -> io::Result<()> {
+        self.restore_attachment(message, file)
     }
     fn set_event_idx(&mut self, _: bool) {}
     fn get_config(&self, offset: u32, size: u32) -> Vec<u8> {
@@ -764,6 +935,7 @@ mod tests {
             Status::Ok,
             Some((&segments, &[0x5a; BLOCK_SIZE])),
             &mut Fault::default(),
+            None,
         )
         .unwrap();
         assert_eq!(accepted.read_obj::<u8>(GuestAddress(0x6000)).unwrap(), 0x5a);
@@ -812,6 +984,7 @@ mod tests {
                     Status::Ok,
                     Some((&segments, &[0x5a; BLOCK_SIZE])),
                     &mut Fault::default(),
+                    None,
                 )
                 .is_err()
             );

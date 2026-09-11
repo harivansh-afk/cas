@@ -194,10 +194,13 @@ impl Reactor {
     fn fail(&mut self, error: &io::Error) {
         self.failed = true;
         self.worker.log.fail();
-        let mut failed = self.worker.health.lock().expect("completion gate poisoned");
-        if failed.is_none() {
-            *failed = Some(error.to_string());
-        }
+        let mut failed = self
+            .worker
+            .shared
+            .health
+            .lock()
+            .expect("completion gate poisoned");
+        failed.fail(error.to_string());
         self.appends.clear();
         let _ = self.worker.wake.0.write(1);
     }
@@ -205,9 +208,11 @@ impl Reactor {
     fn failure(&self) -> io::Error {
         io::Error::other(
             self.worker
+                .shared
                 .health
                 .lock()
                 .expect("completion gate poisoned")
+                .failure
                 .as_deref()
                 .unwrap_or("local image failed")
                 .to_owned(),
@@ -230,7 +235,7 @@ impl Reactor {
         drop(submission);
         drop(credits);
         {
-            let mut metrics = self.worker.metrics.lock().expect("metrics poisoned");
+            let mut metrics = self.worker.shared.metrics.lock().expect("metrics poisoned");
             metrics.allocation_identity_checks += 1;
             metrics.allocations_released += 1;
         }
@@ -299,7 +304,7 @@ impl Reactor {
         unsafe { self.ring.submission().push(&entry) }.map_err(io::Error::other)?;
         pending.submitted = Instant::now();
         pending.ready = None;
-        let mut metrics = self.worker.metrics.lock().expect("metrics poisoned");
+        let mut metrics = self.worker.shared.metrics.lock().expect("metrics poisoned");
         metrics.io_queued += 1;
         metrics.peak_awaiting_cqe = metrics
             .peak_awaiting_cqe
@@ -400,6 +405,7 @@ impl Reactor {
         }
         pending.ready = Some(Instant::now());
         self.worker
+            .shared
             .metrics
             .lock()
             .expect("metrics poisoned")
@@ -415,6 +421,7 @@ impl Reactor {
             self.fail(&error);
         } else if matches!(pending.work, Work::Append(_)) && self.appends.front() != Some(&token) {
             self.worker
+                .shared
                 .metrics
                 .lock()
                 .expect("metrics poisoned")
@@ -434,28 +441,34 @@ impl Reactor {
             };
             {
                 // Shares the frontend's success/failure linearization lock.
-                let gate = Arc::clone(&self.worker.health);
-                let failed = gate.lock().expect("completion gate poisoned");
-                if failed.is_some() {
+                let gate = Arc::clone(&self.worker.shared.health);
+                let mut state = gate.lock().expect("completion gate poisoned");
+                if state.failure.is_some() {
                     break;
                 }
-                self.worker
+                let result = self
+                    .worker
                     .log
                     .publish_append(&append.submission)
-                    .map_err(io::Error::other)?;
+                    .map_err(io::Error::other)
+                    .and_then(|()| state.publish(self.worker.log.status().published));
+                if let Err(error) = result {
+                    state.fail(error.to_string());
+                    return Err(error);
+                }
             }
             let pending = self.pending.remove(&token).unwrap();
             self.appends.pop_front();
             let Work::Append(append) = pending.work else {
                 unreachable!()
             };
-            let mut metrics = self.worker.metrics.lock().expect("metrics poisoned");
+            let mut metrics = self.worker.shared.metrics.lock().expect("metrics poisoned");
             metrics.publication_wait_ns = metrics
                 .publication_wait_ns
                 .saturating_add(nanos(ready.elapsed()));
             metrics.completion_retained_peak = metrics
                 .completion_retained_peak
-                .max(self.worker.pools.append.usage().current.bytes);
+                .max(self.worker.shared.pools.append.usage().current.bytes);
             drop(metrics);
             self.finish_append(append, Ok(()))?;
         }
@@ -497,15 +510,16 @@ impl Reactor {
                     }
                 },
                 Work::Fence(fence) if fence.syncing => {
-                    let gate = Arc::clone(&self.worker.health);
-                    let guard = gate.lock().expect("completion gate poisoned");
-                    if let Some(error) = guard.as_ref() {
+                    let gate = Arc::clone(&self.worker.shared.health);
+                    let mut guard = gate.lock().expect("completion gate poisoned");
+                    if let Some(error) = guard.failure.as_ref() {
                         return Err(io::Error::other(error.clone()));
                     }
                     self.worker
                         .log
                         .complete_sync(&fence.submission)
                         .map_err(io::Error::other)?;
+                    guard.durable = self.worker.log.status().durable;
                     drop(guard);
                     let Work::Fence(fence) = pending.work else {
                         unreachable!()
@@ -549,6 +563,7 @@ impl Reactor {
     fn start_fence(&mut self, waiter: Option<Io>, rollover: bool) -> io::Result<()> {
         let credits = self
             .worker
+            .shared
             .pools
             .control
             .reserve(Amount {
@@ -618,7 +633,8 @@ impl Reactor {
                     writes,
                 }) => {
                     if let Some(start) = self.paused_since.take() {
-                        let mut metrics = self.worker.metrics.lock().expect("metrics poisoned");
+                        let mut metrics =
+                            self.worker.shared.metrics.lock().expect("metrics poisoned");
                         metrics.cohort_pause_ns = metrics
                             .cohort_pause_ns
                             .saturating_add(nanos(start.elapsed()));
@@ -630,12 +646,12 @@ impl Reactor {
                         .prepare_append(builder)
                         .map_err(io::Error::other)?;
                     assert_eq!(submission.batch().allocation_address(), address);
-                    let mut metrics = self.worker.metrics.lock().expect("metrics poisoned");
+                    let mut metrics = self.worker.shared.metrics.lock().expect("metrics poisoned");
                     metrics.batches_submitted += 1;
                     metrics.encoded_bytes += submission.batch().bytes().len() as u64;
                     metrics.encoding_retained_peak = metrics
                         .encoding_retained_peak
-                        .max(self.worker.pools.append.usage().current.bytes);
+                        .max(self.worker.shared.pools.append.usage().current.bytes);
                     drop(metrics);
                     if let Some(token) = self.enqueue(Work::Append(Append {
                         submission,
@@ -743,9 +759,11 @@ impl Reactor {
                 self.reap()?;
                 if self
                     .worker
+                    .shared
                     .health
                     .lock()
                     .expect("completion gate poisoned")
+                    .failure
                     .is_some()
                 {
                     self.failed = true;

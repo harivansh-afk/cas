@@ -15,7 +15,7 @@ uname -a > /results/guest-kernel.txt
 fio --version > /results/guest-fio-version.txt
 lsblk --json --bytes --output NAME,TYPE,SIZE,LOG-SEC,PHY-SEC > /results/guest-disks.json
 
-if [ "$backend" = staging ] && [ -f /results/live-recovery ]; then
+if [ -f /results/live-recovery ]; then
   cp /etc/cas/live.fio /results/live.fio
   cat /proc/sys/kernel/random/boot_id > /results/boot-before.txt
   fio --output-format=json+ --output=/results/live.json /etc/cas/live.fio

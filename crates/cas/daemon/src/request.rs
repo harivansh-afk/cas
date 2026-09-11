@@ -55,6 +55,45 @@ pub(super) enum Request {
         segments: Vec<Segment>,
     },
     Unsupported(Completion),
+    Invalid(Completion),
+}
+
+impl Request {
+    pub fn completion(&self) -> Completion {
+        match self {
+            Self::Read(data) | Self::Write(data) => data.completion,
+            Self::Flush(completion)
+            | Self::Unsupported(completion)
+            | Self::Invalid(completion)
+            | Self::GetId { completion, .. } => *completion,
+        }
+    }
+
+    pub fn admission_kind(&self) -> crate::local::Kind {
+        match self {
+            Self::Read(data) => crate::local::Kind::Read(data.len),
+            Self::Write(data) => crate::local::Kind::Write(data.len),
+            _ => crate::local::Kind::Control,
+        }
+    }
+
+    pub fn inflight(&self, queue: u16, available: u16) -> cas_daemon::inflight::Request {
+        use cas_daemon::inflight::Kind;
+        let (kind, offset, length) = match self {
+            Self::Read(data) => (Kind::Read, data.offset, data.len as u64),
+            Self::Write(data) => (Kind::Write, data.offset, data.len as u64),
+            Self::Flush(_) => (Kind::Flush, 0, 0),
+            _ => (Kind::Protocol, 0, 0),
+        };
+        cas_daemon::inflight::Request {
+            kind,
+            queue,
+            head: self.completion().head,
+            available,
+            offset,
+            length,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

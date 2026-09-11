@@ -3,11 +3,13 @@
 
 use std::fs::{self, File};
 use std::io::{self, Read};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileExt;
 use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+use vhost::vhost_user::message::{VhostUserInflight, VhostUserProtocolFeatures};
 
 use cas_core::{
     BLOCK_SIZE,
@@ -195,6 +197,7 @@ struct FrontendQueue {
     kick: EventFd,
     next_avail: u16,
     deadline: Instant,
+    inflight: Option<(VhostUserInflight, File)>,
 }
 
 impl FrontendQueue {
@@ -212,7 +215,8 @@ impl FrontendQueue {
         .unwrap();
         let call = EventFd::new(EFD_NONBLOCK | EFD_CLOEXEC).unwrap();
         let kick = EventFd::new(EFD_NONBLOCK | EFD_CLOEXEC).unwrap();
-        Self::configure(&mut frontend, &mem, &call, &kick);
+        let mut inflight = None;
+        Self::configure(&mut frontend, &mem, &call, &kick, &mut inflight);
         Self {
             frontend,
             observer,
@@ -221,15 +225,38 @@ impl FrontendQueue {
             kick,
             next_avail: 0,
             deadline: daemon.deadline,
+            inflight,
         }
     }
 
-    fn configure(frontend: &mut Frontend, mem: &GuestMemoryMmap, call: &EventFd, kick: &EventFd) {
+    fn configure(
+        frontend: &mut Frontend,
+        mem: &GuestMemoryMmap,
+        call: &EventFd,
+        kick: &EventFd,
+        inflight: &mut Option<(VhostUserInflight, File)>,
+    ) {
         frontend.set_owner().unwrap();
         let features = frontend.get_features().unwrap();
         frontend.set_features(features).unwrap();
         let protocol_features = frontend.get_protocol_features().unwrap();
         frontend.set_protocol_features(protocol_features).unwrap();
+        if protocol_features.contains(VhostUserProtocolFeatures::INFLIGHT_SHMFD) {
+            if inflight.is_none() {
+                *inflight = Some(
+                    frontend
+                        .get_inflight_fd(&VhostUserInflight {
+                            mmap_size: 0,
+                            mmap_offset: 0,
+                            num_queues: 1,
+                            queue_size: 128,
+                        })
+                        .unwrap(),
+                );
+            }
+            let (message, file) = inflight.as_ref().unwrap();
+            frontend.set_inflight_fd(message, file.as_raw_fd()).unwrap();
+        }
 
         let region =
             VhostUserMemoryRegionInfo::from_guest_region(mem.iter().next().unwrap()).unwrap();
@@ -460,7 +487,13 @@ fn serial_recovery_replays_in_order_across_write_boundaries_and_ring_wrap() {
             queue.observer = stream.try_clone().unwrap();
             queue.frontend = Frontend::from_stream(stream, 1);
             while queue.call.read().is_ok() {}
-            FrontendQueue::configure(&mut queue.frontend, &queue.mem, &queue.call, &queue.kick);
+            FrontendQueue::configure(
+                &mut queue.frontend,
+                &queue.mem,
+                &queue.call,
+                &queue.kick,
+                &mut queue.inflight,
+            );
             queue.kick.write(1).unwrap();
             while u16::from_le(queue.mem.read_obj::<u16>(GuestAddress(0x3002)).unwrap())
                 != queue.next_avail
@@ -804,4 +837,163 @@ fn local_corruption_reports_ioerr_and_releases_read_credits_after_the_buffer() {
     assert_eq!(report["local"]["read"]["current"]["bytes"], 0);
     assert_eq!(report["local"]["requests"]["current"]["requests"], 0);
     assert_eq!(queue.observer.read(&mut [0]).unwrap(), 0);
+}
+
+#[test]
+fn concurrent_retained_fd_replays_without_flush_and_ignores_consumed_available_slots() {
+    for point in [
+        "before-submit",
+        "after-storage",
+        "after-status",
+        "after-used",
+    ] {
+        for start in [0u16, u16::MAX - 1] {
+            let directory = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let child = Daemon::start_kind(&directory, "local-async", true, true, Some(point));
+            let mut daemon = Daemon {
+                child,
+                directory,
+                deadline: Instant::now() + DEADLINE,
+            };
+            let mut queue = FrontendQueue::connect(&mut daemon);
+            assert!(queue.inflight.is_some());
+            queue.next_avail = start;
+            queue
+                .mem
+                .write_obj(start.to_le(), GuestAddress(0x2002))
+                .unwrap();
+            queue
+                .mem
+                .write_obj(start.to_le(), GuestAddress(0x3002))
+                .unwrap();
+            queue.frontend.set_vring_base(0, start).unwrap();
+            queue.frontend.get_features().unwrap();
+            queue
+                .mem
+                .write_slice(&[0x11; BLOCK_SIZE], GuestAddress(0x5000))
+                .unwrap();
+            queue.request_layout(VIRTIO_BLK_T_OUT, false); // acknowledged without FLUSH
+            for (head, base, value) in [(3, 0x7000, 0x22), (6, 0xa000, 0x33)] {
+                queue
+                    .mem
+                    .write_obj(VIRTIO_BLK_T_OUT.to_le(), GuestAddress(base))
+                    .unwrap();
+                queue
+                    .mem
+                    .write_slice(&[value; BLOCK_SIZE], GuestAddress(base + 0x100))
+                    .unwrap();
+                queue
+                    .mem
+                    .write_obj(0xffu8, GuestAddress(base + 0x1100))
+                    .unwrap();
+                queue.descriptor(head, base, 16, VRING_DESC_F_NEXT as u16, head + 1);
+                queue.descriptor(
+                    head + 1,
+                    base + 0x100,
+                    BLOCK_SIZE as u32,
+                    VRING_DESC_F_NEXT as u16,
+                    head + 2,
+                );
+                queue.descriptor(head + 2, base + 0x1100, 1, VRING_DESC_F_WRITE as u16, 0);
+                queue.kick_head(head);
+            }
+            let marker = daemon.directory.path().join("pause.json");
+            while !marker.exists() {
+                assert!(
+                    Instant::now() < daemon.deadline,
+                    "{point}: {}",
+                    daemon.stderr()
+                );
+                assert!(
+                    daemon.child.try_wait().unwrap().is_none(),
+                    "{}",
+                    daemon.stderr()
+                );
+                thread::sleep(Duration::from_millis(1));
+            }
+            daemon.child.kill().unwrap();
+            daemon.child.wait().unwrap();
+            let inspected = cas_core::append::Log::inspect(
+                daemon.directory.path().join("image.raw"),
+                cas_core::append::Limits::default(),
+            )
+            .unwrap();
+            assert!(inspected.status().published >= 1);
+            let identity = cas_daemon::inflight::Identity {
+                store: inspected.config().store,
+                image: inspected.config().image,
+                epoch: inspected.status().epoch,
+                attachment: inspected.status().epoch,
+            };
+            let (message, file) = queue.inflight.as_ref().unwrap();
+            let carrier = cas_daemon::inflight::Carrier::attach(
+                file.try_clone().unwrap(),
+                message,
+                identity,
+                BLOCK_SIZE as u64,
+            )
+            .unwrap();
+            // A consumed available slot is no longer an ownership record. Change
+            // only consumed slots; heads of not-yet-admitted requests stay valid.
+            let consumed = carrier.available(0).unwrap();
+            for position in 0..consumed.wrapping_sub(start) {
+                let slot = 0x2004 + u64::from(start.wrapping_add(position) % 128) * 2;
+                queue
+                    .mem
+                    .write_obj(127u16.to_le(), GuestAddress(slot))
+                    .unwrap();
+            }
+            drop(carrier);
+            drop(inspected);
+            fs::remove_file(daemon.directory.path().join("vhost.sock")).unwrap();
+            fs::remove_file(daemon.directory.path().join("report.json")).unwrap();
+            daemon.child = Daemon::start_kind(&daemon.directory, "local-async", false, true, None);
+            daemon.deadline = Instant::now() + DEADLINE;
+            let stream = daemon.connect();
+            queue.observer = stream.try_clone().unwrap();
+            queue.frontend = Frontend::from_stream(stream, 1);
+            while queue.call.read().is_ok() {}
+            FrontendQueue::configure(
+                &mut queue.frontend,
+                &queue.mem,
+                &queue.call,
+                &queue.kick,
+                &mut queue.inflight,
+            );
+            queue.kick.write(1).unwrap();
+            while u16::from_le(queue.mem.read_obj::<u16>(GuestAddress(0x3002)).unwrap())
+                != queue.next_avail
+            {
+                assert!(
+                    Instant::now() < daemon.deadline,
+                    "{point}, start={start}: {}",
+                    daemon.stderr()
+                );
+                assert!(
+                    daemon.child.try_wait().unwrap().is_none(),
+                    "{}",
+                    daemon.stderr()
+                );
+                thread::sleep(Duration::from_millis(1));
+            }
+            while queue.call.read().is_ok() {}
+            queue.deadline = daemon.deadline;
+            queue.request_layout(VIRTIO_BLK_T_IN, true);
+            let mut bytes = [0; BLOCK_SIZE];
+            queue
+                .mem
+                .read_slice(&mut bytes, GuestAddress(0x5000))
+                .unwrap();
+            assert_eq!(bytes, [0x33; BLOCK_SIZE], "{point}, start={start}");
+            queue.request_layout(VIRTIO_BLK_T_FLUSH, false);
+            drop(queue);
+            let (status, report) = daemon.wait();
+            assert!(status.success(), "{}", daemon.stderr());
+            assert_eq!(report["errors"], 0);
+            assert_eq!(report["local"]["status"]["published"], 3);
+            assert_eq!(report["local"]["status"]["durable"], 3);
+            assert_eq!(report["local"]["status"]["epoch"], 1);
+            assert_eq!(report["inflight"]["active"], true);
+        }
+    }
 }

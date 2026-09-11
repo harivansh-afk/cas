@@ -235,6 +235,18 @@ impl Carrier {
         Ok((self.geometry.message(), self.mapping.file.try_clone()?))
     }
 
+    pub fn identity(&self) -> Identity {
+        self.identity
+    }
+
+    pub fn geometry(&self) -> Geometry {
+        self.geometry
+    }
+
+    pub fn queue_initialized(&self, queue: u16) -> io::Result<bool> {
+        Ok(self.queue(queue)?.version.load(Acquire) == 1)
+    }
+
     fn header(&self) -> &Header {
         // SAFETY: Geometry locates the aligned, bounded atomic-only header.
         unsafe { self.mapping.at(self.geometry.trailer()) }
@@ -413,7 +425,30 @@ impl Carrier {
     }
 
     fn begin_completion(&self, entry: Entry, used: u16) -> io::Result<()> {
-        self.healthy()?;
+        self.prepare_completion(entry, used, false)
+    }
+
+    /// Only IOERR publication may retire an unpublished mutation after FAILED.
+    /// The completion lock must cover fail(), this call and the guest writes.
+    pub fn complete_error(
+        &mut self,
+        entry: Entry,
+        used: u16,
+        publish_used: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<()> {
+        self.prepare_completion(entry, used, true)?;
+        publish_used()?;
+        self.finish_completion(entry, used.wrapping_add(1))
+    }
+
+    fn prepare_completion(&self, entry: Entry, used: u16, failed: bool) -> io::Result<()> {
+        if failed {
+            if self.header().failed.load(Acquire) != 1 {
+                return Err(invalid("IOERR retirement requires a FAILED attachment"));
+            }
+        } else {
+            self.healthy()?;
+        }
         let (state, actual) = self
             .read_slot(entry.request.queue, entry.request.head)?
             .ok_or_else(|| invalid("completion has no active request"))?;
@@ -423,7 +458,7 @@ impl Carrier {
         {
             return Err(invalid("completion identity or used cursor differs"));
         }
-        if entry.required_publication() > self.published() {
+        if !failed && entry.required_publication() > self.published() {
             return Err(invalid(
                 "completion precedes its captured publication boundary",
             ));

@@ -135,6 +135,7 @@ pub struct DaemonReport {
     peak_inflight: u64,
     staging: Option<StagingReport>,
     local: Option<LocalReport>,
+    inflight: Option<InflightReport>,
     #[serde(default)]
     guest_payload_copy_bytes: u64,
     #[serde(default)]
@@ -150,6 +151,17 @@ struct StagingReport {
     image_bytes: u64,
     appended: u64,
     durable: u64,
+}
+
+#[derive(Deserialize)]
+struct InflightReport {
+    active: bool,
+    replayed_requests: u64,
+    replayed_mutations: u64,
+    replay_copy_bytes: u64,
+    replayed_write_bytes: u64,
+    saved_p: u64,
+    recovered_p: u64,
 }
 
 #[derive(Deserialize)]
@@ -212,6 +224,42 @@ impl LocalReport {
                 "local prefix, copy accounting or allocation identity failed",
             ));
         }
+        self.verify_resources(
+            daemon.write_bytes,
+            daemon.backend == Backend::LocalAsync.storage(),
+        )
+    }
+
+    fn verify_live(&self, daemon: &DaemonReport, inflight: &InflightReport) -> io::Result<()> {
+        let metrics = &self.metrics;
+        if self.status.image_bytes != DISK_BYTES
+            || self.status.failed
+            || self.status.published != LIVE_BYTES / BLOCK_SIZE as u64
+            || self.status.durable != self.status.published
+            || !inflight.active
+            || inflight.saved_p > inflight.recovered_p
+            || inflight.recovered_p > self.status.published
+            || inflight.replayed_requests != u64::from(daemon.restored_pending)
+            || inflight.replayed_mutations > inflight.replayed_requests
+            || inflight.replay_copy_bytes != inflight.replayed_mutations * BLOCK_SIZE as u64
+            || daemon.guest_payload_copy_bytes + inflight.replayed_write_bytes != daemon.write_bytes
+            || metrics.gathered_bytes != daemon.guest_payload_copy_bytes
+            || metrics.gather_calls * BLOCK_SIZE as u64 != metrics.gathered_bytes
+            || metrics.allocation_identity_checks != metrics.batches_submitted
+            || metrics.allocations_released != metrics.batches_submitted
+            || self.append.admitted != metrics.batches_submitted + inflight.replayed_mutations
+            || metrics.encoded_bytes
+                != metrics.gathered_bytes + metrics.batches_submitted * BLOCK_SIZE as u64
+        {
+            return Err(io::Error::other(
+                "concurrent replay prefixes, identities or copy accounting failed",
+            ));
+        }
+        self.verify_resources(daemon.guest_payload_copy_bytes, true)
+    }
+
+    fn verify_resources(&self, write_bytes: u64, asynchronous: bool) -> io::Result<()> {
+        let metrics = &self.metrics;
         for (usage, bytes, requests) in [
             (&self.requests, 0, 128),
             (&self.append, 8 * 1024 * 1024, 0),
@@ -235,11 +283,11 @@ impl LocalReport {
             metrics.encoding_retained_peak,
             metrics.completion_retained_peak,
         ] {
-            if peak > 8 * 1024 * 1024 || (daemon.write_bytes != 0 && peak < BLOCK_SIZE) {
+            if peak > 8 * 1024 * 1024 || (write_bytes != 0 && peak < BLOCK_SIZE) {
                 return Err(io::Error::other("invalid append lifetime measurement"));
             }
         }
-        if daemon.backend == Backend::LocalAsync.storage()
+        if asynchronous
             && (metrics.io_queued == 0
                 || metrics.io_queued != metrics.io_completed
                 || metrics.peak_awaiting_cqe == 0
@@ -252,7 +300,37 @@ impl LocalReport {
 }
 
 impl DaemonReport {
-    pub fn verify_live(&self, crash_at: &str) -> io::Result<()> {
+    pub fn verify_live(&self, backend: Backend, crash_at: &str) -> io::Result<()> {
+        if backend == Backend::LocalAsync {
+            if self.schema_version != 1
+                || self.backend != backend.storage()
+                || !self.connection_ok
+                || !self.flush_negotiated
+                || !self.restartable
+                || self.errors != 0
+                || self.pending_at_disconnect != 0
+                || self.queues != 1
+                || self.restored_used.is_none()
+                || self.restored_pending > 128
+                || self.read_bytes < LIVE_BYTES
+                || self.write_bytes == 0
+                || self.flushes == 0
+            {
+                return Err(io::Error::other(
+                    "concurrent live recovery did not finish cleanly",
+                ));
+            }
+            let local = self
+                .local
+                .as_ref()
+                .ok_or_else(|| io::Error::other("missing concurrent storage report"))?;
+            let inflight = self
+                .inflight
+                .as_ref()
+                .ok_or_else(|| io::Error::other("missing retained replay report"))?;
+            return local.verify_live(self, inflight);
+        }
+
         let expected = LIVE_BYTES / BLOCK_SIZE as u64
             + u64::from(matches!(crash_at, "after-storage" | "after-status"));
         if self.schema_version != 1
@@ -561,7 +639,7 @@ mod tests {
             base["staging"]["durable"] = json!(blocks);
             let valid = |value| {
                 serde_json::from_value::<DaemonReport>(value)
-                    .is_ok_and(|report| report.verify_live(point).is_ok())
+                    .is_ok_and(|report| report.verify_live(Backend::Staging, point).is_ok())
             };
             assert!(valid(base.clone()));
             for (field, value) in [

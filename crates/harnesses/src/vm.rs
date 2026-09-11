@@ -40,7 +40,7 @@ pub struct Args {
     /// Kill staging after guest FLUSH, then verify from a fresh guest.
     #[arg(long)]
     recovery: bool,
-    /// Restart a serial, write-through staging daemon while the same guest runs.
+    /// Restart staging or concurrent local storage while the same guest runs.
     #[arg(long, conflicts_with = "recovery")]
     live_recovery: bool,
     /// Public key for the dev-vm guest. Private keys and authorized_keys options are rejected.
@@ -484,7 +484,7 @@ fn execute(args: &mut Args, summary: &mut Summary) -> io::Result<()> {
             "dev-vm requires --ssh-key; smoke runners do not support SSH",
         ));
     }
-    if (args.live_recovery && build.backend != Backend::Staging)
+    if (args.live_recovery && !matches!(build.backend, Backend::Staging | Backend::LocalAsync))
         || (args.recovery
             && !matches!(
                 build.backend,

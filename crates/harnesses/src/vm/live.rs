@@ -9,6 +9,8 @@ struct Pause {
     schema_version: u32,
     point: String,
     writes: u64,
+    published: Option<u64>,
+    durable: Option<u64>,
 }
 
 pub(super) fn execute(
@@ -22,7 +24,7 @@ pub(super) fn execute(
     fs::create_dir(&results)?;
     let temporary = output.join("tmp");
     fs::create_dir(&temporary)?;
-    fs::write(results.join("live-recovery"), b"serial-write-through\n")?;
+    fs::write(results.join("live-recovery"), build.backend.name())?;
     let directory = tempfile::Builder::new()
         .prefix("cas-live-")
         .tempdir_in("/tmp")?;
@@ -51,7 +53,7 @@ pub(super) fn execute(
             .arg(&socket)
             .arg("--image")
             .arg(image)
-            .args(["--backend", "staging", "--restartable"])
+            .args(["--backend", build.backend.name(), "--restartable"])
             .arg("--report")
             .arg(output.join(if first {
                 "daemon-before.json"
@@ -98,6 +100,16 @@ pub(super) fn execute(
     if pause.schema_version != 1 || pause.point != args.crash_at || pause.writes != 32 {
         return Err(io::Error::other("invalid live recovery pause marker"));
     }
+    if build.backend == Backend::LocalAsync {
+        let (Some(p), Some(e)) = (pause.published, pause.durable) else {
+            return Err(io::Error::other("missing pre-crash P/E evidence"));
+        };
+        if e > p || (args.crash_at != "before-submit" && (p < 32 || p == e)) {
+            return Err(io::Error::other(
+                "concurrent crash did not exercise a published unsynced prefix",
+            ));
+        }
+    }
     if guest.poll()?.is_some() {
         return Err(io::Error::other("guest exited before backend kill"));
     }
@@ -139,12 +151,14 @@ pub(super) fn execute(
     }
     let value: Value = read_json(&output.join("daemon-after.json"))?;
     evidence.daemon = Some(value.clone());
-    serde_json::from_value::<DaemonReport>(value)?.verify_live(&args.crash_at)?;
+    serde_json::from_value::<DaemonReport>(value)?.verify_live(build.backend, &args.crash_at)?;
     evidence.verified_bytes = Some(LIVE_BYTES);
     evidence.written_bytes = Some(LIVE_BYTES);
     evidence.live_recovery = Some(serde_json::json!({
         "crash_at": args.crash_at, "write_number": 32, "killed_daemon_exit": killed,
-        "guest_boot_id": before.trim(), "guest_reboots": 0, "mode": "serial_write_through",
+        "guest_boot_id": before.trim(), "guest_reboots": 0,
+        "published_before_kill": pause.published, "durable_before_kill": pause.durable,
+        "mode": if build.backend == Backend::LocalAsync { "concurrent_retained_inflight" } else { "serial_write_through" },
     }));
     Ok(())
 }

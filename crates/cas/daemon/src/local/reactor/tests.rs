@@ -26,7 +26,7 @@ struct Run {
     control: Arc<Control>,
     output: mpsc::Receiver<Response>,
     thread: Option<JoinHandle<()>>,
-    status: Arc<Mutex<append::Status>>,
+    shared: Arc<Shared>,
 }
 
 impl Run {
@@ -44,17 +44,14 @@ impl Run {
             append::Limits::default(),
         )
         .unwrap();
-        let status = Arc::new(Mutex::new(log.status()));
-        let pools = Arc::new(Pools::new());
+        let shared = Shared::new(log.status());
+        let pools = &shared.pools;
         let (output, receiver) = mpsc::channel();
         let worker = Worker {
             log,
             output,
             wake: Wake(EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK).unwrap()),
-            pools: Arc::clone(&pools),
-            metrics: Arc::new(Mutex::new(Metrics::default())),
-            health: Arc::new(Mutex::new(None)),
-            final_status: Arc::clone(&status),
+            shared: Arc::clone(&shared),
         };
         let (sender, input) = mpsc::sync_channel(4);
         for serial in 1..=2 {
@@ -126,7 +123,7 @@ impl Run {
             control,
             output: receiver,
             thread: Some(thread),
-            status,
+            shared,
         }
     }
 
@@ -163,13 +160,13 @@ fn observed_b_completion_cannot_acknowledge_over_withheld_a() {
         run.output.try_recv(),
         Err(mpsc::TryRecvError::Empty)
     ));
-    assert_eq!(run.status.lock().unwrap().published, 0);
+    assert_eq!(run.shared.final_status.lock().unwrap().published, 0);
     // The intentionally wrong maximum-completed rule claims 2 while the
     // independent completion oracle requires 0 until A is delivered.
     assert_eq!(run.control.maximum.load(Ordering::Acquire), 2);
     assert_ne!(
         run.control.maximum.load(Ordering::Acquire),
-        run.status.lock().unwrap().published
+        run.shared.final_status.lock().unwrap().published
     );
     run.release();
     for serial in 1..=2 {
@@ -177,7 +174,7 @@ fn observed_b_completion_cannot_acknowledge_over_withheld_a() {
         assert_eq!(completion.id, serial);
         assert!(completion.result.is_ok());
     }
-    assert_eq!(run.status.lock().unwrap().durable, 0);
+    assert_eq!(run.shared.final_status.lock().unwrap().durable, 0);
     let mut recovered = Log::open_with_expected_prefix(
         run.directory.path().join("log"),
         append::Limits::default(),
@@ -202,8 +199,8 @@ fn short_a_then_complete_b_fails_without_publication_and_rejects_the_suffix() {
         let (completion, _) = run.output.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(completion.result.is_err());
     }
-    assert_eq!(run.status.lock().unwrap().published, 0);
-    assert!(run.status.lock().unwrap().failed);
+    assert_eq!(run.shared.final_status.lock().unwrap().published, 0);
+    assert!(run.shared.final_status.lock().unwrap().failed);
     let path = run.directory.path().join("log");
     let segment = path.join("segment-00000000000000000001.v2");
     let before = std::fs::read(&segment).unwrap();

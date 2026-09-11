@@ -391,3 +391,34 @@ fn never_enabled_queue_retains_no_replay_work() {
             .is_empty()
     );
 }
+
+#[test]
+fn failed_retirement_requires_failed_state_and_never_allows_a_later_success() {
+    let mut carrier = fresh(1);
+    let a = carrier.admit(request(Kind::Write, 0, 0, 0)).unwrap();
+    let b = carrier.admit(request(Kind::Write, 0, 1, 1)).unwrap();
+    assert!(
+        carrier
+            .complete_error(a, 0, || panic!("healthy IOERR retirement"))
+            .is_err()
+    );
+    carrier.fail();
+    carrier.complete_error(a, 0, || Ok(())).unwrap();
+    assert_eq!(carrier.published(), 0);
+    assert!(carrier.read_slot(0, 0).unwrap().is_none());
+    assert!(carrier.publish(2).is_err());
+    assert!(
+        carrier
+            .complete(b, 1, || panic!("success after FAILED"))
+            .is_err()
+    );
+    assert!(
+        carrier
+            .complete_error(b, 0, || panic!("wrong used cursor"))
+            .is_err()
+    );
+    carrier.complete_error(b, 1, || Ok(())).unwrap();
+    let (message, file) = carrier.export().unwrap();
+    drop(carrier);
+    assert!(Carrier::attach(file, &message, identity(), IMAGE_BYTES).is_err());
+}

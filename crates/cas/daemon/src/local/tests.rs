@@ -47,7 +47,7 @@ fn read(local: &mut Local, id: u64, offset: u64, length: usize) {
 fn concurrent_appends_flush_and_read_use_owned_kernel_io() {
     let directory = tempfile::tempdir().unwrap();
     let mut local = concurrent(&directory.path().join("store"));
-    let gate = Arc::clone(&local.health);
+    let gate = Arc::clone(&local.shared.health);
     let stalled = gate.lock().unwrap();
     for id in 0..3 {
         write(&mut local, id, 0, BLOCK_SIZE, id as u8 + 1);
@@ -83,7 +83,7 @@ fn concurrent_appends_flush_and_read_use_owned_kernel_io() {
 fn concurrent_flush_keeps_its_boundary_while_later_writes_wait() {
     let directory = tempfile::tempdir().unwrap();
     let mut local = concurrent(&directory.path().join("store"));
-    let gate = Arc::clone(&local.health);
+    let gate = Arc::clone(&local.shared.health);
     let stalled = gate.lock().unwrap();
     write(&mut local, 0, 0, BLOCK_SIZE, 1);
     let permit = local.prepare(Kind::Control).unwrap().unwrap();
@@ -145,7 +145,7 @@ fn concurrent_partial_reads_verify_original_payloads_and_preserve_overwrites() {
     read(&mut local, 3, BLOCK_SIZE as u64, BLOCK_SIZE);
     let completed = local.receive(true).unwrap().unwrap();
     assert!(completed.result.is_err());
-    assert!(local.health.lock().unwrap().is_some());
+    assert!(local.shared.health.lock().unwrap().failure.is_some());
 }
 
 #[test]
@@ -189,7 +189,7 @@ fn guest_gathers_share_the_final_batch_and_release_after_completion() {
             assert!(completion.result.is_ok());
             drop(completion);
             assert_eq!(
-                local.pools.requests.usage().current.requests,
+                local.shared.pools.requests.usage().current.requests,
                 (writes - id - 1) as usize
             );
         }
@@ -216,7 +216,7 @@ fn guest_gathers_share_the_final_batch_and_release_after_completion() {
 fn allocation_cap_blocks_before_gather_but_reserved_flush_still_enters() {
     let directory = tempfile::tempdir().unwrap();
     let mut local = open(&directory.path().join("store"));
-    let gate = Arc::clone(&local.health);
+    let gate = Arc::clone(&local.shared.health);
     let stalled = gate.lock().unwrap();
     for id in 0..7 {
         let permit = local
@@ -238,12 +238,12 @@ fn allocation_cap_blocks_before_gather_but_reserved_flush_still_enters() {
             .is_none()
     );
     assert!(local.packing.is_none());
-    assert_eq!(local.pools.requests.usage().current.requests, 7);
+    assert_eq!(local.shared.pools.requests.usage().current.requests, 7);
     assert_eq!(
-        local.pools.append.usage().current.bytes,
+        local.shared.pools.append.usage().current.bytes,
         7 * MAX_BATCH_BYTES
     );
-    assert!(local.pools.append.usage().peak.bytes <= 8 * MAX_REQUEST_BYTES);
+    assert!(local.shared.pools.append.usage().peak.bytes <= 8 * MAX_REQUEST_BYTES);
     let flush = local.prepare(Kind::Control).unwrap().unwrap();
     local.enqueue(7, Operation::Flush, flush).unwrap();
     drop(stalled);
@@ -253,8 +253,8 @@ fn allocation_cap_blocks_before_gather_but_reserved_flush_still_enters() {
         assert!(completed.result.is_ok());
     }
     assert!(local.receive(true).unwrap().unwrap().result.is_ok());
-    assert_eq!(local.pools.append.usage().current.bytes, 0);
-    assert_eq!(local.pools.requests.usage().current.requests, 0);
+    assert_eq!(local.shared.pools.append.usage().current.bytes, 0);
+    assert_eq!(local.shared.pools.requests.usage().current.requests, 0);
     assert_eq!(local.status.durable, 7);
 }
 
@@ -301,7 +301,7 @@ fn ordered_write_flush_overwrite_and_read_preserve_barriers() {
             assert_eq!(buffer.as_slice(), &[2; BLOCK_SIZE]);
         }
     }
-    assert_eq!(local.pools.read.usage().current.bytes, 0);
+    assert_eq!(local.shared.pools.read.usage().current.bytes, 0);
     drop(local);
     let recovered = Log::open_with_expected_prefix(&path, append::Limits::default(), 2).unwrap();
     assert_eq!(recovered.status().published, 2);
@@ -322,7 +322,7 @@ fn failed_gather_and_disconnected_owner_release_without_an_extra_fence() {
             .is_err()
     );
     local.seal().unwrap();
-    assert_eq!(local.pools.append.usage().current.bytes, 0);
+    assert_eq!(local.shared.pools.append.usage().current.bytes, 0);
     let permit = local.prepare(Kind::Write(BLOCK_SIZE)).unwrap().unwrap();
     local
         .gather(0, 0, 0, BLOCK_SIZE, permit, |bytes| {
@@ -330,7 +330,8 @@ fn failed_gather_and_disconnected_owner_release_without_an_extra_fence() {
             Ok(())
         })
         .unwrap();
-    let pools = Arc::clone(&local.pools);
+    let shared = Arc::clone(&local.shared);
+    let pools = &shared.pools;
     // Drop drains the owned work even when no caller will consume completion.
     drop(local);
     assert_eq!(pools.append.usage().current.bytes, 0);
@@ -349,7 +350,8 @@ fn failed_gather_and_disconnected_owner_release_without_an_extra_fence() {
 fn returned_read_keeps_request_and_byte_credits_after_worker_shutdown() {
     let directory = tempfile::tempdir().unwrap();
     let mut local = open(&directory.path().join("store"));
-    let pools = Arc::clone(&local.pools);
+    let shared = Arc::clone(&local.shared);
+    let pools = &shared.pools;
     let permit = local.prepare(Kind::Read(BLOCK_SIZE)).unwrap().unwrap();
     local
         .enqueue(

@@ -16,6 +16,12 @@ pub enum Point {
     AfterUsed,
 }
 
+#[derive(Clone, Copy, Serialize)]
+pub struct Snapshot {
+    pub published: u64,
+    pub durable: u64,
+}
+
 pub struct Pause {
     point: Point,
     after: NonZeroU64,
@@ -41,12 +47,14 @@ impl Pause {
         })
     }
 
-    fn publish(&self) -> io::Result<()> {
+    fn publish(&self, snapshot: Option<Snapshot>) -> io::Result<()> {
         #[derive(Serialize)]
         struct Marker {
             schema_version: u32,
             point: Point,
             writes: NonZeroU64,
+            #[serde(flatten)]
+            snapshot: Option<Snapshot>,
         }
 
         let parent = self
@@ -61,6 +69,7 @@ impl Pause {
                 schema_version: 1,
                 point: self.point,
                 writes: self.after,
+                snapshot,
             },
         )?;
         file.persist_noclobber(&self.marker)
@@ -73,27 +82,37 @@ impl Pause {
 pub struct Fault {
     pause: Option<Pause>,
     writes: u64,
+    snapshot: Option<Snapshot>,
 }
 
 impl Fault {
     pub fn new(pause: Option<Pause>) -> Self {
-        Self { pause, writes: 0 }
+        Self {
+            pause,
+            writes: 0,
+            snapshot: None,
+        }
     }
 
-    pub fn next_write(&mut self) {
+    pub fn set_snapshot(&mut self, snapshot: Option<Snapshot>) {
+        self.snapshot = snapshot;
+    }
+
+    pub fn next_write(&mut self) -> u64 {
         self.writes = self.writes.saturating_add(1);
+        self.writes
     }
 
-    fn take_pause(&mut self, point: Point) -> Option<Pause> {
+    fn take_pause(&mut self, point: Point, write: Option<u64>) -> Option<Pause> {
         self.pause
-            .take_if(|pause| pause.point == point && pause.after.get() == self.writes)
+            .take_if(|pause| pause.point == point && Some(pause.after.get()) == write)
     }
 
-    pub fn hit(&mut self, point: Point) -> io::Result<()> {
-        let Some(pause) = self.take_pause(point) else {
+    pub fn hit(&mut self, point: Point, write: Option<u64>) -> io::Result<()> {
+        let Some(pause) = self.take_pause(point, write) else {
             return Ok(());
         };
-        pause.publish()?;
+        pause.publish(self.snapshot)?;
         stop_process()
     }
 }
@@ -122,15 +141,37 @@ mod tests {
             )
             .unwrap(),
         ));
-        assert!(fault.take_pause(Point::AfterStorage).is_none());
+        assert!(
+            fault
+                .take_pause(Point::AfterStorage, Some(fault.writes))
+                .is_none()
+        );
         fault.next_write();
-        assert!(fault.take_pause(Point::AfterStorage).is_none());
+        assert!(
+            fault
+                .take_pause(Point::AfterStorage, Some(fault.writes))
+                .is_none()
+        );
         fault.next_write();
-        assert!(fault.take_pause(Point::BeforeSubmit).is_none());
-        assert!(fault.take_pause(Point::AfterStorage).is_some());
-        assert!(fault.take_pause(Point::AfterStorage).is_none());
+        assert!(
+            fault
+                .take_pause(Point::BeforeSubmit, Some(fault.writes))
+                .is_none()
+        );
+        fault.next_write(); // A newer admission cannot hide write 2's callback.
+        assert!(fault.take_pause(Point::AfterStorage, None).is_none());
+        assert!(fault.take_pause(Point::AfterStorage, Some(2)).is_some());
+        assert!(
+            fault
+                .take_pause(Point::AfterStorage, Some(fault.writes))
+                .is_none()
+        );
         fault.next_write();
-        assert!(fault.take_pause(Point::AfterStorage).is_none());
+        assert!(
+            fault
+                .take_pause(Point::AfterStorage, Some(fault.writes))
+                .is_none()
+        );
     }
 
     #[test]
@@ -143,14 +184,14 @@ mod tests {
             path.clone(),
         )
         .unwrap();
-        pause.publish().unwrap();
+        pause.publish(None).unwrap();
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
             serde_json::json!({"schema_version": 1, "point": "after-status", "writes": 32})
         );
         assert_eq!(
-            pause.publish().unwrap_err().kind(),
+            pause.publish(None).unwrap_err().kind(),
             io::ErrorKind::AlreadyExists
         );
         assert_eq!(std::fs::read(&path).unwrap(), bytes);

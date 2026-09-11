@@ -41,7 +41,7 @@ struct Args {
     /// Create new staging/local storage with this logical capacity; never replaces existing data.
     #[arg(long)]
     create_bytes: Option<u64>,
-    /// Serial staging recovery: make each write durable before publishing completion.
+    /// Live recovery: serial durable staging, or retained inflight state for local-async.
     #[arg(long)]
     restartable: bool,
     /// Test-only pause at a write boundary; an external harness must kill/resume us.
@@ -79,8 +79,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.create_bytes.is_some() && matches!(args.backend, BackendKind::Raw) {
         return Err("--create-bytes requires --backend staging or local".into());
     }
-    if args.restartable && !matches!(args.backend, BackendKind::Staging) {
-        return Err("--restartable requires --backend staging".into());
+    if args.restartable && !matches!(args.backend, BackendKind::Staging | BackendKind::LocalAsync) {
+        return Err("--restartable requires --backend staging or local-async".into());
     }
     let fault = fault::Fault::new(args.pause.map(TryInto::try_into).transpose()?);
     // Do not replace someone else's socket or evidence.

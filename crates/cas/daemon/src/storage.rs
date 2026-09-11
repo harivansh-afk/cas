@@ -11,6 +11,9 @@ use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::thread::{self, JoinHandle};
 
+mod opening;
+pub use opening::Opening;
+
 use crate::local::{self, Local};
 use cas_core::{
     BLOCK_SIZE,
@@ -86,6 +89,7 @@ pub enum Storage {
     Raw(Raw),
     Staging(Staging),
     Local(Box<Local>),
+    Opening(Box<Opening>),
 }
 
 impl Storage {
@@ -110,8 +114,13 @@ impl Storage {
         )?)))
     }
 
+    pub fn local_live(path: &Path, create_bytes: Option<u64>) -> io::Result<Self> {
+        Ok(Self::Opening(Box::new(Opening::new(path, create_bytes)?)))
+    }
+
     pub fn prepare(&mut self, kind: local::Kind) -> io::Result<Option<Permit>> {
         match self {
+            Self::Opening(_) => Err(io::Error::other("IO before inflight recovery")),
             Self::Local(local) => local
                 .prepare(kind)
                 .map(|permit| permit.map(|credits| Permit::Local { _credits: credits })),
@@ -120,14 +129,14 @@ impl Storage {
     }
 
     pub fn is_local(&self) -> bool {
-        matches!(self, Self::Local(_))
+        matches!(self, Self::Local(_) | Self::Opening(_))
     }
 
     pub fn completion_gate(&self) -> Option<local::Health> {
-        if let Self::Local(local) = self {
-            Some(std::sync::Arc::clone(&local.health))
-        } else {
-            None
+        match self {
+            Self::Local(local) => Some(std::sync::Arc::clone(&local.shared.health)),
+            Self::Opening(opening) => Some(std::sync::Arc::clone(&opening.shared.health)),
+            _ => None,
         }
     }
 
@@ -270,6 +279,7 @@ impl Storage {
             Self::Raw(_) => "raw_io_uring",
             Self::Staging(_) => "staging_sync",
             Self::Local(local) => local.name(),
+            Self::Opening(_) => local::Execution::Concurrent.name(),
         }
     }
 
@@ -277,7 +287,7 @@ impl Storage {
         match self {
             Self::Raw(_) => None,
             Self::Staging(staging) => Some(staging.status),
-            Self::Local(_) => None,
+            Self::Local(_) | Self::Opening(_) => None,
         }
     }
 
@@ -286,6 +296,7 @@ impl Storage {
             Self::Raw(raw) => raw.image_bytes,
             Self::Staging(staging) => staging.status.image_bytes,
             Self::Local(local) => local.status.image_bytes,
+            Self::Opening(opening) => opening.config.image_bytes,
         }
     }
 
@@ -302,6 +313,7 @@ impl Storage {
     ) -> io::Result<()> {
         match self {
             Self::Raw(raw) => raw.enqueue(id, operation),
+            Self::Opening(_) => Err(io::Error::other("IO before inflight recovery")),
             Self::Local(local) => match permit {
                 Permit::Local { _credits } => local.enqueue(id, operation, _credits),
                 Permit::Reference => Err(io::Error::other("local IO without admission credits")),
@@ -335,6 +347,7 @@ impl Storage {
     pub fn try_complete(&mut self) -> io::Result<Option<Completed>> {
         match self {
             Self::Raw(raw) => raw.try_complete(),
+            Self::Opening(_) => Ok(None),
             Self::Local(local) => local.receive(false),
             Self::Staging(staging) => match staging
                 .receiver
@@ -361,6 +374,9 @@ impl Storage {
                 return Ok(completed);
             }
             match self {
+                Self::Opening(_) => {
+                    return Err(io::Error::other("completion before inflight recovery"));
+                }
                 Self::Local(local) => {
                     return local
                         .receive(true)?
