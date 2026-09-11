@@ -31,6 +31,7 @@ pub enum Backend {
     Raw,
     Daemon,
     Staging,
+    Local,
 }
 
 impl Backend {
@@ -39,12 +40,14 @@ impl Backend {
             Self::Raw => "raw",
             Self::Daemon => "daemon",
             Self::Staging => "staging",
+            Self::Local => "local",
         }
     }
     pub fn storage(self) -> &'static str {
         match self {
             Self::Raw | Self::Daemon => "raw_io_uring",
             Self::Staging => "staging_sync",
+            Self::Local => "local_sync",
         }
     }
 }
@@ -127,6 +130,11 @@ pub struct DaemonReport {
     bounce_requests: u64,
     peak_inflight: u64,
     staging: Option<StagingReport>,
+    local: Option<LocalReport>,
+    #[serde(default)]
+    guest_payload_copy_bytes: u64,
+    #[serde(default)]
+    writes: u64,
     #[serde(default)]
     restartable: bool,
     restored_used: Option<u16>,
@@ -138,6 +146,91 @@ struct StagingReport {
     image_bytes: u64,
     appended: u64,
     durable: u64,
+}
+
+#[derive(Deserialize)]
+struct LocalReport {
+    status: LocalStatus,
+    metrics: LocalMetrics,
+    requests: cas_core::budget::Usage,
+    append: cas_core::budget::Usage,
+    read: cas_core::budget::Usage,
+    control: cas_core::budget::Usage,
+    host_append: cas_core::budget::Usage,
+    host_read: cas_core::budget::Usage,
+}
+
+#[derive(Deserialize)]
+struct LocalStatus {
+    image_bytes: u64,
+    published: u64,
+    durable: u64,
+    failed: bool,
+}
+
+#[derive(Deserialize)]
+struct LocalMetrics {
+    gathered_bytes: u64,
+    gather_calls: u64,
+    batches_submitted: u64,
+    allocation_identity_checks: u64,
+    allocations_released: u64,
+    encoded_bytes: u64,
+    admission_retained_peak: usize,
+    encoding_retained_peak: usize,
+    completion_retained_peak: usize,
+}
+
+impl LocalReport {
+    fn verify(&self, daemon: &DaemonReport) -> io::Result<()> {
+        let metrics = &self.metrics;
+        if self.status.image_bytes != DISK_BYTES
+            || self.status.failed
+            || self.status.published == 0
+            || self.status.published != self.status.durable
+            || metrics.gathered_bytes != daemon.write_bytes
+            || daemon.guest_payload_copy_bytes != daemon.write_bytes
+            || metrics.gather_calls != daemon.writes
+            || metrics.allocation_identity_checks != metrics.batches_submitted
+            || metrics.allocations_released != metrics.batches_submitted
+            || self.append.admitted != metrics.batches_submitted
+            || (daemon.write_bytes != 0 && (daemon.writes == 0 || metrics.batches_submitted == 0))
+            || metrics.encoded_bytes
+                != daemon.write_bytes + metrics.batches_submitted * BLOCK_SIZE as u64
+        {
+            return Err(io::Error::other(
+                "local prefix, copy accounting or allocation identity failed",
+            ));
+        }
+        for (usage, bytes, requests) in [
+            (&self.requests, 0, 128),
+            (&self.append, 8 * 1024 * 1024, 0),
+            (&self.read, 8 * 1024 * 1024, 0),
+            (&self.control, 64 * 1024, 8),
+            (&self.host_append, 64 * 1024 * 1024, 0),
+            (&self.host_read, 64 * 1024 * 1024, 0),
+        ] {
+            if usage.current != cas_core::budget::Amount::default()
+                || usage.peak.bytes > bytes
+                || usage.peak.requests > requests
+                || usage.admitted != usage.released
+            {
+                return Err(io::Error::other(
+                    "local resource credits leaked or exceeded their bounds",
+                ));
+            }
+        }
+        for peak in [
+            metrics.admission_retained_peak,
+            metrics.encoding_retained_peak,
+            metrics.completion_retained_peak,
+        ] {
+            if peak > 8 * 1024 * 1024 || (daemon.write_bytes != 0 && peak < BLOCK_SIZE) {
+                return Err(io::Error::other("invalid append lifetime measurement"));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl DaemonReport {
@@ -209,6 +302,12 @@ impl DaemonReport {
                 ));
             }
         }
+        if backend == Backend::Local {
+            self.local
+                .as_ref()
+                .ok_or_else(|| io::Error::other("missing local report"))?
+                .verify(self)?;
+        }
         Ok(())
     }
 }
@@ -232,6 +331,50 @@ impl FlushMarker {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+
+    #[test]
+    fn local_evidence_rejects_extra_copies_leaks_and_failed_identity_checks() {
+        let mut value = daemon(Backend::Local, false);
+        let bytes = 2 * IO_BYTES;
+        let writes = bytes / BLOCK_SIZE as u64;
+        let batches = writes / 32;
+        let usage = |admitted, peak| {
+            json!({"current":{"bytes":0,"requests":0},
+            "peak":{"bytes":peak,"requests":0},"admitted":admitted,"released":admitted,"rejected":0})
+        };
+        let allocation = 1024 * 1024 + BLOCK_SIZE;
+        value["writes"] = json!(writes);
+        value["guest_payload_copy_bytes"] = json!(bytes);
+        value["local"] = json!({
+            "status":{"image_bytes":DISK_BYTES,"published":writes,"durable":writes,"failed":false},
+            "metrics":{"gathered_bytes":bytes,"gather_calls":writes,"batches_submitted":batches,
+                "allocation_identity_checks":batches,"allocations_released":batches,
+                "encoded_bytes":bytes + batches * BLOCK_SIZE as u64,
+                "admission_retained_peak":allocation,"encoding_retained_peak":allocation,"completion_retained_peak":allocation},
+            "requests":usage(writes,0),"append":usage(batches,allocation),"read":usage(writes,BLOCK_SIZE),
+            "control":usage(2,BLOCK_SIZE),"host_append":usage(batches,allocation),"host_read":usage(writes,BLOCK_SIZE),
+        });
+        let verify = |value| {
+            serde_json::from_value::<DaemonReport>(value)
+                .unwrap()
+                .verify(Backend::Local, false, false)
+        };
+        verify(value.clone()).unwrap();
+        for (pointer, invalid) in [
+            ("/guest_payload_copy_bytes", json!(2 * bytes)),
+            ("/local/append/peak/bytes", json!(8 * 1024 * 1024 + 1)),
+            ("/local/append/current/bytes", json!(1)),
+            (
+                "/local/metrics/allocation_identity_checks",
+                json!(batches - 1),
+            ),
+            ("/local/status/durable", json!(0)),
+        ] {
+            let mut broken = value.clone();
+            *broken.pointer_mut(pointer).unwrap() = invalid;
+            assert!(verify(broken).is_err(), "{pointer}");
+        }
+    }
 
     fn completion() -> Value {
         json!({"schema_version":1,"service_result":"success","exit_code":"exited","exit_status":"0"})

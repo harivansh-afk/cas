@@ -64,6 +64,7 @@ in
       "raw"
       "daemon"
       "staging"
+      "local"
     ];
     default = "raw";
     description = "Block backend that serves the experiment disk.";

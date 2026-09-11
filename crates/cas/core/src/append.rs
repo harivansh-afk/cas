@@ -295,16 +295,19 @@ impl Log {
 
     fn publish(&mut self, header: &Header<'_>, segment: Arc<Segment>, offset: u64) {
         let envelope = header.envelope();
-        let payload = Arc::new(Payload {
-            segment,
-            offset: offset + BLOCK_SIZE as u64,
-            bytes: envelope.payload_bytes,
-            first: envelope.first,
-            last: envelope.last,
-        });
         for descriptor in header.descriptors() {
-            let source = (descriptor.kind == Kind::Write)
-                .then(|| (Arc::clone(&payload), u64::from(descriptor.payload_offset)));
+            let source = (descriptor.kind == Kind::Write).then(|| {
+                (
+                    Arc::new(Payload {
+                        segment: Arc::clone(&segment),
+                        offset: offset + BLOCK_SIZE as u64 + u64::from(descriptor.payload_offset),
+                        bytes: descriptor.payload_length as usize,
+                        sequence: descriptor.sequence,
+                        crc: descriptor.payload_crc,
+                    }),
+                    0,
+                )
+            });
             self.index.replace(
                 descriptor.offset,
                 Mapping {
@@ -317,6 +320,8 @@ impl Log {
         self.published = envelope.last;
     }
 
+    /// A partial original WRITE needs at most MAX_REQUEST_BYTES scratch bytes
+    /// to verify its CRC. Callers reserve that scratch capacity before admission.
     pub fn read_into(&mut self, offset: u64, buffer: &mut AlignedBuffer) -> Result<()> {
         self.healthy()?;
         let length = buffer.as_slice().len();
@@ -328,6 +333,7 @@ impl Log {
             return Err(format::Error::Invalid("read range").into());
         }
         buffer.as_mut_slice().fill(0);
+        let mut scratch: Option<AlignedBuffer> = None;
         for (begin, mapping) in self.index.overlapping(offset, end) {
             let Some((payload, payload_offset)) = &mapping.source else {
                 continue;
@@ -336,18 +342,44 @@ impl Log {
             let last = mapping.end.min(end);
             let skip = payload_offset + first - begin;
             debug_assert!(skip + last - first <= payload.bytes as u64);
-            debug_assert!((payload.first..=payload.last).contains(&mapping.sequence));
-            if let Err(error) = direct::read_bytes(
-                &payload.segment.file,
-                &mut buffer.as_mut_slice()[(first - offset) as usize..(last - offset) as usize],
-                payload.offset + skip,
-            ) {
+            debug_assert_eq!(payload.sequence, mapping.sequence);
+            let destination =
+                &mut buffer.as_mut_slice()[(first - offset) as usize..(last - offset) as usize];
+            let result = if skip == 0 && destination.len() == payload.bytes {
+                direct::read_bytes(&payload.segment.file, destination, payload.offset)
+                    .and_then(|()| verify_read_crc(destination, payload.crc))
+            } else {
+                if scratch
+                    .as_ref()
+                    .is_none_or(|buffer| buffer.as_slice().len() < payload.bytes)
+                {
+                    // Release the old allocation before growing within the cap.
+                    drop(scratch.take());
+                    scratch = Some(AlignedBuffer::new(payload.bytes));
+                }
+                let bytes = &mut scratch.as_mut().unwrap().as_mut_slice()[..payload.bytes];
+                direct::read_bytes(&payload.segment.file, bytes, payload.offset)
+                    .and_then(|()| verify_read_crc(bytes, payload.crc))
+                    .map(|()| {
+                        destination.copy_from_slice(
+                            &bytes[skip as usize..skip as usize + destination.len()],
+                        )
+                    })
+            };
+            if let Err(error) = result {
                 self.failed = true;
                 return Err(error.into());
             }
         }
         Ok(())
     }
+}
+
+fn verify_read_crc(bytes: &[u8], crc: u32) -> io::Result<()> {
+    if crc32fast::hash(bytes) != crc {
+        return Err(io::Error::other("corrupt staging payload"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

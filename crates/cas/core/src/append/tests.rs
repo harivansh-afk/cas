@@ -458,3 +458,40 @@ fn invalid_terminal_batch_discards_and_retains_all_later_segments() {
     assert_eq!(fs::read(&archives[0]).unwrap(), before[0][BLOCK_SIZE..]);
     assert_eq!(fs::read(&archives[1]).unwrap(), before[1]);
 }
+
+#[test]
+fn a_partial_read_verifies_the_whole_original_write_before_returning_bytes() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("store");
+    let mut log = Log::create(&path, config(), Limits::default()).unwrap();
+    let mut batch = Builder::new(IMAGE_BYTES as u64, 2 * BLOCK_SIZE).unwrap();
+    batch
+        .write(
+            RequestId {
+                serial: 1,
+                attachment: 1,
+                queue: 0,
+                head: 0,
+            },
+            0,
+            2 * BLOCK_SIZE,
+            |bytes| {
+                bytes.fill(7);
+                Ok(())
+            },
+        )
+        .unwrap();
+    log.append(batch).unwrap();
+    let mut output = AlignedBuffer::new(BLOCK_SIZE);
+    log.read_into(BLOCK_SIZE as u64, &mut output).unwrap();
+    assert_eq!(output.as_slice(), &[7; BLOCK_SIZE]);
+    // Damage a different portion of the same immutable WRITE.
+    File::options()
+        .write(true)
+        .open(path.join(segment::name(1)))
+        .unwrap()
+        .write_all_at(&[3], 2 * BLOCK_SIZE as u64)
+        .unwrap();
+    assert!(log.read_into(BLOCK_SIZE as u64, &mut output).is_err());
+    assert!(log.status().failed);
+}

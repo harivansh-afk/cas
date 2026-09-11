@@ -13,7 +13,7 @@ use virtio_bindings::bindings::{
     virtio_blk::{VIRTIO_BLK_F_BLK_SIZE, VIRTIO_BLK_F_FLUSH},
     virtio_config::VIRTIO_F_VERSION_1,
 };
-use virtio_queue::QueueT;
+use virtio_queue::{Queue, QueueOwnedT, QueueT};
 use vm_memory::{
     Bytes, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryLoadGuard, GuestMemoryMmap,
 };
@@ -23,7 +23,8 @@ use vmm_sys_util::eventfd::{EFD_CLOEXEC, EFD_NONBLOCK, EventFd};
 
 use crate::fault::{Fault, Point};
 use crate::request::{self, Completion, DEVICE_ID, Request, Segment, Status};
-use crate::storage::{Operation, Storage};
+use crate::storage::{CompletionData, Operation, Permit, Storage};
+use crate::{BackendKind, local};
 
 const QUEUE_SIZE: usize = 128;
 const REQUIRED_FEATURES: u64 =
@@ -33,6 +34,7 @@ pub(super) const COMPLETION_EVENT: u16 = 2; // 0 is the queue; 1 is the framewor
 struct PendingRequest {
     completion: Completion,
     segments: Vec<Segment>,
+    _permit: Permit,
 }
 
 #[derive(Default)]
@@ -42,6 +44,7 @@ struct Counters {
     flushes: u64,
     read_bytes: u64,
     write_bytes: u64,
+    guest_payload_copy_bytes: u64,
     errors: u64,
     bounce_requests: u64,
     peak_inflight: usize,
@@ -100,14 +103,40 @@ fn publish(
     state.signal_used_queue()
 }
 
-fn pop(
+struct NextChain {
+    chain: virtio_queue::DescriptorChain<GuestMemoryLoadGuard<GuestMemoryMmap>>,
+    next_avail: u16,
+}
+
+fn peek(
     mem: GuestMemoryLoadGuard<GuestMemoryMmap>,
     state: &mut VringState,
-) -> Option<virtio_queue::DescriptorChain<GuestMemoryLoadGuard<GuestMemoryMmap>>> {
+) -> io::Result<Option<NextChain>> {
     if !state.is_enabled() || !state.get_queue().ready() {
-        return None;
+        return Ok(None);
     }
-    state.get_queue_mut().pop_descriptor_chain(mem)
+    let mut snapshot = Queue::try_from(state.get_queue().state()).map_err(io::Error::other)?;
+    let chain = snapshot.iter(mem).map_err(io::Error::other)?.next();
+    Ok(chain.map(|chain| NextChain {
+        chain,
+        next_avail: snapshot.next_avail(),
+    }))
+}
+
+fn gather(
+    mem: &GuestMemoryMmap,
+    segments: &[Segment],
+    destination: &mut [u8],
+    copied: &mut u64,
+) -> io::Result<()> {
+    let mut offset = 0;
+    for segment in segments {
+        mem.read_slice(&mut destination[offset..offset + segment.len], segment.addr)
+            .map_err(io::Error::other)?;
+        *copied += segment.len as u64;
+        offset += segment.len;
+    }
+    Ok(())
 }
 
 impl Backend {
@@ -117,29 +146,39 @@ impl Backend {
     }
     #[cfg(test)]
     pub fn open(path: &Path, staging: bool, create_bytes: Option<u64>) -> io::Result<Self> {
-        Self::open_with_recovery(path, staging, create_bytes, false, Fault::default())
+        Self::open_with_recovery(
+            path,
+            if staging {
+                BackendKind::Staging
+            } else {
+                BackendKind::Raw
+            },
+            create_bytes,
+            false,
+            Fault::default(),
+        )
     }
     pub fn open_with_recovery(
         path: &Path,
-        staging: bool,
+        kind: BackendKind,
         create_bytes: Option<u64>,
         restartable: bool,
         fault: Fault,
     ) -> io::Result<Self> {
-        if restartable && !staging {
+        if restartable && !matches!(kind, BackendKind::Staging) {
             return Err(io::Error::other("restartable mode requires staging"));
         }
         let completion_event = EventFd::new(EFD_NONBLOCK | EFD_CLOEXEC)?;
-        let storage = if staging {
-            Storage::staging_with_durability(
+        let storage = match kind {
+            BackendKind::Staging => Storage::staging_with_durability(
                 path,
                 create_bytes,
                 &completion_event,
                 QUEUE_SIZE,
                 restartable,
-            )?
-        } else {
-            Storage::raw(path, &completion_event, QUEUE_SIZE)?
+            )?,
+            BackendKind::Raw => Storage::raw(path, &completion_event, QUEUE_SIZE)?,
+            BackendKind::Local => Storage::local(path, create_bytes, &completion_event)?,
         };
         let capacity_bytes = storage.image_bytes();
         let exit = vmm_sys_util::event::new_event_consumer_and_notifier(
@@ -189,6 +228,7 @@ impl Backend {
         serde_json::json!({
             "schema_version":1, "fatal_error":self.failure, "backend":self.storage.name(), "connection_ok":connection_ok,
             "restartable":self.restartable, "restored_used":self.restored_used, "restored_pending":self.restored_pending,
+            "local":self.storage.local_report(),
             "staging":self.storage.status().map(|s| serde_json::json!({
                 "image_bytes":s.image_bytes, "appended":s.appended, "durable":s.durable,
                 "log_bytes":s.log_bytes, "mapped_blocks":s.mapped_blocks,
@@ -198,6 +238,7 @@ impl Backend {
             "flush_negotiated":self.negotiated_features & (1 << VIRTIO_BLK_F_FLUSH) != 0,
             "pending_at_disconnect":pending_at_disconnect, "reads":c.reads, "writes":c.writes,
             "flushes":c.flushes, "read_bytes":c.read_bytes, "write_bytes":c.write_bytes,
+            "guest_payload_copy_bytes":c.guest_payload_copy_bytes,
             "errors":c.errors, "bounce_requests":c.bounce_requests, "peak_inflight":c.peak_inflight, "queues":1
         })
     }
@@ -220,6 +261,8 @@ impl Backend {
         mem: &GuestMemoryMmap,
         state: &mut VringState,
         request: Request,
+        permit: Permit,
+        next_id: u64,
     ) -> io::Result<()> {
         if matches!(&request, Request::Write(_)) {
             self.fault.next_write();
@@ -244,39 +287,49 @@ impl Backend {
             Request::Read(data) => (
                 data.completion,
                 data.segments,
-                Operation::Read {
+                Some(Operation::Read {
                     offset: data.offset,
                     buffer: AlignedBuffer::new(data.len),
-                },
+                }),
             ),
             Request::Write(data) => {
-                let mut buffer = AlignedBuffer::new(data.len);
-                let mut offset = 0;
-                for segment in &data.segments {
-                    mem.read_slice(
-                        &mut buffer.as_mut_slice()[offset..offset + segment.len],
-                        segment.addr,
-                    )
-                    .map_err(io::Error::other)?;
-                    offset += segment.len;
-                }
-                (
-                    data.completion,
-                    Vec::new(),
-                    Operation::Write {
+                let operation = if self.storage.is_local() {
+                    self.storage.gather(
+                        self.next_id,
+                        data.completion.head,
+                        data.offset,
+                        data.len,
+                        |destination| {
+                            gather(
+                                mem,
+                                &data.segments,
+                                destination,
+                                &mut self.counters.guest_payload_copy_bytes,
+                            )
+                        },
+                    )?;
+                    None
+                } else {
+                    let mut buffer = AlignedBuffer::new(data.len);
+                    gather(
+                        mem,
+                        &data.segments,
+                        buffer.as_mut_slice(),
+                        &mut self.counters.guest_payload_copy_bytes,
+                    )?;
+                    Some(Operation::Write {
                         offset: data.offset,
                         buffer,
-                    },
-                )
+                    })
+                };
+                (data.completion, Vec::new(), operation)
             }
-            Request::Flush(completion) => (completion, Vec::new(), Operation::Flush),
+            Request::Flush(completion) => (completion, Vec::new(), Some(Operation::Flush)),
         };
-        let next_id = self
-            .next_id
-            .checked_add(1)
-            .ok_or_else(|| io::Error::other("request IDs exhausted"))?;
-        let has_buffer = !matches!(operation, Operation::Flush);
-        self.storage.enqueue(self.next_id, operation)?;
+        let has_buffer = !matches!(operation, Some(Operation::Flush));
+        if let Some(operation) = operation {
+            self.storage.enqueue(self.next_id, operation)?;
+        }
         if has_buffer {
             self.counters.bounce_requests += 1;
         }
@@ -285,6 +338,7 @@ impl Backend {
             PendingRequest {
                 completion,
                 segments,
+                _permit: permit,
             },
         );
         self.next_id = next_id;
@@ -300,16 +354,30 @@ impl Backend {
                 .pending
                 .remove(&completed.id)
                 .ok_or_else(|| io::Error::other("unknown IO completion"))?;
-            let expected = completed.operation.expected_bytes();
-            if let Err(error) = completed.result {
+            let gate = self.storage.completion_gate();
+            let guard = gate
+                .as_ref()
+                .map(|gate| {
+                    gate.lock()
+                        .map_err(|_| io::Error::other("completion gate poisoned"))
+                })
+                .transpose()?;
+            let failure = guard
+                .as_ref()
+                .and_then(|guard| guard.as_ref())
+                .map(|error| io::Error::other(error.clone()));
+            if let Err(error) = failure.map_or(completed.result, Err) {
+                // The request permit must outlive its returned READ allocation
+                // on failure too, including an error during status publication.
+                drop(completed.data);
                 self.finish(mem, state, pending.completion, Status::IoError, None)?;
-                if self.storage.status().is_some() {
+                if self.storage.status().is_some() || self.storage.is_local() {
                     return Err(error);
                 }
                 continue;
             }
-            match completed.operation {
-                Operation::Read { buffer, .. } => {
+            match completed.data {
+                CompletionData::Read(buffer) => {
                     self.finish(
                         mem,
                         state,
@@ -318,16 +386,16 @@ impl Backend {
                         Some((&pending.segments, buffer.as_slice())),
                     )?;
                     self.counters.reads += 1;
-                    self.counters.read_bytes += expected as u64;
+                    self.counters.read_bytes += buffer.as_slice().len() as u64;
                 }
-                Operation::Write { .. } => {
+                CompletionData::Write { bytes } => {
                     self.fault.hit(Point::AfterStorage)?;
                     self.finish(mem, state, pending.completion, Status::Ok, None)?;
                     self.fault.hit(Point::AfterUsed)?;
                     self.counters.writes += 1;
-                    self.counters.write_bytes += expected as u64;
+                    self.counters.write_bytes += bytes as u64;
                 }
-                Operation::Flush => {
+                CompletionData::Flush => {
                     self.finish(mem, state, pending.completion, Status::Ok, None)?;
                     self.counters.flushes += 1;
                 }
@@ -377,10 +445,13 @@ impl Backend {
         let mut consumed = 0;
         let limit = if self.restartable { 1 } else { QUEUE_SIZE };
         while self.pending.len() < limit && consumed < QUEUE_SIZE {
-            let Some(mut chain) = pop(mem.clone(), &mut state) else {
+            let Some(NextChain {
+                mut chain,
+                next_avail,
+            }) = peek(mem.clone(), &mut state)?
+            else {
                 break;
             };
-            consumed += 1;
             let head = chain.head_index();
             let mut descriptors = Vec::new();
             let mut has_next = false;
@@ -400,18 +471,48 @@ impl Backend {
             }
             let completion = Completion::from_descriptors(&mem, head, &descriptors);
             match request::parse(&mem, head, descriptors, self.capacity_bytes) {
-                Ok(request) => self.enqueue(&mem, &mut state, request)?,
-                Err(_) => match completion {
-                    Some(completion) => {
-                        self.finish(&mem, &mut state, completion, Status::IoError, None)?
+                Ok(request) => {
+                    let next_id = self
+                        .next_id
+                        .checked_add(1)
+                        .ok_or_else(|| io::Error::other("request IDs exhausted"))?;
+                    let kind = match &request {
+                        Request::Read(data) => local::Kind::Read(data.len),
+                        Request::Write(data) => local::Kind::Write(data.len),
+                        _ => local::Kind::Control,
+                    };
+                    let gate = self.storage.completion_gate();
+                    let guard = gate
+                        .as_ref()
+                        .map(|gate| {
+                            gate.lock()
+                                .map_err(|_| io::Error::other("completion gate poisoned"))
+                        })
+                        .transpose()?;
+                    if let Some(error) = guard.as_ref().and_then(|guard| guard.as_ref()) {
+                        return Err(io::Error::other(error.clone()));
                     }
-                    None => {
-                        return Err(io::Error::other(
-                            "malformed request without writable status",
-                        ));
+                    let Some(permit) = self.storage.prepare(kind)? else {
+                        break;
+                    };
+                    state.get_queue_mut().set_next_avail(next_avail);
+                    self.enqueue(&mem, &mut state, request, permit, next_id)?;
+                }
+                Err(_) => {
+                    state.get_queue_mut().set_next_avail(next_avail);
+                    match completion {
+                        Some(completion) => {
+                            self.finish(&mem, &mut state, completion, Status::IoError, None)?
+                        }
+                        None => {
+                            return Err(io::Error::other(
+                                "malformed request without writable status",
+                            ));
+                        }
                     }
-                },
+                }
             }
+            consumed += 1;
         }
         self.storage.submit()?;
         if consumed == QUEUE_SIZE {
@@ -431,12 +532,15 @@ impl Backend {
                     return Err(error);
                 }
             };
-            self.pending
+            let pending = self
+                .pending
                 .remove(&completed.id)
                 .ok_or_else(|| io::Error::other("unknown IO completion while draining"))?;
             if let Err(error) = completed.result {
                 self.fail(error.to_string());
             }
+            drop(completed.data);
+            drop(pending);
         }
         Ok(())
     }
@@ -660,14 +764,19 @@ mod tests {
                 )
                 .is_err()
             );
-            assert!(pop(mem.clone(), &mut vring.get_mut()).is_none());
+            assert!(peek(mem.clone(), &mut vring.get_mut()).unwrap().is_none());
             assert_eq!(vring.queue_next_avail(), 0);
             assert_eq!(mem.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 0);
             assert_eq!(mem.read_obj::<u8>(completion.status).unwrap(), 0xff);
             assert_eq!(mem.read_obj::<u8>(GuestAddress(0x6000)).unwrap(), 0);
             vring.set_queue_ready(true);
             vring.set_enabled(true);
-            assert!(pop(mem, &mut vring.get_mut()).is_some());
+            let next = peek(mem, &mut vring.get_mut()).unwrap().unwrap();
+            assert_eq!(vring.queue_next_avail(), 0);
+            vring
+                .get_mut()
+                .get_queue_mut()
+                .set_next_avail(next.next_avail);
             assert_eq!(vring.queue_next_avail(), 1);
         }
     }

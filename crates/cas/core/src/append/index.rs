@@ -9,8 +9,8 @@ pub(super) struct Payload {
     pub segment: Arc<Segment>,
     pub offset: u64,
     pub bytes: usize,
-    pub first: u64,
-    pub last: u64,
+    pub sequence: u64,
+    pub crc: u32,
 }
 
 #[derive(Debug, Clone)]

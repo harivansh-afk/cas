@@ -11,6 +11,7 @@ use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::thread::{self, JoinHandle};
 
+use crate::local::{self, Local};
 use cas_core::{
     BLOCK_SIZE,
     aligned::AlignedBuffer,
@@ -18,6 +19,11 @@ use cas_core::{
 };
 use io_uring::{IoUring, opcode, squeue, types};
 use vmm_sys_util::eventfd::EventFd;
+
+pub enum Permit {
+    Reference,
+    Local { _credits: local::Permit },
+}
 
 pub enum Operation {
     Read { offset: u64, buffer: AlignedBuffer },
@@ -52,16 +58,86 @@ impl Operation {
 
 pub struct Completed {
     pub id: u64,
-    pub operation: Operation,
+    pub data: CompletionData,
     pub result: io::Result<()>,
+}
+
+pub enum CompletionData {
+    Read(AlignedBuffer),
+    Write { bytes: usize },
+    Flush,
+}
+
+impl From<Operation> for CompletionData {
+    fn from(operation: Operation) -> Self {
+        match operation {
+            Operation::Read { buffer, .. } => Self::Read(buffer),
+            Operation::Write { buffer, .. } => Self::Write {
+                bytes: buffer.as_slice().len(),
+            },
+            Operation::Flush => Self::Flush,
+        }
+    }
 }
 
 pub enum Storage {
     Raw(Raw),
     Staging(Staging),
+    Local(Box<Local>),
 }
 
 impl Storage {
+    pub fn local(path: &Path, create_bytes: Option<u64>, event: &EventFd) -> io::Result<Self> {
+        Ok(Self::Local(Box::new(Local::open(
+            path,
+            create_bytes,
+            event,
+        )?)))
+    }
+
+    pub fn prepare(&mut self, kind: local::Kind) -> io::Result<Option<Permit>> {
+        match self {
+            Self::Local(local) => local
+                .prepare(kind)
+                .map(|permit| permit.map(|credits| Permit::Local { _credits: credits })),
+            _ => Ok(Some(Permit::Reference)),
+        }
+    }
+
+    pub fn is_local(&self) -> bool {
+        matches!(self, Self::Local(_))
+    }
+
+    pub fn completion_gate(&self) -> Option<local::Health> {
+        if let Self::Local(local) = self {
+            Some(std::sync::Arc::clone(&local.health))
+        } else {
+            None
+        }
+    }
+
+    pub fn gather(
+        &mut self,
+        id: u64,
+        head: u16,
+        offset: u64,
+        length: usize,
+        gather: impl FnOnce(&mut [u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
+        match self {
+            Self::Local(local) => local.gather(id, head, offset, length, gather),
+            _ => Err(io::Error::other("packed gather requires local storage")),
+        }
+    }
+
+    pub fn local_report(&self) -> Option<serde_json::Value> {
+        if let Self::Local(local) = self {
+            Some(local.report())
+        } else {
+            None
+        }
+    }
+
     pub fn raw(path: &Path, event: &EventFd, capacity: usize) -> io::Result<Self> {
         let file = OpenOptions::new()
             .read(true)
@@ -143,7 +219,7 @@ impl Storage {
                         .send((
                             Completed {
                                 id,
-                                operation,
+                                data: operation.into(),
                                 result,
                             },
                             log.status(),
@@ -171,6 +247,7 @@ impl Storage {
         match self {
             Self::Raw(_) => "raw_io_uring",
             Self::Staging(_) => "staging_sync",
+            Self::Local(_) => "local_sync",
         }
     }
 
@@ -178,6 +255,7 @@ impl Storage {
         match self {
             Self::Raw(_) => None,
             Self::Staging(staging) => Some(staging.status),
+            Self::Local(_) => None,
         }
     }
 
@@ -185,12 +263,14 @@ impl Storage {
         match self {
             Self::Raw(raw) => raw.image_bytes,
             Self::Staging(staging) => staging.status.image_bytes,
+            Self::Local(local) => local.status.image_bytes,
         }
     }
 
     pub fn enqueue(&mut self, id: u64, operation: Operation) -> io::Result<()> {
         match self {
             Self::Raw(raw) => raw.enqueue(id, operation),
+            Self::Local(local) => local.enqueue(id, operation),
             Self::Staging(staging) => staging
                 .sender
                 .as_ref()
@@ -201,6 +281,9 @@ impl Storage {
     }
 
     pub fn submit(&mut self) -> io::Result<()> {
+        if let Self::Local(local) = self {
+            local.seal()?;
+        }
         if let Self::Raw(raw) = self {
             raw.ring.submit()?;
         }
@@ -210,6 +293,7 @@ impl Storage {
     pub fn try_complete(&mut self) -> io::Result<Option<Completed>> {
         match self {
             Self::Raw(raw) => raw.try_complete(),
+            Self::Local(local) => local.receive(false),
             Self::Staging(staging) => match staging
                 .receiver
                 .get_mut()
@@ -229,11 +313,17 @@ impl Storage {
     }
 
     pub fn wait_complete(&mut self) -> io::Result<Completed> {
+        self.submit()?;
         loop {
             if let Some(completed) = self.try_complete()? {
                 return Ok(completed);
             }
             match self {
+                Self::Local(local) => {
+                    return local
+                        .receive(true)?
+                        .ok_or_else(|| io::Error::other("missing local completion"));
+                }
                 Self::Raw(raw) => match raw.ring.submit_and_wait(1) {
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                     result => {
@@ -315,7 +405,7 @@ impl Raw {
         };
         Ok(Some(Completed {
             id,
-            operation,
+            data: operation.into(),
             result,
         }))
     }

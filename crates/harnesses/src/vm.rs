@@ -162,7 +162,7 @@ fn prepare_output(path: &Path) -> io::Result<PathBuf> {
 }
 
 fn scratch_image(backend: Backend, directory: &Path) -> io::Result<PathBuf> {
-    if backend == Backend::Staging {
+    if matches!(backend, Backend::Staging | Backend::Local) {
         return Ok(tempfile::Builder::new()
             .prefix("cas-staging-")
             .tempdir_in(directory)?
@@ -322,8 +322,8 @@ fn execute_guest(
             .arg(image)
             .arg("--report")
             .arg(output.join("daemon.json"));
-        if build.backend == Backend::Staging {
-            command.args(["--backend", "staging"]);
+        if matches!(build.backend, Backend::Staging | Backend::Local) {
+            command.args(["--backend", build.backend.name()]);
             if !read_only {
                 command.arg("--create-bytes").arg(DISK_BYTES.to_string());
             }
@@ -478,8 +478,12 @@ fn execute(args: &mut Args, summary: &mut Summary) -> io::Result<()> {
             "dev-vm requires --ssh-key; smoke runners do not support SSH",
         ));
     }
-    if (args.recovery || args.live_recovery) && build.backend != Backend::Staging {
-        return Err(io::Error::other("recovery requires the staging runner"));
+    if (args.live_recovery && build.backend != Backend::Staging)
+        || (args.recovery && !matches!(build.backend, Backend::Staging | Backend::Local))
+    {
+        return Err(io::Error::other(
+            "unsupported backend for this recovery scenario",
+        ));
     }
     summary.artifact = format!(
         "development_{}_vm_{}",
@@ -516,7 +520,7 @@ fn execute(args: &mut Args, summary: &mut Summary) -> io::Result<()> {
         return Err(io::Error::other("disk directory must exist"));
     }
     let image = scratch_image(build.backend, &disk_dir)?;
-    if build.backend != Backend::Staging {
+    if matches!(build.backend, Backend::Raw | Backend::Daemon) {
         summary.raw_image = Some(image.clone());
     }
     summary.storage_image = Some(image.clone());

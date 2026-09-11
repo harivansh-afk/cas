@@ -89,6 +89,7 @@
           raw = smokeFor pkgs "raw" false;
           daemon = smokeFor pkgs "daemon" false;
           staging = smokeFor pkgs "staging" false;
+          local = smokeFor pkgs "local" false;
         in
         {
           default = pkgs.cas;
@@ -96,8 +97,16 @@
           vm-smoke = raw;
           daemon-smoke = daemon;
           staging-smoke = staging;
+          local-smoke = local;
           checkpoints = pkgs.callPackage ./nix/checkpoints.nix {
-            wrappers = { inherit raw daemon staging; };
+            wrappers = {
+              inherit
+                raw
+                daemon
+                staging
+                local
+                ;
+            };
             provenance = {
               source_revision = self.rev or self.dirtyRev or null;
               source_path = toString self.outPath;

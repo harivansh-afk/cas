@@ -2,6 +2,7 @@
 
 mod backend;
 mod fault;
+mod local;
 mod request;
 mod storage;
 
@@ -20,10 +21,13 @@ use vmm_sys_util::epoll::EventSet;
 enum BackendKind {
     Raw,
     Staging,
+    Local,
 }
 
 #[derive(Parser)]
-#[command(about = "Serve a scratch raw image or staging log over vhost-user (one connection)")]
+#[command(
+    about = "Serve a raw image, reference staging log or local append directory over vhost-user"
+)]
 struct Args {
     #[arg(long)]
     socket: PathBuf,
@@ -33,7 +37,7 @@ struct Args {
     report: PathBuf,
     #[arg(long, value_enum, default_value = "raw")]
     backend: BackendKind,
-    /// Create a new staging log with this logical capacity; never replaces a file.
+    /// Create new staging/local storage with this logical capacity; never replaces existing data.
     #[arg(long)]
     create_bytes: Option<u64>,
     /// Serial staging recovery: make each write durable before publishing completion.
@@ -71,8 +75,8 @@ fn daemon_error(error: DaemonError) -> io::Error {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    if args.create_bytes.is_some() && !matches!(args.backend, BackendKind::Staging) {
-        return Err("--create-bytes requires --backend staging".into());
+    if args.create_bytes.is_some() && matches!(args.backend, BackendKind::Raw) {
+        return Err("--create-bytes requires --backend staging or local".into());
     }
     if args.restartable && !matches!(args.backend, BackendKind::Staging) {
         return Err("--restartable requires --backend staging".into());
@@ -88,7 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .open(&args.report)?;
     let backend = backend::Backend::open_with_recovery(
         &args.image,
-        matches!(args.backend, BackendKind::Staging),
+        args.backend,
         args.create_bytes,
         args.restartable,
         fault,

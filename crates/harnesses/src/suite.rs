@@ -30,6 +30,9 @@ const REQUIRED: [&str; 14] = [
 
 #[derive(clap::Args)]
 pub struct Args {
+    /// Run all reference checks and, for C2, the packed synchronous backend.
+    #[arg(long, default_value = "C2", value_parser = ["C1", "C2"])]
+    checkpoint: String,
     /// Checkout whose exact contents must match the Nix build.
     #[arg(long, default_value = ".")]
     checkout: PathBuf,
@@ -151,7 +154,7 @@ fn scenario(
     report: &mut Report,
 ) -> io::Result<()> {
     process::check_interrupt()?;
-    eprintln!("checkpoint C1: {id}");
+    eprintln!("checkpoint {}: {id}", report.checkpoint);
     let directory = output.join("scenarios").join(id);
     let command_result = process::run_logged(command, &directory, Duration::from_secs(115))?;
     let validation = if command_result.exit_code != Some(0) || command_result.error.is_some() {
@@ -222,7 +225,7 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
         &output.join("cargo-graph"),
     )?;
     host::preflight(
-        "C1 development reference suite",
+        &format!("{} development suite", args.checkpoint),
         &output.join("host.json"),
         &checkout,
     )?;
@@ -310,7 +313,7 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
         command.args(&argv[1..]).current_dir(&checkout);
         scenario(id, &mut command, output, None, report)?;
     }
-    for (id, wrapper, extra) in [
+    let mut vm_scenarios = vec![
         ("raw-qemu", "raw", vec![]),
         ("raw-daemon", "daemon", vec![]),
         ("staging", "staging", vec![]),
@@ -335,7 +338,14 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
             "staging",
             vec!["--live-recovery", "--crash-at", "after-used"],
         ),
-    ] {
+    ];
+    if args.checkpoint == "C2" {
+        vm_scenarios.extend([
+            ("local-sync", "local", vec![]),
+            ("local-fresh-recovery", "local", vec!["--recovery"]),
+        ]);
+    }
+    for (id, wrapper, extra) in vm_scenarios {
         let mut command = Command::new(require_wrapper(&build, wrapper)?.join("bin/cas-vm-smoke"));
         command
             .args(extra)
@@ -355,15 +365,19 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
 }
 
 fn validate_results(report: &Report) -> io::Result<()> {
+    let mut required = REQUIRED.to_vec();
+    if report.checkpoint == "C2" {
+        required.extend(["local-sync", "local-fresh-recovery"]);
+    }
     if report.schema_version != 1
-        || report.checkpoint != "C1"
-        || report.scenarios.len() != REQUIRED.len()
+        || !matches!(report.checkpoint.as_str(), "C1" | "C2")
+        || report.scenarios.len() != required.len()
     {
         return Err(io::Error::other(
             "incomplete or unsupported checkpoint suite",
         ));
     }
-    for id in REQUIRED {
+    for id in required {
         let result = report
             .scenarios
             .get(id)
@@ -390,7 +404,7 @@ pub fn run(mut args: Args) -> io::Result<()> {
     fs::create_dir(&args.output)?;
     let mut report = Report {
         schema_version: 1,
-        checkpoint: "C1".into(),
+        checkpoint: args.checkpoint.clone(),
         passed: false,
         started_at_utc: host::utc_now()?,
         ended_at_utc: String::new(),
@@ -417,7 +431,7 @@ pub fn verify(output: &Path) -> io::Result<()> {
     let mut actual = source::scan(output)?;
     actual.remove(Path::new("suite.json"));
     source::compare(&report.artifacts, &actual, "retained evidence")?;
-    for id in REQUIRED {
+    for (id, expected) in &report.scenarios {
         for file in ["stdout.log", "stderr.log", "command.json", "result.json"] {
             let key = PathBuf::from("scenarios").join(id).join(file);
             if !actual.contains_key(&key) {
@@ -430,7 +444,7 @@ pub fn verify(output: &Path) -> io::Result<()> {
         let directory = output.join("scenarios").join(id);
         let command: process::CommandResult = evidence::read_json(&directory.join("command.json"))?;
         let scenario: Scenario = evidence::read_json(&directory.join("result.json"))?;
-        if command != report.scenarios[id].command || scenario != report.scenarios[id] {
+        if command != expected.command || scenario != *expected {
             return Err(io::Error::other(format!(
                 "{id} disagrees with its retained result"
             )));
@@ -442,6 +456,22 @@ pub fn verify(output: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn c2_requires_both_local_guest_scenarios() {
+        let mut report = passing_report();
+        report.checkpoint = "C2".into();
+        assert!(validate_results(&report).is_err());
+        for id in ["local-sync", "local-fresh-recovery"] {
+            let scenario =
+                serde_json::from_value(serde_json::to_value(&report.scenarios["staging"]).unwrap())
+                    .unwrap();
+            report.scenarios.insert(id.into(), scenario);
+        }
+        validate_results(&report).unwrap();
+        report.scenarios.get_mut("local-sync").unwrap().passed = false;
+        assert!(validate_results(&report).is_err());
+    }
 
     fn passing_report() -> Report {
         Report {

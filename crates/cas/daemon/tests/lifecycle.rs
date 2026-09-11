@@ -38,14 +38,18 @@ impl Daemon {
     }
 
     fn spawn_backend(staging: bool) -> Self {
+        Self::spawn_kind(if staging { "staging" } else { "raw" })
+    }
+
+    fn spawn_kind(kind: &str) -> Self {
         let directory = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
-        if !staging {
+        if kind == "raw" {
             File::create(directory.path().join("image.raw"))
                 .unwrap()
                 .set_len(BLOCK_SIZE as u64)
                 .unwrap();
         }
-        let child = Self::start(&directory, staging, staging);
+        let child = Self::start_kind(&directory, kind, kind != "raw", false, None);
         Self {
             child,
             directory,
@@ -64,6 +68,22 @@ impl Daemon {
         restartable: bool,
         pause: Option<&str>,
     ) -> Child {
+        Self::start_kind(
+            directory,
+            if staging { "staging" } else { "raw" },
+            create,
+            restartable,
+            pause,
+        )
+    }
+
+    fn start_kind(
+        directory: &TempDir,
+        kind: &str,
+        create: bool,
+        restartable: bool,
+        pause: Option<&str>,
+    ) -> Child {
         let stderr = File::create(directory.path().join("stderr")).unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_cas-daemon"));
         command
@@ -73,9 +93,7 @@ impl Daemon {
             .arg(directory.path().join("image.raw"))
             .arg("--report")
             .arg(directory.path().join("report.json"));
-        if staging {
-            command.args(["--backend", "staging"]);
-        }
+        command.args(["--backend", kind]);
         if create {
             command.arg("--create-bytes").arg(BLOCK_SIZE.to_string());
         }
@@ -501,7 +519,16 @@ fn staging_fragmented_write_flush_read_exits_cleanly() {
 }
 
 fn write_flush_read(staging: bool, fragmented: bool) {
-    let mut daemon = Daemon::spawn_backend(staging);
+    write_flush_read_backend(if staging { "staging" } else { "raw" }, fragmented);
+}
+
+#[test]
+fn local_fragmented_write_flush_read_uses_one_final_allocation() {
+    write_flush_read_backend("local", true);
+}
+
+fn write_flush_read_backend(kind: &str, fragmented: bool) {
+    let mut daemon = Daemon::spawn_kind(kind);
     let mut queue = FrontendQueue::connect(&mut daemon);
     let expected = [0x5a; BLOCK_SIZE];
     queue
@@ -535,9 +562,19 @@ fn write_flush_read(staging: bool, fragmented: bool) {
     assert_eq!(report["reads"], 1);
     assert_eq!(report["flushes"], 1);
     assert_eq!(report["write_bytes"], BLOCK_SIZE);
+    assert_eq!(report["guest_payload_copy_bytes"], BLOCK_SIZE);
     assert_eq!(report["read_bytes"], BLOCK_SIZE);
     let path = daemon.directory.path().join("image.raw");
-    let actual = if staging {
+    let actual = if kind == "local" {
+        assert_eq!(report["backend"], "local_sync");
+        assert_eq!(report["local"]["metrics"]["allocation_identity_checks"], 1);
+        assert_eq!(report["local"]["append"]["current"]["bytes"], 0);
+        let mut log =
+            cas_core::append::Log::open(path, cas_core::append::Limits::default()).unwrap();
+        let mut bytes = cas_core::aligned::AlignedBuffer::new(BLOCK_SIZE);
+        log.read_into(0, &mut bytes).unwrap();
+        bytes.as_slice().to_vec()
+    } else if kind == "staging" {
         assert_eq!(report["backend"], "staging_sync");
         assert_eq!(report["staging"]["appended"], 1);
         assert_eq!(report["staging"]["durable"], 1);
@@ -729,5 +766,42 @@ fn staging_corruption_reports_ioerr_and_stops_the_connection() {
     );
     assert_eq!(report["reads"], 0);
     assert_eq!(report["staging"]["durable"], 1);
+    assert_eq!(queue.observer.read(&mut [0]).unwrap(), 0);
+}
+
+#[test]
+fn local_corruption_reports_ioerr_and_releases_read_credits_after_the_buffer() {
+    let mut daemon = Daemon::spawn_kind("local");
+    let mut queue = FrontendQueue::connect(&mut daemon);
+    queue
+        .mem
+        .write_slice(&[0x5a; BLOCK_SIZE], GuestAddress(0x5000))
+        .unwrap();
+    queue.request_layout(VIRTIO_BLK_T_OUT, false);
+    queue.request_layout(VIRTIO_BLK_T_FLUSH, false);
+    File::options()
+        .write(true)
+        .open(
+            daemon
+                .directory
+                .path()
+                .join("image.raw/segment-00000000000000000001.v2"),
+        )
+        .unwrap()
+        .write_all_at(&[0], 2 * BLOCK_SIZE as u64)
+        .unwrap();
+    queue.request_status(VIRTIO_BLK_T_IN, false, VIRTIO_BLK_S_IOERR as u8);
+    let (status, report) = daemon.wait();
+    assert!(!status.success());
+    assert_eq!(report["connection_ok"], false);
+    assert!(
+        report["fatal_error"]
+            .as_str()
+            .unwrap()
+            .contains("corrupt staging payload")
+    );
+    assert_eq!(report["reads"], 0);
+    assert_eq!(report["local"]["read"]["current"]["bytes"], 0);
+    assert_eq!(report["local"]["requests"]["current"]["requests"], 0);
     assert_eq!(queue.observer.read(&mut [0]).unwrap(), 0);
 }

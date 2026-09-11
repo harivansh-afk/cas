@@ -26,7 +26,7 @@ fi
 # Recovery runs boot the staging guest twice. The host writes the phase file
 # before each boot: "write" to fill and flush, then "read" to verify after the
 # daemon was killed and restarted.
-if [ "$backend" = staging ] && [ -f /results/recovery-phase ]; then
+if { [ "$backend" = staging ] || [ "$backend" = local ]; } && [ -f /results/recovery-phase ]; then
   cp /etc/cas/recovery.fio /results/recovery.fio
   case "$(cat /results/recovery-phase)" in
     write)
