@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/cas/core", "crates/cas/cli", "crates/cas/daemon", "crates/harnesses"]
+exclude = ["crates/vendor/vhost-user-backend-0.23.0"]
 resolver = "3"
 
 [workspace.package]
@@ -25,3 +26,6 @@ unsafe_op_in_unsafe_fn = "deny"
 
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "deny"
+
+[patch.crates-io]
+vhost-user-backend = { path = "crates/vendor/vhost-user-backend-0.23.0" }
