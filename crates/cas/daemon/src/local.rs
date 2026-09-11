@@ -8,6 +8,9 @@ use std::io::{self, Read};
 use std::path::Path;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+pub const IO_DEADLINE: Duration = Duration::from_secs(30);
 
 use cas_core::{
     BLOCK_SIZE, MAX_REQUEST_BYTES,
@@ -114,6 +117,16 @@ struct Packing {
 enum Command {
     Append(Packing),
     Io(Io),
+    Pause {
+        done: mpsc::SyncSender<io::Result<append::Status>>,
+        _permit: Permit,
+    },
+    NewAttachment {
+        done: mpsc::SyncSender<io::Result<append::Status>>,
+        _permit: Permit,
+        rotated: bool,
+    },
+    Resume,
 }
 
 impl Command {
@@ -145,6 +158,10 @@ impl Command {
                 }
             }
             Self::Io(io) => complete(io.id, io.operation.into(), io.permit),
+            Self::Pause { done, _permit } | Self::NewAttachment { done, _permit, .. } => {
+                let _ = done.send(Err(io::Error::other(error.to_owned())));
+            }
+            Self::Resume => (),
         }
     }
 }
@@ -267,6 +284,7 @@ pub struct Local {
     admitted: u64,
     packing: Option<Packing>,
     rejected: VecDeque<Completed>,
+    paused: bool,
     pub shared: Arc<Shared>,
     pub status: append::Status,
 }
@@ -330,6 +348,7 @@ impl Local {
             admitted: status.published,
             packing: None,
             rejected: VecDeque::new(),
+            paused: false,
             shared,
             status,
         })
@@ -355,6 +374,9 @@ impl Local {
     }
 
     pub fn prepare(&mut self, kind: Kind) -> io::Result<Option<Permit>> {
+        if self.paused {
+            return Err(io::Error::other("local admission is paused"));
+        }
         if !matches!(kind, Kind::Write(_)) {
             self.seal()?;
         }
@@ -447,6 +469,66 @@ impl Local {
         Ok(())
     }
 
+    pub fn pause(&mut self, deadline: Instant) -> io::Result<()> {
+        if self.paused {
+            return Ok(());
+        }
+        self.seal()?;
+        self.barrier(deadline, |done, permit| Command::Pause {
+            done,
+            _permit: permit,
+        })?;
+        self.paused = true;
+        Ok(())
+    }
+
+    pub fn new_attachment(&mut self, deadline: Instant) -> io::Result<append::Status> {
+        if !self.paused || self.execution != Execution::Concurrent {
+            return Err(io::Error::other("new attachment requires a paused reactor"));
+        }
+        self.barrier(deadline, |done, permit| Command::NewAttachment {
+            done,
+            _permit: permit,
+            rotated: false,
+        })?;
+        self.admitted = self.status.published;
+        Ok(self.status)
+    }
+
+    fn barrier(
+        &mut self,
+        deadline: Instant,
+        command: impl FnOnce(mpsc::SyncSender<io::Result<append::Status>>, Permit) -> Command,
+    ) -> io::Result<()> {
+        let permit = self
+            .shared
+            .reserve(Kind::Control)
+            .ok_or_else(|| io::Error::other("no control credit for storage barrier"))?;
+        let (done, completion) = mpsc::sync_channel(1);
+        self.send(command(done, permit))?;
+        self.status = completion
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|error| {
+                io::Error::new(
+                    if matches!(error, mpsc::RecvTimeoutError::Timeout) {
+                        io::ErrorKind::TimedOut
+                    } else {
+                        io::ErrorKind::BrokenPipe
+                    },
+                    format!("storage barrier did not complete: {error}"),
+                )
+            })??;
+        Ok(())
+    }
+
+    pub fn resume(&mut self) -> io::Result<()> {
+        if self.paused {
+            self.send(Command::Resume)?;
+            self.paused = false;
+        }
+        Ok(())
+    }
+
     pub fn enqueue(&mut self, id: u64, operation: Operation, permit: Permit) -> io::Result<()> {
         if matches!(operation, Operation::Write { .. }) {
             return Err(io::Error::other(
@@ -459,6 +541,10 @@ impl Local {
             permit,
             boundary: self.admitted,
         });
+        if self.paused {
+            command.reject("local admission is paused", &mut self.rejected);
+            return Err(io::Error::other("local admission is paused"));
+        }
         if let Err(error) = self.seal() {
             command.reject(&error.to_string(), &mut self.rejected);
             return Err(error);
@@ -533,7 +619,7 @@ impl Drop for Local {
 
 struct Wake(EventFd);
 
-fn notify(event: &EventFd) -> io::Result<()> {
+pub(crate) fn notify(event: &EventFd) -> io::Result<()> {
     match event.write(1) {
         // A saturated counter already has a notification for the consumer.
         Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(()),
@@ -608,6 +694,29 @@ impl Worker {
             .failure
             .is_some();
         match command {
+            Command::Pause { done, _permit }
+            | Command::NewAttachment {
+                done,
+                _permit,
+                rotated: true,
+            } => {
+                let status = self.log.status();
+                *self.shared.final_status.lock().expect("status poisoned") = status;
+                done.send(if failed {
+                    Err(io::Error::other("local image failed"))
+                } else {
+                    Ok(status)
+                })
+                .map_err(io::Error::other)?;
+            }
+            Command::NewAttachment {
+                done,
+                _permit,
+                rotated: false,
+            } => {
+                let _ = done.send(Err(io::Error::other("attachment did not rotate")));
+            }
+            Command::Resume => (),
             Command::Append(Packing {
                 builder,
                 credits,

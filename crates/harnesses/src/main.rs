@@ -106,6 +106,11 @@ mod tests {
             )
         };
         assert!(parse(&[]).is_ok());
+        assert!(parse(&["--device-reset"]).is_ok());
+        for other in ["--recovery", "--live-recovery"] {
+            assert!(parse(&["--device-reset", other]).is_err());
+        }
+        assert!(parse(&["--device-reset", "--ssh-key", "id.pub"]).is_err());
         assert!(parse(&["--ssh-key", "id.pub"]).is_ok());
         assert!(parse(&["--ssh-key", "id.pub", "--ssh-port", "23480"]).is_ok());
         for args in [

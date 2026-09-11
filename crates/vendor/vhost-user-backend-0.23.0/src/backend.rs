@@ -37,6 +37,19 @@ use vhost::vhost_user::GpuBackend;
 use super::vring::VringT;
 use super::GM;
 
+/// A frontend change that can invalidate an asynchronous backend's accepted state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StateChange {
+    Attachment,
+    Memory,
+    Features,
+    QueueConfiguration(usize),
+    QueueNotification(usize),
+    QueueEnable { index: usize, enabled: bool },
+    QueueStop(usize),
+    Reset,
+}
+
 /// Trait with interior mutability for vhost user backend servers to implement concrete services.
 ///
 /// To support multi-threading and asynchronous IO, we enforce `Send + Sync` bound.
@@ -86,6 +99,18 @@ pub trait VhostUserBackend: Send + Sync {
 
     /// Update guest memory regions.
     fn update_memory(&self, mem: GM<Self::Bitmap>) -> Result<()>;
+
+    /// Pause admission and drain old-state users before the framework mutates it.
+    /// The pause must survive until end_state_change; no vring lock is held here.
+    fn begin_state_change(&self, _change: StateChange, _vrings: &[Self::Vring]) -> Result<()> {
+        Ok(())
+    }
+
+    /// Install the new state, or fail closed, before resuming admission.
+    fn end_state_change(&self, _change: StateChange, _succeeded: bool, _vrings: &[Self::Vring]) -> Result<()> {
+        Ok(())
+    }
+
 
     /// Allocate inflight metadata. Implementations must also advertise INFLIGHT_SHMFD.
     fn get_inflight_fd(&self, _inflight: &VhostUserInflight) -> Result<(VhostUserInflight, File)> {
@@ -253,6 +278,18 @@ pub trait VhostUserBackendMut: Send + Sync {
     /// Update guest memory regions.
     fn update_memory(&mut self, mem: GM<Self::Bitmap>) -> Result<()>;
 
+    /// Pause admission and drain old-state users before the framework mutates it.
+    /// The pause must survive until end_state_change; no vring lock is held here.
+    fn begin_state_change(&mut self, _change: StateChange, _vrings: &[Self::Vring]) -> Result<()> {
+        Ok(())
+    }
+
+    /// Install the new state, or fail closed, before resuming admission.
+    fn end_state_change(&mut self, _change: StateChange, _succeeded: bool, _vrings: &[Self::Vring]) -> Result<()> {
+        Ok(())
+    }
+
+
     /// Allocate inflight metadata. Implementations must also advertise INFLIGHT_SHMFD.
     fn get_inflight_fd(&mut self, _inflight: &VhostUserInflight) -> Result<(VhostUserInflight, File)> {
         Err(std::io::Error::new(
@@ -414,6 +451,14 @@ impl<T: VhostUserBackend> VhostUserBackend for Arc<T> {
         self.deref().update_memory(mem)
     }
 
+    fn begin_state_change(&self, change: StateChange, vrings: &[Self::Vring]) -> Result<()> {
+        self.deref().begin_state_change(change, vrings)
+    }
+
+    fn end_state_change(&self, change: StateChange, succeeded: bool, vrings: &[Self::Vring]) -> Result<()> {
+        self.deref().end_state_change(change, succeeded, vrings)
+    }
+
     fn get_inflight_fd(&self, inflight: &VhostUserInflight) -> Result<(VhostUserInflight, File)> {
         self.deref().get_inflight_fd(inflight)
     }
@@ -513,6 +558,14 @@ impl<T: VhostUserBackendMut> VhostUserBackend for Mutex<T> {
 
     fn update_memory(&self, mem: GM<Self::Bitmap>) -> Result<()> {
         self.lock().unwrap().update_memory(mem)
+    }
+
+    fn begin_state_change(&self, change: StateChange, vrings: &[Self::Vring]) -> Result<()> {
+        self.lock().unwrap().begin_state_change(change, vrings)
+    }
+
+    fn end_state_change(&self, change: StateChange, succeeded: bool, vrings: &[Self::Vring]) -> Result<()> {
+        self.lock().unwrap().end_state_change(change, succeeded, vrings)
     }
 
     fn get_inflight_fd(&self, inflight: &VhostUserInflight) -> Result<(VhostUserInflight, File)> {
@@ -617,6 +670,14 @@ impl<T: VhostUserBackendMut> VhostUserBackend for RwLock<T> {
 
     fn update_memory(&self, mem: GM<Self::Bitmap>) -> Result<()> {
         self.write().unwrap().update_memory(mem)
+    }
+
+    fn begin_state_change(&self, change: StateChange, vrings: &[Self::Vring]) -> Result<()> {
+        self.write().unwrap().begin_state_change(change, vrings)
+    }
+
+    fn end_state_change(&self, change: StateChange, succeeded: bool, vrings: &[Self::Vring]) -> Result<()> {
+        self.write().unwrap().end_state_change(change, succeeded, vrings)
     }
 
     fn get_inflight_fd(&self, inflight: &VhostUserInflight) -> Result<(VhostUserInflight, File)> {

@@ -10,13 +10,16 @@ use std::thread;
 use std::time::Duration;
 
 use cas_daemon::inflight::{Carrier, Geometry, Identity, Kind, Request};
-use vhost::VhostBackend;
 use vhost::vhost_user::message::{
     FrontendReq, VhostUserHeaderFlag, VhostUserInflight, VhostUserProtocolFeatures,
 };
 use vhost::vhost_user::{Frontend, Listener, VhostUserFrontend};
-use vhost_user_backend::{VhostUserBackendMut, VhostUserDaemon, VringRwLock};
-use vm_memory::{ByteValued, GuestMemoryAtomic, GuestMemoryMmap};
+use vhost::{VhostBackend, VhostUserMemoryRegionInfo};
+use vhost_user_backend::{StateChange, VhostUserBackendMut, VhostUserDaemon, VringRwLock};
+use vm_memory::{
+    ByteValued, Bytes, FileOffset, GuestAddress, GuestAddressSpace, GuestMemoryAtomic,
+    GuestMemoryBackend, GuestMemoryLoadGuard, GuestMemoryMmap,
+};
 use vmm_sys_util::epoll::EventSet;
 use vmm_sys_util::event::{
     EventConsumer, EventFlag, EventNotifier, new_event_consumer_and_notifier,
@@ -33,6 +36,10 @@ const IDENTITY: Identity = Identity {
 struct Probe {
     carrier: Option<Carrier>,
     calls: usize,
+    paused: bool,
+    current: Option<GuestMemoryAtomic<GuestMemoryMmap>>,
+    accepted: Option<GuestMemoryLoadGuard<GuestMemoryMmap>>,
+    memory_changes: Vec<bool>,
     exit: (EventConsumer, EventNotifier),
 }
 
@@ -53,7 +60,35 @@ impl VhostUserBackendMut for Probe {
         VhostUserProtocolFeatures::INFLIGHT_SHMFD | VhostUserProtocolFeatures::REPLY_ACK
     }
     fn set_event_idx(&mut self, _: bool) {}
-    fn update_memory(&mut self, _: GuestMemoryAtomic<GuestMemoryMmap>) -> io::Result<()> {
+    fn update_memory(&mut self, memory: GuestMemoryAtomic<GuestMemoryMmap>) -> io::Result<()> {
+        assert!(self.paused);
+        self.accepted = Some(memory.memory());
+        self.current = Some(memory);
+        Ok(())
+    }
+    fn begin_state_change(&mut self, _: StateChange, _: &[VringRwLock]) -> io::Result<()> {
+        assert!(!self.paused);
+        if let (Some(current), Some(accepted)) = (&self.current, &self.accepted) {
+            // The framework's live atomic map must still be the old map here.
+            assert_eq!(
+                current.memory().read_obj::<u64>(GuestAddress(0)).unwrap(),
+                accepted.read_obj::<u64>(GuestAddress(0)).unwrap()
+            );
+        }
+        self.paused = true;
+        Ok(())
+    }
+    fn end_state_change(
+        &mut self,
+        change: StateChange,
+        succeeded: bool,
+        _: &[VringRwLock],
+    ) -> io::Result<()> {
+        assert!(self.paused);
+        if change == StateChange::Memory {
+            self.memory_changes.push(succeeded);
+        }
+        self.paused = false;
         Ok(())
     }
     fn exit_event(&self, _: usize) -> Option<(EventConsumer, EventNotifier)> {
@@ -101,6 +136,10 @@ fn serve(
     let probe = Arc::new(Mutex::new(Probe {
         carrier: None,
         calls: 0,
+        paused: false,
+        current: None,
+        accepted: None,
+        memory_changes: Vec::new(),
         exit: new_event_consumer_and_notifier(EventFlag::empty()).unwrap(),
     }));
     let server_probe = probe.clone();
@@ -184,4 +223,61 @@ fn unnegotiated_get_never_reaches_backend_hook() {
     assert!(matches!(result,
         Err(vhost_user_backend::Error::HandleRequest(vhost::vhost_user::Error::InactiveOperation(feature)))
             if feature == VhostUserProtocolFeatures::INFLIGHT_SHMFD));
+}
+
+#[test]
+fn state_change_hooks_bracket_atomic_memory_replacement_and_failed_updates() {
+    let (probe, _) = serve(|path, probe| {
+        let stream = UnixStream::connect(path).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut frontend = Frontend::from_stream(stream, 1);
+        let features = frontend.get_features().unwrap();
+        frontend.set_features(features).unwrap();
+        let protocol = frontend.get_protocol_features().unwrap();
+        frontend.set_protocol_features(protocol).unwrap();
+        frontend.set_hdr_flags(VhostUserHeaderFlag::NEED_REPLY);
+        for value in [0x11u64, 0x22] {
+            let file = tempfile::tempfile().unwrap();
+            file.set_len(4096).unwrap();
+            let mem = GuestMemoryMmap::<()>::from_ranges_with_files([(
+                GuestAddress(0),
+                4096,
+                Some(FileOffset::new(file, 0)),
+            )])
+            .unwrap();
+            mem.write_obj(value, GuestAddress(0)).unwrap();
+            let region =
+                VhostUserMemoryRegionInfo::from_guest_region(mem.iter().next().unwrap()).unwrap();
+            frontend.set_mem_table(&[region]).unwrap();
+            assert_eq!(
+                probe
+                    .lock()
+                    .unwrap()
+                    .accepted
+                    .as_ref()
+                    .unwrap()
+                    .read_obj::<u64>(GuestAddress(0))
+                    .unwrap(),
+                value
+            );
+            if value == 0x22 {
+                // Overlapping regions fail before replacing the accepted map.
+                assert!(frontend.set_mem_table(&[region, region]).is_err());
+            }
+        }
+    });
+    let probe = probe.lock().unwrap();
+    assert_eq!(probe.memory_changes, [true, true, false]);
+    assert_eq!(
+        probe
+            .accepted
+            .as_ref()
+            .unwrap()
+            .read_obj::<u64>(GuestAddress(0))
+            .unwrap(),
+        0x22
+    );
+    assert!(!probe.paused);
 }

@@ -329,6 +329,26 @@ impl Carrier {
             .map_err(|_| invalid("inflight available cursor exceeds u16"))
     }
 
+    /// Rebase a quiesced queue after frontend reset. Global identities and P
+    /// remain unchanged; an outstanding descriptor forbids reinitialization.
+    pub fn reset_queue(&mut self, queue: u16, available: u16, used: u16) -> io::Result<()> {
+        self.healthy()?;
+        let standard = self.queue(queue)?;
+        if standard.version.load(Acquire) != 1 {
+            return Err(invalid("cannot reset an uninitialized inflight queue"));
+        }
+        for head in 0..self.geometry.queue_size {
+            if self.slot(queue, head)?.state.load(Acquire) != EMPTY
+                || self.descriptor(queue, head)?.inflight.load(Acquire) != 0
+            {
+                return Err(invalid("cannot reset a queue with outstanding ownership"));
+            }
+        }
+        standard.used.store(used, Release);
+        self.header().available[usize::from(queue)].store(u32::from(available), Release);
+        Ok(())
+    }
+
     pub fn admit(&mut self, request: Request) -> io::Result<Entry> {
         let entry = self.prepare(request)?;
         self.activate(entry)?;

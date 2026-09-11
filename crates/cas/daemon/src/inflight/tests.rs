@@ -422,3 +422,37 @@ fn failed_retirement_requires_failed_state_and_never_allows_a_later_success() {
     drop(carrier);
     assert!(Carrier::attach(file, &message, identity(), IMAGE_BYTES).is_err());
 }
+
+#[test]
+fn quiesced_queue_reset_preserves_global_ids_and_refuses_live_ownership() {
+    let mut carrier = fresh(2);
+    let first = carrier.admit(request(Kind::Write, 0, 0, 0)).unwrap();
+    let before = bytes(&carrier);
+    assert!(carrier.reset_queue(0, u16::MAX, u16::MAX).is_err());
+    assert_eq!(bytes(&carrier), before);
+    carrier.publish(1).unwrap();
+    carrier.complete(first, 0, || Ok(())).unwrap();
+    carrier.reset_queue(0, u16::MAX, u16::MAX).unwrap();
+    assert_eq!(carrier.published(), 1);
+    assert_eq!(carrier.available(1).unwrap(), 0);
+    let mut carrier = reopen(carrier);
+    assert!(
+        carrier
+            .reconcile(&[Some(u16::MAX), Some(0)])
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    let next = carrier.admit(request(Kind::Write, 0, 0, u16::MAX)).unwrap();
+    assert_eq!((next.serial, next.mutation), (2, 2));
+    carrier.publish(2).unwrap();
+    carrier.complete(next, u16::MAX, || Ok(())).unwrap();
+    assert_eq!(carrier.available(0).unwrap(), 0);
+    assert!(
+        reopen(carrier)
+            .reconcile(&[Some(0), Some(0)])
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+}

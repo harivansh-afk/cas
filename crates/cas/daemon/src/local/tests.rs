@@ -518,3 +518,95 @@ fn accepted_command_survives_an_already_pending_wake_notification() {
     assert_eq!(local.report()["control"]["current"]["requests"], 0);
     local.stop().unwrap();
 }
+
+#[test]
+fn pause_drains_prior_reads_and_writes_and_resume_restores_admission() {
+    use std::time::{Duration, Instant};
+    let directory = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let mut local = concurrent(&directory.path().join("log"));
+    write(&mut local, 0, 0, BLOCK_SIZE, 0x5a);
+    let permit = local.prepare(Kind::Read(BLOCK_SIZE)).unwrap().unwrap();
+    local
+        .enqueue(
+            1,
+            Operation::Read {
+                offset: 0,
+                buffer: AlignedBuffer::new(BLOCK_SIZE),
+            },
+            permit,
+        )
+        .unwrap();
+    local
+        .pause(Instant::now() + Duration::from_secs(5))
+        .unwrap();
+    assert!(local.prepare(Kind::Write(BLOCK_SIZE)).is_err());
+    let before = local.report()["metrics"]["io_queued"].as_u64().unwrap();
+    assert_eq!(local.report()["metrics"]["io_completed"], before);
+    for _ in 0..2 {
+        let completed = local.receive(true).unwrap().unwrap();
+        completed.result.unwrap();
+        if let CompletionData::Read(buffer) = completed.data {
+            assert_eq!(buffer.as_slice(), &[0x5a; BLOCK_SIZE]);
+        }
+    }
+    // Remain beyond the idle-sync interval without creating new kernel work.
+    thread::sleep(Duration::from_millis(75));
+    assert_eq!(local.report()["metrics"]["io_queued"], before);
+    local.resume().unwrap();
+    write(&mut local, 2, 0, BLOCK_SIZE, 0xa5);
+    let permit = local.prepare(Kind::Control).unwrap().unwrap();
+    local.enqueue(3, Operation::Flush, permit).unwrap();
+    for _ in 0..2 {
+        local.receive(true).unwrap().unwrap().result.unwrap();
+    }
+    local.stop().unwrap();
+    assert_eq!(local.report()["status"]["durable"], 2);
+    assert_eq!(local.report()["requests"]["current"]["requests"], 0);
+}
+
+#[test]
+fn fresh_attachment_syncs_both_epochs_and_keeps_image_mutations_monotonic() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("log");
+    let mut local = concurrent(&path);
+    for generation in 1..=3 {
+        assert_eq!(local.status.epoch, generation);
+        write(
+            &mut local,
+            0,
+            (generation - 1) * BLOCK_SIZE as u64,
+            BLOCK_SIZE,
+            generation as u8,
+        );
+        local.pause(Instant::now() + IO_DEADLINE).unwrap();
+        local.receive(true).unwrap().unwrap().result.unwrap();
+        if generation < 3 {
+            let status = local.new_attachment(Instant::now() + IO_DEADLINE).unwrap();
+            assert_eq!(
+                (status.epoch, status.published, status.durable),
+                (generation + 1, generation, generation)
+            );
+            assert_eq!(local.report()["control"]["current"]["requests"], 0);
+            assert!(local.prepare(Kind::Write(BLOCK_SIZE)).is_err());
+        }
+        local.resume().unwrap();
+    }
+    let permit = local.prepare(Kind::Control).unwrap().unwrap();
+    local.enqueue(1, Operation::Flush, permit).unwrap();
+    local.receive(true).unwrap().unwrap().result.unwrap();
+    local.stop().unwrap();
+    drop(local);
+    let mut log = Log::open(&path, append::Limits::default()).unwrap();
+    let mut bytes = AlignedBuffer::new(3 * BLOCK_SIZE);
+    log.read_into(0, &mut bytes).unwrap();
+    for (index, chunk) in bytes
+        .as_slice()
+        .as_chunks::<BLOCK_SIZE>()
+        .0
+        .iter()
+        .enumerate()
+    {
+        assert_eq!(chunk, &[index as u8 + 1; BLOCK_SIZE]);
+    }
+    assert_eq!((log.status().published, log.status().durable), (3, 3));
+}

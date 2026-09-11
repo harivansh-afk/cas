@@ -179,6 +179,22 @@ impl Log {
     }
 
     pub fn rollover(&mut self) -> Result<()> {
+        self.drained()?;
+        self.rotate(self.current().header.epoch)
+    }
+
+    /// Start a fresh frontend generation after its old published prefix is
+    /// durable. The caller must sync a fence in the new segment before export.
+    pub fn new_attachment(&mut self) -> Result<()> {
+        self.drained()?;
+        let epoch = self
+            .highest_segment
+            .checked_add(1)
+            .ok_or(Error::Exhausted)?;
+        self.rotate(epoch)
+    }
+
+    fn drained(&self) -> Result<()> {
         self.healthy()?;
         if self.cohort.is_some()
             || self.pending_descriptors != 0
@@ -187,7 +203,7 @@ impl Log {
         {
             return Err(Error::Pending);
         }
-        self.rotate(self.current().header.epoch)
+        Ok(())
     }
 
     /// IO failure is terminal even when its CQE arrives before older successes.

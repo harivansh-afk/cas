@@ -35,7 +35,7 @@ use vm_memory::{
 };
 use vmm_sys_util::epoll::EventSet;
 
-use super::backend::VhostUserBackend;
+use super::backend::{StateChange, VhostUserBackend};
 use super::event_loop::VringEpollHandler;
 use super::event_loop::{VringEpollError, VringEpollResult};
 use super::vring::VringT;
@@ -197,6 +197,21 @@ where
         self.handlers.clone()
     }
 
+    fn change_state<R>(
+        &mut self,
+        change: StateChange,
+        apply: impl FnOnce(&mut Self) -> VhostUserResult<R>,
+    ) -> VhostUserResult<R> {
+        self.backend.begin_state_change(change, &self.vrings)
+            .map_err(VhostUserError::ReqHandlerError)?;
+        let result = apply(self);
+        let finished = self.backend.end_state_change(change, result.is_ok(), &self.vrings)
+            .map_err(VhostUserError::ReqHandlerError);
+        let value = result?;
+        finished?;
+        Ok(value)
+    }
+
     fn vring_needs_init(&self, vring: &T::Vring) -> bool {
         let vring_state = vring.get_ref();
 
@@ -269,25 +284,29 @@ where
     }
 
     fn reset_owner(&mut self) -> VhostUserResult<()> {
-        self.owned = false;
-        self.features_acked = false;
-        self.acked_features = 0;
-        self.acked_protocol_features = 0;
-        Ok(())
+        self.change_state(StateChange::Reset, |handler| {
+            handler.owned = false;
+            handler.features_acked = false;
+            handler.acked_features = 0;
+            handler.acked_protocol_features = 0;
+            Ok(())
+        })
     }
 
     fn reset_device(&mut self) -> VhostUserResult<()> {
-        // Disable all vrings
-        for (index, vring) in self.vrings.iter().enumerate() {
-            vring.set_enabled(false);
-            self.update_vring_registration(vring, index as u8)?;
-        }
+        self.change_state(StateChange::Reset, |handler| {
+            // Disable all vrings
+            for (index, vring) in handler.vrings.iter().enumerate() {
+                vring.set_enabled(false);
+                handler.update_vring_registration(vring, index as u8)?;
+            }
 
-        // Reset device state, retain protocol state
-        self.features_acked = false;
-        self.acked_features = 0;
-        self.backend.reset_device();
-        Ok(())
+            // Reset device state, retain protocol state
+            handler.features_acked = false;
+            handler.acked_features = 0;
+            handler.backend.reset_device();
+            Ok(())
+        })
     }
 
     fn get_features(&mut self) -> VhostUserResult<u64> {
@@ -295,36 +314,38 @@ where
     }
 
     fn set_features(&mut self, features: u64) -> VhostUserResult<()> {
-        if (features & !self.backend.features()) != 0 {
-            return Err(VhostUserError::InvalidParam);
-        }
-
-        self.acked_features = features;
-        self.features_acked = true;
-
-        // Upon receiving a `VHOST_USER_SET_FEATURES` message from the front-end without
-        // `VHOST_USER_F_PROTOCOL_FEATURES` set, the back-end must enable all rings immediately.
-        // While processing the rings (whether they are enabled or not), the back-end must support
-        // changing some configuration aspects on the fly.
-        // (see https://qemu-project.gitlab.io/qemu/interop/vhost-user.html#ring-states)
-        //
-        // Note: If `VHOST_USER_F_PROTOCOL_FEATURES` has been negotiated we must leave
-        // the vrings in their current state.
-        if self.acked_features & VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits() == 0 {
-            for (index, vring) in self.vrings.iter().enumerate() {
-                vring.set_enabled(true);
-                self.update_vring_registration(vring, index as u8)?;
+        self.change_state(StateChange::Features, |handler| {
+            if (features & !handler.backend.features()) != 0 {
+                return Err(VhostUserError::InvalidParam);
             }
-        }
 
-        let event_idx: bool = (self.acked_features & (1 << VIRTIO_RING_F_EVENT_IDX)) != 0;
-        for vring in self.vrings.iter_mut() {
-            vring.set_queue_event_idx(event_idx);
-        }
-        self.backend.set_event_idx(event_idx);
-        self.backend.acked_features(self.acked_features);
+            handler.acked_features = features;
+            handler.features_acked = true;
 
-        Ok(())
+            // Upon receiving a `VHOST_USER_SET_FEATURES` message from the front-end without
+            // `VHOST_USER_F_PROTOCOL_FEATURES` set, the back-end must enable all rings immediately.
+            // While processing the rings (whether they are enabled or not), the back-end must support
+            // changing some configuration aspects on the fly.
+            // (see https://qemu-project.gitlab.io/qemu/interop/vhost-user.html#ring-states)
+            //
+            // Note: If `VHOST_USER_F_PROTOCOL_FEATURES` has been negotiated we must leave
+            // the vrings in their current state.
+            if handler.acked_features & VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits() == 0 {
+                for (index, vring) in handler.vrings.iter().enumerate() {
+                    vring.set_enabled(true);
+                    handler.update_vring_registration(vring, index as u8)?;
+                }
+            }
+
+            let event_idx: bool = (handler.acked_features & (1 << VIRTIO_RING_F_EVENT_IDX)) != 0;
+            for vring in handler.vrings.iter_mut() {
+                vring.set_queue_event_idx(event_idx);
+            }
+            handler.backend.set_event_idx(event_idx);
+            handler.backend.acked_features(handler.acked_features);
+
+            Ok(())
+        })
     }
 
     fn set_mem_table(
@@ -332,55 +353,59 @@ where
         ctx: &[VhostUserMemoryRegion],
         files: Vec<File>,
     ) -> VhostUserResult<()> {
-        // We need to create tuple of ranges from the list of VhostUserMemoryRegion
-        // that we get from the caller.
-        let mut regions = Vec::new();
-        let mut mappings: Vec<AddrMapping> = Vec::new();
+        self.change_state(StateChange::Memory, |handler| {
+            // We need to create tuple of ranges from the list of VhostUserMemoryRegion
+            // that we get from the caller.
+            let mut regions = Vec::new();
+            let mut mappings: Vec<AddrMapping> = Vec::new();
 
-        for (region, file) in ctx.iter().zip(files) {
-            let guest_region = GuestRegionMmap::new(
-                region.mmap_region(file)?,
-                GuestAddress(region.guest_phys_addr),
-            )
-            .ok_or(VhostUserError::ReqHandlerError(
-                io::ErrorKind::InvalidInput.into(),
-            ))?;
-            mappings.push(AddrMapping {
-                #[cfg(feature = "postcopy")]
-                local_addr: guest_region.as_ptr() as u64,
-                vmm_addr: region.user_addr,
-                size: region.memory_size,
-                gpa_base: region.guest_phys_addr,
-            });
-            regions.push(guest_region);
-        }
+            for (region, file) in ctx.iter().zip(files) {
+                let guest_region = GuestRegionMmap::new(
+                    region.mmap_region(file)?,
+                    GuestAddress(region.guest_phys_addr),
+                )
+                .ok_or(VhostUserError::ReqHandlerError(
+                    io::ErrorKind::InvalidInput.into(),
+                ))?;
+                mappings.push(AddrMapping {
+                    #[cfg(feature = "postcopy")]
+                    local_addr: guest_region.as_ptr() as u64,
+                    vmm_addr: region.user_addr,
+                    size: region.memory_size,
+                    gpa_base: region.guest_phys_addr,
+                });
+                regions.push(guest_region);
+            }
 
-        let mem = GuestMemoryMmap::from_regions(regions)
-            .map_err(|e| VhostUserError::ReqHandlerError(io::Error::other(e)))?;
+            let mem = GuestMemoryMmap::from_regions(regions)
+                .map_err(|e| VhostUserError::ReqHandlerError(io::Error::other(e)))?;
 
-        // Updating the inner GuestMemory object here will cause all our vrings to
-        // see the new one the next time they call to `atomic_mem.memory()`.
-        self.atomic_mem.lock().unwrap().replace(mem);
+            // Updating the inner GuestMemory object here will cause all our vrings to
+            // see the new one the next time they call to `atomic_mem.memory()`.
+            handler.atomic_mem.lock().unwrap().replace(mem);
 
-        self.backend
-            .update_memory(self.atomic_mem.clone())
-            .map_err(|e| VhostUserError::ReqHandlerError(io::Error::other(e)))?;
-        self.mappings = mappings;
+            handler.backend
+                .update_memory(handler.atomic_mem.clone())
+                .map_err(|e| VhostUserError::ReqHandlerError(io::Error::other(e)))?;
+            handler.mappings = mappings;
 
-        Ok(())
+            Ok(())
+        })
     }
 
     fn set_vring_num(&mut self, index: u32, num: u32) -> VhostUserResult<()> {
-        let vring = self
-            .vrings
-            .get(index as usize)
-            .ok_or(VhostUserError::InvalidParam)?;
+        self.change_state(StateChange::QueueConfiguration(index as usize), |handler| {
+            let vring = handler
+                .vrings
+                .get(index as usize)
+                .ok_or(VhostUserError::InvalidParam)?;
 
-        if num == 0 || num as usize > self.max_queue_size {
-            return Err(VhostUserError::InvalidParam);
-        }
-        vring.set_queue_size(num as u16);
-        Ok(())
+            if num == 0 || num as usize > handler.max_queue_size {
+                return Err(VhostUserError::InvalidParam);
+            }
+            vring.set_queue_size(num as u16);
+            Ok(())
+        })
     }
 
     fn set_vring_addr(
@@ -392,122 +417,134 @@ where
         available: u64,
         _log: u64,
     ) -> VhostUserResult<()> {
-        let vring = self
-            .vrings
-            .get(index as usize)
-            .ok_or(VhostUserError::InvalidParam)?;
+        self.change_state(StateChange::QueueConfiguration(index as usize), |handler| {
+            let vring = handler
+                .vrings
+                .get(index as usize)
+                .ok_or(VhostUserError::InvalidParam)?;
 
-        if !self.mappings.is_empty() {
-            let desc_table = self
-                .vmm_va_to_gpa(descriptor)
-                .map_err(|e| VhostUserError::ReqHandlerError(io::Error::other(e)))?;
-            let avail_ring = self
-                .vmm_va_to_gpa(available)
-                .map_err(|e| VhostUserError::ReqHandlerError(io::Error::other(e)))?;
-            let used_ring = self
-                .vmm_va_to_gpa(used)
-                .map_err(|e| VhostUserError::ReqHandlerError(io::Error::other(e)))?;
-            vring
-                .set_queue_info(desc_table, avail_ring, used_ring)
-                .map_err(|_| VhostUserError::InvalidParam)?;
+            if !handler.mappings.is_empty() {
+                let desc_table = handler
+                    .vmm_va_to_gpa(descriptor)
+                    .map_err(|e| VhostUserError::ReqHandlerError(io::Error::other(e)))?;
+                let avail_ring = handler
+                    .vmm_va_to_gpa(available)
+                    .map_err(|e| VhostUserError::ReqHandlerError(io::Error::other(e)))?;
+                let used_ring = handler
+                    .vmm_va_to_gpa(used)
+                    .map_err(|e| VhostUserError::ReqHandlerError(io::Error::other(e)))?;
+                vring
+                    .set_queue_info(desc_table, avail_ring, used_ring)
+                    .map_err(|_| VhostUserError::InvalidParam)?;
 
-            // SET_VRING_BASE will only restore the 'avail' index, however, after the guest driver
-            // changes, for instance, after reboot, the 'used' index should be reset to 0.
-            //
-            // So let's fetch the used index from the vring as set by the guest here to keep
-            // compatibility with the QEMU's vhost-user library just in case, any implementation
-            // expects the 'used' index to be set when receiving a SET_VRING_ADDR message.
-            //
-            // Note: I'm not sure why QEMU's vhost-user library sets the 'user' index here,
-            // _probably_ to make sure that the VQ is already configured. A better solution would
-            // be to receive the 'used' index in SET_VRING_BASE, as is done when using packed VQs.
-            let idx = vring
-                .queue_used_idx()
-                .map_err(|_| VhostUserError::BackendInternalError)?;
-            vring.set_queue_next_used(idx);
+                // SET_VRING_BASE will only restore the 'avail' index, however, after the guest driver
+                // changes, for instance, after reboot, the 'used' index should be reset to 0.
+                //
+                // So let's fetch the used index from the vring as set by the guest here to keep
+                // compatibility with the QEMU's vhost-user library just in case, any implementation
+                // expects the 'used' index to be set when receiving a SET_VRING_ADDR message.
+                //
+                // Note: I'm not sure why QEMU's vhost-user library sets the 'user' index here,
+                // _probably_ to make sure that the VQ is already configured. A better solution would
+                // be to receive the 'used' index in SET_VRING_BASE, as is done when using packed VQs.
+                let idx = vring
+                    .queue_used_idx()
+                    .map_err(|_| VhostUserError::BackendInternalError)?;
+                vring.set_queue_next_used(idx);
 
-            Ok(())
-        } else {
-            Err(VhostUserError::InvalidParam)
-        }
+                Ok(())
+            } else {
+                Err(VhostUserError::InvalidParam)
+            }
+        })
     }
 
     fn set_vring_base(&mut self, index: u32, base: u32) -> VhostUserResult<()> {
-        let vring = self
-            .vrings
-            .get(index as usize)
-            .ok_or(VhostUserError::InvalidParam)?;
+        self.change_state(StateChange::QueueConfiguration(index as usize), |handler| {
+            let vring = handler
+                .vrings
+                .get(index as usize)
+                .ok_or(VhostUserError::InvalidParam)?;
 
-        vring.set_queue_next_avail(base as u16);
+            vring.set_queue_next_avail(base as u16);
 
-        Ok(())
+            Ok(())
+        })
     }
 
     fn get_vring_base(&mut self, index: u32) -> VhostUserResult<VhostUserVringState> {
-        let vring = self
-            .vrings
-            .get(index as usize)
-            .ok_or(VhostUserError::InvalidParam)?;
+        self.change_state(StateChange::QueueStop(index as usize), |handler| {
+            let vring = handler
+                .vrings
+                .get(index as usize)
+                .ok_or(VhostUserError::InvalidParam)?;
 
-        // Quote from vhost-user specification:
-        // Client must start ring upon receiving a kick (that is, detecting
-        // that file descriptor is readable) on the descriptor specified by
-        // VHOST_USER_SET_VRING_KICK, and stop ring upon receiving
-        // VHOST_USER_GET_VRING_BASE.
-        vring.set_queue_ready(false);
-        self.update_vring_registration(vring, index as u8)?;
+            // Quote from vhost-user specification:
+            // Client must start ring upon receiving a kick (that is, detecting
+            // that file descriptor is readable) on the descriptor specified by
+            // VHOST_USER_SET_VRING_KICK, and stop ring upon receiving
+            // VHOST_USER_GET_VRING_BASE.
+            vring.set_queue_ready(false);
+            handler.update_vring_registration(vring, index as u8)?;
 
-        let next_avail = vring.queue_next_avail();
+            let next_avail = vring.queue_next_avail();
 
-        vring.set_kick(None);
-        vring.set_call(None);
+            vring.set_kick(None);
+            vring.set_call(None);
 
-        Ok(VhostUserVringState::new(index, u32::from(next_avail)))
+            Ok(VhostUserVringState::new(index, u32::from(next_avail)))
+        })
     }
 
     fn set_vring_kick(&mut self, index: u8, file: Option<File>) -> VhostUserResult<()> {
-        let vring = self
-            .vrings
-            .get(index as usize)
-            .ok_or(VhostUserError::InvalidParam)?;
+        self.change_state(StateChange::QueueNotification(index as usize), |handler| {
+            let vring = handler
+                .vrings
+                .get(index as usize)
+                .ok_or(VhostUserError::InvalidParam)?;
 
-        // SAFETY: EventFd requires that it has sole ownership of its fd. So
-        // does File, so this is safe.
-        // Ideally, we'd have a generic way to refer to a uniquely-owned fd,
-        // such as that proposed by Rust RFC #3128.
-        vring.set_kick(file);
+            // SAFETY: EventFd requires that it has sole ownership of its fd. So
+            // does File, so this is safe.
+            // Ideally, we'd have a generic way to refer to a uniquely-owned fd,
+            // such as that proposed by Rust RFC #3128.
+            vring.set_kick(file);
 
-        if self.vring_needs_init(vring) {
-            self.initialize_vring(vring, index)?;
-        }
+            if handler.vring_needs_init(vring) {
+                handler.initialize_vring(vring, index)?;
+            }
 
-        Ok(())
+            Ok(())
+        })
     }
 
     fn set_vring_call(&mut self, index: u8, file: Option<File>) -> VhostUserResult<()> {
-        let vring = self
-            .vrings
-            .get(index as usize)
-            .ok_or(VhostUserError::InvalidParam)?;
+        self.change_state(StateChange::QueueNotification(index as usize), |handler| {
+            let vring = handler
+                .vrings
+                .get(index as usize)
+                .ok_or(VhostUserError::InvalidParam)?;
 
-        vring.set_call(file);
+            vring.set_call(file);
 
-        if self.vring_needs_init(vring) {
-            self.initialize_vring(vring, index)?;
-        }
+            if handler.vring_needs_init(vring) {
+                handler.initialize_vring(vring, index)?;
+            }
 
-        Ok(())
+            Ok(())
+        })
     }
 
     fn set_vring_err(&mut self, index: u8, file: Option<File>) -> VhostUserResult<()> {
-        let vring = self
-            .vrings
-            .get(index as usize)
-            .ok_or(VhostUserError::InvalidParam)?;
+        self.change_state(StateChange::QueueNotification(index as usize), |handler| {
+            let vring = handler
+                .vrings
+                .get(index as usize)
+                .ok_or(VhostUserError::InvalidParam)?;
 
-        vring.set_err(file);
+            vring.set_err(file);
 
-        Ok(())
+            Ok(())
+        })
     }
 
     fn get_protocol_features(&mut self) -> VhostUserResult<VhostUserProtocolFeatures> {
@@ -527,23 +564,25 @@ where
     }
 
     fn set_vring_enable(&mut self, index: u32, enable: bool) -> VhostUserResult<()> {
-        // This request should be handled only when VHOST_USER_F_PROTOCOL_FEATURES
-        // has been negotiated.
-        self.check_feature(VhostUserVirtioFeatures::PROTOCOL_FEATURES)?;
+        self.change_state(StateChange::QueueEnable { index: index as usize, enabled: enable }, |handler| {
+            // This request should be handled only when VHOST_USER_F_PROTOCOL_FEATURES
+            // has been negotiated.
+            handler.check_feature(VhostUserVirtioFeatures::PROTOCOL_FEATURES)?;
 
-        let vring = self
-            .vrings
-            .get(index as usize)
-            .ok_or(VhostUserError::InvalidParam)?;
+            let vring = handler
+                .vrings
+                .get(index as usize)
+                .ok_or(VhostUserError::InvalidParam)?;
 
-        // Backend must not pass data to/from the backend until ring is
-        // enabled by VHOST_USER_SET_VRING_ENABLE with parameter 1,
-        // or after it has been disabled by VHOST_USER_SET_VRING_ENABLE
-        // with parameter 0.
-        vring.set_enabled(enable);
-        self.update_vring_registration(vring, index as u8)?;
+            // Backend must not pass data to/from the backend until ring is
+            // enabled by VHOST_USER_SET_VRING_ENABLE with parameter 1,
+            // or after it has been disabled by VHOST_USER_SET_VRING_ENABLE
+            // with parameter 0.
+            vring.set_enabled(enable);
+            handler.update_vring_registration(vring, index as u8)?;
 
-        Ok(())
+            Ok(())
+        })
     }
 
     fn get_config(
@@ -596,9 +635,11 @@ where
         &mut self,
         inflight: &vhost::vhost_user::message::VhostUserInflight,
     ) -> VhostUserResult<(vhost::vhost_user::message::VhostUserInflight, File)> {
-        self.backend
-            .get_inflight_fd(inflight)
-            .map_err(VhostUserError::ReqHandlerError)
+        self.change_state(StateChange::Attachment, |handler| {
+            handler.backend
+                .get_inflight_fd(inflight)
+                .map_err(VhostUserError::ReqHandlerError)
+        })
     }
 
     fn set_inflight_fd(
@@ -606,9 +647,11 @@ where
         inflight: &vhost::vhost_user::message::VhostUserInflight,
         file: File,
     ) -> VhostUserResult<()> {
-        self.backend
-            .set_inflight_fd(inflight, file)
-            .map_err(VhostUserError::ReqHandlerError)
+        self.change_state(StateChange::Attachment, |handler| {
+            handler.backend
+                .set_inflight_fd(inflight, file)
+                .map_err(VhostUserError::ReqHandlerError)
+        })
     }
 
     fn get_max_mem_slots(&mut self) -> VhostUserResult<u64> {
@@ -620,58 +663,62 @@ where
         region: &VhostUserSingleMemoryRegion,
         file: File,
     ) -> VhostUserResult<()> {
-        let guest_region = Arc::new(
-            GuestRegionMmap::new(
-                region.mmap_region(file)?,
-                GuestAddress(region.guest_phys_addr),
-            )
-            .ok_or(VhostUserError::ReqHandlerError(
-                io::ErrorKind::InvalidInput.into(),
-            ))?,
-        );
+        self.change_state(StateChange::Memory, |handler| {
+            let guest_region = Arc::new(
+                GuestRegionMmap::new(
+                    region.mmap_region(file)?,
+                    GuestAddress(region.guest_phys_addr),
+                )
+                .ok_or(VhostUserError::ReqHandlerError(
+                    io::ErrorKind::InvalidInput.into(),
+                ))?,
+            );
 
-        let addr_mapping = AddrMapping {
-            #[cfg(feature = "postcopy")]
-            local_addr: guest_region.as_ptr() as u64,
-            vmm_addr: region.user_addr,
-            size: region.memory_size,
-            gpa_base: region.guest_phys_addr,
-        };
+            let addr_mapping = AddrMapping {
+                #[cfg(feature = "postcopy")]
+                local_addr: guest_region.as_ptr() as u64,
+                vmm_addr: region.user_addr,
+                size: region.memory_size,
+                gpa_base: region.guest_phys_addr,
+            };
 
-        let mem = self
-            .atomic_mem
-            .memory()
-            .insert_region(guest_region)
-            .map_err(|e| VhostUserError::ReqHandlerError(io::Error::other(e)))?;
+            let mem = handler
+                .atomic_mem
+                .memory()
+                .insert_region(guest_region)
+                .map_err(|e| VhostUserError::ReqHandlerError(io::Error::other(e)))?;
 
-        self.atomic_mem.lock().unwrap().replace(mem);
+            handler.atomic_mem.lock().unwrap().replace(mem);
 
-        self.backend
-            .update_memory(self.atomic_mem.clone())
-            .map_err(|e| VhostUserError::ReqHandlerError(io::Error::other(e)))?;
+            handler.backend
+                .update_memory(handler.atomic_mem.clone())
+                .map_err(|e| VhostUserError::ReqHandlerError(io::Error::other(e)))?;
 
-        self.mappings.push(addr_mapping);
+            handler.mappings.push(addr_mapping);
 
-        Ok(())
+            Ok(())
+        })
     }
 
     fn remove_mem_region(&mut self, region: &VhostUserSingleMemoryRegion) -> VhostUserResult<()> {
-        let (mem, _) = self
-            .atomic_mem
-            .memory()
-            .remove_region(GuestAddress(region.guest_phys_addr), region.memory_size)
-            .map_err(|e| VhostUserError::ReqHandlerError(io::Error::other(e)))?;
+        self.change_state(StateChange::Memory, |handler| {
+            let (mem, _) = handler
+                .atomic_mem
+                .memory()
+                .remove_region(GuestAddress(region.guest_phys_addr), region.memory_size)
+                .map_err(|e| VhostUserError::ReqHandlerError(io::Error::other(e)))?;
 
-        self.atomic_mem.lock().unwrap().replace(mem);
+            handler.atomic_mem.lock().unwrap().replace(mem);
 
-        self.backend
-            .update_memory(self.atomic_mem.clone())
-            .map_err(|e| VhostUserError::ReqHandlerError(io::Error::other(e)))?;
+            handler.backend
+                .update_memory(handler.atomic_mem.clone())
+                .map_err(|e| VhostUserError::ReqHandlerError(io::Error::other(e)))?;
 
-        self.mappings
-            .retain(|mapping| mapping.gpa_base != region.guest_phys_addr);
+            handler.mappings
+                .retain(|mapping| mapping.gpa_base != region.guest_phys_addr);
 
-        Ok(())
+            Ok(())
+        })
     }
 
     fn set_device_state_fd(

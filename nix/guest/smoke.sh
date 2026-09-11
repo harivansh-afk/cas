@@ -15,6 +15,30 @@ uname -a > /results/guest-kernel.txt
 fio --version > /results/guest-fio-version.txt
 lsblk --json --bytes --output NAME,TYPE,SIZE,LOG-SEC,PHY-SEC > /results/guest-disks.json
 
+if [ -f /results/device-reset ]; then
+  cp /etc/cas/live.fio /results/live.fio
+  sed 's/^rw=write$/rw=read/' /etc/cas/live.fio > /results/reset-read.fio
+  cat /proc/sys/kernel/random/boot_id > /results/boot-before.txt
+  block=$(basename "$(readlink -f "$disk")")
+  virtio=$(basename "$(readlink -f "/sys/class/block/$block/device")")
+  driver=/sys/bus/virtio/drivers/virtio_blk
+  test "$(readlink -f "/sys/bus/virtio/devices/$virtio/driver")" = "$driver"
+  printf '%s\n' "$virtio" > /results/reset-device.txt
+  for generation in 1 2 3; do
+    fio --output-format=json+ --output="/results/reset-write-$generation.json" /etc/cas/live.fio
+    if [ "$generation" -lt 3 ]; then
+      blockdev --flushbufs "$disk"
+      printf '%s' "$virtio" > "$driver/unbind"
+      printf '%s' "$virtio" > "$driver/bind"
+      udevadm settle --timeout=10
+      test -b "$disk"
+      fio --readonly --verify_header_seed=0 --verify_write_sequence=0 --output-format=json+ --output="/results/reset-read-$generation.json" /results/reset-read.fio
+    fi
+  done
+  cat /proc/sys/kernel/random/boot_id > /results/boot-after.txt
+  exit 0
+fi
+
 if [ -f /results/live-recovery ]; then
   cp /etc/cas/live.fio /results/live.fio
   cat /proc/sys/kernel/random/boot_id > /results/boot-before.txt

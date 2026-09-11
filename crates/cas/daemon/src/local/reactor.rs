@@ -10,7 +10,6 @@ use io_uring::{IoUring, opcode, squeue, types};
 
 use super::*;
 
-const IO_DEADLINE: Duration = Duration::from_secs(30);
 const IDLE_SYNC: Duration = Duration::from_millis(50);
 
 #[cfg(test)]
@@ -153,6 +152,7 @@ pub(super) struct Reactor {
     last_write: Instant,
     closed: bool,
     failed: bool,
+    admission_paused: bool,
     #[cfg(test)]
     control: Option<Arc<tests::Control>>,
     #[cfg(test)]
@@ -184,6 +184,7 @@ impl Reactor {
             last_write: Instant::now(),
             closed: false,
             failed: false,
+            admission_paused: false,
             #[cfg(test)]
             control: None,
             #[cfg(test)]
@@ -345,10 +346,14 @@ impl Reactor {
                     self.reads.push_back(io)
                 }
                 Ok(command) => {
+                    let pause = matches!(command, Command::Pause { .. });
                     if matches!(command, Command::Append(_)) {
                         self.last_write = Instant::now();
                     }
                     self.commands.push_back(command);
+                    if pause {
+                        break;
+                    }
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -583,8 +588,47 @@ impl Reactor {
     }
 
     fn dispatch(&mut self) -> io::Result<()> {
-        while let Some(command) = self.commands.front() {
+        while let Some(command) = self.commands.front_mut() {
             match command {
+                Command::Pause { .. } if !self.pending.is_empty() || !self.reads.is_empty() => {
+                    break;
+                }
+                Command::Pause { .. } => {
+                    self.admission_paused = true;
+                    let command = self.commands.pop_front().unwrap();
+                    self.worker.execute(command)?;
+                    break;
+                }
+                Command::Resume => {
+                    self.admission_paused = false;
+                    self.commands.pop_front();
+                    continue;
+                }
+                Command::NewAttachment { rotated, .. } => {
+                    if !self.admission_paused {
+                        return Err(io::Error::other("attachment requires storage pause"));
+                    }
+                    if !self.pending.is_empty() || !self.reads.is_empty() {
+                        break;
+                    }
+                    let boundary = self.worker.log.status().published;
+                    if !self.worker.log.covers_flush(boundary) {
+                        self.start_fence(None, false)?;
+                        break;
+                    }
+                    if !*rotated {
+                        self.worker.log.new_attachment().map_err(io::Error::other)?;
+                        *rotated = true;
+                        self.start_fence(None, false)?;
+                        break;
+                    }
+                    let command = self.commands.pop_front().unwrap();
+                    self.worker.execute(command)?;
+                    continue;
+                }
+                _ if self.admission_paused => {
+                    return Err(io::Error::other("IO during storage pause"));
+                }
                 Command::Append(packing) => match self.worker.log.check_append(&packing.builder) {
                     Err(append::Error::Pending) => {
                         self.paused_since.get_or_insert_with(Instant::now);
@@ -663,6 +707,9 @@ impl Reactor {
                     }
                 }
                 Command::Io(io) => self.start_fence(Some(io), false)?,
+                Command::Pause { .. } | Command::Resume | Command::NewAttachment { .. } => {
+                    unreachable!("administrative command handled above")
+                }
             }
         }
         while self
@@ -692,6 +739,7 @@ impl Reactor {
             }
         }
         if !self.closed
+            && !self.admission_paused
             && self.cohort.is_none()
             && self.commands.is_empty()
             && self.worker.log.status().durable < self.worker.log.status().issued
@@ -714,7 +762,8 @@ impl Reactor {
 
     fn wait(&self) -> io::Result<()> {
         let active = !self.pending.is_empty()
-            || self.worker.log.status().issued > self.worker.log.status().durable;
+            || (!self.admission_paused
+                && self.worker.log.status().issued > self.worker.log.status().durable);
         let timeout = if active { 50 } else { -1 };
         let mut descriptors = [
             libc::pollfd {

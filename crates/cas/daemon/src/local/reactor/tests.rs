@@ -27,10 +27,15 @@ struct Run {
     output: mpsc::Receiver<Response>,
     thread: Option<JoinHandle<()>>,
     shared: Arc<Shared>,
+    paused: Option<mpsc::Receiver<io::Result<append::Status>>>,
 }
 
 impl Run {
     fn start(short: bool) -> Self {
+        Self::start_with_pause(short, false)
+    }
+
+    fn start_with_pause(short: bool, pause: bool) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let config = append::Config {
             store: [1; 16],
@@ -101,6 +106,16 @@ impl Run {
                 }))
                 .unwrap();
         }
+        let paused = pause.then(|| {
+            let (done, result) = mpsc::sync_channel(1);
+            sender
+                .send(Command::Pause {
+                    done,
+                    _permit: shared.reserve(Kind::Control).unwrap(),
+                })
+                .unwrap();
+            result
+        });
         // Both appends precede startup. Closing input disables idle sync, so the
         // test also checks recovery of completed, unsynchronized host writes.
         drop(sender);
@@ -124,6 +139,7 @@ impl Run {
             output: receiver,
             thread: Some(thread),
             shared,
+            paused,
         }
     }
 
@@ -215,4 +231,22 @@ fn short_a_then_complete_b_fails_without_publication_and_rejects_the_suffix() {
     let recovered = Log::open(&path, append::Limits::default()).unwrap();
     assert_eq!(recovered.status().published, 0);
     assert_eq!(recovered.status().rejected_bytes, 4 * BLOCK_SIZE as u64);
+}
+
+#[test]
+fn pause_waits_for_the_oldest_owned_append_even_after_a_later_cqe() {
+    let mut run = Run::start_with_pause(false, true);
+    run.wait_for_b();
+    assert!(matches!(
+        run.paused.as_ref().unwrap().try_recv(),
+        Err(mpsc::TryRecvError::Empty)
+    ));
+    assert_eq!(run.shared.pools.control.usage().current.requests, 1);
+    run.release();
+    let status = run.paused.take().unwrap().recv().unwrap().unwrap();
+    assert_eq!(status.published, 2);
+    assert_eq!(status.durable, 0);
+    assert_eq!(run.shared.pools.control.usage().current.requests, 0);
+    let metrics = run.shared.metrics.lock().unwrap();
+    assert_eq!(metrics.io_queued, metrics.io_completed);
 }

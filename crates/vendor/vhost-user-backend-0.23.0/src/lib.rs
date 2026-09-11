@@ -23,7 +23,7 @@ use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
 use self::handler::VhostUserHandler;
 
 mod backend;
-pub use self::backend::{VhostUserBackend, VhostUserBackendMut};
+pub use self::backend::{StateChange, VhostUserBackend, VhostUserBackendMut};
 
 mod event_loop;
 pub use self::event_loop::VringEpollHandler;

@@ -44,6 +44,8 @@ let
       fio
       util-linux
       coreutils
+      systemd
+      gnused
     ];
     text = builtins.readFile ./smoke.sh;
   };

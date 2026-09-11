@@ -283,6 +283,23 @@ impl FrontendQueue {
         frontend.get_features().unwrap();
     }
 
+    fn reset_base(&mut self, start: u16) {
+        // Enabling a queue may immediately schedule it. Quiesce before changing
+        // the guest's used and available cursors, then install the new base.
+        self.frontend.set_vring_enable(0, false).unwrap();
+        self.frontend.get_features().unwrap();
+        self.next_avail = start;
+        self.mem
+            .write_obj(start.to_le(), GuestAddress(0x2002))
+            .unwrap();
+        self.mem
+            .write_obj(start.to_le(), GuestAddress(0x3002))
+            .unwrap();
+        self.frontend.set_vring_base(0, start).unwrap();
+        self.frontend.set_vring_enable(0, true).unwrap();
+        self.frontend.get_features().unwrap();
+    }
+
     fn descriptor(&self, index: u16, addr: u64, len: u32, flags: u16, next: u16) {
         let mut descriptor = [0; 16];
         descriptor[..8].copy_from_slice(&addr.to_le_bytes());
@@ -857,17 +874,7 @@ fn concurrent_retained_fd_replays_without_flush_and_ignores_consumed_available_s
             };
             let mut queue = FrontendQueue::connect(&mut daemon);
             assert!(queue.inflight.is_some());
-            queue.next_avail = start;
-            queue
-                .mem
-                .write_obj(start.to_le(), GuestAddress(0x2002))
-                .unwrap();
-            queue
-                .mem
-                .write_obj(start.to_le(), GuestAddress(0x3002))
-                .unwrap();
-            queue.frontend.set_vring_base(0, start).unwrap();
-            queue.frontend.get_features().unwrap();
+            queue.reset_base(start);
             queue
                 .mem
                 .write_slice(&[0x11; BLOCK_SIZE], GuestAddress(0x5000))
@@ -1000,3 +1007,115 @@ fn concurrent_retained_fd_replays_without_flush_and_ignores_consumed_available_s
 
 #[path = "lifecycle/multiqueue.rs"]
 mod multiqueue;
+
+#[test]
+fn serving_stop_start_retains_epoch_and_full_reset_installs_a_fresh_carrier() {
+    use std::os::unix::fs::MetadataExt;
+
+    let directory = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let child = Daemon::start_kind(&directory, "local-async", true, true, None);
+    let mut daemon = Daemon {
+        child,
+        directory,
+        deadline: Instant::now() + DEADLINE,
+    };
+    let mut queue = FrontendQueue::connect(&mut daemon);
+    let mut last_inode = 0;
+    for generation in 1..=3u64 {
+        queue
+            .mem
+            .write_slice(&[generation as u8; BLOCK_SIZE], GuestAddress(0x5000))
+            .unwrap();
+        queue.request_layout(VIRTIO_BLK_T_OUT, false);
+        // QEMU stops queues before either retaining or freeing its inflight FD.
+        queue.frontend.set_vring_enable(0, false).unwrap();
+        let base = queue.frontend.get_vring_base(0).unwrap();
+        assert_eq!(base as u16, queue.next_avail);
+        let (message, file) = queue.inflight.as_ref().unwrap();
+        let inode = file.metadata().unwrap().ino();
+        assert_ne!(inode, last_inode);
+        last_inode = inode;
+        // Ordinary stop/start returns the same FD and must retain this epoch.
+        queue
+            .frontend
+            .set_inflight_fd(message, file.as_raw_fd())
+            .unwrap();
+        queue.frontend.set_vring_base(0, base as u16).unwrap();
+        queue.frontend.set_vring_call(0, &queue.call).unwrap();
+        queue.frontend.set_vring_kick(0, &queue.kick).unwrap();
+        queue.frontend.set_vring_enable(0, true).unwrap();
+        queue
+            .frontend
+            .get_features()
+            .unwrap_or_else(|error| panic!("{error}: {}", daemon.stderr()));
+        queue
+            .mem
+            .write_slice(&[0; BLOCK_SIZE], GuestAddress(0x5000))
+            .unwrap();
+        queue.request_layout(VIRTIO_BLK_T_IN, false);
+        let mut actual = [0; BLOCK_SIZE];
+        queue
+            .mem
+            .read_slice(&mut actual, GuestAddress(0x5000))
+            .unwrap();
+        assert_eq!(actual, [generation as u8; BLOCK_SIZE]);
+        if generation == 3 {
+            break;
+        }
+        queue.frontend.set_vring_enable(0, false).unwrap();
+        queue.frontend.get_vring_base(0).unwrap();
+        // Full reset frees QEMU's old FD. GET must succeed on the same socket.
+        let old_carrier = queue.inflight.take().unwrap();
+        let (message, file) = queue
+            .frontend
+            .get_inflight_fd(&VhostUserInflight {
+                mmap_size: 0,
+                mmap_offset: 0,
+                num_queues: 1,
+                queue_size: 128,
+            })
+            .unwrap();
+        // Keep the old FD live so inode comparison cannot observe reuse.
+        assert_ne!(
+            old_carrier.1.metadata().unwrap().ino(),
+            file.metadata().unwrap().ino()
+        );
+        queue
+            .frontend
+            .set_inflight_fd(&message, file.as_raw_fd())
+            .unwrap();
+        queue.inflight = Some((message, file));
+        queue.next_avail = 0;
+        queue.mem.write_obj(0u16, GuestAddress(0x2002)).unwrap();
+        queue.mem.write_obj(0u16, GuestAddress(0x3002)).unwrap();
+        queue.frontend.set_vring_base(0, 0).unwrap();
+        queue.frontend.set_vring_call(0, &queue.call).unwrap();
+        queue.frontend.set_vring_kick(0, &queue.kick).unwrap();
+        queue.frontend.set_vring_enable(0, true).unwrap();
+        queue
+            .frontend
+            .get_features()
+            .unwrap_or_else(|error| panic!("{error}: {}", daemon.stderr()));
+        // Read the previous generation before any write in the new attachment.
+        queue
+            .mem
+            .write_slice(&[0; BLOCK_SIZE], GuestAddress(0x5000))
+            .unwrap();
+        queue.request_layout(VIRTIO_BLK_T_IN, false);
+        queue
+            .mem
+            .read_slice(&mut actual, GuestAddress(0x5000))
+            .unwrap();
+        assert_eq!(actual, [generation as u8; BLOCK_SIZE]);
+    }
+    queue.request_layout(VIRTIO_BLK_T_FLUSH, false);
+    drop(queue);
+    let (status, report) = daemon.wait();
+    assert!(status.success(), "{}", daemon.stderr());
+    assert_eq!(report["errors"], 0);
+    assert_eq!(report["local"]["status"]["epoch"], 3);
+    assert_eq!(report["local"]["status"]["published"], 3);
+    assert_eq!(report["local"]["status"]["durable"], 3);
+    assert_eq!(report["writes"], 3);
+    assert_eq!(report["reads"], 5);
+}

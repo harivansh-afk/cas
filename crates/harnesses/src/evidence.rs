@@ -203,6 +203,8 @@ struct LocalReport {
 
 #[derive(Deserialize)]
 struct LocalStatus {
+    #[serde(default)]
+    epoch: u64,
     image_bytes: u64,
     published: u64,
     durable: u64,
@@ -385,7 +387,7 @@ impl DaemonReport {
         }
         Ok(())
     }
-    pub fn verify(&self, backend: Backend, read_only: bool, interactive: bool) -> io::Result<()> {
+    fn verify_clean(&self, backend: Backend, read_only: bool) -> io::Result<()> {
         if self.schema_version != 1
             || self.backend != backend.storage()
             || !self.connection_ok
@@ -404,6 +406,36 @@ impl DaemonReport {
                 "four configured queues did not all execute requests",
             ));
         }
+        Ok(())
+    }
+
+    pub fn verify_reset(&self) -> io::Result<()> {
+        self.verify_clean(Backend::LocalAsync, false)?;
+        let local = self
+            .local
+            .as_ref()
+            .ok_or_else(|| io::Error::other("missing local report"))?;
+        if !self.restartable
+            || self
+                .inflight
+                .as_ref()
+                .is_none_or(|inflight| !inflight.active)
+            || self.write_bytes != 3 * LIVE_BYTES
+            || self.read_bytes < 5 * LIVE_BYTES
+            || self.writes != 3 * LIVE_BYTES / BLOCK_SIZE as u64
+            || self.flushes < 3
+            || local.status.epoch != 3
+            || local.status.published != 3 * LIVE_BYTES / BLOCK_SIZE as u64
+        {
+            return Err(io::Error::other(
+                "reset did not preserve epochs, prefixes and exact IO",
+            ));
+        }
+        local.verify(self)
+    }
+
+    pub fn verify(&self, backend: Backend, read_only: bool, interactive: bool) -> io::Result<()> {
+        self.verify_clean(backend, read_only)?;
         let expected = if read_only { IO_BYTES } else { 2 * IO_BYTES };
         let writes_ok = if read_only {
             self.write_bytes == 0
@@ -463,10 +495,9 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
 
-    #[test]
-    fn local_evidence_rejects_extra_copies_leaks_and_failed_identity_checks() {
-        let mut value = daemon(Backend::Local, false);
-        let bytes = 2 * IO_BYTES;
+    fn local_daemon(backend: Backend, bytes: u64) -> Value {
+        let mut value = daemon(backend, false);
+        value["write_bytes"] = json!(bytes);
         let writes = bytes / BLOCK_SIZE as u64;
         let batches = writes / 32;
         let usage = |admitted, peak| {
@@ -485,6 +516,14 @@ mod tests {
             "requests":usage(writes,0),"append":usage(batches,allocation),"read":usage(writes,BLOCK_SIZE),
             "control":usage(2,BLOCK_SIZE),"host_append":usage(batches,allocation),"host_read":usage(writes,BLOCK_SIZE),
         });
+        value
+    }
+
+    #[test]
+    fn local_evidence_rejects_extra_copies_leaks_and_failed_identity_checks() {
+        let bytes = 2 * IO_BYTES;
+        let batches = bytes / BLOCK_SIZE as u64 / 32;
+        let value = local_daemon(Backend::Local, bytes);
         let verify = |value| {
             serde_json::from_value::<DaemonReport>(value)
                 .unwrap()
@@ -500,6 +539,39 @@ mod tests {
                 json!(batches - 1),
             ),
             ("/local/status/durable", json!(0)),
+        ] {
+            let mut broken = value.clone();
+            *broken.pointer_mut(pointer).unwrap() = invalid;
+            assert!(verify(broken).is_err(), "{pointer}");
+        }
+    }
+
+    #[test]
+    fn reset_evidence_rejects_reused_epochs_lost_prefixes_and_missing_queues() {
+        let mut value = local_daemon(Backend::LocalAsync, 3 * LIVE_BYTES);
+        value["restartable"] = json!(true);
+        value["queues"] = json!(4);
+        value["queue_requests"] = json!([100, 100, 100, 100]);
+        value["inflight"] = json!({"active":true, "replayed_requests":0,"replayed_mutations":0,
+            "replay_copy_bytes":0,"replayed_write_bytes":0,"saved_p":0,"recovered_p":0});
+        value["read_bytes"] = json!(5 * LIVE_BYTES);
+        value["local"]["status"]["epoch"] = json!(3);
+        value["local"]["metrics"]["io_queued"] = json!(200);
+        value["local"]["metrics"]["io_completed"] = json!(200);
+        value["local"]["metrics"]["peak_awaiting_cqe"] = json!(4);
+        let verify = |value| {
+            serde_json::from_value::<DaemonReport>(value)
+                .unwrap()
+                .verify_reset()
+        };
+        verify(value.clone()).unwrap();
+        for (pointer, invalid) in [
+            ("/local/status/epoch", json!(1)),
+            ("/local/status/published", json!(1024)),
+            ("/local/status/durable", json!(0)),
+            ("/queue_requests/3", json!(0)),
+            ("/read_bytes", json!(3 * LIVE_BYTES)),
+            ("/inflight/active", json!(false)),
         ] {
             let mut broken = value.clone();
             *broken.pointer_mut(pointer).unwrap() = invalid;

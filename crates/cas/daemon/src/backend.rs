@@ -1,5 +1,6 @@
 // Queue execution: retain owned IO until completion and publish against one memory snapshot.
 
+mod lifecycle;
 mod recovery;
 use cas_daemon::inflight::Entry;
 use recovery::Session;
@@ -90,6 +91,10 @@ pub(super) struct Backend {
     concurrent: bool,
     first_queue: usize,
     queue_requests: [u64; CONCURRENT_QUEUES],
+    paused: bool,
+    change_deadline: Option<std::time::Instant>,
+    blocked_queues: [bool; CONCURRENT_QUEUES],
+    rebase_queues: [bool; CONCURRENT_QUEUES],
     restored_used: Option<u16>,
     restored_pending: u16,
     fault: Fault,
@@ -307,6 +312,10 @@ impl Backend {
             concurrent: matches!(kind, BackendKind::LocalAsync),
             first_queue: 0,
             queue_requests: [0; CONCURRENT_QUEUES],
+            paused: false,
+            change_deadline: None,
+            blocked_queues: [false; CONCURRENT_QUEUES],
+            rebase_queues: [false; CONCURRENT_QUEUES],
             restored_used: None,
             restored_pending: 0,
             fault,
@@ -604,6 +613,9 @@ impl Backend {
         if let Some(failure) = &self.failure {
             return Err(io::Error::other(failure.clone()));
         }
+        if self.paused {
+            return Ok(());
+        }
         if let Some(gate) = self.storage.completion_gate()
             && let Some(error) = gate
                 .lock()
@@ -641,6 +653,9 @@ impl Backend {
         queue: u16,
         vring: &VringMutex,
     ) -> io::Result<()> {
+        if self.blocked_queues[usize::from(queue)] {
+            return Ok(());
+        }
         let mut state = vring.get_mut();
         if !state.is_enabled() || !state.get_queue().ready() {
             return Ok(());
@@ -891,6 +906,21 @@ impl VhostUserBackendMut for Backend {
         }
         self.memory = Some(memory.memory());
         Ok(())
+    }
+    fn begin_state_change(
+        &mut self,
+        change: vhost_user_backend::StateChange,
+        vrings: &[VringMutex],
+    ) -> io::Result<()> {
+        self.begin_change(change, vrings)
+    }
+    fn end_state_change(
+        &mut self,
+        change: vhost_user_backend::StateChange,
+        succeeded: bool,
+        vrings: &[VringMutex],
+    ) -> io::Result<()> {
+        self.end_change(change, succeeded, vrings)
     }
     fn exit_event(&self, _: usize) -> Option<(EventConsumer, EventNotifier)> {
         Some((
@@ -1173,5 +1203,128 @@ mod tests {
         assert_eq!(report["status"]["published"], 0);
         assert_eq!(report["append"]["current"]["bytes"], 0);
         assert_eq!(report["requests"]["current"]["requests"], 0);
+    }
+    #[test]
+    fn memory_change_drains_old_guest_publication_before_installing_the_new_map() {
+        use vhost_user_backend::StateChange;
+        fn submit(
+            backend: &mut Backend,
+            mem: &GuestMemoryMmap,
+            vring: &VringMutex,
+            id: u64,
+            write: bool,
+        ) {
+            let data = request::DataRequest {
+                completion: Completion {
+                    head: id as u16,
+                    status: GuestAddress(0x5100),
+                },
+                offset: 0,
+                len: BLOCK_SIZE,
+                segments: vec![Segment {
+                    addr: GuestAddress(0x6000),
+                    len: BLOCK_SIZE,
+                    writable: !write,
+                }],
+            };
+            let request = if write {
+                Request::Write(data)
+            } else {
+                Request::Read(data)
+            };
+            mem.write_obj(0xffu8, request.completion().status).unwrap();
+            let permit = backend
+                .storage
+                .prepare(request.admission_kind())
+                .unwrap()
+                .unwrap();
+            let mut state = vring.get_mut();
+            state.get_queue_mut().set_next_avail(id as u16 + 1);
+            mem.write_obj(id as u16 + 1, GuestAddress(0x2002)).unwrap();
+            backend.next_id = id + 1;
+            backend
+                .enqueue(
+                    mem,
+                    &mut state,
+                    Admitted {
+                        queue: 0,
+                        id,
+                        request,
+                        permit,
+                        inflight: None,
+                    },
+                    None,
+                )
+                .unwrap();
+            backend.storage.submit().unwrap();
+        }
+        let directory = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut backend = Backend::open_with_recovery(
+            &directory.path().join("log"),
+            BackendKind::LocalAsync,
+            Some(BLOCK_SIZE as u64),
+            false,
+            Fault::default(),
+        )
+        .unwrap();
+        let (atomic, vring) = queue();
+        let vrings = std::slice::from_ref(&vring);
+        backend.update_memory(atomic.clone()).unwrap();
+        backend.acked_features(backend.features());
+        let old = atomic.memory();
+        old.write_slice(&[0x5a; BLOCK_SIZE], GuestAddress(0x6000))
+            .unwrap();
+        submit(&mut backend, &old, &vring, 0, true);
+        backend
+            .begin_state_change(StateChange::Memory, vrings)
+            .unwrap();
+        backend
+            .end_state_change(StateChange::Memory, true, vrings)
+            .unwrap();
+        old.write_slice(&[0; BLOCK_SIZE], GuestAddress(0x6000))
+            .unwrap();
+        submit(&mut backend, &old, &vring, 1, false);
+        assert_eq!(backend.pending_count(), 1);
+        assert_eq!(old.read_obj::<u8>(GuestAddress(0x6000)).unwrap(), 0);
+        backend
+            .begin_state_change(StateChange::Memory, vrings)
+            .unwrap();
+        assert_eq!(backend.pending_count(), 0);
+        assert!(backend.paused);
+        assert_eq!(old.read_obj::<u8>(GuestAddress(0x6000)).unwrap(), 0x5a);
+        assert_eq!(
+            old.read_obj::<u8>(GuestAddress(0x5100)).unwrap(),
+            Status::Ok as u8
+        );
+        assert_eq!(old.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 2);
+        let replacement = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mut copy = vec![0; 0x10000];
+        old.read_slice(&mut copy, GuestAddress(0)).unwrap();
+        replacement.write_slice(&copy, GuestAddress(0)).unwrap();
+        atomic.lock().unwrap().replace(replacement);
+        backend.update_memory(atomic.clone()).unwrap();
+        backend
+            .end_state_change(StateChange::Memory, true, vrings)
+            .unwrap();
+        assert!(!backend.paused);
+        let new = atomic.memory();
+        new.write_slice(&[0; BLOCK_SIZE], GuestAddress(0x6000))
+            .unwrap();
+        old.write_slice(&[0xa5; BLOCK_SIZE], GuestAddress(0x6000))
+            .unwrap();
+        old.write_obj(0xfeu8, GuestAddress(0x5100)).unwrap();
+        submit(&mut backend, &new, &vring, 2, false);
+        backend
+            .begin_state_change(StateChange::QueueNotification(0), vrings)
+            .unwrap();
+        assert_eq!(new.read_obj::<u8>(GuestAddress(0x6000)).unwrap(), 0x5a);
+        assert_eq!(new.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 3);
+        assert_eq!(old.read_obj::<u8>(GuestAddress(0x6000)).unwrap(), 0xa5);
+        assert_eq!(old.read_obj::<u8>(GuestAddress(0x5100)).unwrap(), 0xfe);
+        assert_eq!(old.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 2);
+        backend
+            .end_state_change(StateChange::QueueNotification(0), true, vrings)
+            .unwrap();
+        backend.drain().unwrap();
     }
 }

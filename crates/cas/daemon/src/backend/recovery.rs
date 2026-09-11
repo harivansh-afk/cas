@@ -31,6 +31,12 @@ pub(super) struct Session {
 }
 
 impl Session {
+    pub(super) fn fresh(&self) -> bool {
+        self.phase == Phase::Fresh
+    }
+    pub(super) fn active(&self) -> bool {
+        self.phase == Phase::Active
+    }
     pub fn report(&self) -> serde_json::Value {
         serde_json::json!({ "active": self.phase == Phase::Active,
             "replayed_requests": self.replayed_requests, "replayed_mutations": self.replayed_mutations,
@@ -56,45 +62,70 @@ impl Backend {
         message: &VhostUserInflight,
     ) -> io::Result<(VhostUserInflight, File)> {
         let geometry = geometry(message)?;
-        if self
-            .live
-            .as_ref()
-            .is_none_or(|session| session.phase != Phase::AwaitingFd)
-        {
-            return Err(io::Error::other("unexpected fresh inflight request"));
-        }
-        let Storage::Opening(opening) = &mut self.storage else {
-            return Err(io::Error::other("fresh attachment has no locked opening"));
+        let phase = self.live.as_ref().map(|session| session.phase);
+        let (shared, mut identity, status) = match (&mut self.storage, phase) {
+            (Storage::Opening(opening), Some(Phase::AwaitingFd)) => {
+                let shared = Arc::clone(&opening.shared);
+                let log = opening.fresh()?;
+                let config = log.config();
+                let status = log.status();
+                self.storage = Storage::Local(Box::new(local::Local::from_log(
+                    log,
+                    &self.completion_event,
+                    local::Execution::Concurrent,
+                    Arc::clone(&shared),
+                )?));
+                (
+                    shared,
+                    Identity {
+                        store: config.store,
+                        image: config.image,
+                        epoch: status.epoch,
+                        attachment: status.epoch,
+                    },
+                    status,
+                )
+            }
+            (Storage::Local(local), Some(Phase::Active)) => {
+                let (identity, required_p) = {
+                    let health = local
+                        .shared
+                        .health
+                        .lock()
+                        .map_err(|_| io::Error::other("completion gate poisoned"))?;
+                    let carrier = health
+                        .carrier
+                        .as_ref()
+                        .ok_or_else(|| io::Error::other("missing old carrier"))?;
+                    (carrier.identity(), carrier.published())
+                };
+                let status = local
+                    .new_attachment(self.change_deadline.ok_or_else(|| {
+                        io::Error::other("attachment has no lifecycle deadline")
+                    })?)?;
+                if status.published < required_p || status.durable < required_p {
+                    return Err(io::Error::other(
+                        "fresh attachment lost the old required prefix",
+                    ));
+                }
+                (Arc::clone(&local.shared), identity, status)
+            }
+            _ => return Err(io::Error::other("unexpected fresh inflight request")),
         };
-        let shared = Arc::clone(&opening.shared);
-        let log = opening.fresh()?;
-        let config = log.config();
-        let status = log.status();
-        // Fresh attachment generation and durable writer epoch use the same
-        // unique ticket. The trailer still stores and checks both identities.
-        let carrier = Carrier::create(
-            geometry,
-            Identity {
-                store: config.store,
-                image: config.image,
-                epoch: status.epoch,
-                attachment: status.epoch,
-            },
-            config.image_bytes,
-            status.published,
-        )?;
+        // A fresh carrier is exported only after its new epoch and fence are
+        // durable. Keep the old map through that transition so P stays checked.
+        identity.epoch = status.epoch;
+        identity.attachment = status.epoch;
+        let carrier = Carrier::create(geometry, identity, self.capacity_bytes, status.published)?;
         let exported = carrier.export()?;
         shared
             .health
             .lock()
             .map_err(|_| io::Error::other("completion gate poisoned"))?
             .carrier = Some(carrier);
-        self.storage = Storage::Local(Box::new(local::Local::from_log(
-            log,
-            &self.completion_event,
-            local::Execution::Concurrent,
-            shared,
-        )?));
+        self.next_id = 0;
+        self.blocked_queues.fill(true);
+        self.rebase_queues.fill(false);
         self.live.as_mut().unwrap().phase = Phase::Fresh;
         Ok(exported)
     }
@@ -117,7 +148,7 @@ impl Backend {
         let mut state = gate
             .lock()
             .map_err(|_| io::Error::other("completion gate poisoned"))?;
-        if phase == Phase::Fresh {
+        if matches!(phase, Phase::Fresh | Phase::Active) {
             let current = state
                 .carrier
                 .as_ref()
@@ -126,7 +157,7 @@ impl Backend {
             let expected = original.metadata()?;
             let actual = file.metadata()?;
             if (expected.dev(), expected.ino()) != (actual.dev(), actual.ino()) {
-                return Err(io::Error::other("first SET must return the GET carrier"));
+                return Err(io::Error::other("SET must return the current GET carrier"));
             }
             // QEMU sends SET after GET before queue setup, including on fresh boot.
             Carrier::attach(file, message, current.identity(), self.capacity_bytes)?;
@@ -181,7 +212,8 @@ impl Backend {
         let mut queues: Vec<_> = vrings.iter().map(VringMutex::get_mut).collect();
         let mut cursors = Vec::with_capacity(usize::from(geometry.num_queues));
         for (index, queue) in queues.iter_mut().enumerate() {
-            let ready = queue.is_enabled() && queue.get_queue().ready();
+            let ready =
+                !self.blocked_queues[index] && queue.is_enabled() && queue.get_queue().ready();
             if index >= usize::from(geometry.num_queues) {
                 if ready {
                     return Err(io::Error::other(

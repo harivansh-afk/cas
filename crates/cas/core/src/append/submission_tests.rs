@@ -248,3 +248,29 @@ fn partial_read_plan_verifies_the_complete_original_payload() {
     file.write_all_at(&[0xff], range.offset()).unwrap();
     assert!(plan.read_into(&mut response).is_err());
 }
+
+#[test]
+fn new_attachment_requires_a_drained_prefix_and_preserves_old_payload_pins() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("log");
+    let mut log = Log::create(&path, config(), Limits::default()).unwrap();
+    let append = log.prepare_append(builder(1, 0, 0x71)).unwrap();
+    assert!(matches!(log.new_attachment(), Err(Error::Pending)));
+    write(&append);
+    log.publish_append(&append).unwrap();
+    assert!(matches!(log.new_attachment(), Err(Error::Pending)));
+    let pin = log.read_plan(0, BLOCK_SIZE, 1).unwrap();
+    log.flush().unwrap();
+    let original_epoch = log.status().epoch;
+    log.new_attachment().unwrap();
+    assert!(log.status().epoch > original_epoch);
+    assert_eq!((log.status().published, log.status().durable), (1, 1));
+    assert!(!log.covers_flush(1)); // Old fence cannot certify this epoch.
+    assert_eq!(read(&mut log), vec![0x71; BLOCK_SIZE]);
+    log.flush().unwrap();
+    assert!(log.covers_flush(1));
+    drop((pin, append, log));
+    let mut reopened = Log::open(&path, Limits::default()).unwrap();
+    assert_eq!(read(&mut reopened), vec![0x71; BLOCK_SIZE]);
+    assert!(reopened.status().epoch > original_epoch + 1);
+}

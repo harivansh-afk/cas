@@ -28,6 +28,7 @@ const DAEMON_SHUTDOWN: Duration = Duration::from_secs(10);
 
 mod interactive;
 mod live;
+mod reset;
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -43,6 +44,9 @@ pub struct Args {
     /// Restart staging or concurrent local storage while the same guest runs.
     #[arg(long, conflicts_with = "recovery")]
     live_recovery: bool,
+    /// Reset the experiment virtio driver twice in the same guest and daemon.
+    #[arg(long, conflicts_with_all = ["recovery", "live_recovery", "ssh_key"])]
+    device_reset: bool,
     /// Public key for the dev-vm guest. Private keys and authorized_keys options are rejected.
     #[arg(long, conflicts_with_all = ["recovery", "live_recovery"])]
     ssh_key: Option<PathBuf>,
@@ -295,6 +299,9 @@ fn execute_guest(
             if read_only { "read\n" } else { "write\n" },
         )?;
     }
+    if args.device_reset {
+        fs::write(results.join("device-reset"), "two resets\n")?;
+    }
     let mut env = environment(image, &results, &temporary);
     if build.interactive {
         interactive::prepare(args, &results, &mut env)?;
@@ -333,6 +340,9 @@ fn execute_guest(
             if !read_only {
                 command.arg("--create-bytes").arg(DISK_BYTES.to_string());
             }
+        }
+        if args.device_reset {
+            command.arg("--restartable");
         }
         let mut child = ManagedChild::spawn(&mut command)?;
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -420,7 +430,11 @@ fn execute_guest(
             "QEMU exited with {status}; see console.log"
         )));
     }
-    verify_io(&results, build.backend, read_only, evidence)?;
+    if args.device_reset {
+        reset::verify_guest(&results, evidence)?;
+    } else {
+        verify_io(&results, build.backend, read_only, evidence)?;
+    }
     if let Some(daemon) = &mut daemon {
         let start = Instant::now();
         let status = daemon.wait(DAEMON_SHUTDOWN);
@@ -432,11 +446,12 @@ fn execute_guest(
         }
         let value: Value = read_json(&output.join("daemon.json"))?;
         evidence.daemon = Some(value.clone());
-        serde_json::from_value::<DaemonReport>(value)?.verify(
-            build.backend,
-            read_only,
-            build.interactive,
-        )?;
+        let report: DaemonReport = serde_json::from_value(value)?;
+        if args.device_reset {
+            report.verify_reset()?;
+        } else {
+            report.verify(build.backend, read_only, build.interactive)?;
+        }
     }
     Ok(())
 }
@@ -485,7 +500,8 @@ fn execute(args: &mut Args, summary: &mut Summary) -> io::Result<()> {
             "dev-vm requires --ssh-key; smoke runners do not support SSH",
         ));
     }
-    if (args.live_recovery && !matches!(build.backend, Backend::Staging | Backend::LocalAsync))
+    if (args.device_reset && build.backend != Backend::LocalAsync)
+        || (args.live_recovery && !matches!(build.backend, Backend::Staging | Backend::LocalAsync))
         || (args.recovery
             && !matches!(
                 build.backend,
@@ -501,6 +517,8 @@ fn execute(args: &mut Args, summary: &mut Summary) -> io::Result<()> {
         build.backend.name(),
         if build.interactive {
             "interactive"
+        } else if args.device_reset {
+            "device_reset"
         } else if args.live_recovery {
             "live_recovery"
         } else if args.recovery {
@@ -658,6 +676,7 @@ mod tests {
             disk_dir: None,
             recovery: false,
             live_recovery: false,
+            device_reset: false,
             ssh_key: None,
             ssh_port: 23479,
             crash_at: "after-storage".into(),
