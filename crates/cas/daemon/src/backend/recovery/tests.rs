@@ -24,7 +24,7 @@ fn idle_frontend_deadline_fails_the_retained_attachment_without_guest_access() {
         .unwrap();
     let deadline = Deadline::after(Duration::from_millis(20));
     backend.recovery_deadline = Some(deadline);
-    backend.recovery_timer = Some(deadline.timer().unwrap());
+    backend.deadline_timer = Some(deadline.timer().unwrap());
     std::thread::sleep(Duration::from_millis(30));
     let (_, token) = backend.deadline_listener().unwrap();
     assert_eq!(
@@ -107,20 +107,7 @@ fn retained_read_uses_the_normal_owned_reactor_and_original_head() {
     let (message, file) = carrier.export().unwrap();
     let (memory, vring) = super::super::tests::queue();
     let mem = memory.memory();
-    for (head, addr, length, flags, next) in [
-        (0u64, 0x4000u64, 16u32, 1u16, 1u16),
-        (1, 0x5000, BLOCK_SIZE as u32, 3, 2),
-        (2, 0x6000, 1, 2, 0),
-    ] {
-        let base = 0x1000 + head * 16;
-        mem.write_obj(addr.to_le(), GuestAddress(base)).unwrap();
-        mem.write_obj(length.to_le(), GuestAddress(base + 8))
-            .unwrap();
-        mem.write_obj(flags.to_le(), GuestAddress(base + 12))
-            .unwrap();
-        mem.write_obj(next.to_le(), GuestAddress(base + 14))
-            .unwrap();
-    }
+    super::super::tests::data_chain(&mem, virtio_bindings::bindings::virtio_blk::VIRTIO_BLK_T_IN);
     // IN has type zero, sector zero. Avail slot 1 is deliberately poisoned:
     // replay must walk saved head 0, never a consumed available-ring slot.
     mem.write_obj(0xffu8, GuestAddress(0x6000)).unwrap();
@@ -160,4 +147,72 @@ fn retained_read_uses_the_normal_owned_reactor_and_original_head() {
     assert_eq!(report["local"]["metrics"]["io_completed"], 1);
     assert_eq!(report["local"]["read"]["current"]["bytes"], 0);
     assert!(backend.recovery_deadline.is_none());
+}
+
+#[test]
+fn retained_rejected_write_replays_only_ioerr_without_gather_or_mutation() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("log");
+    let log = local::create_log(&path, 0x10000).unwrap();
+    let config = log.config();
+    drop(log);
+    let mut carrier = Carrier::create(
+        Geometry::new(1, 128).unwrap(),
+        Identity {
+            store: config.store,
+            image: config.image,
+            epoch: 1,
+            attachment: 1,
+        },
+        config.image_bytes,
+        0,
+    )
+    .unwrap();
+    carrier.initialize_queue(0, 0, 0).unwrap();
+    carrier
+        .reject(cas_daemon::inflight::Request {
+            kind: cas_daemon::inflight::Kind::Write,
+            queue: 0,
+            head: 0,
+            available: 0,
+            offset: 0,
+            length: BLOCK_SIZE as u64,
+        })
+        .unwrap();
+    let (message, file) = carrier.export().unwrap();
+    let (memory, vring) = crate::backend::tests::queue();
+    let mem = memory.memory();
+    crate::backend::tests::data_chain(
+        &mem,
+        virtio_bindings::bindings::virtio_blk::VIRTIO_BLK_T_OUT,
+    );
+    mem.write_slice(&[0xdd; BLOCK_SIZE], GuestAddress(0x5000))
+        .unwrap();
+    mem.write_obj(1u16, GuestAddress(0x2002)).unwrap();
+    let mut backend =
+        Backend::open_with_recovery(&path, BackendKind::LocalAsync, None, true, Fault::default())
+            .unwrap();
+    backend.update_memory(memory.clone()).unwrap();
+    backend.negotiated_features = REQUIRED_FEATURES;
+    backend.restore_attachment(&message, file).unwrap();
+    assert!(
+        backend
+            .activate_attachment(&mem, std::slice::from_ref(&vring))
+            .unwrap()
+    );
+    assert_eq!(
+        mem.read_obj::<u8>(GuestAddress(0x6000)).unwrap(),
+        Status::IoError as u8
+    );
+    assert_eq!(mem.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 1);
+    assert_eq!(backend.next_id, 1);
+    assert_eq!(backend.pending_count(), 0);
+    assert!(backend.failure.is_none());
+    backend.drain().unwrap();
+    let report = backend.report(0, true);
+    assert_eq!(report["writes"], 0);
+    assert_eq!(report["local"]["status"]["published"], 0);
+    assert_eq!(report["inflight"]["replayed_mutations"], 0);
+    assert_eq!(report["inflight"]["replay_copy_bytes"], 0);
+    assert_eq!(report["inflight"]["replayed_write_bytes"], 0);
 }

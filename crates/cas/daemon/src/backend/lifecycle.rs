@@ -141,6 +141,8 @@ impl Backend {
                 }
                 _ => (),
             }
+            self.clear_changed_waits(change);
+            self.rearm_deadline_timer()?;
             self.validate_used_cursors(vrings)?;
             if let Storage::Local(local) = &mut self.storage {
                 local.resume()?;

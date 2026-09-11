@@ -19,6 +19,7 @@ impl Deadline {
     pub fn remaining(self) -> io::Result<Duration> {
         self.0
             .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
             .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "recovery deadline expired"))
     }
 
@@ -85,24 +86,32 @@ impl Deadline {
         }
     }
 
+    pub fn instant(self) -> Instant {
+        self.0
+    }
+
     pub fn timer(self) -> io::Result<TimerFd> {
-        // SAFETY: creates a new owned descriptor; no pointers are passed.
-        let fd = unsafe {
-            libc::timerfd_create(
-                libc::CLOCK_MONOTONIC,
-                libc::TFD_CLOEXEC | libc::TFD_NONBLOCK,
-            )
-        };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: fd is newly created and its ownership moves into TimerFd.
-        let mut timer = unsafe { TimerFd::from_raw_fd(fd) };
+        let mut timer = timer()?;
         timer
             .reset(self.remaining()?, None)
             .map_err(io::Error::from)?;
         Ok(timer)
     }
+}
+
+pub fn timer() -> io::Result<TimerFd> {
+    // SAFETY: creates a new owned descriptor; no pointers are passed.
+    let fd = unsafe {
+        libc::timerfd_create(
+            libc::CLOCK_MONOTONIC,
+            libc::TFD_CLOEXEC | libc::TFD_NONBLOCK,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fd is newly created and its ownership moves into TimerFd.
+    Ok(unsafe { TimerFd::from_raw_fd(fd) })
 }
 
 #[cfg(test)]

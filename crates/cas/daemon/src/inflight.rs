@@ -18,7 +18,9 @@ use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use cas_core::{BLOCK_SIZE, MAX_REQUEST_BYTES};
 use vhost::vhost_user::message::VhostUserInflight;
 
-use layout::{ACTIVE, Descriptor, EMPTY, Header, MAGIC, PAGE, PREPARED, Queue, Slot};
+use layout::{
+    ACTIVE, Descriptor, EMPTY, Header, MAGIC, PAGE, PREPARED, Queue, REJECTED, Slot, VERSION,
+};
 use mapping::Mapping;
 
 pub use recovery::Replay;
@@ -151,11 +153,14 @@ pub struct Entry {
     pub mutation: u64,
     pub boundary: u64,
     pub attachment: u64,
+    pub rejected: bool,
 }
 
 impl Entry {
     fn required_publication(self) -> u64 {
-        if matches!(self.request.kind, Kind::Read | Kind::Flush) {
+        if self.rejected {
+            0
+        } else if matches!(self.request.kind, Kind::Read | Kind::Flush) {
             self.boundary
         } else {
             self.mutation
@@ -185,7 +190,7 @@ impl Carrier {
             image_bytes,
         };
         let header = carrier.header();
-        header.version.store(1, Relaxed);
+        header.version.store(VERSION, Relaxed);
         header.bytes.store(PAGE as u32, Relaxed);
         for (target, bytes) in [
             (&header.store, identity.store),
@@ -350,13 +355,22 @@ impl Carrier {
     }
 
     pub fn admit(&mut self, request: Request) -> io::Result<Entry> {
-        let entry = self.prepare(request)?;
+        self.admit_outcome(request, false)
+    }
+
+    /// Preserve an admission rejection across a crash without issuing a mutation.
+    pub fn reject(&mut self, request: Request) -> io::Result<Entry> {
+        self.admit_outcome(request, true)
+    }
+
+    fn admit_outcome(&mut self, request: Request, rejected: bool) -> io::Result<Entry> {
+        let entry = self.prepare(request, rejected)?;
         self.activate(entry)?;
         self.finish_admission(entry);
         Ok(entry)
     }
 
-    fn prepare(&mut self, request: Request) -> io::Result<Entry> {
+    fn prepare(&mut self, request: Request, rejected: bool) -> io::Result<Entry> {
         self.healthy()?;
         request.validate(self.image_bytes)?;
         if self.queue(request.queue)?.version.load(Acquire) != 1
@@ -381,7 +395,7 @@ impl Carrier {
             .checked_add(1)
             .ok_or_else(|| invalid("operation serial exhausted"))?;
         let boundary = self.header().mutation.load(Acquire);
-        let mutation = if request.mutates() {
+        let mutation = if request.mutates() && !rejected {
             boundary
                 .checked_add(1)
                 .ok_or_else(|| invalid("mutation sequence exhausted"))?
@@ -394,7 +408,10 @@ impl Carrier {
             mutation,
             boundary,
             attachment: self.identity.attachment,
+            rejected,
         };
+        slot.flags
+            .store(if rejected { REJECTED } else { 0 }, Relaxed);
         slot.kind.store(request.kind as u16, Relaxed);
         slot.queue.store(request.queue, Relaxed);
         slot.head.store(request.head, Relaxed);

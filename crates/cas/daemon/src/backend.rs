@@ -1,7 +1,9 @@
 // Queue execution: retain owned IO until completion and publish against one memory snapshot.
 
+mod admission;
 mod lifecycle;
 mod recovery;
+use admission::Admission;
 use cas_daemon::inflight::Entry;
 use recovery::Session;
 
@@ -95,7 +97,8 @@ pub(super) struct Backend {
     paused: bool,
     change_deadline: Option<std::time::Instant>,
     recovery_deadline: Option<Deadline>,
-    recovery_timer: Option<vmm_sys_util::timerfd::TimerFd>,
+    waiting: [Option<admission::Waiting>; CONCURRENT_QUEUES],
+    deadline_timer: Option<vmm_sys_util::timerfd::TimerFd>,
     blocked_queues: [bool; CONCURRENT_QUEUES],
     rebase_queues: [bool; CONCURRENT_QUEUES],
     restored_used: Option<u16>,
@@ -165,7 +168,9 @@ fn publish_tracked(
             .carrier
             .as_mut()
             .ok_or_else(|| io::Error::other("completion lost its carrier"))?;
-        let result = if health.failure.is_some() {
+        let result = if entry.rejected && status != Status::IoError {
+            Err(io::Error::other("success for a rejected admission"))
+        } else if health.failure.is_some() {
             if status != Status::IoError {
                 return Err(io::Error::other("success after image failure"));
             }
@@ -298,7 +303,14 @@ impl Backend {
             Storage::Opening(opening) => Some(opening.deadline),
             _ => None,
         };
-        let recovery_timer = recovery_deadline.map(Deadline::timer).transpose()?;
+        let deadline_timer = if matches!(kind, BackendKind::LocalAsync) {
+            Some(match recovery_deadline {
+                Some(deadline) => deadline.timer()?,
+                None => crate::deadline::timer()?,
+            })
+        } else {
+            None
+        };
         let capacity_bytes = storage.image_bytes();
         let exit = vmm_sys_util::event::new_event_consumer_and_notifier(
             EventFlag::NONBLOCK | EventFlag::CLOEXEC,
@@ -323,7 +335,8 @@ impl Backend {
             paused: false,
             change_deadline: None,
             recovery_deadline,
-            recovery_timer,
+            waiting: [None; CONCURRENT_QUEUES],
+            deadline_timer,
             blocked_queues: [false; CONCURRENT_QUEUES],
             rebase_queues: [false; CONCURRENT_QUEUES],
             restored_used: None,
@@ -361,16 +374,13 @@ impl Backend {
         self.recovery_deadline
     }
     pub fn deadline_listener(&self) -> Option<(RawFd, u16)> {
-        self.recovery_timer
+        self.deadline_timer
             .as_ref()
             .map(|timer| (timer.as_raw_fd(), self.completion_token() + 1))
     }
     fn recovered(&mut self) -> io::Result<()> {
-        if let Some(timer) = &mut self.recovery_timer {
-            timer.clear().map_err(io::Error::from)?;
-        }
         self.recovery_deadline = None;
-        Ok(())
+        self.rearm_deadline_timer()
     }
     pub fn pending_count(&self) -> usize {
         self.pending.len()
@@ -669,7 +679,8 @@ impl Backend {
             let queue = (first + offset) % count;
             self.admit_queue(&mem, queue as u16, &vrings[queue])?;
         }
-        self.storage.submit()
+        self.storage.submit()?;
+        self.rearm_deadline_timer()
     }
 
     fn admit_queue(
@@ -720,7 +731,10 @@ impl Backend {
             QUEUE_SIZE
         };
         let queue_size = usize::from(state.get_queue().size());
-        while self.pending.len() < limit && consumed < queue_size {
+        while consumed < queue_size {
+            if !self.concurrent && self.pending.len() >= limit {
+                break;
+            }
             let Some(NextChain { chain, next_avail }) = peek(mem.clone(), &mut state)? else {
                 break;
             };
@@ -740,13 +754,24 @@ impl Backend {
             if let Some(error) = guard.as_ref().and_then(|guard| guard.failure.as_ref()) {
                 return Err(io::Error::other(error.clone()));
             }
-            let Some(permit) = self.storage.prepare(request.admission_kind())? else {
+            let admission =
+                self.prepare_admission(queue, next_avail.wrapping_sub(1), &request, limit)?;
+            if matches!(admission, Admission::Waiting) {
                 break;
-            };
+            }
+            let rejected = matches!(admission, Admission::Rejected);
+            self.waiting[usize::from(queue)] = None;
             let inflight = guard
                 .as_deref_mut()
                 .and_then(|state| state.carrier.as_mut())
-                .map(|carrier| carrier.admit(request.inflight(queue, next_avail.wrapping_sub(1))))
+                .map(|carrier| {
+                    let request = request.inflight(queue, next_avail.wrapping_sub(1));
+                    if rejected {
+                        carrier.reject(request)
+                    } else {
+                        carrier.admit(request)
+                    }
+                })
                 .transpose()?;
             if inflight.is_some_and(|entry| entry.serial != next_id) {
                 return Err(io::Error::other(
@@ -762,18 +787,34 @@ impl Backend {
             ) {
                 self.queue_requests[usize::from(queue)] += 1;
             }
-            self.enqueue(
-                mem,
-                &mut state,
-                Admitted {
-                    queue,
-                    id,
-                    request,
-                    permit,
-                    inflight,
-                },
-                guard.as_deref_mut(),
-            )?;
+            if rejected {
+                self.finish(
+                    mem,
+                    &mut state,
+                    GuestCompletion {
+                        queue,
+                        target: request.completion(),
+                        inflight,
+                        write_number: None,
+                    },
+                    Status::IoError,
+                    None,
+                    guard.as_deref_mut(),
+                )?;
+            } else if let Admission::Accepted(permit) = admission {
+                self.enqueue(
+                    mem,
+                    &mut state,
+                    Admitted {
+                        queue,
+                        id,
+                        request,
+                        permit,
+                        inflight,
+                    },
+                    guard.as_deref_mut(),
+                )?;
+            }
             consumed += 1;
         }
         if consumed == queue_size {
@@ -979,17 +1020,19 @@ impl VhostUserBackendMut for Backend {
                         .is_some_and(|(_, token)| token == timer) =>
                 {
                     match self
-                        .recovery_timer
+                        .deadline_timer
                         .as_mut()
                         .unwrap()
                         .wait()
                         .map_err(io::Error::from)
                     {
                         Ok(_) => (),
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => (),
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
                         Err(error) => return Err(error),
                     }
-                    return self.recovery_deadline.map_or(Ok(()), Deadline::check);
+                    if let Some(deadline) = self.recovery_deadline {
+                        deadline.check()?;
+                    }
                 }
                 _ => return Err(io::Error::other("unknown event token")),
             }
@@ -1019,6 +1062,35 @@ mod tests {
         vring.set_queue_ready(true);
         vring.set_enabled(true);
         (mem, vring)
+    }
+
+    pub(super) fn data_chain(mem: &GuestMemoryMmap, kind: u32) {
+        use virtio_bindings::bindings::virtio_ring::{VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
+        let read = kind == virtio_bindings::bindings::virtio_blk::VIRTIO_BLK_T_IN;
+        let mut header = [0; 16];
+        header[..4].copy_from_slice(&kind.to_le_bytes());
+        mem.write_slice(&header, GuestAddress(0x4000)).unwrap();
+        for (index, addr, length, flags, next) in [
+            (0u64, 0x4000u64, 16u32, VRING_DESC_F_NEXT, 1u16),
+            (
+                1,
+                0x5000,
+                BLOCK_SIZE as u32,
+                VRING_DESC_F_NEXT | if read { VRING_DESC_F_WRITE } else { 0 },
+                2,
+            ),
+            (2, 0x6000, 1, VRING_DESC_F_WRITE, 0),
+        ] {
+            let base = 0x1000 + index * 16;
+            mem.write_obj(addr.to_le(), GuestAddress(base)).unwrap();
+            mem.write_obj(length.to_le(), GuestAddress(base + 8))
+                .unwrap();
+            mem.write_obj((flags as u16).to_le(), GuestAddress(base + 12))
+                .unwrap();
+            mem.write_obj(next.to_le(), GuestAddress(base + 14))
+                .unwrap();
+        }
+        mem.write_obj(0xffu8, GuestAddress(0x6000)).unwrap();
     }
 
     #[test]

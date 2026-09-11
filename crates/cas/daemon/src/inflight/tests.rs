@@ -61,7 +61,7 @@ fn fd_survives_creator_and_has_bounded_standard_and_private_regions() {
     assert_eq!(original.geometry.bytes(), 155648);
     let wire = bytes(&original);
     let trailer = original.geometry.trailer();
-    assert_eq!(&wire[trailer..trailer + 8], b"CASIFL01");
+    assert_eq!(&wire[trailer..trailer + 8], b"CASIFL02");
     assert_eq!(&wire[trailer + 16..trailer + 32], &[0x21; 16]);
     let mut replacement = reopen(original);
     let replay = replacement.reconcile(&[Some(0); 4]).unwrap();
@@ -83,7 +83,9 @@ fn fd_survives_creator_and_has_bounded_standard_and_private_regions() {
 fn every_admission_cut_retains_identity_and_reserves_counters() {
     for cut in 0..7 {
         let mut carrier = fresh(1);
-        let entry = carrier.prepare(request(Kind::Write, 0, 7, 0)).unwrap();
+        let entry = carrier
+            .prepare(request(Kind::Write, 0, 7, 0), false)
+            .unwrap();
         if cut >= 1 {
             carrier
                 .descriptor(0, 7)
@@ -310,7 +312,7 @@ fn invalid_mapping_and_identity_are_rejected_without_modification() {
             5 => expected.image[0] ^= 1,
             6 => expected.epoch += 1,
             7 => expected.attachment += 1,
-            8 => original.header().version.store(2, Release),
+            8 => original.header().version.store(1, Release),
             9 => original.header().reserved[0].store(1, Release),
             10 => original.header().available[0].store(65536, Release),
             _ => unreachable!(),
@@ -455,4 +457,65 @@ fn quiesced_queue_reset_preserves_global_ids_and_refuses_live_ownership() {
             .entries
             .is_empty()
     );
+}
+
+#[test]
+fn rejected_outcomes_survive_admission_and_used_cuts_without_spending_mutations() {
+    for kind in [Kind::Write, Kind::Read, Kind::Flush, Kind::Zero] {
+        for cut in 0..=4 {
+            let mut carrier = fresh(1);
+            let older = carrier.admit(request(Kind::Write, 0, 3, 0)).unwrap();
+            let rejected = carrier.prepare(request(kind, 0, 7, 1), true).unwrap();
+            assert_eq!(
+                (rejected.serial, rejected.boundary, rejected.mutation),
+                (2, 1, 0)
+            );
+            assert!(rejected.rejected);
+            if cut >= 1 {
+                carrier.activate(rejected).unwrap();
+            }
+            if cut >= 2 {
+                carrier.finish_admission(rejected);
+            }
+            if cut >= 3 {
+                carrier.begin_completion(rejected, 0).unwrap();
+            }
+            let guest_used = u16::from(cut == 4);
+            let mut carrier = reopen(carrier);
+            let replay = carrier.reconcile(&[Some(guest_used)]).unwrap();
+            assert_eq!(
+                (
+                    replay.highest_serial,
+                    replay.highest_mutation,
+                    replay.published
+                ),
+                (2, 1, 0)
+            );
+            assert_eq!(
+                replay.entries,
+                if cut == 4 {
+                    vec![older]
+                } else {
+                    vec![older, rejected]
+                }
+            );
+            if cut != 4 {
+                carrier.complete(rejected, 0, || Ok(())).unwrap();
+            }
+            let next = carrier.admit(request(Kind::Write, 0, 8, 2)).unwrap();
+            assert_eq!((next.serial, next.mutation), (3, 2));
+            assert!(!next.rejected);
+            carrier.publish(1).unwrap();
+            carrier.complete(older, 1, || Ok(())).unwrap();
+            carrier.publish(2).unwrap();
+            carrier.complete(next, 2, || Ok(())).unwrap();
+            assert!(
+                reopen(carrier)
+                    .reconcile(&[Some(3)])
+                    .unwrap()
+                    .entries
+                    .is_empty()
+            );
+        }
+    }
 }

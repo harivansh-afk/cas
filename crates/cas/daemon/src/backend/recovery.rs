@@ -338,7 +338,9 @@ impl Backend {
         session.replay_copy_bytes = copied;
         session.replayed_write_bytes = requests
             .iter()
-            .map(|request| {
+            .zip(&replay.entries)
+            .filter(|(_, entry)| !entry.rejected)
+            .map(|(request, _)| {
                 if let Request::Write(data) = request {
                     data.len as u64
                 } else {
@@ -356,15 +358,26 @@ impl Backend {
         // may see this newer prefix, and recovered FLUSHes cover their boundary.
         for (entry, request) in replay.entries.into_iter().zip(requests) {
             let queue = &mut *queues[usize::from(entry.request.queue)];
-            let permit = shared
-                .reserve(request.admission_kind())
-                .ok_or_else(|| io::Error::other("replay completion reserve exhausted"))?;
             let completion = GuestCompletion {
                 queue: entry.request.queue,
                 target: request.completion(),
                 inflight: Some(entry),
                 write_number: None,
             };
+            if entry.rejected {
+                self.finish(
+                    mem,
+                    queue,
+                    completion,
+                    Status::IoError,
+                    None,
+                    Some(&mut state),
+                )?;
+                continue;
+            }
+            let permit = shared
+                .reserve(request.admission_kind())
+                .ok_or_else(|| io::Error::other("replay completion reserve exhausted"))?;
             match request {
                 Request::Read(data) => {
                     self.enqueue(

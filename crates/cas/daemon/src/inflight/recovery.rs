@@ -1,7 +1,10 @@
 use std::io;
 use std::sync::atomic::Ordering::{Acquire, Release};
 
-use super::{ACTIVE, Carrier, EMPTY, Entry, Kind, MAGIC, PAGE, PREPARED, Request, Slot, invalid};
+use super::{
+    ACTIVE, Carrier, EMPTY, Entry, Kind, MAGIC, PAGE, PREPARED, REJECTED, Request, Slot, VERSION,
+    invalid,
+};
 
 pub struct Replay {
     /// Original admission order across all queues, including protocol requests.
@@ -21,7 +24,7 @@ impl Carrier {
     pub(super) fn validate_header(&self) -> io::Result<()> {
         let header = self.header();
         if header.magic.load(Acquire) != MAGIC
-            || header.version.load(Acquire) != 1
+            || header.version.load(Acquire) != VERSION
             || header.bytes.load(Acquire) != PAGE as u32
             || header.queues.load(Acquire) != u32::from(self.geometry.queues)
             || header.queue_size.load(Acquire) != u32::from(self.geometry.queue_size)
@@ -57,8 +60,8 @@ impl Carrier {
     pub(super) fn read_slot(&self, queue: u16, head: u16) -> io::Result<Option<(u32, Entry)>> {
         let slot = self.slot(queue, head)?;
         let state = slot.state.load(Acquire);
-        if slot.reserved.load(Acquire) != 0 || slot.tail.iter().any(|byte| byte.load(Acquire) != 0)
-        {
+        let flags = slot.flags.load(Acquire);
+        if flags & !REJECTED != 0 || slot.tail.iter().any(|byte| byte.load(Acquire) != 0) {
             return Err(invalid("nonzero reserved inflight slot bytes"));
         }
         if state == EMPTY {
@@ -82,8 +85,9 @@ impl Carrier {
             mutation: slot.mutation.load(Acquire),
             boundary: slot.boundary.load(Acquire),
             attachment: slot.attachment.load(Acquire),
+            rejected: flags & REJECTED != 0,
         };
-        let expected_mutation = if request.mutates() {
+        let expected_mutation = if request.mutates() && !entry.rejected {
             entry.boundary.checked_add(1)
         } else {
             Some(0)
