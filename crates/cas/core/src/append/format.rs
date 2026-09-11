@@ -414,6 +414,9 @@ impl Builder {
     pub fn allocation_bytes(&self) -> usize {
         self.buffer.as_slice().len()
     }
+    pub fn image_bytes(&self) -> u64 {
+        self.image_bytes
+    }
     pub fn allocation_address(&self) -> usize {
         self.buffer.as_slice().as_ptr() as usize
     }

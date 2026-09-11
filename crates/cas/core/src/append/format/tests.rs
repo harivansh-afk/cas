@@ -154,7 +154,7 @@ fn checksummed_but_inconsistent_metadata_is_rejected() {
     // Each edit retains a valid header CRC. These are framing/range checks,
     // independent of detecting torn or corrupt bytes with a checksum.
     for (offset, replacement) in [
-        (12, 64u64.to_le_bytes().to_vec()[..2].to_vec()),
+        (12, 64u16.to_le_bytes().to_vec()),
         (32, 4096u32.to_le_bytes().to_vec()),
         (40, u64::MAX.to_le_bytes().to_vec()),
         (64 + 24, u64::MAX.to_le_bytes().to_vec()),
