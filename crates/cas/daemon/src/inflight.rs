@@ -153,6 +153,16 @@ pub struct Entry {
     pub attachment: u64,
 }
 
+impl Entry {
+    fn required_publication(self) -> u64 {
+        if matches!(self.request.kind, Kind::Read | Kind::Flush) {
+            self.boundary
+        } else {
+            self.mutation
+        }
+    }
+}
+
 pub struct Carrier {
     mapping: Mapping,
     geometry: Geometry,
@@ -413,8 +423,10 @@ impl Carrier {
         {
             return Err(invalid("completion identity or used cursor differs"));
         }
-        if entry.mutation > self.published() {
-            return Err(invalid("write completion precedes ordered publication"));
+        if entry.required_publication() > self.published() {
+            return Err(invalid(
+                "completion precedes its captured publication boundary",
+            ));
         }
         self.descriptor(entry.request.queue, entry.request.head)?
             .next

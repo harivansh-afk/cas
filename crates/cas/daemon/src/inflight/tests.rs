@@ -227,6 +227,27 @@ fn global_order_and_boundaries_span_queues_and_empty_zero() {
 }
 
 #[test]
+fn read_and_flush_cannot_complete_before_the_captured_publication_boundary() {
+    for kind in [Kind::Read, Kind::Flush] {
+        let mut carrier = fresh(2);
+        carrier.admit(request(Kind::Write, 0, 0, 0)).unwrap();
+        let entry = carrier.admit(request(kind, 1, 0, 0)).unwrap();
+        assert!(
+            carrier
+                .complete(entry, 0, || panic!("boundary not yet published"))
+                .is_err()
+        );
+        // A saved used publication with this impossible prefix must also fail
+        // reconciliation before either queue's metadata is repaired.
+        let before = bytes(&carrier);
+        assert!(carrier.reconcile(&[Some(0), Some(1)]).is_err());
+        assert_eq!(bytes(&carrier), before);
+        carrier.publish(1).unwrap();
+        carrier.complete(entry, 0, || Ok(())).unwrap();
+    }
+}
+
+#[test]
 fn exhaustion_rejects_before_prepared_or_cursor_change() {
     for exhausted_mutation in [false, true] {
         let mut carrier = fresh(1);

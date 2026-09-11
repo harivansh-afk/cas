@@ -54,6 +54,9 @@ impl Log {
             next_batch: 1,
             highest_segment,
             published: 0,
+            issued: 0,
+            pending_descriptors: 0,
+            cohort: None,
             durable: 0,
             encoded_bytes: 0,
             allocated_bytes: 0,
@@ -102,6 +105,7 @@ impl Log {
                 required,
             });
         }
+        log.issued = log.published;
         if let Some((index, offset)) = rejected {
             // Retain all rejected bytes before the first destructive change.
             for (relative, (number, file)) in candidates[index..].iter().enumerate() {

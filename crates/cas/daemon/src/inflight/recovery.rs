@@ -137,7 +137,7 @@ impl Carrier {
                             || entry.boundary > mutation
                             || (state == ACTIVE
                                 && inflight == 0
-                                && entry.mutation > self.published())
+                                && entry.required_publication() > self.published())
                             || ((state == ACTIVE || inflight == 1)
                                 && descriptor.counter.load(Acquire) != entry.serial)
                         {
@@ -202,7 +202,8 @@ impl Carrier {
                                 && saved.entry.request.head == head
                         })
                         .ok_or_else(|| invalid("used publication has no saved head"))?;
-                    if interrupted.state != ACTIVE || interrupted.entry.mutation > self.published()
+                    if interrupted.state != ACTIVE
+                        || interrupted.entry.required_publication() > self.published()
                     {
                         return Err(invalid(
                             "used publication precedes active request or published mutation",

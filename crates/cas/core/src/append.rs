@@ -1,8 +1,10 @@
 //! Packed v2 staging, introduced separately from submission concurrency.
 pub mod format;
 mod index;
+mod read;
 mod recovery;
 mod segment;
+mod submission;
 
 use std::fs::{self, File};
 use std::io;
@@ -15,6 +17,8 @@ use index::{Index, Mapping, Payload};
 use segment::{Directory, Segment};
 
 pub use crate::direct::Alignment;
+pub use read::{ReadPlan, ReadRange};
+pub use submission::Submission;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -28,6 +32,10 @@ pub enum Error {
     Exhausted,
     #[error("staging capacity exhausted")]
     Capacity,
+    #[error("operation waits for earlier appends or an active sync cohort")]
+    Pending,
+    #[error("append requires a drained durable segment rollover")]
+    Rollover,
     #[error("recovery prefix {recovered} does not cover required prefix {required}")]
     Prefix { recovered: u64, required: u64 },
 }
@@ -81,6 +89,7 @@ impl Default for Limits {
 pub struct Status {
     pub image_bytes: u64,
     pub published: u64,
+    pub issued: u64,
     pub durable: u64,
     pub epoch: u64,
     pub segments: usize,
@@ -92,7 +101,7 @@ pub struct Status {
     pub failed: bool,
 }
 
-/// C2 serial execution. The actual IO file descriptions stay locked and are
+/// Ordered staging state. The actual IO file descriptions stay locked and are
 /// shared with immutable payload pins. No explicit unlock precedes file release.
 pub struct Log {
     directory: Directory,
@@ -104,6 +113,9 @@ pub struct Log {
     next_batch: u64,
     highest_segment: u64,
     published: u64,
+    issued: u64,
+    pending_descriptors: usize,
+    cohort: Option<submission::Cohort>,
     durable: u64,
     encoded_bytes: u64,
     allocated_bytes: u64,
@@ -145,6 +157,9 @@ impl Log {
             next_batch: 1,
             highest_segment: 1,
             published: 0,
+            issued: 0,
+            pending_descriptors: 0,
+            cohort: None,
             durable: 0,
             encoded_bytes: BLOCK_SIZE as u64,
             allocated_bytes,
@@ -182,6 +197,7 @@ impl Log {
         Status {
             image_bytes: self.config.image_bytes,
             published: self.published,
+            issued: self.issued,
             durable: self.durable,
             epoch: self.current().header.epoch,
             segments: self.segments.len(),
@@ -226,71 +242,37 @@ impl Log {
     }
 
     pub fn append(&mut self, builder: Builder) -> Result<Batch> {
-        self.healthy()?;
-        if builder.is_empty() {
-            return Err(format::Error::Invalid("empty append").into());
+        match self.check_append(&builder) {
+            Err(Error::Rollover) => {
+                self.flush()?;
+                self.rollover()?;
+            }
+            result => result?,
         }
-        if builder.image_bytes() != self.config.image_bytes {
-            return Err(format::Error::Invalid("builder image mismatch").into());
-        }
-        // An overwrite can split both boundary intervals. Reserve the maximum
-        // growth for every descriptor before issuing payload IO.
-        if self
-            .index
-            .len()
-            .checked_add(2 * builder.len())
-            .is_none_or(|count| count > self.limits.intervals)
-        {
-            return Err(Error::Capacity);
-        }
-        let first = self.published.checked_add(1).ok_or(Error::Exhausted)?;
-        self.published
-            .checked_add(builder.len() as u64)
-            .ok_or(Error::Exhausted)?;
-        let bytes = (BLOCK_SIZE + builder.payload_bytes()) as u64;
-        if self.offset + bytes + BLOCK_SIZE as u64 > self.config.segment_bytes {
-            self.flush()?;
-            self.rotate(self.current().header.epoch)?;
-        }
-        let batch = builder.seal(self.current().header.number, self.next_batch, first)?;
-        self.next_batch.checked_add(1).ok_or(Error::Exhausted)?;
-        let result = direct::write_bytes(&self.current().file, batch.bytes(), self.offset);
+        let submission = self.prepare_append(builder)?;
+        let result = direct::write_bytes(
+            submission.file(),
+            submission.batch().bytes(),
+            submission.offset(),
+        );
         self.fail_on_io(result)?;
-        let header = Header::decode(&batch.bytes()[..BLOCK_SIZE], self.config.image_bytes)?;
-        self.publish(&header, Arc::clone(self.current()), self.offset);
-        self.offset += bytes;
-        self.encoded_bytes += bytes;
-        self.next_batch += 1;
-        Ok(batch)
+        self.publish_append(&submission)?;
+        Ok(submission.into_batch())
     }
 
     pub fn flush(&mut self) -> Result<u64> {
         self.healthy()?;
+        if self.cohort.is_some() || self.issued != self.published {
+            return Err(Error::Pending);
+        }
         if self.fenced && self.durable == self.published {
             return Ok(self.durable);
         }
-        self.next_batch.checked_add(1).ok_or(Error::Exhausted)?;
-        if self.offset + BLOCK_SIZE as u64 > self.config.segment_bytes {
-            // Only a preceding fence can consume the reserved final slot.
-            // Synchronize it before rotating, then emit the requested new fence.
-            let result = direct::sync_data(&self.current().file);
-            self.fail_on_io(result)?;
-            self.rotate(self.current().header.epoch)?;
-        }
-        let fence = Batch::fence(
-            self.current().header.number,
-            self.next_batch,
-            self.published,
-        )?;
-        let result = direct::write_bytes(&self.current().file, fence.bytes(), self.offset)
-            .and_then(|()| direct::sync_data(&self.current().file));
+        let fence = self.prepare_fence()?;
+        let result = direct::write_bytes(fence.file(), fence.batch().bytes(), fence.offset())
+            .and_then(|()| direct::sync_data(fence.file()));
         self.fail_on_io(result)?;
-        self.offset += BLOCK_SIZE as u64;
-        self.encoded_bytes += BLOCK_SIZE as u64;
-        self.next_batch += 1;
-        self.durable = self.published;
-        self.fenced = true;
-        Ok(self.durable)
+        self.complete_sync(&fence)
     }
 
     fn publish(&mut self, header: &Header<'_>, segment: Arc<Segment>, offset: u64) {
@@ -320,58 +302,10 @@ impl Log {
         self.published = envelope.last;
     }
 
-    /// A partial original WRITE needs at most MAX_REQUEST_BYTES scratch bytes
-    /// to verify its CRC. Callers reserve that scratch capacity before admission.
+    /// Reserve response plus MAX_REQUEST_BYTES checksum scratch before calling.
     pub fn read_into(&mut self, offset: u64, buffer: &mut AlignedBuffer) -> Result<()> {
-        self.healthy()?;
-        let length = buffer.as_slice().len();
-        let end = offset.checked_add(length as u64).ok_or(Error::Exhausted)?;
-        if !offset.is_multiple_of(BLOCK_SIZE as u64)
-            || end > self.config.image_bytes
-            || length > MAX_REQUEST_BYTES
-        {
-            return Err(format::Error::Invalid("read range").into());
-        }
-        buffer.as_mut_slice().fill(0);
-        let mut scratch: Option<AlignedBuffer> = None;
-        for (begin, mapping) in self.index.overlapping(offset, end) {
-            let Some((payload, payload_offset)) = &mapping.source else {
-                continue;
-            };
-            let first = begin.max(offset);
-            let last = mapping.end.min(end);
-            let skip = payload_offset + first - begin;
-            debug_assert!(skip + last - first <= payload.bytes as u64);
-            debug_assert_eq!(payload.sequence, mapping.sequence);
-            let destination =
-                &mut buffer.as_mut_slice()[(first - offset) as usize..(last - offset) as usize];
-            let result = if skip == 0 && destination.len() == payload.bytes {
-                direct::read_bytes(&payload.segment.file, destination, payload.offset)
-                    .and_then(|()| verify_read_crc(destination, payload.crc))
-            } else {
-                if scratch
-                    .as_ref()
-                    .is_none_or(|buffer| buffer.as_slice().len() < payload.bytes)
-                {
-                    // Release the old allocation before growing within the cap.
-                    drop(scratch.take());
-                    scratch = Some(AlignedBuffer::new(payload.bytes));
-                }
-                let bytes = &mut scratch.as_mut().unwrap().as_mut_slice()[..payload.bytes];
-                direct::read_bytes(&payload.segment.file, bytes, payload.offset)
-                    .and_then(|()| verify_read_crc(bytes, payload.crc))
-                    .map(|()| {
-                        destination.copy_from_slice(
-                            &bytes[skip as usize..skip as usize + destination.len()],
-                        )
-                    })
-            };
-            if let Err(error) = result {
-                self.failed = true;
-                return Err(error.into());
-            }
-        }
-        Ok(())
+        let plan = self.read_plan(offset, buffer.as_slice().len(), self.published)?;
+        self.fail_on_io(plan.read_into(buffer))
     }
 }
 
@@ -382,5 +316,7 @@ fn verify_read_crc(bytes: &[u8], crc: u32) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod submission_tests;
 #[cfg(test)]
 mod tests;
