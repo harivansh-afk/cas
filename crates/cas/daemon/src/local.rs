@@ -2,6 +2,7 @@
 mod reactor;
 mod state;
 pub use state::ImageState;
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
@@ -113,6 +114,39 @@ struct Packing {
 enum Command {
     Append(Packing),
     Io(Io),
+}
+
+impl Command {
+    // The frontend keeps ownership when the worker cannot accept a command.
+    // Return a completion for every transferred request, including batch members.
+    fn reject(self, error: &str, output: &mut VecDeque<Completed>) {
+        let mut complete = |id, data, permit| {
+            output.push_back(Completed {
+                id,
+                data,
+                result: Err(io::Error::other(error.to_owned())),
+                _permit: Some(permit),
+            })
+        };
+        match self {
+            Self::Append(Packing {
+                builder,
+                credits,
+                writes,
+            }) => {
+                drop(builder);
+                drop(credits);
+                for write in writes {
+                    complete(
+                        write.id,
+                        CompletionData::Write { bytes: write.bytes },
+                        write.permit,
+                    );
+                }
+            }
+            Self::Io(io) => complete(io.id, io.operation.into(), io.permit),
+        }
+    }
 }
 
 struct Io {
@@ -232,6 +266,7 @@ pub struct Local {
     execution: Execution,
     admitted: u64,
     packing: Option<Packing>,
+    rejected: VecDeque<Completed>,
     pub shared: Arc<Shared>,
     pub status: append::Status,
 }
@@ -294,19 +329,27 @@ impl Local {
             execution,
             admitted: status.published,
             packing: None,
+            rejected: VecDeque::new(),
             shared,
             status,
         })
     }
 
-    fn send(&self, command: Command) -> io::Result<()> {
-        self.sender
+    fn send(&mut self, command: Command) -> io::Result<()> {
+        if let Err(error) = self
+            .sender
             .as_ref()
             .expect("live local worker")
             .try_send(command)
-            .map_err(io::Error::other)?;
+        {
+            let message = error.to_string();
+            let (mpsc::TrySendError::Full(command) | mpsc::TrySendError::Disconnected(command)) =
+                error;
+            command.reject(&message, &mut self.rejected);
+            return Err(io::Error::other(message));
+        }
         if let Some(wake) = &self.input_wake {
-            wake.write(1)?;
+            notify(wake)?;
         }
         Ok(())
     }
@@ -410,16 +453,23 @@ impl Local {
                 "local writes must gather directly into an append batch",
             ));
         }
-        self.seal()?;
-        self.send(Command::Io(Io {
+        let command = Command::Io(Io {
             id,
             operation,
             permit,
             boundary: self.admitted,
-        }))
+        });
+        if let Err(error) = self.seal() {
+            command.reject(&error.to_string(), &mut self.rejected);
+            return Err(error);
+        }
+        self.send(command)
     }
 
     pub fn receive(&mut self, wait: bool) -> io::Result<Option<Completed>> {
+        if let Some(completed) = self.rejected.pop_front() {
+            return Ok(Some(completed));
+        }
         let receiver = self
             .receiver
             .get_mut()
@@ -452,7 +502,7 @@ impl Local {
     }
 
     pub fn stop(&mut self) -> io::Result<()> {
-        self.seal()?;
+        let sealed = self.seal();
         drop(self.sender.take());
         if let Some(wake) = &self.input_wake {
             let _ = wake.write(1);
@@ -462,6 +512,7 @@ impl Local {
                 .join()
                 .map_err(|_| io::Error::other("local IO worker panicked"))?;
         }
+        self.rejected.clear();
         let receiver = self
             .receiver
             .get_mut()
@@ -470,7 +521,7 @@ impl Local {
             self.status = status;
             drop(completed);
         }
-        Ok(())
+        sealed
     }
 }
 
@@ -481,6 +532,14 @@ impl Drop for Local {
 }
 
 struct Wake(EventFd);
+
+fn notify(event: &EventFd) -> io::Result<()> {
+    match event.write(1) {
+        // A saturated counter already has a notification for the consumer.
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(()),
+        result => result,
+    }
+}
 impl Drop for Wake {
     fn drop(&mut self) {
         let _ = self.0.write(1);
@@ -529,7 +588,7 @@ impl Worker {
                 self.log.status(),
             ))
             .map_err(io::Error::other)?;
-        self.wake.0.write(1)
+        notify(&self.wake.0)
     }
 
     fn run(mut self, input: mpsc::Receiver<Command>) {

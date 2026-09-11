@@ -390,7 +390,7 @@ impl Backend {
         mem: &GuestMemoryMmap,
         state: &mut VringState,
         admitted: Admitted,
-        health: Option<&mut local::ImageState>,
+        mut health: Option<&mut local::ImageState>,
     ) -> io::Result<()> {
         let Admitted {
             queue,
@@ -400,60 +400,57 @@ impl Backend {
             inflight,
         } = admitted;
         let write_number = matches!(&request, Request::Write(_)).then(|| self.fault.next_write());
-        let tracked = |target| GuestCompletion {
+        let completion = GuestCompletion {
             queue,
-            target,
+            target: request.completion(),
             inflight,
             write_number,
         };
-        let mut permit = Some(permit);
-        self.fault
-            .set_snapshot(health.as_deref().and_then(local::ImageState::snapshot));
-        self.fault.hit(Point::BeforeSubmit, write_number)?;
-        let (completion, segments, operation) = match request {
-            Request::GetId {
-                completion,
-                segments,
-            } => {
+        match &request {
+            Request::GetId { segments, .. } => {
                 return self.finish(
                     mem,
                     state,
-                    tracked(completion),
+                    completion,
                     Status::Ok,
-                    Some((&segments, DEVICE_ID)),
+                    Some((segments, DEVICE_ID)),
                     health,
                 );
             }
-            Request::Unsupported(completion) => {
-                return self.finish(
-                    mem,
-                    state,
-                    tracked(completion),
-                    Status::Unsupported,
-                    None,
-                    health,
-                );
+            Request::Unsupported(_) => {
+                return self.finish(mem, state, completion, Status::Unsupported, None, health);
             }
-            Request::Invalid(completion) => {
-                return self.finish(
-                    mem,
-                    state,
-                    tracked(completion),
-                    Status::IoError,
-                    None,
-                    health,
-                );
+            Request::Invalid(_) => {
+                return self.finish(mem, state, completion, Status::IoError, None, health);
             }
-            Request::Read(data) => (
-                data.completion,
-                data.segments,
-                Some(Operation::Read {
-                    offset: data.offset,
-                    buffer: AlignedBuffer::new(data.len),
-                }),
-            ),
-            Request::Write(data) => {
-                let operation = if self.storage.is_local() {
+            _ => (),
+        }
+        // Install retirement before gathering or handing off ownership. A local
+        // enqueue returns ownership through completion even if delivery fails.
+        self.pending.insert(
+            id,
+            PendingRequest {
+                completion,
+                segments: Vec::new(),
+                error_published: false,
+            },
+        );
+        self.counters.peak_inflight = self.counters.peak_inflight.max(self.pending.len());
+        let has_buffer = !matches!(&request, Request::Flush(_));
+        let mut owned = false;
+        let result = (|| {
+            self.fault
+                .set_snapshot(health.as_deref().and_then(local::ImageState::snapshot));
+            self.fault.hit(Point::BeforeSubmit, write_number)?;
+            let operation = match request {
+                Request::Read(data) => {
+                    self.pending.get_mut(&id).unwrap().segments = data.segments;
+                    Operation::Read {
+                        offset: data.offset,
+                        buffer: AlignedBuffer::new(data.len),
+                    }
+                }
+                Request::Write(data) if self.storage.is_local() => {
                     self.storage.gather(
                         id,
                         QueueHead {
@@ -462,7 +459,7 @@ impl Backend {
                         },
                         data.offset,
                         data.len,
-                        permit.take().expect("unsubmitted admission permit"),
+                        permit,
                         |destination| {
                             gather(
                                 mem,
@@ -472,8 +469,10 @@ impl Backend {
                             )
                         },
                     )?;
-                    None
-                } else {
+                    owned = true;
+                    return Ok(());
+                }
+                Request::Write(data) => {
                     let mut buffer = AlignedBuffer::new(data.len);
                     gather(
                         mem,
@@ -481,35 +480,39 @@ impl Backend {
                         buffer.as_mut_slice(),
                         &mut self.counters.guest_payload_copy_bytes,
                     )?;
-                    Some(Operation::Write {
+                    Operation::Write {
                         offset: data.offset,
                         buffer,
-                    })
-                };
-                (data.completion, Vec::new(), operation)
+                    }
+                }
+                Request::Flush(_) => Operation::Flush,
+                _ => unreachable!("immediate requests returned before storage admission"),
+            };
+            let result = self.storage.enqueue_owned(id, operation, permit);
+            owned = self.storage.is_local() || result.is_ok();
+            result
+        })();
+        if let Err(error) = result {
+            if !owned {
+                self.pending
+                    .remove(&id)
+                    .expect("untransferred retirement record");
+                if let Some(health) = health.as_deref_mut() {
+                    health.fail(error.to_string());
+                }
+                if let Err(retirement) =
+                    self.finish(mem, state, completion, Status::IoError, None, health)
+                {
+                    return Err(io::Error::other(format!(
+                        "{error}; failed retirement: {retirement}"
+                    )));
+                }
             }
-            Request::Flush(completion) => (completion, Vec::new(), Some(Operation::Flush)),
-        };
-        let has_buffer = !matches!(operation, Some(Operation::Flush));
-        if let Some(operation) = operation {
-            self.storage.enqueue_owned(
-                id,
-                operation,
-                permit.take().expect("unsubmitted admission permit"),
-            )?;
+            return Err(error);
         }
         if has_buffer {
             self.counters.bounce_requests += 1;
         }
-        self.pending.insert(
-            id,
-            PendingRequest {
-                completion: tracked(completion),
-                segments,
-                error_published: false,
-            },
-        );
-        self.counters.peak_inflight = self.counters.peak_inflight.max(self.pending.len());
         Ok(())
     }
     fn complete(&mut self, mem: &GuestMemoryMmap, vrings: &[VringMutex]) -> io::Result<()> {
@@ -742,6 +745,10 @@ impl Backend {
     }
     /// Reap IO after disconnect without touching guest queues or memory.
     pub fn drain(&mut self) -> io::Result<()> {
+        // An earlier gather may still own an unsealed batch when admission fails.
+        if let Err(error) = self.storage.submit() {
+            self.fail(error.to_string());
+        }
         while !self.pending.is_empty() {
             let completed = match self.storage.wait_complete() {
                 Ok(completed) => completed,
@@ -1070,5 +1077,101 @@ mod tests {
                 .set_next_avail(next.next_avail);
             assert_eq!(vring.queue_next_avail(), 1);
         }
+    }
+    #[test]
+    fn failed_gather_retires_its_head_and_drains_an_earlier_unsealed_batch() {
+        use cas_daemon::inflight::{Carrier, Geometry, Identity};
+        let directory = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut backend = Backend::open_with_recovery(
+            &directory.path().join("log"),
+            BackendKind::LocalAsync,
+            Some(BLOCK_SIZE as u64),
+            false,
+            Fault::default(),
+        )
+        .unwrap();
+        let (memory, vring) = queue();
+        backend.update_memory(memory.clone()).unwrap();
+        let mem = memory.memory();
+        let gate = backend.storage.completion_gate().unwrap();
+        let mut carrier = Carrier::create(
+            Geometry::new(1, QUEUE_SIZE as u16).unwrap(),
+            Identity {
+                store: [1; 16],
+                image: [2; 16],
+                epoch: 1,
+                attachment: 1,
+            },
+            BLOCK_SIZE as u64,
+            0,
+        )
+        .unwrap();
+        carrier.initialize_queue(0, 0, 0).unwrap();
+        gate.lock().unwrap().carrier = Some(carrier);
+        for (id, address) in [(0, 0x6000), (1, 0x10000)] {
+            let request = Request::Write(request::DataRequest {
+                completion: Completion {
+                    head: id as u16,
+                    status: GuestAddress(0x5100 + id),
+                },
+                offset: 0,
+                len: BLOCK_SIZE,
+                segments: vec![Segment {
+                    addr: GuestAddress(address),
+                    len: BLOCK_SIZE,
+                    writable: false,
+                }],
+            });
+            mem.write_obj(0xffu8, request.completion().status).unwrap();
+            let permit = backend
+                .storage
+                .prepare(request.admission_kind())
+                .unwrap()
+                .unwrap();
+            let mut health = gate.lock().unwrap();
+            let entry = health
+                .carrier
+                .as_mut()
+                .unwrap()
+                .admit(request.inflight(0, id as u16))
+                .unwrap();
+            let mut state = vring.get_mut();
+            state.get_queue_mut().set_next_avail(id as u16 + 1);
+            let result = backend.enqueue(
+                &mem,
+                &mut state,
+                Admitted {
+                    id,
+                    queue: 0,
+                    request,
+                    permit,
+                    inflight: Some(entry),
+                },
+                Some(&mut health),
+            );
+            assert_eq!(result.is_ok(), id == 0);
+            if id == 1 {
+                assert!(health.failure.is_some());
+                assert_eq!(
+                    mem.read_obj::<u8>(GuestAddress(0x5101)).unwrap(),
+                    Status::IoError as u8
+                );
+                assert_eq!(health.carrier.as_ref().unwrap().published(), 0);
+            }
+        }
+        assert_eq!(backend.pending_count(), 1); // Only the batch still owns an operation.
+        backend.fail("injected guest gather failure".into());
+        backend.fail_pending(std::slice::from_ref(&vring));
+        backend.drain().unwrap();
+        assert_eq!(backend.pending_count(), 0);
+        assert_eq!(
+            mem.read_obj::<u8>(GuestAddress(0x5100)).unwrap(),
+            Status::IoError as u8
+        );
+        assert_eq!(mem.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 2);
+        let report = backend.storage.local_report().unwrap();
+        assert_eq!(report["status"]["published"], 0);
+        assert_eq!(report["append"]["current"]["bytes"], 0);
+        assert_eq!(report["requests"]["current"]["requests"], 0);
     }
 }

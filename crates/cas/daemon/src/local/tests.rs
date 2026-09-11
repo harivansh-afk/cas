@@ -426,3 +426,95 @@ fn returned_read_keeps_request_and_byte_credits_after_worker_shutdown() {
     assert_eq!(pools.requests.usage().current.requests, 0);
     assert_eq!(pools.read.usage().current.bytes, 0);
 }
+
+#[test]
+fn rejected_batch_and_following_read_return_each_owner_until_credits_are_released() {
+    for disconnected in [false, true] {
+        let directory = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut local = concurrent(&directory.path().join("log"));
+        drop(local.sender.take());
+        local.input_wake.as_ref().unwrap().write(1).unwrap();
+        local.worker.take().unwrap().join().unwrap();
+        let (sender, receiver) = mpsc::sync_channel(0);
+        let receiver = (!disconnected).then_some(receiver);
+        local.sender = Some(sender);
+        let read = local.shared.reserve(Kind::Read(BLOCK_SIZE)).unwrap();
+        for id in 0..2 {
+            let permit = local.prepare(Kind::Write(BLOCK_SIZE)).unwrap().unwrap();
+            local
+                .gather(
+                    id,
+                    QueueHead {
+                        queue: 0,
+                        head: id as u16,
+                    },
+                    0,
+                    BLOCK_SIZE,
+                    permit,
+                    |bytes| {
+                        bytes.fill(id as u8);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+        }
+        assert!(
+            local
+                .enqueue(
+                    2,
+                    Operation::Read {
+                        offset: 0,
+                        buffer: AlignedBuffer::new(BLOCK_SIZE)
+                    },
+                    read
+                )
+                .is_err()
+        );
+        let report = local.report();
+        assert_eq!(report["append"]["current"]["bytes"], 0); // Rejected final batch is gone.
+        assert_eq!(report["requests"]["current"]["requests"], 3);
+        assert_eq!(
+            report["read"]["current"]["bytes"],
+            BLOCK_SIZE + MAX_REQUEST_BYTES
+        );
+        let mut completed = Vec::new();
+        for id in 0..3 {
+            let item = local.receive(true).unwrap().unwrap();
+            assert_eq!(item.id, id);
+            assert!(item.result.is_err());
+            completed.push(item);
+        }
+        assert_eq!(local.report()["requests"]["current"]["requests"], 3);
+        drop(completed);
+        assert_eq!(local.report()["requests"]["current"]["requests"], 0);
+        assert_eq!(local.report()["read"]["current"]["bytes"], 0);
+        drop(receiver);
+        local.stop().unwrap();
+    }
+}
+
+#[test]
+fn accepted_command_survives_an_already_pending_wake_notification() {
+    let directory = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let mut local = concurrent(&directory.path().join("log"));
+    drop(local.sender.take());
+    local.input_wake.as_ref().unwrap().write(1).unwrap();
+    local.worker.take().unwrap().join().unwrap();
+    let (sender, receiver) = mpsc::sync_channel(1);
+    local.sender = Some(sender);
+    let wake = EventFd::new(EFD_NONBLOCK | EFD_CLOEXEC).unwrap();
+    wake.write(u64::MAX - 1).unwrap();
+    local.input_wake = Some(wake);
+    let permit = local.prepare(Kind::Control).unwrap().unwrap();
+    local.enqueue(0, Operation::Flush, permit).unwrap();
+    assert_eq!(local.report()["control"]["current"]["requests"], 1);
+    let command = receiver.try_recv().unwrap();
+    assert_eq!(
+        local.input_wake.as_ref().unwrap().read().unwrap(),
+        u64::MAX - 1
+    );
+    command.reject("test worker retirement", &mut local.rejected);
+    drop(local.receive(true).unwrap().unwrap());
+    assert_eq!(local.report()["control"]["current"]["requests"], 0);
+    local.stop().unwrap();
+}

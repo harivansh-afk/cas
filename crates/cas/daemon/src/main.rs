@@ -1,4 +1,4 @@
-// Single-queue vhost-user block device with raw and staging storage modes.
+// Vhost-user block device with reference storage and a concurrent local adapter.
 
 mod backend;
 mod fault;
