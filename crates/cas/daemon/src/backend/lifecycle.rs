@@ -16,6 +16,9 @@ impl Backend {
         let deadline = Instant::now() + local::IO_DEADLINE;
         self.change_deadline = Some(deadline);
         let result = (|| {
+            if let Some(deadline) = self.recovery_deadline {
+                deadline.check()?;
+            }
             let index = match change {
                 StateChange::QueueConfiguration(index)
                 | StateChange::QueueNotification(index)

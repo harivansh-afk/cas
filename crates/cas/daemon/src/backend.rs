@@ -26,6 +26,7 @@ use vmm_sys_util::epoll::EventSet;
 use vmm_sys_util::event::{EventConsumer, EventFlag, EventNotifier};
 use vmm_sys_util::eventfd::{EFD_CLOEXEC, EFD_NONBLOCK, EventFd};
 
+use crate::deadline::Deadline;
 use crate::fault::{Fault, Point};
 use crate::request::{self, Completion, DEVICE_ID, Request, Segment, Status};
 use crate::storage::{CompletionData, Operation, Permit, QueueHead, Storage};
@@ -93,6 +94,8 @@ pub(super) struct Backend {
     queue_requests: [u64; CONCURRENT_QUEUES],
     paused: bool,
     change_deadline: Option<std::time::Instant>,
+    recovery_deadline: Option<Deadline>,
+    recovery_timer: Option<vmm_sys_util::timerfd::TimerFd>,
     blocked_queues: [bool; CONCURRENT_QUEUES],
     rebase_queues: [bool; CONCURRENT_QUEUES],
     restored_used: Option<u16>,
@@ -291,6 +294,11 @@ impl Backend {
             BackendKind::LocalAsync if live => Storage::local_live(path, create_bytes)?,
             BackendKind::LocalAsync => Storage::local_async(path, create_bytes, &completion_event)?,
         };
+        let recovery_deadline = match &storage {
+            Storage::Opening(opening) => Some(opening.deadline),
+            _ => None,
+        };
+        let recovery_timer = recovery_deadline.map(Deadline::timer).transpose()?;
         let capacity_bytes = storage.image_bytes();
         let exit = vmm_sys_util::event::new_event_consumer_and_notifier(
             EventFlag::NONBLOCK | EventFlag::CLOEXEC,
@@ -314,6 +322,8 @@ impl Backend {
             queue_requests: [0; CONCURRENT_QUEUES],
             paused: false,
             change_deadline: None,
+            recovery_deadline,
+            recovery_timer,
             blocked_queues: [false; CONCURRENT_QUEUES],
             rebase_queues: [false; CONCURRENT_QUEUES],
             restored_used: None,
@@ -346,6 +356,21 @@ impl Backend {
     pub fn completion_token(&self) -> u16 {
         // Queue tokens precede the framework's exit event.
         (self.num_queues() + 1) as u16
+    }
+    pub fn recovery_deadline(&self) -> Option<Deadline> {
+        self.recovery_deadline
+    }
+    pub fn deadline_listener(&self) -> Option<(RawFd, u16)> {
+        self.recovery_timer
+            .as_ref()
+            .map(|timer| (timer.as_raw_fd(), self.completion_token() + 1))
+    }
+    fn recovered(&mut self) -> io::Result<()> {
+        if let Some(timer) = &mut self.recovery_timer {
+            timer.clear().map_err(io::Error::from)?;
+        }
+        self.recovery_deadline = None;
+        Ok(())
     }
     pub fn pending_count(&self) -> usize {
         self.pending.len()
@@ -948,6 +973,24 @@ impl VhostUserBackendMut for Backend {
                         Err(error) => return Err(error),
                     }
                 }
+                timer
+                    if self
+                        .deadline_listener()
+                        .is_some_and(|(_, token)| token == timer) =>
+                {
+                    match self
+                        .recovery_timer
+                        .as_mut()
+                        .unwrap()
+                        .wait()
+                        .map_err(io::Error::from)
+                    {
+                        Ok(_) => (),
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => (),
+                        Err(error) => return Err(error),
+                    }
+                    return self.recovery_deadline.map_or(Ok(()), Deadline::check);
+                }
                 _ => return Err(io::Error::other("unknown event token")),
             }
             self.process(vrings)
@@ -966,7 +1009,7 @@ mod tests {
     use std::fs::File;
     use vm_memory::GuestAddress;
 
-    fn queue() -> (GuestMemoryAtomic<GuestMemoryMmap>, VringMutex) {
+    pub(super) fn queue() -> (GuestMemoryAtomic<GuestMemoryMmap>, VringMutex) {
         let mem = GuestMemoryAtomic::new(
             GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap(),
         );

@@ -250,3 +250,44 @@ fn pause_waits_for_the_oldest_owned_append_even_after_a_later_cqe() {
     let metrics = run.shared.metrics.lock().unwrap();
     assert_eq!(metrics.io_queued, metrics.io_completed);
 }
+
+#[test]
+fn timed_out_pause_preserves_owners_and_no_late_write_can_succeed() {
+    let mut run = Run::start_with_pause(false, true);
+    run.wait_for_b();
+    assert!(matches!(
+        run.paused
+            .as_ref()
+            .unwrap()
+            .recv_timeout(Duration::from_millis(20)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    // The frontend's deadline expires while A remains owned by storage.
+    drop(run.paused.take());
+    run.shared
+        .health
+        .lock()
+        .unwrap()
+        .fail("storage pause timed out".into());
+    let contender = std::fs::File::open(
+        run.directory
+            .path()
+            .join("log/segment-00000000000000000001.v2"),
+    )
+    .unwrap();
+    assert!(matches!(
+        contender.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    assert_ne!(run.shared.pools.append.usage().current.bytes, 0);
+    assert_eq!(run.shared.final_status.lock().unwrap().published, 0);
+    run.release();
+    for _ in 0..2 {
+        let (completed, _) = run.output.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(completed.result.is_err());
+    }
+    assert_eq!(run.shared.final_status.lock().unwrap().published, 0);
+    assert_eq!(run.shared.pools.append.usage().current.bytes, 0);
+    assert_eq!(run.shared.pools.requests.usage().current.requests, 0);
+    contender.try_lock().unwrap();
+}

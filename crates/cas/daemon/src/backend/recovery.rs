@@ -251,6 +251,7 @@ impl Backend {
         }
         if phase != Phase::Replay {
             self.live.as_mut().unwrap().phase = Phase::Active;
+            self.recovered()?;
             return Ok(true);
         }
         let initialized: Vec<_> = (0..geometry.num_queues)
@@ -281,55 +282,40 @@ impl Backend {
             }
             requests.push(request);
         }
-        let mutations = replay
-            .entries
-            .iter()
-            .filter(|entry| entry.mutation != 0)
-            .map(|entry| Mutation {
-                id: RequestId {
-                    serial: entry.serial,
-                    attachment: entry.attachment,
-                    queue: entry.request.queue,
-                    head: entry.request.head,
-                },
-                sequence: entry.mutation,
-                offset: entry.request.offset,
-                length: entry.request.length,
-                kind: if entry.request.kind == cas_daemon::inflight::Kind::Write {
-                    Kind::Write
-                } else {
-                    Kind::Zero
-                },
-            })
-            .collect();
+        let epoch = carrier.identity().epoch;
+        drop(state); // No completion lock may span blocking filesystem IO.
         let Storage::Opening(opening) = &mut self.storage else {
             return Err(io::Error::other("missing locked recovery"));
         };
         let shared = Arc::clone(&opening.shared);
-        let mut storage_replay = opening.live(
-            replay.published,
-            carrier.identity().epoch,
-            replay.highest_mutation,
+        let worker_shared = Arc::clone(&shared);
+        let deadline = opening.deadline;
+        let inspected = opening.take_inspection()?;
+        let memory = mem.clone().into_inner();
+        let Recovered {
+            log,
+            replay,
+            requests,
+            copied,
             mutations,
-        )?;
-        carrier.publish(storage_replay.published())?;
-        let mut copied = 0;
-        let mut mutations = 0;
-        while let Some(mutation) = storage_replay.next() {
-            let index = replay
-                .entries
-                .binary_search_by_key(&mutation.id.serial, |entry| entry.serial)
-                .map_err(|_| io::Error::other("replay mutation lost its descriptor"))?;
-            let Request::Write(data) = &requests[index] else {
-                return Err(io::Error::other("unexpected replay mutation kind"));
-            };
-            shared.replay_next(&mut storage_replay, |destination| {
-                gather(mem, &data.segments, destination, &mut copied)
-            })?;
-            carrier.publish(storage_replay.published())?;
-            mutations += 1;
-        }
-        let mut log = shared.finish_replay(storage_replay)?;
+        } = deadline.run(move || {
+            replay_storage(
+                deadline,
+                inspected,
+                worker_shared,
+                memory,
+                epoch,
+                replay,
+                requests,
+            )
+        })?;
+        let mut state = gate
+            .lock()
+            .map_err(|_| io::Error::other("completion gate poisoned"))?;
+        let carrier = state
+            .carrier
+            .as_mut()
+            .ok_or_else(|| io::Error::other("missing retained carrier"))?;
         for (index, (queue, used)) in queues.iter_mut().zip(&cursors).enumerate() {
             let Some(used) = *used else { continue };
             if !initialized[index] {
@@ -360,11 +346,17 @@ impl Backend {
                 }
             })
             .sum();
+        self.storage = Storage::Local(Box::new(local::Local::from_log(
+            log,
+            &self.completion_event,
+            local::Execution::Concurrent,
+            Arc::clone(&shared),
+        )?));
         // All mutations and the recovery fence are durable. Recovered reads
         // may see this newer prefix, and recovered FLUSHes cover their boundary.
         for (entry, request) in replay.entries.into_iter().zip(requests) {
             let queue = &mut *queues[usize::from(entry.request.queue)];
-            let _permit = shared
+            let permit = shared
                 .reserve(request.admission_kind())
                 .ok_or_else(|| io::Error::other("replay completion reserve exhausted"))?;
             let completion = GuestCompletion {
@@ -375,19 +367,18 @@ impl Backend {
             };
             match request {
                 Request::Read(data) => {
-                    let mut buffer = AlignedBuffer::new(data.len);
-                    log.read_into(data.offset, &mut buffer)
-                        .map_err(io::Error::other)?;
-                    self.finish(
+                    self.enqueue(
                         mem,
                         queue,
-                        completion,
-                        Status::Ok,
-                        Some((&data.segments, buffer.as_slice())),
+                        Admitted {
+                            queue: entry.request.queue,
+                            id: entry.serial - 1,
+                            request: Request::Read(data),
+                            permit: Permit::Local { _credits: permit },
+                            inflight: Some(entry),
+                        },
                         Some(&mut state),
                     )?;
-                    self.counters.reads += 1;
-                    self.counters.read_bytes += data.len as u64;
                 }
                 Request::Write(data) => {
                     self.finish(mem, queue, completion, Status::Ok, None, Some(&mut state))?;
@@ -425,13 +416,99 @@ impl Backend {
             }
         }
         drop(state);
-        self.storage = Storage::Local(Box::new(local::Local::from_log(
-            log,
-            &self.completion_event,
-            local::Execution::Concurrent,
-            shared,
-        )?));
         self.live.as_mut().unwrap().phase = Phase::Active;
+        self.recovered()?;
         Ok(true)
     }
 }
+
+struct Recovered {
+    log: cas_core::append::Log,
+    replay: cas_daemon::inflight::Replay,
+    requests: Vec<Request>,
+    copied: u64,
+    mutations: usize,
+}
+
+fn replay_storage(
+    deadline: crate::deadline::Deadline,
+    inspected: cas_core::append::Recovery,
+    shared: Arc<local::Shared>,
+    memory: Arc<GuestMemoryMmap>,
+    epoch: u64,
+    replay: cas_daemon::inflight::Replay,
+    requests: Vec<Request>,
+) -> io::Result<Recovered> {
+    let mutations = replay
+        .entries
+        .iter()
+        .filter(|entry| entry.mutation != 0)
+        .map(|entry| Mutation {
+            id: RequestId {
+                serial: entry.serial,
+                attachment: entry.attachment,
+                queue: entry.request.queue,
+                head: entry.request.head,
+            },
+            sequence: entry.mutation,
+            offset: entry.request.offset,
+            length: entry.request.length,
+            kind: if entry.request.kind == cas_daemon::inflight::Kind::Write {
+                Kind::Write
+            } else {
+                Kind::Zero
+            },
+        })
+        .collect();
+    deadline.check()?;
+    let mut storage_replay = inspected
+        .live(replay.published, epoch, replay.highest_mutation, mutations)
+        .map_err(io::Error::other)?;
+    let publish = |prefix| -> io::Result<()> {
+        deadline.check()?;
+        shared
+            .health
+            .lock()
+            .map_err(|_| io::Error::other("completion gate poisoned"))?
+            .publish(prefix)
+    };
+    publish(storage_replay.published())?;
+    let mut copied = 0;
+    let mut mutations = 0;
+    while let Some(mutation) = storage_replay.next() {
+        deadline.check()?;
+        let index = replay
+            .entries
+            .binary_search_by_key(&mutation.id.serial, |entry| entry.serial)
+            .map_err(|_| io::Error::other("replay mutation lost its descriptor"))?;
+        let Request::Write(data) = &requests[index] else {
+            return Err(io::Error::other("unexpected replay mutation kind"));
+        };
+        shared.replay_next(&mut storage_replay, |destination| {
+            let health = shared
+                .health
+                .lock()
+                .map_err(|_| io::Error::other("completion gate poisoned"))?;
+            deadline.check()?;
+            if let Some(error) = &health.failure {
+                return Err(io::Error::other(error.clone()));
+            }
+            gather(&memory, &data.segments, destination, &mut copied)
+        })?;
+        publish(storage_replay.published())?;
+        mutations += 1;
+    }
+    deadline.check()?;
+    let log = shared.finish_replay(storage_replay)?;
+    deadline.check()?;
+    Ok(Recovered {
+        log,
+        replay,
+        requests,
+        copied,
+        mutations,
+    })
+}
+
+#[cfg(test)]
+mod tests;

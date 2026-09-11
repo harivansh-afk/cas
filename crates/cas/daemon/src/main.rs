@@ -1,6 +1,7 @@
 // Vhost-user block device with reference storage and a concurrent local adapter.
 
 mod backend;
+mod deadline;
 mod fault;
 mod local;
 mod request;
@@ -8,6 +9,7 @@ mod storage;
 
 use std::io;
 use std::num::NonZeroU64;
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -98,6 +100,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.restartable,
         fault,
     )?;
+    let recovery_deadline = backend.recovery_deadline();
+    let deadline_listener = backend.deadline_listener();
     let completion_fd = backend.completion_fd();
     let completion_token = backend.completion_token();
     let backend = Arc::new(Mutex::new(backend));
@@ -112,7 +116,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         EventSet::IN,
         u64::from(completion_token),
     )?;
+    if let Some((fd, token)) = deadline_listener {
+        daemon.get_epoll_handlers()[0].register_listener(fd, EventSet::IN, u64::from(token))?;
+    }
     let mut listener = Listener::new(&args.socket, false)?;
+    if let Some(deadline) = recovery_deadline {
+        deadline.wait_readable(listener.as_raw_fd())?;
+    }
     {
         // Workers cannot run before their fatal-error shutdown path is installed.
         // start accepts a connection and spawns the socket thread; it does not
