@@ -71,6 +71,7 @@ struct Attachment {
 struct Context {
     catalog: Option<cas_core::catalog::Catalog>,
     mode: Option<recovery::Mode>,
+    gates: Option<recovery::frontend::Gates>,
 }
 
 /// Complete retained membership, stabilized together before starting the host.
@@ -192,10 +193,16 @@ impl Host {
             &resources.metadata,
         )?;
         let image_count = images.as_ref().len();
+        if let Some(gates) = &context.gates {
+            gates.validate(images.as_ref())?;
+        }
         let admission = admission::Admission::new(image_count, &resources.metadata)?;
         let shared = Arc::new(SharedHost {
             admission,
-            gate: Arc::new(state::HostGate::default()),
+            gate: context.gates.as_ref().map_or_else(
+                || Arc::new(state::HostGate::default()),
+                |gates| Arc::clone(&gates.host),
+            ),
             reader: store.reader()?,
             resources,
             attached: AtomicUsize::new(0),
@@ -238,13 +245,16 @@ impl Host {
                     "host image identity or stabilized root differs",
                 ));
             }
-            let health = state::Gate::new(
-                ImageState {
-                    durable: log.status().durable,
-                    ..ImageState::default()
-                },
-                Some(Arc::clone(&shared.gate)),
-            );
+            let health = match &context.gates {
+                Some(gates) => Arc::clone(&gates.images[index].1),
+                None => state::Gate::new(
+                    ImageState {
+                        durable: log.status().durable,
+                        ..ImageState::default()
+                    },
+                    Some(Arc::clone(&shared.gate)),
+                ),
+            };
             let wake = EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK)?;
             let (output, events) = mailbox::bounded(1, &shared.resources.metadata)?;
             let (reply, replies) = mailbox::bounded(1, &shared.resources.metadata)?;

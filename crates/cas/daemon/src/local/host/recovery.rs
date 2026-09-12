@@ -3,7 +3,9 @@ use super::*;
 use cas_core::{catalog, catalog::Catalog, manifest::file, segments::Tickets};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+pub(crate) mod frontend;
 mod live;
+pub use frontend::RetainedHost;
 pub use live::{Prepared, Replay, Retained};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -279,6 +281,14 @@ impl Recovered {
     }
 
     pub fn into_host(self, staging_bytes: u64) -> io::Result<Host> {
+        self.into_host_with_gates(staging_bytes, None)
+    }
+
+    fn into_host_with_gates(
+        self,
+        staging_bytes: u64,
+        gates: Option<frontend::Gates>,
+    ) -> io::Result<Host> {
         Host::build_owned(
             self.resources,
             self.store,
@@ -291,6 +301,7 @@ impl Recovered {
             Context {
                 catalog: Some(self.catalog),
                 mode: Some(self.mode),
+                gates,
             },
         )
     }

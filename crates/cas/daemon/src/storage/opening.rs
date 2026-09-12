@@ -10,6 +10,7 @@ use std::time::Duration;
 enum Source {
     Created(Log),
     Existing(Recovery),
+    Shared(local::host::recovery::frontend::Endpoint),
 }
 
 pub struct Opening {
@@ -21,6 +22,28 @@ pub struct Opening {
 }
 
 impl Opening {
+    pub(crate) fn shared(
+        config: Config,
+        status: Status,
+        shared: Arc<Shared>,
+        deadline: Deadline,
+        endpoint: local::host::recovery::frontend::Endpoint,
+    ) -> Self {
+        Self {
+            source: Some(Source::Shared(endpoint)),
+            config,
+            status,
+            shared,
+            deadline,
+        }
+    }
+
+    pub(crate) fn endpoint(&mut self) -> Option<&mut local::host::recovery::frontend::Endpoint> {
+        match &mut self.source {
+            Some(Source::Shared(endpoint)) => Some(endpoint),
+            _ => None,
+        }
+    }
     pub fn new(path: &Path, create_bytes: Option<u64>) -> io::Result<Self> {
         Self::with_deadline(path, create_bytes, Deadline::after(RECOVERY_TIMEOUT))
     }
@@ -61,6 +84,11 @@ impl Opening {
     }
 
     pub fn fresh(&mut self) -> io::Result<Log> {
+        if matches!(self.source, Some(Source::Shared(_))) {
+            return Err(io::Error::other(
+                "retained host cannot choose cold recovery through GET",
+            ));
+        }
         let source = self
             .source
             .take()
@@ -68,6 +96,7 @@ impl Opening {
         self.deadline.run(move || match source {
             Source::Created(log) => Ok(log),
             Source::Existing(inspected) => inspected.fresh(0).map_err(io::Error::other),
+            Source::Shared(_) => unreachable!(),
         })
     }
 

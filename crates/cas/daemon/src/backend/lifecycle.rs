@@ -16,6 +16,15 @@ impl Backend {
         let deadline = Instant::now() + local::IO_DEADLINE;
         self.change_deadline = Some(deadline);
         let result = (|| {
+            if self
+                .live
+                .as_ref()
+                .is_some_and(|session| !session.permits_change(change))
+            {
+                return Err(io::Error::other(
+                    "frontend configuration changed during shared recovery",
+                ));
+            }
             if let Some(deadline) = self.recovery_deadline {
                 deadline.check()?;
             }

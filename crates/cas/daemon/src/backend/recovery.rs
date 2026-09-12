@@ -16,6 +16,7 @@ enum Phase {
     AwaitingFd,
     Fresh,
     Replay,
+    Waiting,
     Active,
 }
 
@@ -23,6 +24,7 @@ enum Phase {
 pub(super) struct Session {
     cold: Option<Identity>,
     phase: Phase,
+    frozen_queues: [bool; CONCURRENT_QUEUES],
     replayed_requests: usize,
     replayed_mutations: usize,
     replay_copy_bytes: u64,
@@ -34,6 +36,21 @@ pub(super) struct Session {
 impl Session {
     pub(super) fn fresh(&self) -> bool {
         self.phase == Phase::Fresh
+    }
+    pub(super) fn permits_change(&self, change: vhost_user_backend::StateChange) -> bool {
+        use vhost_user_backend::StateChange;
+        if self.phase != Phase::Waiting {
+            return true;
+        }
+        match change {
+            StateChange::QueueNotification(_) => true,
+            StateChange::QueueConfiguration(index)
+            | StateChange::QueueStop(index)
+            | StateChange::QueueEnable { index, .. } => {
+                self.frozen_queues.get(index).is_some_and(|frozen| !frozen)
+            }
+            _ => false,
+        }
     }
     pub(super) fn active(&self) -> bool {
         self.phase == Phase::Active
@@ -230,6 +247,19 @@ impl Backend {
             return Ok(true);
         };
         let phase = session.phase;
+        if phase == Phase::Waiting {
+            let Storage::Opening(opening) = &mut self.storage else {
+                return Err(io::Error::other("missing shared recovery endpoint"));
+            };
+            let result = opening
+                .endpoint()
+                .ok_or_else(|| io::Error::other("missing shared recovery endpoint"))?
+                .poll()?;
+            return match result {
+                Some(activated) => self.finish_attachment(mem, vrings, activated),
+                None => Ok(false),
+            };
+        }
         if phase == Phase::AwaitingFd {
             return Err(io::Error::other("IO before inflight negotiation"));
         }
@@ -324,6 +354,32 @@ impl Backend {
             return Err(io::Error::other("missing locked recovery"));
         };
         let shared = Arc::clone(&opening.shared);
+        if let Some(endpoint) = opening.endpoint() {
+            self.live.as_mut().unwrap().frozen_queues.fill(true);
+            for (frozen, cursor) in self
+                .live
+                .as_mut()
+                .unwrap()
+                .frozen_queues
+                .iter_mut()
+                .zip(&cursors)
+            {
+                *frozen = cursor.is_some();
+            }
+            endpoint.submit(Validated {
+                epoch,
+                replay,
+                requests,
+                cursors,
+                initialized,
+                memory: mem.clone().into_inner(),
+                shared,
+                copied: 0,
+                mutation_count: 0,
+            })?;
+            self.live.as_mut().unwrap().phase = Phase::Waiting;
+            return Ok(false);
+        }
         let worker_shared = Arc::clone(&shared);
         let deadline = opening.deadline;
         let inspected = opening.take_inspection()?;
@@ -345,14 +401,94 @@ impl Backend {
                 requests,
             )
         })?;
-        let mut state = gate
-            .lock()
-            .map_err(|_| io::Error::other("completion gate poisoned"))?;
+        drop(queues);
+        let local = local::Local::from_log(
+            log,
+            &self.completion_event,
+            local::Execution::Concurrent,
+            Arc::clone(&shared),
+        )?;
+        self.finish_attachment(
+            mem,
+            vrings,
+            Activated {
+                local,
+                saved: Validated {
+                    epoch,
+                    replay,
+                    requests,
+                    cursors,
+                    initialized,
+                    memory: mem.clone().into_inner(),
+                    shared,
+                    copied,
+                    mutation_count: mutations,
+                },
+            },
+        )
+    }
+
+    fn finish_attachment(
+        &mut self,
+        mem: &GuestMemoryLoadGuard<GuestMemoryMmap>,
+        vrings: &[VringMutex],
+        activated: Activated,
+    ) -> io::Result<bool> {
+        let Activated { local, saved } = activated;
+        let Validated {
+            replay,
+            requests,
+            mut cursors,
+            initialized,
+            copied,
+            mutation_count: mutations,
+            memory,
+            shared: original,
+            ..
+        } = saved;
+        if !Arc::ptr_eq(&memory, &mem.clone().into_inner()) {
+            return Err(io::Error::other(
+                "guest memory changed during shared recovery",
+            ));
+        }
+        let shared = Arc::clone(&local.shared);
+        if !Arc::ptr_eq(&original.health, &shared.health) {
+            return Err(io::Error::other(
+                "recovered image changed its completion gate",
+            ));
+        }
+        if let Some(injection) = original.injection.get()
+            && !Arc::ptr_eq(&original, &shared)
+        {
+            shared
+                .injection
+                .set(injection.clone())
+                .map_err(|_| io::Error::other("duplicate recovered injection"))?;
+        }
+        let status = local.status;
+        let gate = Arc::clone(&shared.health);
+        self.storage = Storage::Local(Box::new(local));
+        let mut queues: Vec<_> = vrings.iter().map(VringMutex::get_mut).collect();
+        let mut state = gate.lock()?;
+        if let Some(error) = &state.failure {
+            return Err(io::Error::other(error.clone()));
+        }
         let carrier = state
             .carrier
             .as_mut()
             .ok_or_else(|| io::Error::other("missing retained carrier"))?;
-        for (index, (queue, used)) in queues.iter_mut().zip(&cursors).enumerate() {
+        for (index, (queue, used)) in queues.iter_mut().zip(&mut cursors).enumerate() {
+            if !self.blocked_queues[index] && queue.is_enabled() && queue.get_queue().ready() {
+                let actual = queue
+                    .get_queue()
+                    .used_idx(&**mem, Ordering::Acquire)
+                    .map_err(io::Error::other)?
+                    .0;
+                if actual != used.unwrap_or(0) {
+                    return Err(io::Error::other("guest used index changed during recovery"));
+                }
+                *used = Some(actual);
+            }
             let Some(used) = *used else { continue };
             if !initialized[index] {
                 carrier.initialize_queue(index as u16, queue.get_queue().next_avail(), used)?;
@@ -362,13 +498,13 @@ impl Backend {
                 .set_next_avail(carrier.available(index as u16)?);
             queue.get_queue_mut().set_next_used(used);
         }
-        state.durable = log.status().durable;
+        state.durable = status.durable;
         self.next_id = replay.highest_serial;
         self.restored_used = Some(cursors.iter().flatten().copied().next().unwrap_or(0));
         self.restored_pending = replay.entries.len() as u16;
         let session = self.live.as_mut().unwrap();
         session.saved_p = replay.published;
-        session.recovered_p = log.status().published;
+        session.recovered_p = status.published;
         session.replayed_requests = replay.entries.len();
         session.replayed_mutations = mutations;
         session.replay_copy_bytes = copied;
@@ -384,12 +520,6 @@ impl Backend {
                 }
             })
             .sum();
-        self.storage = Storage::Local(Box::new(local::Local::from_log(
-            log,
-            &self.completion_event,
-            local::Execution::Concurrent,
-            Arc::clone(&shared),
-        )?));
         // All mutations and the recovery fence are durable. Recovered reads
         // may see this newer prefix, and recovered FLUSHes cover their boundary.
         for (entry, request) in replay.entries.into_iter().zip(requests) {
@@ -411,8 +541,12 @@ impl Backend {
                 )?;
                 continue;
             }
+            let completion_kind = match &request {
+                Request::Read(data) => local::Kind::Read(data.len),
+                _ => local::Kind::Control,
+            };
             let permit = shared
-                .reserve(request.admission_kind())
+                .reserve(completion_kind)
                 .ok_or_else(|| io::Error::other("replay completion reserve exhausted"))?;
             match request {
                 Request::Read(data) => {
@@ -488,27 +622,7 @@ fn replay_storage(
     replay: crate::inflight::Replay,
     requests: Vec<Request>,
 ) -> io::Result<Recovered> {
-    let mutations = replay
-        .entries
-        .iter()
-        .filter(|entry| entry.mutation != 0)
-        .map(|entry| Mutation {
-            id: RequestId {
-                serial: entry.serial,
-                attachment: entry.attachment,
-                queue: entry.request.queue,
-                head: entry.request.head,
-            },
-            sequence: entry.mutation,
-            offset: entry.request.offset,
-            length: entry.request.length,
-            kind: if entry.request.kind == crate::inflight::Kind::Write {
-                Kind::Write
-            } else {
-                Kind::Zero
-            },
-        })
-        .collect();
+    let mutations = retained_mutations(&replay).collect();
     deadline.check()?;
     let mut storage_replay = inspected
         .live(replay.published, epoch, replay.highest_mutation, mutations)
@@ -572,3 +686,64 @@ fn replay_storage(
 
 #[cfg(test)]
 mod tests;
+
+pub(crate) struct Activated {
+    pub(crate) local: local::Local,
+    pub(crate) saved: Validated,
+}
+
+/// Original descriptor and guest-memory owners survive asynchronous recovery.
+pub(crate) struct Validated {
+    pub(crate) epoch: u64,
+    pub(crate) replay: crate::inflight::Replay,
+    requests: Vec<Request>,
+    cursors: Vec<Option<u16>>,
+    initialized: Vec<bool>,
+    memory: Arc<GuestMemoryMmap>,
+    pub(crate) shared: Arc<local::Shared>,
+    copied: u64,
+    mutation_count: usize,
+}
+impl Validated {
+    pub(crate) fn mutations(&self) -> impl Iterator<Item = Mutation> + '_ {
+        retained_mutations(&self.replay)
+    }
+    pub(crate) fn gather(&mut self, mutation: Mutation, bytes: &mut [u8]) -> io::Result<()> {
+        let index = self
+            .replay
+            .entries
+            .binary_search_by_key(&mutation.id.serial, |entry| entry.serial)
+            .map_err(|_| io::Error::other("replay mutation lost its descriptor"))?;
+        let Request::Write(data) = &self.requests[index] else {
+            return Err(io::Error::other("unexpected replay mutation kind"));
+        };
+        gather(&self.memory, &data.segments, bytes, &mut self.copied)?;
+        self.mutation_count += 1;
+        Ok(())
+    }
+}
+fn retained_mutations(replay: &crate::inflight::Replay) -> impl Iterator<Item = Mutation> + '_ {
+    replay
+        .entries
+        .iter()
+        .filter(|entry| entry.mutation != 0)
+        .map(|entry| Mutation {
+            id: RequestId {
+                serial: entry.serial,
+                attachment: entry.attachment,
+                queue: entry.request.queue,
+                head: entry.request.head,
+            },
+            sequence: entry.mutation,
+            offset: entry.request.offset,
+            length: entry.request.length,
+            kind: if entry.request.kind == crate::inflight::Kind::Write {
+                Kind::Write
+            } else {
+                Kind::Zero
+            },
+        })
+}
+
+#[cfg(test)]
+pub(crate) mod testing;

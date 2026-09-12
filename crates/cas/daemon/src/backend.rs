@@ -2,7 +2,7 @@
 
 mod admission;
 mod lifecycle;
-mod recovery;
+pub(crate) mod recovery;
 use crate::inflight::Entry;
 use admission::Admission;
 use recovery::Session;
