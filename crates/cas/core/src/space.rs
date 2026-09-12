@@ -1,14 +1,17 @@
 //! Host disk accounting. Callers measure physical allocations and reclaim only
 //! after the filesystem operation and its required sync have succeeded.
 mod filesystem;
+mod recovery;
 mod staging;
 pub use filesystem::{Governor, Observation, Permit};
+pub use recovery::{METADATA_MARGIN, Recovery};
 pub use staging::{Image as StagingImage, Permit as StagingPermit, Staging, Usage as StagingUsage};
 use std::{
     io,
     sync::{Arc, Mutex},
 };
 
+#[cfg(test)]
 const MIB: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, serde::Serialize)]
@@ -23,7 +26,7 @@ impl Limits {
         let reserve = segment
             .checked_mul(3)
             .and_then(|n| n.checked_add(manifest_transaction))
-            .and_then(|n| n.checked_add(16 * MIB))
+            .and_then(|n| n.checked_add(METADATA_MARGIN))
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "disk reserve overflow"))?;
         if segment == 0 || manifest_transaction == 0 || capacity <= reserve {
             return Err(io::Error::new(

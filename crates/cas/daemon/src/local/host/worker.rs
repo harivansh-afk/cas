@@ -171,6 +171,7 @@ impl Endpoint {
 }
 
 pub(super) struct Owner {
+    pub _catalog: Option<cas_core::catalog::Catalog>,
     pub store: Store,
     pub snapshots: BudgetVec<Snapshot, BudgetAllocator>,
     pub endpoints: BudgetVec<Endpoint, BudgetAllocator>,

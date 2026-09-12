@@ -240,11 +240,17 @@ impl Recovery {
         Ok(())
     }
 
-    pub fn fresh(mut self, required: u64) -> Result<Log> {
+    pub fn fresh(self, required: u64) -> Result<Log> {
+        self.fresh_with(required, crate::space::Recovery::default())
+    }
+
+    pub fn fresh_with(mut self, required: u64, repair: crate::space::Recovery<'_>) -> Result<Log> {
         self.require_prefix(required)?;
-        self.repair()?;
-        self.log.rotate(None)?;
-        self.log.flush()?;
+        self.repair(repair)?;
+        repair.output(self.log.config.segment_bytes, || {
+            self.log.rotate(None).map_err(io::Error::other)?;
+            self.log.flush().map_err(io::Error::other)
+        })?;
         Ok(self.log)
     }
 
@@ -305,7 +311,7 @@ impl Recovery {
             return Err(io::Error::other("issued tail has no inflight owner").into());
         }
         self.verify_identities(&mutations)?;
-        self.repair()?;
+        self.repair(crate::space::Recovery::default())?;
         // A retained fence may fill its segment. All retained files have synced
         // before creating a successor, but only finish() establishes recovered E.
         if self.log.offset + BLOCK_SIZE as u64 > self.log.config.segment_bytes {
@@ -360,28 +366,50 @@ impl Recovery {
         Ok(())
     }
 
-    fn repair(&mut self) -> Result<()> {
+    pub fn validate_recovery(&self, repair: crate::space::Recovery<'_>) -> Result<()> {
+        repair.validate_tickets(self.log.tickets.as_ref())?;
+        for (_, file) in &self.candidates {
+            repair.validate_file(file)?;
+        }
+        if let Some((index, offset)) = self.rejected {
+            for (relative, (_, file)) in self.candidates[index..].iter().enumerate() {
+                let begin = if relative == 0 { offset } else { 0 };
+                repair.validate_output(Directory::archive_bytes(file, begin)?)?;
+            }
+        }
+        repair.validate_output(self.log.config.segment_bytes)?;
+        Ok(())
+    }
+
+    fn repair(&mut self, repair: crate::space::Recovery<'_>) -> Result<()> {
+        self.validate_recovery(repair)?;
         if let Some((index, offset)) = self.rejected.take() {
             // Retain every rejected byte before the first destructive change.
             for (relative, (number, file)) in self.candidates[index..].iter().enumerate() {
                 let begin = if relative == 0 { offset } else { 0 };
-                self.log
-                    .directory
-                    .archive(&super::segment::name(*number), file, begin)?;
+                repair.archive(
+                    &self.log.directory,
+                    &super::segment::name(*number),
+                    file,
+                    begin,
+                )?;
                 self.log.rejected_bytes += file.metadata()?.len() - begin;
             }
             for (relative, (number, file)) in self.candidates[index..].iter().enumerate() {
-                if relative == 0 && offset != 0 {
-                    file.set_len(offset)?;
-                    file.sync_all()?;
-                } else {
-                    fs::remove_file(self.log.directory.path.join(segment::name(*number)))?;
-                }
+                repair.output(0, || {
+                    if relative == 0 && offset != 0 {
+                        file.set_len(offset)?;
+                        file.sync_all()?;
+                    } else {
+                        fs::remove_file(self.log.directory.path.join(segment::name(*number)))?;
+                    }
+                    self.log.directory.sync()
+                })?;
             }
-            self.log.directory.sync()?;
         }
         for segment in &self.log.segments {
-            direct::sync_data(&segment.file)?;
+            repair.validate_file(&segment.file)?;
+            repair.output(0, || direct::sync_data(&segment.file))?;
         }
         Ok(())
     }

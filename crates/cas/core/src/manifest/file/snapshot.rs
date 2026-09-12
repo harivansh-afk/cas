@@ -146,6 +146,11 @@ pub struct SnapshotInspection {
 }
 
 impl SnapshotInspection {
+    pub fn validate_recovery(&self, repair: crate::space::Recovery<'_>) -> io::Result<()> {
+        repair.validate_file(&self.file)?;
+        repair.validate_output(0)
+    }
+
     pub fn selected(&self) -> SnapshotKey {
         self.key
     }

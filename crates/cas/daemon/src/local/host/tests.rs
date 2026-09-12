@@ -7,6 +7,7 @@ mod admission;
 mod allocation;
 mod collection;
 mod quiescence;
+mod recovery;
 mod rotation;
 
 const STORE: Config = Config {

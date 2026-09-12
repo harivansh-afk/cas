@@ -84,6 +84,14 @@ pub struct SharedRecovery {
 }
 
 impl SharedRecovery {
+    pub fn validate_recovery(&self, repair: crate::space::Recovery<'_>) -> Result<()> {
+        self.recovery.validate_recovery(repair)
+    }
+
+    pub fn config(&self) -> Config {
+        self.recovery.config()
+    }
+
     pub fn status(&self) -> super::Status {
         self.recovery.status()
     }
@@ -103,7 +111,16 @@ impl SharedRecovery {
     }
 
     pub fn fresh(self, base: View, required: u64) -> Result<Log> {
-        self.stabilized(base)?.fresh(required)
+        self.fresh_with(base, required, crate::space::Recovery::default())
+    }
+
+    pub fn fresh_with(
+        self,
+        base: View,
+        required: u64,
+        repair: crate::space::Recovery<'_>,
+    ) -> Result<Log> {
+        self.stabilized(base)?.fresh_with(required, repair)
     }
 
     pub fn live(

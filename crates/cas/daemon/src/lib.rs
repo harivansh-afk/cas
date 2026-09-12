@@ -13,6 +13,7 @@ pub mod fault;
 mod local;
 mod request;
 pub mod storage;
+pub use local::host::recovery;
 pub use local::host::{CollectionHandle, CollectionReport, Host, Quiescence, Resources, Roots};
 
 #[derive(Clone, Copy, clap::ValueEnum)]

@@ -5,7 +5,7 @@ use cas_core::{
     space::{Governor, Staging},
 };
 
-pub(super) const METADATA_MARGIN: u64 = 16 * MAX_REQUEST_BYTES as u64;
+pub(super) use cas_core::space::METADATA_MARGIN;
 
 pub struct Admission {
     pub staging: BudgetArc<Staging>,
@@ -59,6 +59,27 @@ pub(super) fn validate(
     physical: &Governor,
 ) -> io::Result<()> {
     let segment = store.config().segment_bytes;
+    validate_geometry(segment, store.tickets(), physical)?;
+    if images
+        .iter()
+        .any(|(log, _)| log.config().segment_bytes != segment)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "WAL and store segment geometry differ",
+        ));
+    }
+    for (_, manifest) in images {
+        physical.validate_file(manifest.view()?.file())?;
+    }
+    Ok(())
+}
+
+pub(super) fn validate_geometry(
+    segment: u64,
+    tickets: &Arc<cas_core::segments::Tickets>,
+    physical: &Governor,
+) -> io::Result<()> {
     let reserve = cas_core::space::Limits::new(
         physical.limits().capacity,
         segment,
@@ -66,19 +87,13 @@ pub(super) fn validate(
     )?
     .reserve;
     if segment < 2 * MAX_REQUEST_BYTES as u64
-        || !physical.uses_tickets(store.tickets())
+        || !physical.uses_tickets(tickets)
         || physical.limits().reserve < reserve
-        || images
-            .iter()
-            .any(|(log, _)| log.config().segment_bytes != segment)
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "governed host allocation geometry or owner differs",
         ));
-    }
-    for (_, manifest) in images {
-        physical.validate_file(manifest.view()?.file())?;
     }
     Ok(())
 }

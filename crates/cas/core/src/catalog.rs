@@ -152,6 +152,12 @@ pub struct Inspection {
 }
 
 impl Inspection {
+    pub fn validate_recovery(&self, repair: crate::space::Recovery<'_>) -> io::Result<()> {
+        repair.validate_tickets(Some(&self.owner._tickets))?;
+        repair.validate_file(&self.file)?;
+        repair.validate_output(0)
+    }
+
     pub fn contents(&self) -> &Contents {
         &self.contents
     }

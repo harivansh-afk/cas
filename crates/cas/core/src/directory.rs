@@ -58,9 +58,18 @@ impl Directory {
         fs::remove_file(self.path.join(name))
     }
 
+    pub fn archive_bytes(file: &File, offset: u64) -> io::Result<u64> {
+        file.metadata()?
+            .len()
+            .checked_sub(offset)
+            .and_then(|bytes| bytes.checked_next_multiple_of(crate::BLOCK_SIZE as u64))
+            .ok_or_else(|| io::Error::other("invalid archive output bound"))
+    }
+
     pub fn archive(&self, name: &str, file: &File, offset: u64) -> io::Result<PathBuf> {
         use std::io::Write;
         use std::os::unix::fs::FileExt;
+        let reserved = Self::archive_bytes(file, offset)?;
         let archive = self.path.join("rejected");
         if !archive.exists() {
             fs::create_dir(&archive)?;
@@ -79,6 +88,9 @@ impl Directory {
                 Err(error) => return Err(error),
             }
         };
+        if reserved != 0 {
+            crate::direct::preallocate(&output, 0, reserved)?;
+        }
         // Archive through a separate buffered read descriptor. The locked direct
         // IO description remains alive; only archival evidence uses buffered IO.
         let input = File::open(format!("/proc/self/fd/{}", file.as_raw_fd()))?;

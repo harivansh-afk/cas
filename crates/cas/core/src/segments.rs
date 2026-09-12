@@ -84,6 +84,11 @@ impl Tickets {
         *self.state.lock().expect("segment allocator mutex poisoned")
     }
 
+    pub fn device(&self) -> io::Result<u64> {
+        use std::os::unix::fs::MetadataExt;
+        Ok(self.directory.file().metadata()?.dev())
+    }
+
     pub fn root(&self) -> &Path {
         &self.directory.path
     }

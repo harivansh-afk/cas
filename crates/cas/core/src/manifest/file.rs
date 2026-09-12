@@ -346,17 +346,32 @@ impl Inspection {
         self.selected
     }
 
-    pub fn recover(mut self) -> io::Result<Manifest> {
+    pub fn validate_recovery(&self, repair: crate::space::Recovery<'_>) -> io::Result<()> {
+        repair.validate_file(&self.manifest.file)?;
+        repair.validate_output(Directory::archive_bytes(
+            &self.manifest.file,
+            self.manifest.end,
+        )?)
+    }
+
+    pub fn recover(self) -> io::Result<Manifest> {
+        self.recover_with(crate::space::Recovery::default())
+    }
+
+    pub fn recover_with(mut self, repair: crate::space::Recovery<'_>) -> io::Result<Manifest> {
+        self.validate_recovery(repair)?;
         let manifest = &mut self.manifest;
         if self.selected.file_bytes > manifest.end {
-            manifest
-                .directory
-                .archive(NAME, &manifest.file, manifest.end)?;
-            manifest.file.set_len(manifest.end)?;
+            repair.archive(&manifest.directory, NAME, &manifest.file, manifest.end)?;
         }
         // A complete unsynced transaction may have survived. Stabilize it even
         // when inspection found no rejected suffix to truncate.
-        direct::sync_data(&manifest.file)?;
+        repair.output(0, || {
+            if self.selected.file_bytes > manifest.end {
+                manifest.file.set_len(manifest.end)?;
+            }
+            direct::sync_data(&manifest.file)
+        })?;
         manifest.failed = false;
         Ok(self.manifest)
     }

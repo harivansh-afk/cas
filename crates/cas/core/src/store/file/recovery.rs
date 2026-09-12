@@ -21,28 +21,55 @@ impl Inspection {
         self.store.status()
     }
 
-    pub fn recover(mut self) -> io::Result<Store> {
-        // Inspection has never exposed a reader: recovery owns the state
-        // exclusively and performs IO without holding a lookup mutex.
+    pub fn validate_recovery(&mut self, repair: crate::space::Recovery<'_>) -> io::Result<()> {
+        repair.validate_tickets(Some(&self.store.shared.tickets))?;
+        let shared = Arc::get_mut(&mut self.store.shared).expect("private inspection owner");
+        let state = shared.state.get_mut().expect("private inspection state");
+        for segment in &state.segments {
+            repair.validate_file(&segment.file)?;
+            if segment.file_bytes > segment.end {
+                repair.validate_output(Directory::archive_bytes(&segment.file, segment.end)?)?;
+            }
+        }
+        for rejected in &self.rejected {
+            repair.validate_file(&rejected.file)?;
+            repair.validate_output(Directory::archive_bytes(&rejected.file, 0)?)?;
+        }
+        repair.validate_output(0)
+    }
+
+    pub fn recover(self) -> io::Result<Store> {
+        self.recover_with(crate::space::Recovery::default())
+    }
+
+    pub fn recover_with(mut self, repair: crate::space::Recovery<'_>) -> io::Result<Store> {
+        self.validate_recovery(repair)?;
         let shared = Arc::get_mut(&mut self.store.shared).expect("private inspection owner");
         let directory = &shared.directory;
         let state = shared.state.get_mut().expect("private inspection state");
         for segment in &state.segments {
             if segment.file_bytes > segment.end {
-                directory.archive(
+                repair.archive(
+                    directory,
                     &segments::name(segment.header.number),
                     &segment.file,
                     segment.end,
                 )?;
-                segment.file.set_len(segment.end)?;
             }
-            direct::sync_data(&segment.file)?;
+            repair.output(0, || {
+                if segment.file_bytes > segment.end {
+                    segment.file.set_len(segment.end)?;
+                }
+                direct::sync_data(&segment.file)
+            })?;
         }
         for rejected in &self.rejected {
             let name = segments::name(rejected.number);
-            directory.archive(&name, &rejected.file, 0)?;
-            fs::remove_file(directory.path.join(name))?;
-            directory.sync()?;
+            repair.archive(directory, &name, &rejected.file, 0)?;
+            repair.output(0, || {
+                fs::remove_file(directory.path.join(name))?;
+                directory.sync()
+            })?;
         }
         for segment in &mut state.segments {
             segment.file_bytes = segment.end;

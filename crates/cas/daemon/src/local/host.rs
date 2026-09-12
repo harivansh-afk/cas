@@ -3,6 +3,7 @@ pub(super) mod admission;
 pub(super) mod capacity;
 pub use admission::Quiescence;
 mod collection;
+pub mod recovery;
 #[cfg(test)]
 mod tests;
 mod worker;
@@ -66,9 +67,9 @@ struct Attachment {
 }
 
 /// Complete retained membership, stabilized together before starting the host.
-pub struct Roots {
-    pub images: Vec<(Log, Manifest)>,
-    pub snapshots: Vec<Snapshot>,
+pub struct Roots<I = Vec<(Log, Manifest)>, S = Vec<Snapshot>> {
+    pub images: I,
+    pub snapshots: S,
 }
 
 /// Embedding API for the catalog owner and the same native validation frontend.
@@ -134,11 +135,26 @@ impl Host {
         staging_bytes: u64,
         physical: Option<Arc<cas_core::space::Governor>>,
     ) -> io::Result<Self> {
+        Self::build_owned(resources, store, roots, staging_bytes, physical, None)
+    }
+
+    fn build_owned<I, S>(
+        resources: Arc<Resources>,
+        store: Store,
+        roots: Roots<I, S>,
+        staging_bytes: u64,
+        physical: Option<Arc<cas_core::space::Governor>>,
+        catalog: Option<cas_core::catalog::Catalog>,
+    ) -> io::Result<Self>
+    where
+        I: AsRef<[(Log, Manifest)]> + IntoIterator<Item = (Log, Manifest)>,
+        S: AsRef<[Snapshot]> + IntoIterator<Item = Snapshot>,
+    {
         let Roots { images, snapshots } = roots;
         if let Some(physical) = &physical {
-            capacity::validate(&store, &images, physical)?;
+            capacity::validate(&store, images.as_ref(), physical)?;
         }
-        for snapshot in &snapshots {
+        for snapshot in snapshots.as_ref() {
             if snapshot.key().commit.store != store.config().store {
                 return Err(io::Error::other("snapshot belongs to another store"));
             }
@@ -146,19 +162,23 @@ impl Host {
                 physical.validate_file(snapshot.view()?.file())?;
             }
         }
-        if images.is_empty() {
+        if images.as_ref().is_empty() {
             return Err(io::Error::other("host requires an image"));
         }
-        capacity::staging_geometry(&images, staging_bytes)?;
+        capacity::staging_geometry(images.as_ref(), staging_bytes)?;
         let staging = cas_core::space::Staging::new(
             staging_bytes,
-            images.iter().map(|(log, _)| cas_core::space::StagingImage {
-                allocated: log.status().allocated_bytes,
-                capacity: log.limits().staging_bytes,
-            }),
+            images
+                .as_ref()
+                .iter()
+                .map(|(log, _)| cas_core::space::StagingImage {
+                    allocated: log.status().allocated_bytes,
+                    capacity: log.limits().staging_bytes,
+                }),
             &resources.metadata,
         )?;
-        let admission = admission::Admission::new(images.len(), &resources.metadata)?;
+        let image_count = images.as_ref().len();
+        let admission = admission::Admission::new(image_count, &resources.metadata)?;
         let shared = Arc::new(SharedHost {
             admission,
             gate: Arc::new(state::HostGate::default()),
@@ -177,12 +197,12 @@ impl Host {
         let mut endpoints =
             BudgetVec::new_in(BudgetAllocator::new(Arc::clone(&shared.resources.metadata)));
         attachments
-            .try_reserve_exact(images.len())
+            .try_reserve_exact(image_count)
             .map_err(|_| io::Error::other("host image metadata exhausted"))?;
         endpoints
-            .try_reserve_exact(images.len())
+            .try_reserve_exact(image_count)
             .map_err(|_| io::Error::other("host endpoint metadata exhausted"))?;
-        let (ready, input) = mailbox::bounded(images.len() + 1, &shared.resources.metadata)?;
+        let (ready, input) = mailbox::bounded(image_count + 1, &shared.resources.metadata)?;
         for (index, (log, manifest)) in images.into_iter().enumerate() {
             let admission = capacity::Admission {
                 staging: shared.staging.clone(),
@@ -248,9 +268,10 @@ impl Host {
                 },
             }));
         }
-        let mut retained = reserved_vec(snapshots.len(), &shared.resources.metadata)?;
+        let mut retained = reserved_vec(snapshots.as_ref().len(), &shared.resources.metadata)?;
         retained.extend(snapshots);
         let owner = worker::Owner {
+            _catalog: catalog,
             snapshots: retained,
             store,
             endpoints,
