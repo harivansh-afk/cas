@@ -7,6 +7,8 @@ pub use allocator::BudgetAllocator;
 mod shared;
 pub use shared::BudgetArc;
 
+pub mod channel;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Amount {
     pub bytes: usize,
