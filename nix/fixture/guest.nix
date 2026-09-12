@@ -56,7 +56,8 @@
     ];
     serviceConfig = {
       Type = "oneshot";
-      TimeoutStartSec = 240;
+      # Includes the additional real 30-second queued-IO timeout control.
+      TimeoutStartSec = 270;
     };
     script = ''
       export CAS_CORE_TESTS=${cas.tests}/bin/cas-core-tests

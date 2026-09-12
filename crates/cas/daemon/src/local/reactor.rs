@@ -45,11 +45,24 @@ enum Work {
 
 struct Pending {
     work: Work,
-    submitted: Instant,
+    submitted: Option<Instant>,
+    queued: Instant,
     ready: Option<Instant>,
 }
 
 impl Pending {
+    fn in_kernel(&self) -> bool {
+        self.submitted.is_some() && self.ready.is_none()
+    }
+
+    fn bulk(&self) -> bool {
+        match &self.work {
+            Work::Append(_) => true,
+            Work::Read(read) => !read.notification_only(),
+            Work::Fence(_) => false,
+        }
+    }
+
     fn entry(&mut self) -> squeue::Entry {
         match &mut self.work {
             Work::Append(append) => write_entry(&append.submission),
@@ -86,6 +99,8 @@ fn write_entry(submission: &Submission) -> squeue::Entry {
 pub(super) struct Reactor {
     // Drop drains the ring before these owners can be destroyed.
     ring: IoUring,
+    scheduler: Option<cas_core::scheduler::Port>,
+    bulk: BudgetQueue<u64>,
     pending: Slots<Pending>,
     ready: BudgetVec<u64, BudgetAllocator>,
     fence_waiters: Option<BudgetVec<Io, BudgetAllocator>>,
@@ -127,8 +142,16 @@ impl Reactor {
         let appends = BudgetQueue::with_capacity(capacity, metadata)?;
         let commands = BudgetQueue::with_capacity(capacity, metadata)?;
         let reads = BudgetQueue::with_capacity(capacity, metadata)?;
+        let bulk = BudgetQueue::with_capacity(capacity, metadata)?;
+        let scheduler = worker
+            .port
+            .as_ref()
+            .map(host::Port::io_scheduler)
+            .transpose()?;
         Ok(Self {
             ring,
+            scheduler,
+            bulk,
             pending,
             ready,
             fence_waiters,
@@ -242,6 +265,47 @@ impl Reactor {
 
     fn push(&mut self, token: u64) -> io::Result<()> {
         let pending = self.pending.get_mut(&token).expect("owned IO before SQE");
+        if let Some(scheduler) = &self.scheduler
+            && pending.bulk()
+        {
+            pending.submitted = None;
+            pending.queued = Instant::now();
+            pending.ready = None;
+            scheduler.ready(true)?;
+            self.bulk.push_back(token);
+            return Ok(());
+        }
+        self.push_now(token)
+    }
+
+    fn submit_bulk(&mut self) -> io::Result<()> {
+        while let Some(&token) = self.bulk.front() {
+            let bytes = self
+                .pending
+                .get(&token)
+                .expect("queued bulk owner")
+                .expected_bytes();
+            if !self
+                .scheduler
+                .as_ref()
+                .expect("bulk scheduler")
+                .take(bytes, self.bulk.len() > 1)?
+            {
+                break;
+            }
+            self.bulk.pop_front();
+            if let Err(error) = self.push_now(token) {
+                let pending = self.pending.remove(&token).expect("unsubmitted bulk owner");
+                self.fail(&error);
+                self.reject(pending.work)?;
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    fn push_now(&mut self, token: u64) -> io::Result<()> {
+        let pending = self.pending.get_mut(&token).expect("owned IO before SQE");
         let entry = pending.entry();
         #[cfg(test)]
         let entry = match &self.control {
@@ -252,13 +316,13 @@ impl Reactor {
         // SAFETY: pending owns every referenced buffer and the locked file.
         // No owner is removed until its CQE. Drop drains or retains all owners.
         unsafe { self.ring.submission().push(&entry) }.map_err(io::Error::other)?;
-        pending.submitted = Instant::now();
+        pending.submitted = Some(Instant::now());
         pending.ready = None;
         let mut metrics = self.worker.shared.metrics.lock().expect("metrics poisoned");
         metrics.io_queued += 1;
         metrics.peak_awaiting_cqe = metrics
             .peak_awaiting_cqe
-            .max(self.pending.values().filter(|p| p.ready.is_none()).count());
+            .max(self.pending.values().filter(|p| p.in_kernel()).count());
         Ok(())
     }
 
@@ -277,7 +341,8 @@ impl Reactor {
             token,
             Pending {
                 work,
-                submitted: Instant::now(),
+                submitted: None,
+                queued: Instant::now(),
                 ready: Some(Instant::now()),
             },
         );
@@ -904,6 +969,14 @@ impl Reactor {
     }
 
     fn reject_queued(&mut self) -> io::Result<()> {
+        if let Some(scheduler) = &self.scheduler {
+            scheduler.ready(false)?;
+        }
+        while let Some(token) = self.bulk.pop_front() {
+            let pending = self.pending.remove(&token).expect("unsubmitted bulk owner");
+            assert!(!pending.in_kernel());
+            self.reject(pending.work)?;
+        }
         while let Some(command) = self.commands.pop_front() {
             self.worker.execute(command)?;
         }
@@ -992,7 +1065,8 @@ impl Reactor {
                 }
                 if !self.failed
                     && self.pending.values().any(|pending| {
-                        pending.ready.is_none() && pending.submitted.elapsed() >= IO_DEADLINE
+                        pending.ready.is_none()
+                            && pending.submitted.unwrap_or(pending.queued).elapsed() >= IO_DEADLINE
                     })
                 {
                     self.fail(&io::Error::new(
@@ -1035,6 +1109,9 @@ impl Reactor {
                 } else {
                     self.dispatch()?;
                 }
+                if !self.failed {
+                    self.submit_bulk()?;
+                }
                 self.ring.submit()?;
                 Ok::<(), io::Error>(())
             })();
@@ -1062,6 +1139,9 @@ impl Reactor {
 
 impl Drop for Reactor {
     fn drop(&mut self) {
+        if let Some(scheduler) = &self.scheduler {
+            let _ = scheduler.ready(false);
+        }
         #[cfg(test)]
         if let Some((token, _)) = self.withheld.take()
             && let Some(pending) = self.pending.get_mut(&token)
@@ -1070,14 +1150,14 @@ impl Drop for Reactor {
             // has no kernel owner even if publication remains withheld.
             pending.ready = Some(Instant::now());
         }
-        while self.pending.values().any(|pending| pending.ready.is_none()) {
+        while self.pending.values().any(Pending::in_kernel) {
             match self.ring.submit_and_wait(1) {
                 Ok(_) => (),
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(_) => {
                     // Retain credits and file descriptions with every allocation
                     // whose kernel ownership cannot be disproved.
-                    self.pending.retain(|_, pending| pending.ready.is_none());
+                    self.pending.retain(|_, pending| pending.in_kernel());
                     self.pending.leak();
                     break;
                 }

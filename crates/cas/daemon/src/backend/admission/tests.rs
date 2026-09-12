@@ -255,3 +255,59 @@ fn rejected_status_cannot_be_published_as_success() {
     );
     assert_eq!(mem.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 0);
 }
+
+#[test]
+fn shared_frontends_defer_full_images_keep_control_live_and_wake_on_credit_release() {
+    let root = tempfile::tempdir().unwrap();
+    let resources = Arc::new(local::host::Resources::default());
+    let mut host = local::host::tests::create(root.path(), 2, Arc::clone(&resources));
+    let mut first = host.attach([2; 16], Fault::default()).unwrap();
+    let mut second = host.attach([3; 16], Fault::default()).unwrap();
+    let mut held = Vec::new();
+    for available in 0..128 {
+        let Admission::Accepted(permit) = first
+            .prepare_admission(0, available, &write_request(), 136)
+            .unwrap()
+        else {
+            panic!("first image request capacity");
+        };
+        first.waiting[0] = None;
+        held.push(permit);
+    }
+    assert!(matches!(
+        first
+            .prepare_admission(0, 128, &write_request(), 136)
+            .unwrap(),
+        Admission::Waiting
+    ));
+    let Admission::Accepted(other) = second
+        .prepare_admission(0, 0, &write_request(), 136)
+        .unwrap()
+    else {
+        panic!("full first image blocked second image");
+    };
+    second.waiting[0] = None;
+    let flush = Request::Flush(Completion {
+        head: 4,
+        status: GuestAddress(0x7000),
+    });
+    let Admission::Accepted(control) = first.prepare_admission(1, 0, &flush, 136).unwrap() else {
+        panic!("bulk pressure consumed the control reserve");
+    };
+    first.waiting[1] = None;
+    assert_eq!((first.next_id, second.next_id), (0, 0));
+    // Drain earlier readiness, then release one actual accepted request owner.
+    while first.completion_event.read().is_ok() {}
+    drop(held.pop());
+    assert!(first.completion_event.read().is_ok());
+    let Admission::Accepted(retry) = first
+        .prepare_admission(0, 128, &write_request(), 136)
+        .unwrap()
+    else {
+        panic!("released credit did not admit the waiting head");
+    };
+    first.waiting[0] = None;
+    drop((retry, control, other, held, first, second));
+    local::host::tests::shutdown(host);
+    assert_eq!(resources.metadata.usage().current.bytes, 0);
+}

@@ -72,6 +72,15 @@ impl Admission {
         }
     }
 
+    pub(super) fn wake_frontend(&self, index: usize) -> io::Result<()> {
+        if let Some(wake) = self.wakes.get(index).and_then(OnceLock::get)
+            && wake.attached.load(Ordering::Acquire)
+        {
+            notify(&wake.frontend)?;
+        }
+        Ok(())
+    }
+
     fn wake(&self) -> io::Result<()> {
         for wake in self.wakes.iter().filter_map(OnceLock::get) {
             notify(&wake.frontend)?;

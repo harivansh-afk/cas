@@ -160,6 +160,17 @@ impl Storage {
         Self::from_opening(Opening::new(path, create_bytes)?)
     }
 
+    pub(crate) fn admission_ticket(
+        &self,
+        kind: local::Kind,
+    ) -> io::Result<Option<local::host::fair::Ticket>> {
+        match self {
+            Self::Local(local) => local.admission_ticket(kind),
+            Self::Opening(_) => Err(io::Error::other("admission before recovery")),
+            _ => Ok(None),
+        }
+    }
+
     pub fn prepare(&mut self, kind: local::Kind) -> io::Result<Option<Permit>> {
         match self {
             Self::Opening(_) => Err(io::Error::other("IO before inflight recovery")),

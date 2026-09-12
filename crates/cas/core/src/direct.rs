@@ -115,6 +115,7 @@ pub(crate) fn read_bytes(file: &File, buffer: &mut [u8], offset: u64) -> io::Res
         return Err(io::Error::from_raw_os_error(libc::EIO));
     }
     let read = loop {
+        crate::scheduler::before_background_io(buffer.len())?;
         match file.read_at(buffer, offset) {
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             result => break result?,
@@ -143,10 +144,12 @@ pub(crate) fn write_bytes(file: &File, buffer: &[u8], offset: u64) -> io::Result
     if faults::take(faults::Fault::ShortWrite) {
         // Persist one aligned block, then report the short write through
         // same length check as the real syscall result.
+        crate::scheduler::before_background_io(BLOCK_SIZE)?;
         let written = file.write_at(&buffer[..BLOCK_SIZE], offset)?;
         return check_write_length(written, buffer.len());
     }
     let written = loop {
+        crate::scheduler::before_background_io(buffer.len())?;
         match file.write_at(buffer, offset) {
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             result => break result?,

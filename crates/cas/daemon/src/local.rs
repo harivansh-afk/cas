@@ -62,6 +62,7 @@ pub struct Permit {
     _read: Option<BudgetArc<Credits>>,
     window: Option<window::Slot>,
     _admission: Option<host::admission::Entry>,
+    pub(crate) fair_release: Option<host::fair::Release>,
 }
 
 struct Fetched {
@@ -310,6 +311,7 @@ impl Shared {
         };
         Some(Permit {
             _admission: entry,
+            fair_release: None,
             _request: request,
             _read: read,
             window: match (kind, &self.window) {
@@ -374,6 +376,7 @@ pub fn create_log(path: &Path, image_bytes: u64) -> io::Result<Log> {
 }
 
 pub struct Local {
+    fair: Option<host::fair::Port>,
     sender: Option<mailbox::Sender<Command>>,
     receiver: Mutex<mailbox::Receiver<Response>>,
     worker: Option<JoinHandle<()>>,
@@ -454,6 +457,7 @@ impl Local {
                     .try_clone()?,
             )?;
         }
+        let fair = port.as_ref().map(host::Port::fair);
         let worker = Worker {
             log,
             output,
@@ -470,6 +474,7 @@ impl Local {
             None => builder.spawn(move || worker.run(input))?,
         };
         Ok(Self {
+            fair,
             sender: Some(sender),
             receiver: Mutex::new(receiver),
             worker: Some(worker),
@@ -501,6 +506,14 @@ impl Local {
             notify(wake)?;
         }
         Ok(())
+    }
+
+    pub(crate) fn admission_ticket(&self, kind: Kind) -> io::Result<Option<host::fair::Ticket>> {
+        self.fair
+            .as_ref()
+            .map(|fair| fair.ticket(kind))
+            .transpose()
+            .map(Option::flatten)
     }
 
     pub fn prepare(&mut self, kind: Kind) -> io::Result<Option<Permit>> {

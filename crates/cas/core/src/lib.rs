@@ -8,6 +8,12 @@ pub mod chunk_index;
 pub mod watermark;
 
 #[cfg(target_os = "linux")]
+pub mod scheduler;
+
+#[cfg(target_os = "linux")]
+mod eventfd;
+
+#[cfg(target_os = "linux")]
 mod direct;
 
 #[cfg(target_os = "linux")]

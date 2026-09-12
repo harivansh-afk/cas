@@ -7,7 +7,7 @@ use allocator_api2::vec::Vec;
 use hashbrown::HashTable;
 use std::{
     io,
-    os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+    os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd},
     sync::{Arc, Mutex},
 };
 
@@ -292,29 +292,7 @@ impl Signal {
     }
 
     fn notify(&self) -> io::Result<()> {
-        let one = 1u64;
-        loop {
-            // SAFETY: the FD is owned; one is an initialized eight-byte value.
-            let result = unsafe {
-                libc::write(
-                    self.0.as_raw_fd(),
-                    (&one as *const u64).cast(),
-                    size_of::<u64>(),
-                )
-            };
-            if result == size_of::<u64>() as isize {
-                return Ok(());
-            }
-            if result >= 0 {
-                return Err(io::Error::other("short fetch notification"));
-            }
-            let error = io::Error::last_os_error();
-            match error.kind() {
-                io::ErrorKind::Interrupted => continue,
-                io::ErrorKind::WouldBlock => return Ok(()), // A notification is already pending.
-                _ => return Err(error),
-            }
-        }
+        crate::eventfd::notify(self.0.as_fd())
     }
 }
 

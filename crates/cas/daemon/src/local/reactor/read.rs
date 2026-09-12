@@ -89,6 +89,9 @@ impl Read {
     pub fn done(&self) -> bool {
         matches!(self.stage, Stage::Done)
     }
+    pub fn notification_only(&self) -> bool {
+        matches!(self.stage, Stage::Waiting(_))
+    }
     pub fn shared_io(&self) -> bool {
         self.shared_io
     }

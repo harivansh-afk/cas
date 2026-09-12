@@ -235,6 +235,7 @@ pub(super) struct Owner {
 
 impl Owner {
     pub fn run(mut self) {
+        let _io_scope = cas_core::scheduler::Scheduler::background(&self.shared.io_scheduler);
         let mut exit = UnexpectedExit {
             shared: self.shared.clone(),
             normal: false,

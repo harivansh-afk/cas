@@ -389,7 +389,7 @@ impl Backend {
             paused: false,
             change_deadline: None,
             recovery_deadline,
-            waiting: [None; CONCURRENT_QUEUES],
+            waiting: std::array::from_fn(|_| None),
             deadline_timer,
             blocked_queues: [false; CONCURRENT_QUEUES],
             rebase_queues: [false; CONCURRENT_QUEUES],

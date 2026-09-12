@@ -11,6 +11,7 @@ mod initialization;
 mod quiescence;
 mod recovery;
 mod rotation;
+mod scheduling;
 mod snapshots;
 
 const STORE: Config = Config {

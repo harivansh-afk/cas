@@ -5,11 +5,11 @@ use vhost_user_backend::StateChange;
 
 const ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Clone, Copy)]
 pub(super) struct Waiting {
     head: u16,
     available: u16,
     deadline: Instant,
+    ticket: Option<local::host::fair::Ticket>,
 }
 
 pub(super) enum Admission {
@@ -29,24 +29,43 @@ impl Backend {
         let now = Instant::now();
         let head = request.completion().head;
         let waiting = &mut self.waiting[usize::from(queue)];
-        if waiting.is_some_and(|old| old.head != head || old.available != available) {
+        if waiting
+            .as_ref()
+            .is_some_and(|old| old.head != head || old.available != available)
+        {
             *waiting = None;
         }
         // Expiration wins even if credits became available after the deadline.
-        if waiting.is_some_and(|old| now >= old.deadline) {
+        if waiting.as_ref().is_some_and(|old| now >= old.deadline) {
             return Ok(Admission::Rejected);
         }
-        if self.pending.len() < limit
-            && let Some(permit) = self.storage.prepare(request.admission_kind())?
-        {
-            return Ok(Admission::Accepted(permit));
-        }
-        if self.concurrent {
-            waiting.get_or_insert(Waiting {
+        if self.concurrent && waiting.is_none() {
+            *waiting = Some(Waiting {
                 head,
                 available,
                 deadline: now + ADMISSION_TIMEOUT,
+                ticket: self.storage.admission_ticket(request.admission_kind())?,
             });
+        }
+        let turn =
+            if let Some(ticket) = waiting.as_ref().and_then(|waiting| waiting.ticket.as_ref()) {
+                let Some(turn) = ticket.turn()? else {
+                    return Ok(Admission::Waiting);
+                };
+                Some(turn)
+            } else {
+                None
+            };
+        if self.pending.len() < limit
+            && let Some(mut permit) = self.storage.prepare(request.admission_kind())?
+        {
+            if let Some(turn) = turn {
+                let Permit::Local { _credits } = &mut permit else {
+                    unreachable!("only shared hosts schedule admission");
+                };
+                _credits.fair_release = Some(turn.commit());
+            }
+            return Ok(Admission::Accepted(permit));
         }
         Ok(Admission::Waiting)
     }
@@ -81,7 +100,7 @@ impl Backend {
     pub(super) fn clear_changed_waits(&mut self, change: StateChange) {
         match change {
             StateChange::Memory | StateChange::Reset | StateChange::Attachment => {
-                self.waiting.fill(None)
+                self.waiting.iter_mut().for_each(|waiting| *waiting = None)
             }
             StateChange::QueueConfiguration(index)
             | StateChange::QueueStop(index)

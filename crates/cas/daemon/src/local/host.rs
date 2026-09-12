@@ -1,6 +1,7 @@
 //! One writer owner; image reactors exchange bounded, sequenced receipts.
 pub(super) mod admission;
 pub(super) mod capacity;
+pub(crate) mod fair;
 pub use admission::Quiescence;
 mod administration;
 mod collection;
@@ -21,6 +22,7 @@ use cas_core::{
     manifest::file::{Manifest, Snapshot},
     store::file::{Reader, Store},
 };
+use std::os::fd::{FromRawFd, IntoRawFd};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 pub struct Resources {
@@ -53,6 +55,8 @@ impl Resources {
 
 struct SharedHost {
     admission: BudgetArc<admission::Admission>,
+    fair: BudgetArc<fair::Fair>,
+    io_scheduler: BudgetArc<cas_core::scheduler::Scheduler>,
     gate: BudgetArc<state::HostGate>,
     reader: Reader,
     cache: BudgetArc<cas_core::cache::Cache>,
@@ -209,6 +213,7 @@ impl Host {
         }
         let admission = admission::Admission::new(image_count, &resources.metadata)?;
         let metadata = Arc::clone(&resources.metadata);
+        let fair = fair::Fair::new(image_count, admission.clone(), &metadata)?;
         let gate = match &context.gates {
             Some(gates) => gates.host.clone(),
             None => state::HostGate::new(&metadata)?,
@@ -216,6 +221,8 @@ impl Host {
         let shared = BudgetArc::try_new(
             SharedHost {
                 admission,
+                fair,
+                io_scheduler: cas_core::scheduler::Scheduler::new(image_count, &metadata)?,
                 gate,
                 reader: store.reader()?,
                 cache: cas_core::cache::Cache::new(resources.cache_bytes, &metadata)?,
@@ -409,6 +416,10 @@ impl Host {
         self.shared
             .admission
             .bind(port.index, event.try_clone()?, port.wake.try_clone()?)?;
+        let wake = port.wake.try_clone()?.into_raw_fd();
+        // SAFETY: the freshly cloned eventfd transfers its unique FD owner here.
+        let wake = unsafe { std::os::fd::OwnedFd::from_raw_fd(wake) };
+        self.shared.io_scheduler.bind(port.index, wake)?;
         let shared = Shared::with_pools(
             log.status(),
             self.shared.resources.pools.image(),
@@ -434,7 +445,7 @@ impl Host {
         serde_json::json!({ "failure": self.shared.gate.failure(), "store": self.store_status(),
             "admission": self.shared.admission.status(),
             "cache": self.shared.cache.status(), "metadata_cache": self.shared.pages.status(),
-            "fetches": self.shared.fetches.status(),
+            "fetches": self.shared.fetches.status(), "admission_scheduler":self.shared.fair.report(), "io_scheduler":self.shared.io_scheduler.status(),
             "collection": *self.shared.collection.lock().expect("collection status poisoned"),
             "pools": self.shared.resources.pools.report(), "metadata": self.shared.resources.metadata.usage(),
             "compaction_metadata": self.shared.resources.compaction.usage(),
@@ -542,6 +553,17 @@ impl Port {
 
     pub fn fail_shared(&self, error: &io::Error) {
         self.shared.gate.fail(error.to_string());
+    }
+
+    pub(super) fn fair(&self) -> fair::Port {
+        fair::Port {
+            owner: self.shared.fair.clone(),
+            image: self.index,
+        }
+    }
+
+    pub(super) fn io_scheduler(&self) -> io::Result<cas_core::scheduler::Port> {
+        cas_core::scheduler::Scheduler::port(&self.shared.io_scheduler, self.index)
     }
 
     pub fn reader(&self) -> Reader {
