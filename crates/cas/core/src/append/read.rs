@@ -1,7 +1,10 @@
 //! Immutable read snapshots. Payload pins retain the actual locked IO files.
+use crate::budget::BudgetAllocator;
+use allocator_api2::vec::Vec;
 use std::fs::File;
 use std::io;
 use std::ops::Range;
+use std::sync::Arc;
 
 use super::{Error, Log, Result, format, index::Payload, verify_read_crc};
 use crate::{BLOCK_SIZE, MAX_REQUEST_BYTES, aligned::AlignedBuffer, direct};
@@ -49,7 +52,7 @@ impl ReadRange {
 pub struct ReadPlan {
     offset: u64,
     bytes: usize,
-    ranges: Vec<ReadRange>,
+    ranges: Vec<ReadRange, BudgetAllocator>,
     covered: [u64; 4],
     base: Option<crate::manifest::file::View>,
 }
@@ -151,7 +154,10 @@ impl Log {
         if self.published < boundary {
             return Err(Error::Pending);
         }
-        let mut ranges = Vec::with_capacity(bytes / BLOCK_SIZE);
+        let mut ranges = Vec::new_in(BudgetAllocator::new(Arc::clone(&self.metadata)));
+        ranges.try_reserve_exact(bytes / BLOCK_SIZE).map_err(|_| {
+            io::Error::new(io::ErrorKind::OutOfMemory, "read plan metadata exhausted")
+        })?;
         let mut covered = [0u64; 4];
         for (begin, mapping) in self.index.overlapping(offset, end) {
             let first = begin.max(offset);

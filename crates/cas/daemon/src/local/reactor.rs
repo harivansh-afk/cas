@@ -485,13 +485,10 @@ impl Reactor {
                         self.push(token)?;
                     }
                     Err(error) => {
-                        if read.shared_io()
-                            && let Some(port) = &self.worker.port
-                        {
-                            port.fail_shared(&error);
-                        }
-                        self.fail(&error);
-                        self.reject(pending.work)?;
+                        let Work::Read(read) = pending.work else {
+                            unreachable!()
+                        };
+                        self.fail_read(read, error)?;
                     }
                 },
                 Work::Fence(fence) if fence.syncing => {
@@ -762,34 +759,17 @@ impl Reactor {
                 }
             }
         }
-        while self
-            .reads
-            .front()
-            .is_some_and(|io| io.boundary <= self.worker.log.status().published)
+        while !self.failed
+            && self
+                .reads
+                .front()
+                .is_some_and(|io| io.boundary <= self.worker.log.status().published)
         {
-            let mut io = self.reads.pop_front().unwrap();
-            let Operation::Read { offset, buffer } = &mut io.operation else {
-                unreachable!()
-            };
-            let plan = self
-                .worker
-                .log
-                .read_plan(*offset, buffer.as_slice().len(), io.boundary)
-                .map_err(io::Error::other)?;
-            buffer.as_mut_slice().fill(0);
-            let read = Read::new(plan, io, self.worker.port.as_ref())?;
-            if read.done() {
-                self.send_io(read.into_io(), Ok(()))?;
-            } else {
-                let read = BudgetBox::try_new_in(
-                    read,
-                    BudgetAllocator::new(Arc::clone(&self.worker.shared.metadata)),
-                )
-                .map_err(|_| {
-                    io::Error::new(io::ErrorKind::OutOfMemory, "read state metadata exhausted")
-                })?;
-                self.enqueue(Work::Read(read))?;
-            }
+            let io = self.reads.pop_front().unwrap();
+            self.start_read(io)?;
+        }
+        if self.failed {
+            return self.reject_queued();
         }
         self.sync_for_compaction()?;
         self.drain_window()?;
@@ -804,6 +784,62 @@ impl Reactor {
             self.start_fence(None, false)?;
         }
         Ok(())
+    }
+
+    fn start_read(&mut self, mut io: Io) -> io::Result<()> {
+        let Operation::Read { offset, buffer } = &mut io.operation else {
+            unreachable!()
+        };
+        let plan = match self
+            .worker
+            .log
+            .read_plan(*offset, buffer.as_slice().len(), io.boundary)
+        {
+            Ok(plan) => plan,
+            Err(error) => return self.fail_io(io, io::Error::other(error)),
+        };
+        buffer.as_mut_slice().fill(0);
+        let mut allocation = match BudgetBox::<Read, _>::try_new_uninit_in(BudgetAllocator::new(
+            Arc::clone(&self.worker.shared.metadata),
+        )) {
+            Ok(allocation) => allocation,
+            Err(_) => {
+                return self.fail_io(
+                    io,
+                    io::Error::new(io::ErrorKind::OutOfMemory, "read state metadata exhausted"),
+                );
+            }
+        };
+        allocation.write(Read::new(plan, io));
+        // SAFETY: the unique box above was initialized exactly once with Read;
+        // no fallible preparation occurs until this owner is fully initialized.
+        let mut read = unsafe { allocation.assume_init() };
+        if let Err(error) = read.prepare(self.worker.port.as_ref()) {
+            return self.fail_read(read, error);
+        }
+        if read.done() {
+            self.send_io(BudgetBox::into_inner(read).into_io(), Ok(()))
+        } else {
+            self.enqueue(Work::Read(read)).map(|_| ())
+        }
+    }
+
+    fn fail_io(&mut self, io: Io, error: io::Error) -> io::Result<()> {
+        self.fail(&error);
+        self.send_io(io, Err(error))
+    }
+
+    fn fail_read(
+        &mut self,
+        read: BudgetBox<Read, BudgetAllocator>,
+        error: io::Error,
+    ) -> io::Result<()> {
+        if read.shared_io()
+            && let Some(port) = &self.worker.port
+        {
+            port.fail_shared(&error);
+        }
+        self.fail_io(BudgetBox::into_inner(read).into_io(), error)
     }
 
     fn drain_window(&mut self) -> io::Result<()> {

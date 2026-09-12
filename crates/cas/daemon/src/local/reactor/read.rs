@@ -26,37 +26,36 @@ pub(super) struct Read {
 }
 
 impl Read {
-    pub fn new(plan: ReadPlan, io: Io, port: Option<&host::Port>) -> io::Result<Self> {
-        let (reader, page) = if plan.manifest().is_some()
-            && (0..plan.bytes() / BLOCK_SIZE).any(|b| !plan.staged(b))
-        {
-            let port = port.ok_or_else(|| io::Error::other("manifest read has no shared store"))?;
-            (
-                Some(port.reader()),
-                Some(AlignedBuffer::try_new_in(
-                    BLOCK_SIZE,
-                    BudgetAllocator::new(port.metadata()),
-                )?),
-            )
-        } else {
-            (None, None)
-        };
-        let mut read = Self {
+    pub fn new(plan: ReadPlan, io: Io) -> Self {
+        Self {
             scratch: None,
-            page,
+            page: None,
             plan,
-            reader,
+            reader: None,
             io,
             stage: Stage::Done,
             block: 0,
             shared_io: false,
-        };
-        if read.plan.ranges().is_empty() {
-            read.next_block()?;
-        } else {
-            read.stage = Stage::Staging(0);
         }
-        Ok(read)
+    }
+
+    pub fn prepare(&mut self, port: Option<&host::Port>) -> io::Result<()> {
+        if self.plan.manifest().is_some()
+            && (0..self.plan.bytes() / BLOCK_SIZE).any(|block| !self.plan.staged(block))
+        {
+            let port = port.ok_or_else(|| io::Error::other("manifest read has no shared store"))?;
+            self.reader = Some(port.reader());
+            self.page = Some(AlignedBuffer::try_new_in(
+                BLOCK_SIZE,
+                BudgetAllocator::new(port.metadata()),
+            )?);
+        }
+        if self.plan.ranges().is_empty() {
+            self.next_block()?;
+        } else {
+            self.stage = Stage::Staging(0);
+        }
+        Ok(())
     }
 
     pub fn done(&self) -> bool {

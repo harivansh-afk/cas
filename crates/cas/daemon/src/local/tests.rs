@@ -740,3 +740,70 @@ fn descriptor_metadata_denial_precedes_mutation_and_refunds_partial_admission() 
     drop((completion, local));
     assert_eq!(metadata.usage().current, Amount::default());
 }
+
+#[test]
+fn read_preparation_errors_return_every_owner_before_credit_release() {
+    for exhaust_metadata in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut local = concurrent(&directory.path().join("log"));
+        let shared = Arc::clone(&local.shared);
+        let first = local.prepare(Kind::Read(BLOCK_SIZE)).unwrap().unwrap();
+        let second = local.prepare(Kind::Read(BLOCK_SIZE)).unwrap().unwrap();
+        let gate = shared.health.lock().unwrap();
+        let held = exhaust_metadata.then(|| {
+            shared
+                .metadata
+                .reserve(Amount {
+                    bytes: 128 * MAX_REQUEST_BYTES - shared.metadata.usage().current.bytes,
+                    requests: 0,
+                })
+                .unwrap()
+        });
+        let first_offset = if exhaust_metadata {
+            0
+        } else {
+            local.status.image_bytes
+        };
+        for (id, offset, permit) in [(0, first_offset, first), (1, 0, second)] {
+            local
+                .enqueue(
+                    id,
+                    Operation::Read {
+                        offset,
+                        buffer: AlignedBuffer::new(BLOCK_SIZE),
+                    },
+                    permit,
+                )
+                .unwrap();
+        }
+        drop(gate);
+        notify(local.input_wake.as_ref().unwrap()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut responses = Vec::new();
+        while responses.len() < 2 {
+            if let Some(response) = local.receive(false).unwrap() {
+                assert_eq!(response.id, responses.len() as u64);
+                assert!(response.result.is_err());
+                assert!(shared.health.lock().unwrap().failure.is_some());
+                responses.push(response);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "read preparation lost a completion owner"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(shared.pools.requests.usage().current.requests, 2);
+        assert_eq!(
+            shared.pools.read.usage().current.bytes,
+            2 * (BLOCK_SIZE + MAX_REQUEST_BYTES)
+        );
+        assert_eq!(local.report()["metrics"]["io_queued"], 0);
+        assert_eq!(local.status.published, 0);
+        drop(responses);
+        assert_eq!(shared.pools.requests.usage().current, Amount::default());
+        assert_eq!(shared.pools.read.usage().current, Amount::default());
+        drop((held, local));
+        assert_eq!(shared.metadata.usage().current, Amount::default());
+    }
+}

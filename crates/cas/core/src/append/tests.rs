@@ -539,17 +539,22 @@ fn index_budget_denial_precedes_creation_or_recovery_and_publication_reuses_slot
             .unwrap();
     }
     let old = log.read_plan(0, IMAGE_BYTES, 32).unwrap();
+    let plan_bytes = IMAGE_BYTES / BLOCK_SIZE * size_of::<ReadRange>();
+    assert_eq!(metadata.usage().current.bytes, charged + plan_bytes);
     for block in 0..32 {
         log.append(builder(block as u64 + 33, block * BLOCK_SIZE, 0xaa))
             .unwrap();
     }
     log.flush().unwrap();
-    assert_eq!(metadata.usage().current.bytes, charged);
-    assert_eq!(metadata.usage().peak.bytes, charged);
-    assert_eq!(metadata.usage().admitted, 3);
+    assert_eq!(metadata.usage().current.bytes, charged + plan_bytes);
+    assert_eq!(metadata.usage().peak.bytes, charged + plan_bytes);
+    assert_eq!(metadata.usage().admitted, 4);
     assert!(log.status().index_nodes_peak >= 3);
     drop(log);
-    assert_eq!(metadata.usage().current.bytes, segment_metadata);
+    assert_eq!(
+        metadata.usage().current.bytes,
+        segment_metadata + plan_bytes
+    );
     let mut data = AlignedBuffer::new(IMAGE_BYTES);
     old.read_into(&mut data).unwrap();
     for (block, bytes) in data
@@ -573,4 +578,45 @@ fn index_budget_denial_precedes_creation_or_recovery_and_publication_reuses_slot
     assert_eq!(metadata.usage().current.bytes, charged);
     drop(recovery);
     assert_eq!(metadata.usage().current.bytes, 0);
+}
+
+#[test]
+fn read_plan_metadata_denial_precedes_pins_and_captured_storage_survives_log_drop() {
+    let directory = tempfile::tempdir().unwrap();
+    let capacity = 64 * MAX_REQUEST_BYTES;
+    let metadata = Budget::new(Amount {
+        bytes: capacity,
+        requests: 0,
+    });
+    let mut log = Log::create_with_metadata(
+        directory.path().join("log"),
+        config(),
+        Limits::default(),
+        Arc::clone(&metadata),
+    )
+    .unwrap();
+    drop(log.append(builder(1, 0, 0x6c)).unwrap());
+    let baseline = metadata.usage().current;
+    let held = metadata
+        .reserve(Amount {
+            bytes: capacity - baseline.bytes,
+            requests: 0,
+        })
+        .unwrap();
+    assert!(
+        matches!(log.read_plan(0, BLOCK_SIZE, 1), Err(Error::Io(error)) if error.kind() == io::ErrorKind::OutOfMemory)
+    );
+    assert!(!log.status().failed);
+    assert_eq!(log.status().read_pins, 0);
+    drop(held);
+    let plan = log.read_plan(0, BLOCK_SIZE, 1).unwrap();
+    assert!(metadata.usage().current.bytes > baseline.bytes);
+    assert_eq!(log.status().read_pins, 1);
+    drop(log);
+    assert!(metadata.usage().current.bytes > 0);
+    let mut output = AlignedBuffer::new(BLOCK_SIZE);
+    plan.read_into(&mut output).unwrap();
+    assert_eq!(output.as_slice(), &[0x6c; BLOCK_SIZE]);
+    drop(plan);
+    assert_eq!(metadata.usage().current, Amount::default());
 }

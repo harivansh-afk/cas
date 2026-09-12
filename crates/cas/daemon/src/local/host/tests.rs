@@ -647,3 +647,64 @@ fn shared_chunk_corruption_fails_every_image_before_later_success() {
     drop((pin, first, second));
     shutdown(host);
 }
+
+#[test]
+fn read_page_metadata_denial_returns_ioerr_without_failing_the_shared_store() {
+    let root = tempfile::tempdir().unwrap();
+    let resources = Arc::new(Resources::default());
+    let mut host = create(root.path(), 2, Arc::clone(&resources));
+    let mut first = attach(&mut host, 2);
+    let mut other = attach(&mut host, 3);
+    let permit = first.prepare(Kind::Read(BLOCK_SIZE)).unwrap().unwrap();
+    let shared = Arc::clone(&first.shared);
+    let gate = shared.health.lock().unwrap();
+    let held = resources
+        .metadata
+        .reserve(Amount {
+            bytes: 128 * MAX_REQUEST_BYTES - resources.metadata.usage().current.bytes - BLOCK_SIZE,
+            requests: 0,
+        })
+        .unwrap();
+    first
+        .enqueue(
+            0,
+            Operation::Read {
+                offset: 0,
+                buffer: AlignedBuffer::new(BLOCK_SIZE),
+            },
+            permit,
+        )
+        .unwrap();
+    drop(gate);
+    notify(first.input_wake.as_ref().unwrap()).unwrap();
+    let completed = received(&mut first);
+    assert_eq!(completed.id, 0);
+    let error = completed.result.as_ref().unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::OutOfMemory);
+    assert_eq!(error.to_string(), "aligned buffer allocation denied");
+    assert!(shared.health.lock().unwrap().failure.is_some());
+    assert!(host.shared.gate.failure().is_none());
+    assert_eq!(shared.pools.requests.usage().current.requests, 1);
+    assert_eq!(
+        shared.pools.read.usage().current.bytes,
+        BLOCK_SIZE + MAX_REQUEST_BYTES
+    );
+    drop((completed, held));
+    let permit = other.prepare(Kind::Read(BLOCK_SIZE)).unwrap().unwrap();
+    other
+        .enqueue(
+            0,
+            Operation::Read {
+                offset: 0,
+                buffer: AlignedBuffer::new(BLOCK_SIZE),
+            },
+            permit,
+        )
+        .unwrap();
+    let response = received(&mut other);
+    assert!(response.result.is_ok());
+    drop((response, shared, first, other));
+    shutdown(host);
+    assert_eq!(resources.metadata.usage().current, Amount::default());
+    assert_eq!(resources.read_memory().usage().current, Amount::default());
+}
