@@ -44,7 +44,8 @@ impl SharedHost {
     }
 
     pub fn account_failed(&self) -> bool {
-        self.staging.failed()
+        self.admission.status().failed
+            || self.staging.failed()
             || self
                 .physical
                 .as_ref()

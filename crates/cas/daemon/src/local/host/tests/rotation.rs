@@ -42,11 +42,11 @@ fn allocation_case(timeout: bool) {
     first.send(Command::Io(old_read)).unwrap();
     let response = completed(&mut first);
     assert_eq!(response.id, 7);
-    let CompletionData::Read(bytes) = response.data else {
+    let CompletionData::Read(bytes) = &response.data else {
         panic!("old read completion");
     };
     assert_eq!(bytes.as_slice(), old);
-    drop(bytes);
+    drop(response);
     let permit = first.prepare(Kind::Control).unwrap().unwrap();
     first.enqueue(8, Operation::Flush, permit).unwrap();
     assert_eq!(completed(&mut first).id, 8);

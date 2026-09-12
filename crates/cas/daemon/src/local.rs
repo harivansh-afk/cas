@@ -59,6 +59,7 @@ pub struct Permit {
     _request: Credits,
     _read: Option<Credits>,
     window: Option<window::Slot>,
+    _admission: Option<host::admission::Entry>,
 }
 
 #[derive(Default, serde::Serialize)]
@@ -175,6 +176,7 @@ pub struct Shared {
     pub health: Health,
     pub injection: OnceLock<crate::fault::Injection>,
     window: Option<cas_core::budget::BudgetArc<window::Window>>,
+    admission: Option<cas_core::budget::BudgetArc<host::admission::Admission>>,
 }
 
 impl Shared {
@@ -194,6 +196,7 @@ impl Shared {
                 requests: 0,
             }),
             None,
+            None,
         )
     }
 
@@ -203,6 +206,7 @@ impl Shared {
         health: Health,
         metadata: Arc<Budget>,
         window: Option<cas_core::budget::BudgetArc<window::Window>>,
+        admission: Option<cas_core::budget::BudgetArc<host::admission::Admission>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             injection: OnceLock::new(),
@@ -212,6 +216,7 @@ impl Shared {
             final_status: Mutex::new(status),
             health,
             window,
+            admission,
         })
     }
 
@@ -228,6 +233,22 @@ impl Shared {
     }
 
     pub fn reserve(&self, kind: Kind) -> Option<Permit> {
+        let entry = match &self.admission {
+            Some(admission) => Some(host::admission::Admission::enter(admission)?),
+            None => None,
+        };
+        self.reserve_with_entry(kind, entry)
+    }
+
+    fn reserve_control(&self) -> Option<Permit> {
+        self.reserve_with_entry(Kind::Control, None)
+    }
+
+    fn reserve_with_entry(
+        &self,
+        kind: Kind,
+        entry: Option<host::admission::Entry>,
+    ) -> Option<Permit> {
         let request = match kind {
             Kind::Control => self.pools.control.reserve(Amount {
                 bytes: BLOCK_SIZE,
@@ -247,6 +268,7 @@ impl Shared {
             None
         };
         Some(Permit {
+            _admission: entry,
             _request: request,
             _read: read,
             window: match (kind, &self.window) {
@@ -590,7 +612,7 @@ impl Local {
     ) -> io::Result<()> {
         let permit = self
             .shared
-            .reserve(Kind::Control)
+            .reserve_control()
             .ok_or_else(|| io::Error::other("no control credit for storage barrier"))?;
         let (done, completion) = mailbox::bounded(1, &self.shared.metadata)?;
         self.send(command(done, permit))?;

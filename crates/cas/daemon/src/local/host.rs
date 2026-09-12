@@ -1,5 +1,7 @@
 //! One writer owner; image reactors exchange bounded, sequenced receipts.
+pub(super) mod admission;
 pub(super) mod capacity;
+pub use admission::Quiescence;
 #[cfg(test)]
 mod tests;
 mod worker;
@@ -42,6 +44,7 @@ impl Resources {
 }
 
 struct SharedHost {
+    admission: cas_core::budget::BudgetArc<admission::Admission>,
     gate: Arc<state::HostGate>,
     reader: Reader,
     resources: Arc<Resources>,
@@ -112,7 +115,9 @@ impl Host {
             }),
             &resources.metadata,
         )?;
+        let admission = admission::Admission::new(images.len(), &resources.metadata)?;
         let shared = Arc::new(SharedHost {
+            admission,
             gate: Arc::new(state::HostGate::default()),
             reader: store.reader()?,
             resources,
@@ -231,22 +236,32 @@ impl Host {
     }
 
     fn local(&mut self, image: [u8; 16], event: &EventFd) -> io::Result<Local> {
+        let _attachment =
+            admission::Admission::enter(&self.shared.admission).ok_or(io::ErrorKind::WouldBlock)?;
         let slot = self
             .images
             .iter_mut()
             .find(|slot| slot.as_ref().is_some_and(|a| a.image == image))
             .ok_or_else(|| io::Error::other("unknown or already attached host image"))?;
         let Attachment { log, mut port, .. } = slot.take().unwrap();
+        self.shared
+            .admission
+            .bind(port.index, event.try_clone()?, port.wake.try_clone()?)?;
         let shared = Shared::with_pools(
             log.status(),
             self.shared.resources.pools.image(),
             Arc::clone(&port.health),
             Arc::clone(&self.shared.resources.metadata),
             Some(port.window.clone()),
+            Some(self.shared.admission.clone()),
         );
         port.attached = true;
         self.shared.attached.fetch_add(1, Ordering::Relaxed);
         Local::from_host(log, event, shared, port)
+    }
+
+    pub fn pause_admission(&self) -> io::Result<Quiescence> {
+        admission::Admission::pause(&self.shared.admission)
     }
 
     pub fn store_status(&self) -> cas_core::store::file::Status {
@@ -255,6 +270,7 @@ impl Host {
 
     pub fn report(&self) -> serde_json::Value {
         serde_json::json!({ "failure": self.shared.gate.failure(), "store": self.store_status(),
+            "admission": self.shared.admission.status(),
             "pools": self.shared.resources.pools.report(), "metadata": self.shared.resources.metadata.usage(),
             "compaction_metadata": self.shared.resources.compaction.usage(),
             "attached": self.shared.attached.load(Ordering::Acquire),

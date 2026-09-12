@@ -5,6 +5,7 @@ use cas_core::{
 use std::{fs, path::Path};
 mod admission;
 mod allocation;
+mod quiescence;
 mod rotation;
 
 const STORE: Config = Config {
