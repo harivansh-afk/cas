@@ -42,12 +42,14 @@ writeShellApplication {
     nix
     util-linux
   ];
-  text = ''
-    exec ${lib.getExe' cas "cas-harness"} fixture --build-info ${buildInfo} "$@"
-  '';
-  derivationArgs.postCheck = ''
-    mkdir -p "$out/share/cas"
-    cp ${buildInfo} "$out/share/cas/build.json"
-  '';
+  runtimeEnv = {
+    CAS_HARNESS = lib.getExe' cas "cas-harness";
+    CAS_BUILD_INFO = "${buildInfo}";
+  };
+  text = builtins.readFile ./run.sh;
+  derivationArgs = {
+    CAS_BUILD_INFO = "${buildInfo}";
+    postCheck = builtins.readFile ../install-build-info.sh;
+  };
   meta.description = "Run source-bound native core IO and reflink controls on fresh XFS";
 }

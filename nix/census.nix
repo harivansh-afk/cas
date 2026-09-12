@@ -50,11 +50,11 @@ in
       cloud-utils
       normalize
     ];
-    text = ''
-      exec cas-harness fleet \
-        --firmware ${OVMF.fd}/FV/AAVMF_CODE.fd \
-        --firmware-vars ${OVMF.fd}/FV/AAVMF_VARS.fd \
-        --workload ${../experiments/update-guest.sh} "$@"
-    '';
+    runtimeEnv = {
+      CAS_FIRMWARE = "${OVMF.fd}/FV/AAVMF_CODE.fd";
+      CAS_FIRMWARE_VARS = "${OVMF.fd}/FV/AAVMF_VARS.fd";
+      CAS_WORKLOAD = "${../experiments/update-guest.sh}";
+    };
+    text = builtins.readFile ./run-fleet.sh;
   };
 }

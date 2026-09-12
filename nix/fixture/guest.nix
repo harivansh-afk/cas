@@ -6,6 +6,30 @@
   cas,
   ...
 }:
+let
+  workload = pkgs.writeShellApplication {
+    name = "cas-fixture-workload";
+    runtimeInputs = with pkgs; [
+      coreutils
+      util-linux
+      xfsprogs
+    ];
+    runtimeEnv = {
+      CAS_CORE_TESTS = "${cas.tests}/bin/cas-core-tests";
+      CAS_DAEMON_TESTS = "${cas.tests}/bin/cas-daemon-tests";
+    };
+    text = builtins.readFile ./workload.sh;
+  };
+
+  finish = pkgs.writeShellApplication {
+    name = "cas-fixture-finish";
+    runtimeInputs = with pkgs; [
+      coreutils
+      systemd
+    ];
+    text = builtins.readFile ./finish.sh;
+  };
+in
 {
   imports = [ (modulesPath + "/virtualisation/qemu-vm.nix") ];
   networking.hostName = "cas-fixture";
@@ -49,25 +73,11 @@
       "/results"
       "/fixture"
     ];
-    path = [
-      pkgs.coreutils
-      pkgs.util-linux
-      pkgs.xfsprogs
-    ];
     serviceConfig = {
       Type = "oneshot";
       TimeoutStartSec = 240;
+      ExecStart = lib.getExe workload;
+      ExecStopPost = lib.getExe finish;
     };
-    script = ''
-      export CAS_CORE_TESTS=${cas.tests}/bin/cas-core-tests
-      export CAS_DAEMON_TESTS=${cas.tests}/bin/cas-daemon-tests
-      ${builtins.readFile ./workload.sh}
-    '';
-    postStop = ''
-      printf '{"schema_version":1,"service_result":"%s","exit_code":"%s","exit_status":"%s"}\n' \
-        "$SERVICE_RESULT" "$EXIT_CODE" "$EXIT_STATUS" > /results/completion.json
-      ${pkgs.systemd}/bin/journalctl -u cas-fixture.service --no-pager > /results/service.log
-      ${pkgs.systemd}/bin/systemctl --force --force poweroff
-    '';
   };
 }

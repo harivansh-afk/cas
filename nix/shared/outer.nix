@@ -19,21 +19,28 @@ let
       guest_ram_bytes = inner.config.virtualisation.memorySize * 1024 * 1024;
     }
   );
+
+  workload = pkgs.writeShellApplication {
+    name = "cas-shared-workload";
+    runtimeInputs = with pkgs; [
+      coreutils
+      util-linux
+      xfsprogs
+    ];
+    runtimeEnv = {
+      CAS_HARNESS = "${cas}/bin/cas-harness";
+      CAS_BUILD_INFO = "${build}";
+    };
+    text = builtins.readFile ./workload.sh;
+  };
 in
 {
   imports = [ ../fixture/guest.nix ];
   virtualisation.memorySize = lib.mkForce 4096;
   systemd.services.cas-fixture = {
-    serviceConfig.TimeoutStartSec = lib.mkForce 450;
-    script = lib.mkForce ''
-      exec > /results/workload.log 2>&1
-      findmnt --json /fixture > /results/mount.json
-      xfs_info /fixture > /results/xfs-info.log
-      uname -a > /results/kernel.log
-      df -B1 /fixture > /results/space-before.log
-      ${cas}/bin/cas-harness shared --root /fixture/store --output /results/shared --build-info ${build} --scenario /results/scenario.json
-      df -B1 /fixture > /results/space-after.log
-      sync -f /fixture
-    '';
+    serviceConfig = {
+      TimeoutStartSec = lib.mkForce 450;
+      ExecStart = lib.mkForce (lib.getExe workload);
+    };
   };
 }
