@@ -142,9 +142,9 @@ impl Drop for Pin {
 /// Captures all registered roots under an exclusive owner borrow. A dropped
 /// reader can only make this set conservative; another publication is excluded.
 pub struct Roots<'a> {
-    file: &'a File,
-    keys: Vec<SnapshotKey, BudgetAllocator>,
-    metadata: Arc<Budget>,
+    pub(super) file: &'a File,
+    pub(super) keys: Vec<SnapshotKey, BudgetAllocator>,
+    pub(super) metadata: Arc<Budget>,
 }
 
 impl Roots<'_> {

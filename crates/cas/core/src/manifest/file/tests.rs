@@ -5,6 +5,7 @@ use crate::{
 };
 use std::{fs, io::Write, os::unix::fs::FileExt};
 mod pins;
+mod reclaim;
 mod snapshots;
 
 const ID: Identity = Identity {

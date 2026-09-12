@@ -10,6 +10,21 @@ use std::path::Path;
 use crate::BLOCK_SIZE;
 use crate::aligned::AlignedBuffer;
 
+mod fiemap;
+pub(crate) use fiemap::next_extent;
+
+pub(crate) fn truncate(file: &File, length: u64) -> io::Result<()> {
+    crate::encoding::require(
+        length <= i64::MAX as u64 && length.is_multiple_of(BLOCK_SIZE as u64),
+        "invalid truncate length",
+    )?;
+    #[cfg(test)]
+    if faults::take(faults::Fault::Truncate) {
+        return Err(io::Error::from_raw_os_error(libc::EIO));
+    }
+    file.set_len(length)
+}
+
 pub(crate) fn open(path: &Path, create: bool) -> io::Result<File> {
     let file = OpenOptions::new()
         .read(true)
@@ -239,6 +254,8 @@ pub(crate) mod faults {
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     pub(crate) enum Fault {
+        Truncate,
+        Map,
         Rename,
         Reflink,
         Write,

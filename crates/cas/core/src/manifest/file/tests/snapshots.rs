@@ -113,8 +113,8 @@ fn immutable_inspection_requires_exact_eof_commit_and_chunk_dependencies() {
         .unwrap()
         .recover()
         .unwrap();
-    model(&snapshot.view(), &[]);
-    let pin = snapshot.view();
+    model(&snapshot.view().unwrap(), &[]);
+    let pin = snapshot.view().unwrap();
     drop(snapshot);
     assert!(Snapshot::inspect(root.path(), expected, metadata(), |_| Ok(())).is_err());
     drop(pin);
@@ -148,7 +148,7 @@ fn metadata_identity_and_reflink_denials_never_fall_back_to_a_copy() {
     let source = frozen(&source_path);
     let before = bytes(&source_path);
     let denied = destination(root.path(), "metadata-denied");
-    assert!(Snapshot::create(&source.view(), &denied, budget(BLOCK_SIZE - 1)).is_err());
+    assert!(Snapshot::create(&source.view().unwrap(), &denied, budget(BLOCK_SIZE - 1)).is_err());
     assert!(!denied.join(NAME).exists());
     assert!(Manifest::clone_snapshot(&source, &denied, CLONE, budget(BLOCK_SIZE - 1)).is_err());
     assert!(!denied.join(NAME).exists());
@@ -179,7 +179,7 @@ fn metadata_identity_and_reflink_denials_never_fall_back_to_a_copy() {
         let error = if clone {
             Manifest::clone_snapshot(&source, &denied, CLONE, metadata()).err()
         } else {
-            Snapshot::create(&source.view(), &denied, metadata()).err()
+            Snapshot::create(&source.view().unwrap(), &denied, metadata()).err()
         }
         .unwrap();
         assert_eq!(error.raw_os_error(), Some(libc::EOPNOTSUPP));
@@ -212,7 +212,7 @@ fn reflink_snapshot_captures_exact_old_root_and_clone_gets_a_private_namespace()
         }
     );
     assert_eq!(bytes(&snapshot_path), original);
-    model(&snapshot.view(), &[]);
+    model(&snapshot.view().unwrap(), &[]);
     model(&source.view().unwrap(), &[(1, Some([199; 32]))]);
     let mut clone = Manifest::clone_snapshot(&snapshot, &clone_path, CLONE, metadata()).unwrap();
     assert_eq!(clone.current().image, CLONE.image);
@@ -286,7 +286,7 @@ fn reflink_snapshot_captures_exact_old_root_and_clone_gets_a_private_namespace()
         (24, None),
     ];
     model(&clone.view().unwrap(), &edits);
-    model(&snapshot.view(), &[]);
+    model(&snapshot.view().unwrap(), &[]);
     model(&source.view().unwrap(), &[(1, Some([199; 32]))]);
     assert_eq!(bytes(&snapshot_path), original);
     drop(clone);
@@ -301,7 +301,7 @@ fn reflink_snapshot_captures_exact_old_root_and_clone_gets_a_private_namespace()
         .unwrap()
         .recover()
         .unwrap();
-    model(&recovered.view(), &[]);
+    model(&recovered.view().unwrap(), &[]);
 }
 
 #[test]
@@ -320,7 +320,7 @@ fn failed_snapshot_verification_or_sync_leaves_the_source_and_orphan_intact() {
         // The constructor returned no snapshot; only explicit inspection can
         // stabilize this complete orphan. It has not entered any catalog.
         let inspected = Snapshot::inspect(&target, key(&source), metadata(), |_| Ok(())).unwrap();
-        model(&inspected.recover().unwrap().view(), &[]);
+        model(&inspected.recover().unwrap().view().unwrap(), &[]);
     }
 }
 

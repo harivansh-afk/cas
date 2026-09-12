@@ -24,6 +24,9 @@ mod pins;
 use pins::Pin;
 pub use pins::Roots;
 
+mod reclaim;
+pub use reclaim::ReclaimedPages;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Identity {
     pub store: [u8; 16],
@@ -198,6 +201,17 @@ impl Manifest {
     pub fn pinned_roots(&mut self, metadata: Arc<Budget>) -> io::Result<Roots<'_>> {
         self.healthy()?;
         self.pin.capture(&self.file, metadata)
+    }
+
+    /// The host establishes quiescence and reserves physical metadata output.
+    /// Logical punch statistics do not establish filesystem free-space progress.
+    pub fn reclaim_pages(&mut self, metadata: Arc<Budget>) -> io::Result<ReclaimedPages> {
+        self.healthy()?;
+        let prepared = reclaim::Prepared::new(self.pin.capture(&self.file, metadata)?)?;
+        self.failed = true;
+        let reclaimed = prepared.run()?;
+        self.failed = false;
+        Ok(reclaimed)
     }
 
     fn healthy(&self) -> io::Result<()> {

@@ -43,6 +43,7 @@ impl SnapshotKey {
 pub struct Snapshot {
     _directory: Directory,
     view: View,
+    failed: bool,
 }
 
 impl Snapshot {
@@ -50,12 +51,36 @@ impl Snapshot {
         self.view.key()
     }
 
-    pub fn view(&self) -> View {
-        self.view.clone()
+    pub fn view(&self) -> io::Result<View> {
+        self.healthy()?;
+        Ok(self.view.clone())
+    }
+
+    pub fn failed(&self) -> bool {
+        self.failed
+    }
+
+    fn healthy(&self) -> io::Result<()> {
+        if self.failed {
+            return Err(io::Error::other(
+                "snapshot failed; explicit recovery required",
+            ));
+        }
+        Ok(())
     }
 
     pub fn pinned_roots(&mut self, metadata: Arc<Budget>) -> io::Result<Roots<'_>> {
+        self.healthy()?;
         self.view.pin.capture(&self.view.file, metadata)
+    }
+
+    pub fn reclaim_pages(&mut self, metadata: Arc<Budget>) -> io::Result<ReclaimedPages> {
+        self.healthy()?;
+        let prepared = reclaim::Prepared::new(self.view.pin.capture(&self.view.file, metadata)?)?;
+        self.failed = true;
+        let reclaimed = prepared.run()?;
+        self.failed = false;
+        Ok(reclaimed)
     }
 
     /// The destination directory already exists. The host has established its
@@ -68,6 +93,7 @@ impl Snapshot {
         let (directory, file) = copy.sync()?;
         Ok(Self {
             _directory: directory,
+            failed: false,
             view: View {
                 file,
                 commit: source.commit,
@@ -129,6 +155,7 @@ impl SnapshotInspection {
         direct::sync_data(&self.file)?;
         Ok(Snapshot {
             _directory: self.directory,
+            failed: false,
             view: View {
                 file: self.file,
                 commit: self.key.commit,
@@ -147,6 +174,7 @@ impl Manifest {
         identity: Identity,
         metadata: Arc<Budget>,
     ) -> io::Result<Self> {
+        source.healthy()?;
         let key = source.key();
         require(
             identity.store == key.commit.store

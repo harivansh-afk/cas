@@ -52,13 +52,36 @@ impl<'a, P: PageReader> Tree<'a, P> {
     /// `end` is the byte after this committed transaction, not an unverified EOF.
     pub fn new(source: &'a P, commit: Commit, end: u64, metadata: Arc<Budget>) -> io::Result<Self> {
         validate_view(commit, end)?;
+        Self::with_scratch(
+            source,
+            commit,
+            end,
+            AlignedBuffer::try_new_in(BLOCK_SIZE, BudgetAllocator::new(metadata))?,
+        )
+    }
+
+    pub(crate) fn with_scratch(
+        source: &'a P,
+        commit: Commit,
+        end: u64,
+        scratch: AlignedBuffer<BudgetAllocator>,
+    ) -> io::Result<Self> {
+        validate_view(commit, end)?;
+        require(
+            scratch.as_slice().len() == BLOCK_SIZE,
+            "manifest traversal scratch size",
+        )?;
         Ok(Self {
             source,
             commit,
             end,
-            scratch: AlignedBuffer::try_new_in(BLOCK_SIZE, BudgetAllocator::new(metadata))?,
+            scratch,
             reads: 0,
         })
+    }
+
+    pub(crate) fn into_scratch(self) -> AlignedBuffer<BudgetAllocator> {
+        self.scratch
     }
 
     fn root_cursor(&self) -> Cursor {
@@ -103,9 +126,19 @@ impl<'a, P: PageReader> Tree<'a, P> {
 
     /// Walk and validate all reachable mappings with height-bounded scratch.
     /// The visitor can check chunk availability or mark hashes during quiescent GC.
-    pub fn walk(&mut self, mut visitor: impl FnMut(Extent) -> io::Result<()>) -> io::Result<()> {
+    pub fn walk(&mut self, visitor: impl FnMut(Extent) -> io::Result<()>) -> io::Result<()> {
+        self.walk_pages(|_| Ok(()), visitor)
+    }
+
+    /// Visit validated page addresses as well as mappings, using the same
+    /// decoder and height-bounded traversal as ordinary dependency inspection.
+    pub fn walk_pages(
+        &mut self,
+        mut page: impl FnMut(u64) -> io::Result<()>,
+        mut visitor: impl FnMut(Extent) -> io::Result<()>,
+    ) -> io::Result<()> {
         if self.commit.root.offset != 0 {
-            self.visit(self.root_cursor(), &mut visitor)?;
+            self.visit(self.root_cursor(), &mut page, &mut visitor)?;
         }
         Ok(())
     }
@@ -113,9 +146,12 @@ impl<'a, P: PageReader> Tree<'a, P> {
     fn visit(
         &mut self,
         cursor: Cursor,
+        page: &mut impl FnMut(u64) -> io::Result<()>,
         visitor: &mut impl FnMut(Extent) -> io::Result<()>,
     ) -> io::Result<()> {
-        match self.read_node(cursor)? {
+        let node = self.read_node(cursor)?;
+        page(cursor.offset)?;
+        match node {
             Node::Leaf(entries) => {
                 for entry in entries {
                     visitor(entry)?;
@@ -123,7 +159,7 @@ impl<'a, P: PageReader> Tree<'a, P> {
             }
             Node::Branch(children) => {
                 for index in 0..children.len() {
-                    self.visit(cursor.child(&children, index), visitor)?;
+                    self.visit(cursor.child(&children, index), page, visitor)?;
                 }
             }
         }
