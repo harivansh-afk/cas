@@ -63,6 +63,7 @@ pub struct Config {
     pub mode: Mode,
     pub endpoints: Vec<Endpoint>,
     pub reports: PathBuf,
+    pub pause: Option<crate::CompactionPause>,
 }
 
 struct Output {
@@ -163,8 +164,21 @@ fn outputs(
 }
 
 pub fn serve(mut config: Config) -> io::Result<()> {
-    let resources = Arc::new(Resources::default());
+    let mut resources = Resources::default();
     let (outputs, report) = outputs(&mut config, &resources)?;
+    if let Some(pause) = config.pause.take() {
+        if !config
+            .endpoints
+            .iter()
+            .any(|endpoint| endpoint.image == pause.image)
+        {
+            return Err(io::Error::other(
+                "compaction pause image is outside configured membership",
+            ));
+        }
+        resources.pause_compaction(pause, config.reports.join("compaction-pause.json"))?;
+    }
+    let resources = Arc::new(resources);
     let result = run(config, outputs, &resources);
     let value = match &result {
         Ok(outcome) => serde_json::json!({

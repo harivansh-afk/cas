@@ -31,7 +31,7 @@ in
       xfs_info /fixture > /results/xfs-info.log
       uname -a > /results/kernel.log
       df -B1 /fixture > /results/space-before.log
-      ${cas}/bin/cas-harness shared --root /fixture/store --output /results/shared --build-info ${build}
+      ${cas}/bin/cas-harness shared --root /fixture/store --output /results/shared --build-info ${build} --scenario /results/scenario.json
       df -B1 /fixture > /results/space-after.log
       sync -f /fixture
     '';

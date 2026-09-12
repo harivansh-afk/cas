@@ -169,7 +169,8 @@ pub(super) fn verify(output: &Path, build: &Build) -> io::Result<()> {
     )?;
     if build.workload == super::Workload::Shared {
         require(build.memory_mib == 4096, "shared outer RAM differs")?;
-        return crate::shared::verify(&guest.join("shared"));
+        let scenario = evidence::read_json(&guest.join("scenario.json"))?;
+        return crate::shared::verify(&guest.join("shared"), &scenario, build.live_recovery);
     }
     require(build.memory_mib == 2048, "core outer RAM differs")?;
     let hashes = |file| -> io::Result<Vec<String>> {

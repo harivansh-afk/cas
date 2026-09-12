@@ -13,6 +13,7 @@ fn config(root: &Path, transport: &Path, mode: Mode) -> ServiceConfig {
         segment_bytes: 2 * MAX_REQUEST_BYTES as u64,
         staging_bytes: 1024 * MAX_REQUEST_BYTES as u64,
         mode,
+        pause: None,
         endpoints: (2..4)
             .map(|image| Endpoint {
                 image: [image; 16],

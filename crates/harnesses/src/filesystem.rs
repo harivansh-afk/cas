@@ -30,8 +30,11 @@ pub struct Args {
     image: u8,
     #[arg(long)]
     sqlite: PathBuf,
+    #[arg(long)]
+    continued: bool,
 }
 
+const CONTINUED: usize = 4 * 1024 * 1024;
 const CREATED: usize = 512 * 1024;
 const APPENDED: usize = 256 * 1024;
 const OVERWRITE: std::ops::Range<usize> = 4096..12288;
@@ -131,10 +134,29 @@ fn verify(args: &Args) -> io::Result<serde_json::Value> {
     if database != "ok\n1024|1024|0|1|1024\n" {
         return Err(io::Error::other("SQLite contents or integrity differ"));
     }
+    let continued = if args.continued || matches!(args.phase, Phase::Resume) {
+        let mut bytes = Vec::new();
+        File::open(args.root.join("continued.bin"))?
+            .take((CONTINUED + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() != CONTINUED
+            || bytes
+                .iter()
+                .enumerate()
+                .any(|(offset, &byte)| byte != initial_byte(offset, args.image + 7))
+        {
+            return Err(io::Error::other(
+                "continuation file differs from restart oracle",
+            ));
+        }
+        bytes.len()
+    } else {
+        0
+    };
     Ok(
         serde_json::json!({"schema_version":1,"passed":true,"phase":args.phase,"image":args.image,
         "file_bytes":actual.len(),"file_blake3":blake3::hash(&actual).to_hex().to_string(),
-        "sqlite_rows":1024,"sqlite_integrity":"ok","buffered":true}),
+        "sqlite_rows":1024,"sqlite_integrity":"ok","buffered":true,"continued_bytes":continued}),
     )
 }
 
@@ -146,16 +168,16 @@ pub fn run(args: Args) -> io::Result<()> {
             write(&args)?;
         }
         if matches!(args.phase, Phase::Resume) {
-            // Dirty actual file data after reconnect; a cached read alone would
-            // not demonstrate continued WRITE and fsync service.
-            let bytes: Vec<_> = (0..4096)
-                .map(|offset| initial_byte(offset, args.image))
+            let bytes: Vec<_> = (0..CONTINUED)
+                .map(|offset| initial_byte(offset, args.image + 7))
                 .collect();
             let mut file = File::options()
                 .write(true)
-                .open(args.root.join("renamed.bin"))?;
+                .create_new(true)
+                .open(args.root.join("continued.bin"))?;
             file.write_all(&bytes)?;
             file.sync_all()?;
+            File::open(&args.root)?.sync_all()?;
         }
         verify(&args)
     })();

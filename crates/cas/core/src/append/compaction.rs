@@ -1,6 +1,6 @@
 //! Bounded background IO and sequenced publication share one compaction receipt.
 mod output;
-pub use output::Prepared;
+pub use output::{Prepared, Publication};
 
 use super::{
     Log, Result,

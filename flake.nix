@@ -80,6 +80,7 @@
         pkgs.callPackage ./nix/fixture {
           name = if liveRecovery then "cas-shared-recovery-fixture" else "cas-shared-fixture";
           workload = "shared";
+          inherit liveRecovery;
           guest = lib.nixosSystem {
             specialArgs = {
               cas = pkgs.cas;

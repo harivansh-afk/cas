@@ -22,6 +22,8 @@ pub struct Args {
     output: PathBuf,
     #[arg(long, hide = true)]
     build_info: PathBuf,
+    #[arg(long, value_enum)]
+    crash_at: Option<crate::shared::Cut>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -37,6 +39,8 @@ enum Workload {
 struct Build {
     #[serde(default)]
     workload: Workload,
+    #[serde(default)]
+    live_recovery: bool,
     #[serde(default = "core_memory")]
     memory_mib: u64,
     source_revision: String,
@@ -71,6 +75,11 @@ fn execute(args: &Args) -> io::Result<()> {
     let checkout = args.checkout.canonicalize()?;
     let build: Build = evidence::read_json(&args.build_info)?;
     fs::copy(&args.build_info, output.join("build.json"))?;
+    if args.crash_at.is_some() && (build.workload != Workload::Shared || !build.live_recovery) {
+        return Err(io::Error::other(
+            "crash-at requires shared-recovery-fixture",
+        ));
+    }
     if std::env::current_exe()?.canonicalize()? != build.harness.canonicalize()? {
         return Err(io::Error::other("fixture must run its packaged harness"));
     }
@@ -129,6 +138,12 @@ fn execute(args: &Args) -> io::Result<()> {
     let guest = output.join("guest");
     let temporary = output.join("tmp");
     fs::create_dir(&guest)?;
+    evidence::write_json(
+        &guest.join("scenario.json"),
+        &crate::shared::Scenario {
+            crash_at: args.crash_at,
+        },
+    )?;
     fs::create_dir(&temporary)?;
     let disk = output.join("xfs.img");
     File::options()

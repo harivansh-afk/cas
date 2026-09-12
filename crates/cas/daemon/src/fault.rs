@@ -66,25 +66,28 @@ impl Pause {
             snapshot: Option<Snapshot>,
         }
 
-        let parent = self
-            .marker
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| std::path::Path::new("."));
-        let mut file = NamedTempFile::new_in(parent)?;
-        serde_json::to_writer(
-            file.as_file_mut(),
+        publish_marker(
+            &self.marker,
             &Marker {
                 schema_version: 1,
                 point: self.point,
                 writes: self.after,
                 snapshot,
             },
-        )?;
-        file.persist_noclobber(&self.marker)
-            .map_err(|error| error.error)?;
-        Ok(())
+        )
     }
+}
+
+pub(crate) fn publish_marker(marker: &std::path::Path, value: &impl Serialize) -> io::Result<()> {
+    let parent = marker
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut file = NamedTempFile::new_in(parent)?;
+    serde_json::to_writer(file.as_file_mut(), value)?;
+    file.persist_noclobber(marker)
+        .map_err(|error| error.error)?;
+    Ok(())
 }
 
 /// One pause shared by the frontend, IO reactor and recovery worker.
@@ -168,7 +171,7 @@ impl Fault {
     }
 }
 
-fn stop_process() -> io::Result<()> {
+pub(crate) fn stop_process() -> io::Result<()> {
     // SAFETY: SIGSTOP stops this process. The harness owns its process group
     // and can kill or resume it; no Rust data is accessed by a signal handler.
     if unsafe { libc::raise(libc::SIGSTOP) } != 0 {

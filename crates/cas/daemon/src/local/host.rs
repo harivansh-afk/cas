@@ -4,6 +4,7 @@ pub(super) mod capacity;
 pub use admission::Quiescence;
 mod administration;
 mod collection;
+pub mod fault;
 mod snapshots;
 pub use snapshots::{SnapshotHandle, SnapshotReport};
 pub mod initialize;
@@ -26,6 +27,7 @@ pub struct Resources {
     pub metadata: Arc<Budget>,
     pub compaction: Arc<Budget>,
     pools: pools::HostPools,
+    fault: Option<Mutex<Option<fault::Pause>>>,
 }
 
 impl Default for Resources {
@@ -40,6 +42,7 @@ impl Default for Resources {
             metadata: metadata(),
             compaction: metadata(),
             pools: pools::HostPools::new(),
+            fault: None,
         }
     }
 }
@@ -266,6 +269,7 @@ impl Host {
             let (output, events) = mailbox::bounded(1, &shared.resources.metadata)?;
             let (reply, replies) = mailbox::bounded(1, &shared.resources.metadata)?;
             endpoints.push(worker::Endpoint {
+                resources: Arc::clone(&shared.resources),
                 manifest,
                 quiescent: None,
                 #[cfg(test)]

@@ -15,6 +15,7 @@ mod local;
 mod request;
 pub mod service;
 pub mod storage;
+pub use local::host::fault::{Point as CompactionPoint, Selection as CompactionPause};
 pub use local::host::{
     CollectionHandle, CollectionReport, Host, Quiescence, Resources, Roots, SnapshotHandle,
     SnapshotReport,

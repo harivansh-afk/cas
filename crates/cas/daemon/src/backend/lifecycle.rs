@@ -58,7 +58,10 @@ impl Backend {
                 local.pause(deadline)?;
             }
             Ok(())
-        })();
+        })()
+        .map_err(|error: io::Error| {
+            io::Error::new(error.kind(), format!("frontend {change:?}: {error}"))
+        });
         if let Err(error) = &result {
             self.fail(error.to_string());
             self.fail_pending(vrings);
@@ -118,30 +121,15 @@ impl Backend {
                 StateChange::QueueConfiguration(index) if serving => {
                     self.blocked_queues[index] = true;
                     self.rebase_queues[index] = true;
-                    // A standalone base update can already form a complete
-                    // queue. A multi-message reset stays blocked until its
-                    // addresses and cursor describe a valid available ring.
-                    if self.configuration_ready(&vrings[index])? {
-                        self.rebase_queue(index, &vrings[index])?;
-                        self.blocked_queues[index] = false;
-                        self.rebase_queues[index] = false;
-                    }
                 }
                 StateChange::QueueStop(index) => {
                     self.blocked_queues[index] = true;
                     self.rebase_queues[index] = serving;
                 }
                 StateChange::QueueEnable { index, enabled } => {
-                    if enabled
-                        && (self.rebase_queues[index]
-                            || self.live.as_ref().is_some_and(Session::fresh))
-                    {
-                        self.rebase_queue(index, &vrings[index])?;
-                    }
-                    self.blocked_queues[index] = !enabled;
-                    if enabled {
-                        self.rebase_queues[index] = false;
-                    }
+                    self.rebase_queues[index] |=
+                        enabled && self.live.as_ref().is_some_and(Session::fresh);
+                    self.blocked_queues[index] = !enabled || self.rebase_queues[index];
                 }
                 StateChange::Reset => {
                     self.blocked_queues.fill(true);
@@ -149,6 +137,25 @@ impl Backend {
                     self.negotiated_features = 0;
                 }
                 _ => (),
+            }
+            // Enable does not imply that addresses and the kick FD are ready.
+            // Any later setup message may finish the pending rebase.
+            let configured = match change {
+                StateChange::QueueConfiguration(index)
+                | StateChange::QueueNotification(index)
+                | StateChange::QueueEnable {
+                    index,
+                    enabled: true,
+                } => Some(index),
+                _ => None,
+            };
+            if let Some(index) = configured
+                && self.rebase_queues[index]
+                && self.configuration_ready(&vrings[index])?
+            {
+                self.rebase_queue(index, &vrings[index])?;
+                self.blocked_queues[index] = false;
+                self.rebase_queues[index] = false;
             }
             self.clear_changed_waits(change);
             self.rearm_deadline_timer()?;
@@ -169,7 +176,10 @@ impl Backend {
                 local::notify(&self.completion_event)?;
             }
             Ok(())
-        })();
+        })()
+        .map_err(|error: io::Error| {
+            io::Error::new(error.kind(), format!("frontend {change:?}: {error}"))
+        });
         if let Err(error) = &result {
             self.paused = true;
             self.fail(error.to_string());
@@ -187,7 +197,12 @@ impl Backend {
         let used = queue
             .get_queue()
             .used_idx(&**memory, Ordering::Acquire)
-            .map_err(io::Error::other)?
+            .map_err(|error| {
+                io::Error::other(format!(
+                    "rebase queue {index}, state {:?}: {error}",
+                    queue.get_queue().state()
+                ))
+            })?
             .0;
         if let Some(gate) = self.storage.completion_gate() {
             let mut health = gate
@@ -234,7 +249,12 @@ impl Backend {
             let used = queue
                 .get_queue()
                 .used_idx(&**memory, Ordering::Acquire)
-                .map_err(io::Error::other)?
+                .map_err(|error| {
+                    io::Error::other(format!(
+                        "validate queue {index}, state {:?}: {error}",
+                        queue.get_queue().state()
+                    ))
+                })?
                 .0;
             if used != queue.get_queue().next_used() {
                 return Err(io::Error::other(

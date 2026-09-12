@@ -4,6 +4,73 @@ use std::time::{Duration, Instant};
 use vm_memory::GuestAddress;
 
 #[test]
+fn fresh_queue_enable_waits_for_addresses_and_kick() {
+    use vhost_user_backend::StateChange;
+    let directory = tempfile::tempdir().unwrap();
+    let mut backend = Backend::open_with_recovery(
+        &directory.path().join("log"),
+        BackendKind::LocalAsync,
+        Some(BLOCK_SIZE as u64),
+        true,
+        Fault::default(),
+    )
+    .unwrap();
+    backend
+        .create_attachment(&VhostUserInflight {
+            mmap_size: 0,
+            mmap_offset: 0,
+            num_queues: 1,
+            queue_size: 128,
+        })
+        .unwrap();
+    let (memory, vring) = super::super::tests::queue();
+    vring.set_queue_info(0x10000, 0x20000, 0x30000).unwrap();
+    vring.set_queue_ready(false);
+    vring.set_enabled(false);
+    backend.update_memory(memory).unwrap();
+    backend.acked_features(backend.features());
+    let vrings = [vring];
+    let enable = StateChange::QueueEnable {
+        index: 0,
+        enabled: true,
+    };
+    backend.begin_change(enable, &vrings).unwrap();
+    vrings[0].set_enabled(true);
+    backend.end_change(enable, true, &vrings).unwrap();
+    assert!(backend.blocked_queues[0]);
+    backend
+        .begin_change(StateChange::QueueConfiguration(0), &vrings)
+        .unwrap();
+    vrings[0].set_queue_info(0x1000, 0x2000, 0x3000).unwrap();
+    backend
+        .end_change(StateChange::QueueConfiguration(0), true, &vrings)
+        .unwrap();
+    assert!(backend.blocked_queues[0]);
+    backend
+        .begin_change(StateChange::QueueNotification(0), &vrings)
+        .unwrap();
+    vrings[0].set_queue_ready(true);
+    backend
+        .end_change(StateChange::QueueNotification(0), true, &vrings)
+        .unwrap();
+    assert!(!backend.blocked_queues[0]);
+    backend.process(&vrings).unwrap();
+    assert!(
+        backend
+            .storage
+            .completion_gate()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .carrier
+            .as_ref()
+            .unwrap()
+            .queue_initialized(0)
+            .unwrap()
+    );
+}
+
+#[test]
 fn idle_frontend_deadline_fails_the_retained_attachment_without_guest_access() {
     let directory = tempfile::tempdir().unwrap();
     let mut backend = Backend::open_with_recovery(

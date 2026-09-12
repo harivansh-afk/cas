@@ -14,6 +14,14 @@ use crate::{
 use arrayvec::ArrayVec;
 use std::{io, sync::Arc};
 
+/// Completed owner boundaries, exposed for process-crash controls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Publication {
+    BeforeChunks,
+    AfterChunks,
+    AfterManifest,
+}
+
 /// The worker retains Input while this borrows its verified immutable payload.
 /// Every hash is computed once; the complete mapping is owned before output IO.
 pub struct Prepared<'a> {
@@ -88,6 +96,15 @@ impl Prepared<'_> {
 
     /// The exclusive worker owns Store and Manifest throughout output and sync.
     pub fn write(self, store: &mut Store, manifest: &mut Manifest) -> io::Result<Compacted> {
+        self.write_with(store, manifest, |_, _| Ok(()))
+    }
+
+    pub fn write_with(
+        self,
+        store: &mut Store,
+        manifest: &mut Manifest,
+        mut observe: impl FnMut(Publication, u64) -> io::Result<()>,
+    ) -> io::Result<Compacted> {
         require(
             !store.status().failed && store.config().store == self.previous.commit().store,
             "compaction store is failed or differs",
@@ -96,10 +113,13 @@ impl Prepared<'_> {
             manifest.view()?.same(&self.previous),
             "compaction manifest changed before output",
         )?;
+        observe(Publication::BeforeChunks, manifest.current().durable)?;
         for chunks in self.chunks.chunks(MAX_CHUNKS) {
             store.insert(chunks)?;
         }
+        observe(Publication::AfterChunks, manifest.current().durable)?;
         manifest.publish(self.manifest)?;
+        observe(Publication::AfterManifest, manifest.current().durable)?;
         Ok(Compacted {
             previous: self.previous,
             view: manifest.view()?,

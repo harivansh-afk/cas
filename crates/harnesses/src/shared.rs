@@ -25,6 +25,36 @@ const IMAGES: [&str; 2] = [
 ];
 const IMAGE_BYTES: u64 = 512 * 1024 * 1024;
 const SEGMENT_BYTES: u64 = 2 * 1024 * 1024;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Cut {
+    BeforeChunks,
+    AfterChunks,
+    AfterManifest,
+    AfterD,
+    AfterPunch,
+    AfterUnlink,
+}
+
+impl Cut {
+    fn name(self) -> &'static str {
+        match self {
+            Self::BeforeChunks => "before-chunks",
+            Self::AfterChunks => "after-chunks",
+            Self::AfterManifest => "after-manifest",
+            Self::AfterD => "after-d",
+            Self::AfterPunch => "after-punch",
+            Self::AfterUnlink => "after-unlink",
+        }
+    }
+}
+
+#[derive(Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Scenario {
+    pub crash_at: Option<Cut>,
+}
+
 const PHASE_TIMEOUT: Duration = Duration::from_secs(180);
 
 #[derive(clap::Args)]
@@ -35,6 +65,8 @@ pub struct Args {
     output: PathBuf,
     #[arg(long)]
     build_info: PathBuf,
+    #[arg(long)]
+    scenario: PathBuf,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -72,6 +104,7 @@ fn start_host(
     output: &Path,
     paths: &[PathBuf; 2],
     mode: &str,
+    cut: Option<Cut>,
 ) -> io::Result<ManagedChild> {
     let reports = output.join("daemon");
     fs::create_dir(&reports)?;
@@ -83,6 +116,17 @@ fn start_host(
         .arg(SEGMENT_BYTES.to_string())
         .arg("--reports")
         .arg(&reports);
+    if let Some(cut) = cut {
+        command.args([
+            "--pause-compaction",
+            cut.name(),
+            "--pause-image",
+            IMAGES[0],
+            "--pause-after",
+            "1",
+            "--pause-wait-for-arm",
+        ]);
+    }
     for (id, socket) in IMAGES.iter().zip(paths) {
         command
             .arg("--image")
@@ -106,15 +150,16 @@ fn start_host(
     Ok(host)
 }
 
-fn phase(args: &Args, build: &Build, name: &str) -> io::Result<()> {
+fn phase(args: &Args, build: &Build, scenario: &Scenario, name: &str) -> io::Result<()> {
     let output = args.output.join(name);
     fs::create_dir(&output)?;
     let sockets = tempfile::Builder::new()
         .prefix("cas-shared-")
         .tempdir_in("/run")?;
     let paths = [sockets.path().join("0.sock"), sockets.path().join("1.sock")];
-    let mut host = start_host(args, build, &output, &paths, "cold")?;
     let live = build.live_recovery && name == "write";
+    let cut = if live { scenario.crash_at } else { None };
+    let mut host = start_host(args, build, &output, &paths, "cold", cut)?;
     let mut guests = Vec::new();
     for (index, socket) in paths.iter().enumerate() {
         let directory = output.join(format!("guest-{index}"));
@@ -125,6 +170,9 @@ fn phase(args: &Args, build: &Build, name: &str) -> io::Result<()> {
         fs::write(directory.join("image"), index.to_string())?;
         if live {
             fs::write(directory.join("live-recovery"), "retained")?;
+        }
+        if build.live_recovery && name == "verify" {
+            fs::write(directory.join("continued"), "required")?;
         }
         let mut command = Command::new(&build.guest);
         command
@@ -145,7 +193,7 @@ fn phase(args: &Args, build: &Build, name: &str) -> io::Result<()> {
             &paths,
             &mut host,
             &mut guests,
-            deadline,
+            restart::Boundary { deadline, cut },
         )?
     } else {
         output.clone()
@@ -197,13 +245,13 @@ fn phase(args: &Args, build: &Build, name: &str) -> io::Result<()> {
     if !status.success() {
         return Err(io::Error::other("shared host shutdown failed"));
     }
-    verify_phase(&output, name, build)
+    verify_phase(&output, name, build, scenario)
 }
 
-fn verify_phase(output: &Path, phase: &str, build: &Build) -> io::Result<()> {
+fn verify_phase(output: &Path, phase: &str, build: &Build, scenario: &Scenario) -> io::Result<()> {
     let live = build.live_recovery && phase == "write";
     let completed = if live {
-        verify_restart(output)?;
+        verify_restart(output, scenario.crash_at)?;
         output.join("replacement")
     } else {
         output.to_owned()
@@ -227,6 +275,16 @@ fn verify_phase(output: &Path, phase: &str, build: &Build) -> io::Result<()> {
             .verify()?;
         let exit: serde_json::Value = evidence::read_json(&directory.join("exit.json"))?;
         let mount: serde_json::Value = evidence::read_json(&directory.join("mount.json"))?;
+        let limits: serde_json::Value = evidence::read_json(&directory.join("queue-limits.json"))?;
+        let transfer = limits["max_segments"]
+            .as_u64()
+            .zip(limits["max_segment_size"].as_u64())
+            .and_then(|(count, size)| count.checked_mul(size));
+        if !transfer.is_some_and(|bytes| bytes > 0 && bytes <= cas_core::MAX_REQUEST_BYTES as u64) {
+            return Err(io::Error::other(
+                "guest segment geometry exceeds the request cap",
+            ));
+        }
         if exit["exit_code"] != 0
             || mount["filesystems"][0]["fstype"] != "ext4"
             || !mount["filesystems"][0]["options"]
@@ -259,9 +317,16 @@ fn verify_phase(output: &Path, phase: &str, build: &Build) -> io::Result<()> {
                 || resumed["phase"] != "resume"
                 || resumed["file_blake3"] != actual["file_blake3"]
                 || resumed["sqlite_integrity"] != "ok"
+                || resumed["continued_bytes"] != 4 * 1024 * 1024
             {
                 return Err(io::Error::other("resumed application oracle failed"));
             }
+        }
+        if build.live_recovery && phase == "verify" && actual["continued_bytes"] != 4 * 1024 * 1024
+        {
+            return Err(io::Error::other(
+                "fresh boot lacks the complete continuation file",
+            ));
         }
         let qemu: serde_json::Value = evidence::read_json(&directory.join("qemu.json"))?;
         let argv = qemu["argv"]
@@ -319,6 +384,13 @@ fn verify_phase(output: &Path, phase: &str, build: &Build) -> io::Result<()> {
 pub fn run(args: Args) -> io::Result<()> {
     fs::create_dir(&args.output)?;
     let build: Build = evidence::read_json(&args.build_info)?;
+    let scenario: Scenario = evidence::read_json(&args.scenario)?;
+    if scenario.crash_at.is_some() && !build.live_recovery {
+        return Err(io::Error::other(
+            "compaction cuts require the retained fixture",
+        ));
+    }
+    evidence::write_json(&args.output.join("scenario.json"), &scenario)?;
     evidence::write_json(&args.output.join("build.json"), &build)?;
     let started = crate::host::utc_now()?;
     let result = (|| {
@@ -338,8 +410,8 @@ pub fn run(args: Args) -> io::Result<()> {
             &args.output.join("initialize"),
             Duration::from_secs(65),
         )?;
-        phase(&args, &build, "write")?;
-        phase(&args, &build, "verify")?;
+        phase(&args, &build, &scenario, "write")?;
+        phase(&args, &build, &scenario, "verify")?;
         Ok(())
     })();
     evidence::write_json(
@@ -348,20 +420,30 @@ pub fn run(args: Args) -> io::Result<()> {
             "schema_version":1,"passed":result.is_ok(),"started_at_utc":started,"ended_at_utc":crate::host::utc_now()?,
             "error":result.as_ref().err().map(ToString::to_string),"images":2,"image_bytes":IMAGE_BYTES,
             "segment_bytes":SEGMENT_BYTES,"guest_ram_bytes_each":build.guest_ram_bytes,"inner_acceleration":"tcg",
-            "paper_gates":[],"checkpoint_complete":false,"live_recovery":build.live_recovery,
+            "paper_gates":[],"checkpoint_complete":false,"live_recovery":build.live_recovery,"crash_at":scenario.crash_at,
         }),
     )?;
     result
 }
 
-pub fn verify(output: &Path) -> io::Result<()> {
+pub fn verify(output: &Path, expected: &Scenario, live_recovery: bool) -> io::Result<()> {
     let report: serde_json::Value = evidence::read_json(&output.join("shared.json"))?;
     if report["passed"] != true {
         return Err(io::Error::other("shared fixture did not pass"));
     }
     let build: Build = evidence::read_json(&output.join("build.json"))?;
+    let scenario: Scenario = evidence::read_json(&output.join("scenario.json"))?;
+    if scenario != *expected
+        || build.live_recovery != live_recovery
+        || report["live_recovery"] != live_recovery
+        || report["crash_at"] != serde_json::to_value(expected.crash_at)?
+    {
+        return Err(io::Error::other(
+            "shared scenario differs from fixture request",
+        ));
+    }
     for phase in ["write", "verify"] {
-        verify_phase(&output.join(phase), phase, &build)?;
+        verify_phase(&output.join(phase), phase, &build, &scenario)?;
     }
     for index in 0..2 {
         let get = |phase| {

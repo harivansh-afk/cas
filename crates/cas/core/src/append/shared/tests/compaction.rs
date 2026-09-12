@@ -38,6 +38,27 @@ impl Fixture {
 }
 
 #[test]
+fn reclamation_accepts_an_admitted_identity_before_log_assignment() {
+    let mut f = Fixture::new();
+    write(f.log(), 0, 10);
+    f.log().flush().unwrap();
+    f.compact();
+    assert!(f.log().select_reclamation(Some(0), memory()).is_err());
+    let selected = f.log().select_reclamation(Some(2), memory()).unwrap();
+    // The carrier has admitted mutation 2, but it was not in the selected spans.
+    write(f.log(), 0, 20);
+    f.log().flush().unwrap();
+    let reclaimed = selected.run().unwrap();
+    let stats = f.log().apply_reclamation(reclaimed).unwrap();
+    assert!(stats.punch_requested_bytes > 0);
+    f.fresh(2);
+    assert_eq!(
+        f.image(),
+        [vec![20; BLOCK_SIZE], vec![0; 7 * BLOCK_SIZE]].concat()
+    );
+}
+
+#[test]
 fn publication_keeps_newer_overwrites_and_reclaim_waits_for_original_readers() {
     let mut f = Fixture::new();
     write(f.log(), 0, 10);
@@ -58,7 +79,29 @@ fn publication_keeps_newer_overwrites_and_reclaim_waits_for_original_readers() {
         (2, 2, 2 * BLOCK_SIZE)
     );
     assert_eq!(f.log().status().read_pins, 1);
-    let output = f.output(input);
+    let mut boundaries = Vec::new();
+    let output = input
+        .prepare(f.manifest.as_ref().unwrap())
+        .unwrap()
+        .write_with(
+            &mut f.store,
+            f.manifest.as_mut().unwrap(),
+            |point, durable| {
+                boundaries.push((point, durable));
+                Ok(())
+            },
+        )
+        .unwrap();
+    drop(input);
+    use crate::append::Publication;
+    assert_eq!(
+        boundaries,
+        [
+            (Publication::BeforeChunks, 0),
+            (Publication::AfterChunks, 0),
+            (Publication::AfterManifest, 2),
+        ]
+    );
     assert_eq!(f.log().status().compacted, 0); // Synced file is not yet image publication.
     assert_eq!(output.durable(), 2);
     f.log().publish_compaction(output).unwrap();
@@ -80,7 +123,19 @@ fn publication_keeps_newer_overwrites_and_reclaim_waits_for_original_readers() {
     );
     drop(old);
     assert_eq!(f.log().status().read_pins, 0);
-    f.reclaim(None);
+    let mut operations = Vec::new();
+    let reclaimed = f
+        .log()
+        .select_reclamation(None, memory())
+        .unwrap()
+        .run_with(|operation| {
+            operations.push(operation);
+            Ok(())
+        })
+        .unwrap();
+    f.log().apply_reclamation(reclaimed).unwrap();
+    assert!(operations.iter().any(|operation| matches!(operation,
+        crate::append::ReclaimOperation::Punch { bytes, .. } if *bytes > 0)));
     f.fresh(3);
     assert_eq!(
         f.image(),

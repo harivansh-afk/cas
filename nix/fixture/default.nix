@@ -9,6 +9,7 @@
   guest,
   provenance,
   workload ? "core",
+  liveRecovery ? false,
   name ? "cas-xfs-fixture",
 }:
 let
@@ -17,6 +18,7 @@ let
     builtins.toJSON {
       inherit (provenance) source_revision source_path;
       inherit workload;
+      live_recovery = liveRecovery;
       memory_mib = guest.config.virtualisation.memorySize;
       vm = "${vm}/bin/run-cas-fixture-vm";
       harness = lib.getExe' cas "cas-harness";

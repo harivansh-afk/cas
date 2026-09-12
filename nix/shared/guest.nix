@@ -61,6 +61,9 @@
       lsblk --bytes --json > /results/disks.json
       test "$(blockdev --getsize64 /dev/vda)" = 536870912
       test "$(blockdev --getss /dev/vda)" = 4096
+      printf '{"max_segments":%s,"max_segment_size":%s,"max_sectors_kb":%s,"max_hw_sectors_kb":%s}\n' \
+        "$(cat /sys/block/vda/queue/max_segments)" "$(cat /sys/block/vda/queue/max_segment_size)" \
+        "$(cat /sys/block/vda/queue/max_sectors_kb)" "$(cat /sys/block/vda/queue/max_hw_sectors_kb)" > /results/queue-limits.json
       case "$phase" in
         write) mkfs.ext4 -F -b 4096 -E nodiscard,lazy_itable_init=0,lazy_journal_init=0 /dev/vda ;;
         verify) e2fsck -fn /dev/vda ;;
@@ -70,11 +73,15 @@
       mount -t ext4 -o data=ordered /dev/vda /mnt/cas
       findmnt --json /mnt/cas > /results/mount.json
       tune2fs -l /dev/vda > /results/ext4.log
-      ${cas}/bin/cas-harness filesystem --root /mnt/cas --output /results/workload --phase "$phase" --image "$image" --sqlite ${pkgs.sqlite}/bin/sqlite3
+      continuation=()
+      if test -f /results/continued; then continuation+=(--continued); fi
+      ${cas}/bin/cas-harness filesystem --root /mnt/cas --output /results/workload --phase "$phase" --image "$image" --sqlite ${pkgs.sqlite}/bin/sqlite3 "''${continuation[@]}"
       if test -f /results/live-recovery; then
         touch /results/ready
-        while ! test -f /results/resume; do sleep 0.05; done
+        while ! test -f /results/continue; do sleep 0.05; done
         ${cas}/bin/cas-harness filesystem --root /mnt/cas --output /results/resumed --phase resume --image "$image" --sqlite ${pkgs.sqlite}/bin/sqlite3
+        touch /results/updated
+        while ! test -f /results/resume; do sleep 0.05; done
       fi
       if test "$phase" = write; then
         fstrim -v /mnt/cas > /results/trim.log
@@ -85,6 +92,7 @@
     postStop = ''
       printf '{"schema_version":1,"service_result":"%s","exit_code":"%s","exit_status":"%s"}\n' "$SERVICE_RESULT" "$EXIT_CODE" "$EXIT_STATUS" > /results/completion.json
       ${pkgs.systemd}/bin/journalctl -u cas-filesystem.service --no-pager > /results/service.log
+      ${pkgs.systemd}/bin/journalctl -k --no-pager > /results/kernel-journal.log
       ${pkgs.coreutils}/bin/sync
       ${pkgs.systemd}/bin/systemctl --force --force poweroff
     '';

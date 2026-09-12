@@ -7,6 +7,7 @@ enum Grant {
 
 pub(super) struct Endpoint {
     pub manifest: Manifest,
+    pub resources: Arc<Resources>,
     pub quiescent: Option<u64>,
     #[cfg(test)]
     pub control: Arc<Mutex<tests::Control>>,
@@ -68,11 +69,46 @@ impl Endpoint {
                     }
                 }
                 self.healthy()?;
+                let through = prepared.through();
+                let chunks = Some(prepared.chunk_count());
+                let image = self.manifest.current().image;
+                let resources = Arc::clone(&self.resources);
+                let health = Arc::clone(&self.health);
                 let output = || {
-                    let receipt = prepared.write(store, &mut self.manifest)?;
+                    let receipt =
+                        prepared.write_with(store, &mut self.manifest, |stage, durable| {
+                            use append::Publication;
+                            let point = match stage {
+                                Publication::BeforeChunks => fault::Point::BeforeChunks,
+                                Publication::AfterChunks => fault::Point::AfterChunks,
+                                Publication::AfterManifest => fault::Point::AfterManifest,
+                            };
+                            resources.hit_compaction(
+                                point,
+                                fault::Observation {
+                                    image,
+                                    through,
+                                    manifest_durable: durable,
+                                    chunks,
+                                    operation: None,
+                                },
+                                &health,
+                            )
+                        })?;
                     let Reply::Reclaim(reclaim) = self.exchange(Event::Published(receipt))? else {
                         return Err(io::Error::other("expected reclamation after D publication"));
                     };
+                    self.resources.hit_compaction(
+                        fault::Point::AfterD,
+                        fault::Observation {
+                            image,
+                            through,
+                            manifest_durable: self.manifest.current().durable,
+                            chunks,
+                            operation: None,
+                        },
+                        &self.health,
+                    )?;
                     self.reclaim(reclaim)
                 };
                 match permit {
@@ -114,7 +150,25 @@ impl Endpoint {
     }
 
     fn reclaim(&self, reclaim: append::Reclamation) -> io::Result<()> {
-        match self.exchange(Event::Reclaimed(reclaim.run()?))? {
+        let durable = self.manifest.current().durable;
+        let reclaimed = reclaim.run_with(|operation| {
+            let point = match operation {
+                append::ReclaimOperation::Punch { .. } => fault::Point::AfterPunch,
+                append::ReclaimOperation::Unlink { .. } => fault::Point::AfterUnlink,
+            };
+            self.resources.hit_compaction(
+                point,
+                fault::Observation {
+                    image: self.manifest.current().image,
+                    through: durable,
+                    manifest_durable: durable,
+                    chunks: None,
+                    operation: Some(operation),
+                },
+                &self.health,
+            )
+        })?;
+        match self.exchange(Event::Reclaimed(reclaimed))? {
             Reply::Applied => Ok(()),
             _ => Err(io::Error::other("expected reclaimed-space acknowledgment")),
         }

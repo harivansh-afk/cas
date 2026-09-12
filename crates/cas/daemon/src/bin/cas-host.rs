@@ -30,6 +30,15 @@ struct Serve {
     /// Existing directory on another filesystem; creates host.json and per-image reports.
     #[arg(long)]
     reports: PathBuf,
+    /// One-shot process pause for development crash controls.
+    #[arg(long, value_enum, requires = "pause_image")]
+    pause_compaction: Option<cas_daemon::CompactionPoint>,
+    #[arg(long, value_parser = host_service::parse_id, requires = "pause_compaction")]
+    pause_image: Option<[u8; 16]>,
+    #[arg(long, default_value = "1")]
+    pause_after: std::num::NonZeroU64,
+    #[arg(long, requires = "pause_compaction")]
+    pause_wait_for_arm: bool,
 }
 
 #[derive(Parser)]
@@ -87,6 +96,14 @@ fn main() -> std::io::Result<()> {
         staging_bytes: args.storage.staging_bytes,
         endpoints: args.endpoints,
         reports: args.reports,
+        pause: args
+            .pause_compaction
+            .map(|point| cas_daemon::CompactionPause {
+                point,
+                image: args.pause_image.expect("required with pause-compaction"),
+                after: args.pause_after,
+                wait_for_arm: args.pause_wait_for_arm,
+            }),
     })
 }
 

@@ -26,6 +26,19 @@ pub struct ReclaimStats {
     pub removed_segments: usize,
 }
 
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(tag = "operation", rename_all = "lowercase")]
+pub enum ReclaimOperation {
+    Punch {
+        segment: u64,
+        offset: u64,
+        bytes: u64,
+    },
+    Unlink {
+        segment: u64,
+    },
+}
+
 pub struct Reclamation {
     base: View,
     directory: Directory,
@@ -53,6 +66,7 @@ pub struct Reclaimed {
 impl Log {
     /// oldest_live is the earliest mutation whose original identity is still
     /// needed by retained inflight recovery, or None when all have retired.
+    /// Admission can precede Log assignment, so this cutoff may exceed issued.
     pub fn select_reclamation(
         &self,
         oldest_live: Option<u64>,
@@ -64,7 +78,7 @@ impl Log {
             .as_ref()
             .ok_or_else(|| io::Error::other("reclamation requires a manifest"))?;
         require(
-            oldest_live.is_none_or(|sequence| sequence != 0 && sequence <= self.issued),
+            oldest_live.is_none_or(|sequence| sequence != 0),
             "invalid oldest live mutation",
         )?;
         Ok(Reclamation {
@@ -114,6 +128,13 @@ impl Reclamation {
     /// reconciles actual free space after applying/dropping all retired owners;
     /// an unlink is not a promise of instant physical block release.
     pub fn run(self) -> io::Result<Reclaimed> {
+        self.run_with(|_| Ok(()))
+    }
+
+    pub fn run_with(
+        self,
+        mut observe: impl FnMut(ReclaimOperation) -> io::Result<()>,
+    ) -> io::Result<Reclaimed> {
         let mut changes = Vec::new_in(BudgetAllocator::new(Arc::clone(&self.metadata)));
         changes.try_reserve_exact(self.spans.len()).map_err(|_| {
             io::Error::new(
@@ -165,6 +186,11 @@ impl Reclamation {
                                 offset + BLOCK_SIZE as u64,
                                 envelope.payload_bytes as u64,
                             )?;
+                            observe(ReclaimOperation::Punch {
+                                segment: segment.header.number,
+                                offset: offset + BLOCK_SIZE as u64,
+                                bytes: envelope.payload_bytes as u64,
+                            })?;
                             stats.punch_requested_bytes += envelope.payload_bytes as u64;
                             punched = true;
                         } else {
@@ -196,6 +222,9 @@ impl Reclamation {
                         .path
                         .join(segment::name(segment.header.number)),
                 )?;
+                observe(ReclaimOperation::Unlink {
+                    segment: segment.header.number,
+                })?;
                 self.directory.sync()?;
                 stats.removed_segments += 1;
                 0

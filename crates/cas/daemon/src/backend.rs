@@ -42,6 +42,9 @@ const REQUIRED_FEATURES: u64 =
     (1 << VIRTIO_F_VERSION_1) | (1 << VIRTIO_BLK_F_BLK_SIZE) | (1 << VIRTIO_BLK_F_FLUSH);
 const CONCURRENT_QUEUES: usize = 4;
 const CONCURRENT_QUEUE_SIZE: usize = 256;
+// Virtio SIZE_MAX is per segment; the product must fit the decoder's request cap.
+const MAX_SEGMENT_BYTES: usize = 64 * 1024;
+const MAX_DATA_SEGMENTS: usize = MAX_REQUEST_BYTES / MAX_SEGMENT_BYTES;
 
 #[derive(Clone, Copy)]
 struct GuestCompletion {
@@ -1032,8 +1035,8 @@ impl VhostUserBackendMut for Backend {
     fn get_config(&self, offset: u32, size: u32) -> Vec<u8> {
         let mut config = [0; 60];
         config[..8].copy_from_slice(&(self.capacity_bytes / request::SECTOR_BYTES).to_le_bytes());
-        config[8..12].copy_from_slice(&(MAX_REQUEST_BYTES as u32).to_le_bytes());
-        config[12..16].copy_from_slice(&((self.max_queue_size() - 2) as u32).to_le_bytes());
+        config[8..12].copy_from_slice(&(MAX_SEGMENT_BYTES as u32).to_le_bytes());
+        config[12..16].copy_from_slice(&(MAX_DATA_SEGMENTS as u32).to_le_bytes());
         config[20..24].copy_from_slice(&(BLOCK_SIZE as u32).to_le_bytes());
         config[34..36].copy_from_slice(&(self.num_queues() as u16).to_le_bytes());
         if self.zeroes_supported {
@@ -1178,6 +1181,50 @@ mod tests {
                 .unwrap();
         }
         mem.write_obj(0xffu8, GuestAddress(0x6000)).unwrap();
+    }
+
+    #[test]
+    fn advertised_transfer_geometry_fits_the_request_decoder() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("image.raw");
+        File::create(&path)
+            .unwrap()
+            .set_len(16 * MAX_REQUEST_BYTES as u64)
+            .unwrap();
+        let backend = Backend::new(&path).unwrap();
+        let config = backend.get_config(0, 60);
+        let segment = u32::from_le_bytes(config[8..12].try_into().unwrap()) as usize;
+        let count = u32::from_le_bytes(config[12..16].try_into().unwrap()) as usize;
+        assert_eq!(segment * count, MAX_REQUEST_BYTES);
+        assert!(segment >= 64 * 1024 && count + 2 <= backend.max_queue_size());
+        let mem =
+            GuestMemoryMmap::from_ranges(&[(GuestAddress(0), MAX_REQUEST_BYTES + 8192)]).unwrap();
+        mem.write_obj(
+            virtio_bindings::bindings::virtio_blk::VIRTIO_BLK_T_OUT.to_le(),
+            GuestAddress(0),
+        )
+        .unwrap();
+        let mut descriptors = vec![Segment {
+            addr: GuestAddress(0),
+            len: 16,
+            writable: false,
+        }];
+        descriptors.extend((0..count).map(|index| Segment {
+            addr: GuestAddress((4096 + index * segment) as u64),
+            len: segment,
+            writable: false,
+        }));
+        descriptors.push(Segment {
+            addr: GuestAddress((4096 + MAX_REQUEST_BYTES) as u64),
+            len: 1,
+            writable: true,
+        });
+        let Request::Write(request) =
+            request::parse(&mem, 0, descriptors, backend.capacity_bytes).unwrap()
+        else {
+            panic!("advertised maximum must decode as WRITE");
+        };
+        assert_eq!(request.len, MAX_REQUEST_BYTES);
     }
 
     #[test]
