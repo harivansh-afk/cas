@@ -65,8 +65,13 @@ fn native_publication_and_reopen_preserve_current_and_historical_images() {
         assert_eq!(manifest.current(), old_commit);
         assert_eq!(manifest.publish(prepared).unwrap(), new_commit);
         let mut tree = manifest.tree().unwrap();
-        let mut old =
-            Tree::new(&manifest.file, previous.0, previous.1, Arc::clone(&memory)).unwrap();
+        let mut old = Tree::new(
+            manifest.file.as_ref(),
+            previous.0,
+            previous.1,
+            Arc::clone(&memory),
+        )
+        .unwrap();
         for block in 0..512 {
             assert_eq!(tree.get(block).unwrap(), oracle[block as usize]);
             assert_eq!(old.get(block).unwrap(), previous.2[block as usize]);
@@ -361,4 +366,76 @@ fn file_locks_and_recovery_scratch_remain_bounded() {
     assert!(Manifest::inspect(dir.path(), ID, 0, Arc::clone(&short), |_| Ok(())).is_err());
     assert_eq!(short.usage().current.bytes, 0);
     assert_unchanged(dir.path(), &original);
+}
+
+#[test]
+fn pinned_views_keep_old_roots_and_the_actual_io_lock_after_publication_and_drop() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut manifest = Manifest::create(dir.path(), ID, metadata()).unwrap();
+    let empty = manifest.view().unwrap();
+    manifest
+        .publish(manifest.prepare(&[change(7, 9)], 1).unwrap())
+        .unwrap();
+    let first = manifest.view().unwrap();
+    manifest
+        .publish(manifest.prepare(&[change(7, 3), change(17, 4)], 2).unwrap())
+        .unwrap();
+    let latest = manifest.view().unwrap();
+    assert_eq!(empty.commit().durable, 0);
+    assert_eq!(first.commit().durable, 1);
+    assert_eq!(latest.commit().durable, 2);
+    assert!(empty.end() < first.end() && first.end() < latest.end());
+    drop(manifest);
+    assert!(direct::open(&dir.path().join(NAME), false).is_err());
+    assert_eq!(empty.tree().unwrap().get(7).unwrap(), None);
+    assert_eq!(first.tree().unwrap().get(7).unwrap(), Some([9; 32]));
+    assert_eq!(first.tree().unwrap().get(17).unwrap(), None);
+    assert_eq!(latest.tree().unwrap().get(7).unwrap(), Some([3; 32]));
+    let mut lookup = latest.lookup(17).unwrap();
+    let mut page = AlignedBuffer::new(BLOCK_SIZE);
+    loop {
+        match lookup.state().unwrap() {
+            super::super::tree::LookupState::Page { offset, .. } => {
+                direct::read_bytes(lookup.file(), page.as_mut_slice(), offset).unwrap();
+                lookup.accept(offset, page.as_slice()).unwrap();
+            }
+            super::super::tree::LookupState::Complete(hash) => {
+                assert_eq!(hash, Some([4; 32]));
+                break;
+            }
+        }
+    }
+    drop((empty, first));
+    assert!(direct::open(&dir.path().join(NAME), false).is_err());
+    drop(latest);
+    assert!(direct::open(&dir.path().join(NAME), false).is_err());
+    drop(lookup);
+    assert!(direct::open(&dir.path().join(NAME), false).is_ok());
+}
+
+#[test]
+fn failed_publication_and_unsynced_inspection_cannot_produce_a_serving_view() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut manifest = Manifest::create(dir.path(), ID, metadata()).unwrap();
+    manifest
+        .publish(manifest.prepare(&[change(7, 1)], 1).unwrap())
+        .unwrap();
+    let prior = manifest.view().unwrap();
+    let prepared = manifest.prepare(&[change(7, 2)], 2).unwrap();
+    faults::inject(Fault::Sync);
+    assert!(manifest.publish(prepared).is_err());
+    assert!(manifest.view().is_err());
+    drop(manifest);
+    assert_eq!(prior.tree().unwrap().get(7).unwrap(), Some([1; 32]));
+    assert!(inspect(dir.path(), 1).is_err());
+    drop(prior);
+    let inspection = inspect(dir.path(), 1).unwrap();
+    assert_eq!(inspection.selected().commit.durable, 2);
+    assert!(inspection.manifest.view().is_err());
+    faults::inject(Fault::Sync);
+    assert!(inspection.recover().is_err());
+    let recovered = inspect(dir.path(), 1).unwrap().recover().unwrap();
+    let view = recovered.view().unwrap();
+    assert_eq!(view.commit().durable, 2);
+    assert_eq!(view.tree().unwrap().get(7).unwrap(), Some([2; 32]));
 }

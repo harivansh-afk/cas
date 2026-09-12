@@ -2,7 +2,7 @@
 //! invoking mutating operations and accounts physical output even on failure.
 use super::{
     format::{Commit, Extent, FileHeader, Kind, Page, Root},
-    tree::{Prepared, Tree},
+    tree::{Lookup, LookupState, Prepared, Tree},
 };
 use crate::{
     BLOCK_SIZE,
@@ -45,14 +45,78 @@ impl Identity {
 
 pub struct Manifest {
     directory: Directory,
-    file: File,
+    file: Arc<File>,
     current: Commit,
     end: u64,
     metadata: Arc<Budget>,
     failed: bool,
 }
 
+/// Immutable root/end with a pin on the actual locked IO file description.
+/// Construction is restricted to a healthy manifest after sync.
+#[derive(Clone)]
+pub struct View {
+    file: Arc<File>,
+    commit: Commit,
+    end: u64,
+    metadata: Arc<Budget>,
+}
+
+impl View {
+    pub fn commit(&self) -> Commit {
+        self.commit
+    }
+    pub fn end(&self) -> u64 {
+        self.end
+    }
+    pub fn file(&self) -> &File {
+        &self.file
+    }
+    pub fn lookup(&self, block: u64) -> io::Result<Read> {
+        Ok(Read {
+            lookup: Lookup::new(self.commit, self.end, block)?,
+            file: Arc::clone(&self.file),
+        })
+    }
+    pub fn tree(&self) -> io::Result<Tree<'_, File>> {
+        Tree::new(
+            self.file.as_ref(),
+            self.commit,
+            self.end,
+            Arc::clone(&self.metadata),
+        )
+    }
+}
+
+/// A page-driven lookup retaining its actual IO file through completion.
+pub struct Read {
+    lookup: Lookup,
+    file: Arc<File>,
+}
+
+impl Read {
+    pub fn file(&self) -> &File {
+        &self.file
+    }
+    pub fn state(&self) -> io::Result<LookupState> {
+        self.lookup.state()
+    }
+    pub fn accept(&mut self, offset: u64, bytes: &[u8]) -> io::Result<LookupState> {
+        self.lookup.accept(offset, bytes)
+    }
+}
+
 impl Manifest {
+    pub fn view(&self) -> io::Result<View> {
+        self.healthy()?;
+        Ok(View {
+            file: Arc::clone(&self.file),
+            commit: self.current,
+            end: self.end,
+            metadata: Arc::clone(&self.metadata),
+        })
+    }
+
     /// The directory already exists. Catalog publication follows this file and
     /// directory sync; an error leaves any created file for explicit recovery.
     pub fn create(path: &Path, identity: Identity, metadata: Arc<Budget>) -> io::Result<Self> {
@@ -75,7 +139,7 @@ impl Manifest {
         directory.sync()?;
         Ok(Self {
             directory,
-            file,
+            file: Arc::new(file),
             current,
             end: (2 * BLOCK_SIZE) as u64,
             metadata,
@@ -107,7 +171,7 @@ impl Manifest {
     pub fn tree(&self) -> io::Result<Tree<'_, File>> {
         self.healthy()?;
         Tree::new(
-            &self.file,
+            self.file.as_ref(),
             self.current,
             self.end,
             Arc::clone(&self.metadata),
@@ -117,7 +181,7 @@ impl Manifest {
     pub fn prepare(&self, changes: &[Extent], durable: u64) -> io::Result<Prepared> {
         self.healthy()?;
         Prepared::build(
-            &self.file,
+            self.file.as_ref(),
             self.current,
             self.end,
             changes,
@@ -167,7 +231,7 @@ impl Manifest {
         Ok(Inspection {
             manifest: Self {
                 directory,
-                file,
+                file: Arc::new(file),
                 current: selected.commit,
                 end: selected.end,
                 metadata,

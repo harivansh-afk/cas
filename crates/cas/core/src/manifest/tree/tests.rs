@@ -507,5 +507,98 @@ fn parent_child_minimum_level_and_bounds_are_checked_beyond_page_crcs() {
         );
         let mut tree = Tree::new(&image, image.commit, image.bytes.len() as u64, metadata).unwrap();
         assert!(tree.walk(|_| Ok(())).is_err());
+        let block = if first_end == 1 && level == 1 {
+            second_start
+        } else {
+            0
+        };
+        assert!(tree.get(block).is_err());
     }
+}
+
+#[test]
+fn resumable_lookup_matches_the_flat_oracle_without_owning_io_or_buffers() {
+    let memory = metadata();
+    let mut image = Image::new();
+    let mut expected = vec![None; BLOCKS as usize];
+    for begin in [100, 400, 700] {
+        let edits: Vec<_> = (begin..begin + 128).step_by(2).map(mapping).collect();
+        for edit in &edits {
+            expected[edit.start as usize] = edit.hash;
+        }
+        image.apply(&edits, &memory);
+    }
+    image.apply(
+        &[Extent {
+            start: 420,
+            end: 450,
+            hash: None,
+        }],
+        &memory,
+    );
+    expected[420..450].fill(None);
+    assert!(image.commit.root.height >= 2);
+    let end = image.bytes.len() as u64;
+    for block in (0..1024).chain([BLOCKS - 1]) {
+        let before = image.reads.get();
+        let mut lookup = Lookup::new(image.commit, end, block).unwrap();
+        let mut levels = Vec::new();
+        loop {
+            match lookup.state().unwrap() {
+                LookupState::Page { offset, level } => {
+                    assert!(offset < end - BLOCK_SIZE as u64);
+                    if let Some(previous) = levels.last() {
+                        assert_eq!(*previous, level + 1);
+                    }
+                    levels.push(level);
+                    let page = &image.bytes[offset as usize..offset as usize + BLOCK_SIZE];
+                    lookup.accept(offset, page).unwrap();
+                }
+                LookupState::Complete(hash) => {
+                    assert_eq!(hash, expected[block as usize]);
+                    assert!(lookup.accept(image.commit.root.offset, &[]).is_err());
+                    break;
+                }
+            }
+        }
+        assert_eq!(image.reads.get(), before);
+        assert!(levels.len() <= image.commit.root.height as usize);
+        let mut tree = Tree::new(&image, image.commit, end, Arc::clone(&memory)).unwrap();
+        assert_eq!(tree.get(block).unwrap(), expected[block as usize]);
+        assert_eq!(tree.page_reads(), levels.len() as u64);
+    }
+    assert_eq!(memory.usage().current.bytes, 0);
+}
+
+#[test]
+fn lookup_rejects_stale_completions_bad_pages_and_invalid_views() {
+    let mut image = Image::new();
+    let empty = Lookup::new(image.commit, image.bytes.len() as u64, 0).unwrap();
+    assert_eq!(empty.state().unwrap(), LookupState::Complete(None));
+    assert!(Lookup::new(image.commit, image.bytes.len() as u64, BLOCKS).is_err());
+    assert!(Lookup::new(image.commit, 0, 0).is_err());
+    image.apply(&[mapping(7)], &metadata());
+    let end = image.bytes.len() as u64;
+    let offset = image.commit.root.offset;
+    let good = &image.bytes[offset as usize..offset as usize + BLOCK_SIZE];
+    let mut bad_crc = good.to_vec();
+    bad_crc[BLOCK_SIZE - 1] ^= 1;
+    for (completion_offset, page) in [
+        (offset + BLOCK_SIZE as u64, good),
+        (offset, &good[..511]),
+        (offset, bad_crc.as_slice()),
+    ] {
+        let mut lookup = Lookup::new(image.commit, end, 7).unwrap();
+        assert!(lookup.accept(completion_offset, page).is_err());
+        assert!(lookup.state().is_err());
+        assert!(lookup.accept(offset, good).is_err());
+    }
+    let invalid = Commit {
+        root: Root {
+            offset: end - BLOCK_SIZE as u64,
+            height: 1,
+        },
+        ..image.commit
+    };
+    assert!(Lookup::new(invalid, end, 7).is_err());
 }

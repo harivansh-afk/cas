@@ -1,4 +1,4 @@
-use super::super::format::{BRANCH_CAPACITY, Child, Extent, Kind, LEAF_CAPACITY, Page};
+use super::super::format::{BRANCH_CAPACITY, Child, Commit, Extent, Kind, LEAF_CAPACITY, Page};
 use crate::encoding::require;
 use arrayvec::ArrayVec;
 use std::io;
@@ -17,6 +17,15 @@ pub(super) struct Cursor {
 }
 
 impl Cursor {
+    pub fn root(commit: Commit) -> Self {
+        Self {
+            offset: commit.root.offset,
+            level: commit.root.height.saturating_sub(1),
+            minimum: None,
+            lower: 0,
+            upper: commit.image_bytes / crate::BLOCK_SIZE as u64,
+        }
+    }
     pub fn child(self, children: &[Child], index: usize) -> Self {
         let child = children[index];
         Self {
