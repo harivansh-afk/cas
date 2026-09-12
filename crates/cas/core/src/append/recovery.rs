@@ -32,6 +32,16 @@ impl Log {
     }
 
     pub fn inspect(path: impl AsRef<Path>, limits: Limits) -> Result<Recovery> {
+        Self::inspect_with_metadata(path, limits, super::default_metadata())
+    }
+
+    /// Reserve interval nodes before read-only inspection; no repair occurs here.
+    pub fn inspect_with_metadata(
+        path: impl AsRef<Path>,
+        limits: Limits,
+        metadata: Arc<crate::budget::Budget>,
+    ) -> Result<Recovery> {
+        let index = Index::new(limits.intervals, metadata)?;
         let directory = Directory::open(path.as_ref())?;
         let segment::Candidates {
             highest: highest_segment,
@@ -59,7 +69,7 @@ impl Log {
             config,
             limits,
             segments: Vec::new(),
-            index: Index::default(),
+            index,
             offset: BLOCK_SIZE as u64,
             next_batch: 1,
             highest_segment,

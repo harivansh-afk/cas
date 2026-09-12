@@ -11,7 +11,12 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::{BLOCK_SIZE, MAX_REQUEST_BYTES, aligned::AlignedBuffer, direct};
+use crate::{
+    BLOCK_SIZE, MAX_REQUEST_BYTES,
+    aligned::AlignedBuffer,
+    budget::{Amount, Budget},
+    direct,
+};
 use format::{Batch, Builder, Header, Kind, SegmentHeader};
 use index::{Index, Mapping, Payload};
 use segment::{Directory, Segment};
@@ -95,6 +100,9 @@ pub struct Status {
     pub epoch: u64,
     pub segments: usize,
     pub intervals: usize,
+    pub index_metadata_bytes: usize,
+    pub index_nodes: usize,
+    pub index_nodes_peak: usize,
     pub encoded_bytes: u64,
     pub allocated_bytes: u64,
     pub rejected_bytes: u64,
@@ -125,8 +133,25 @@ pub struct Log {
     fenced: bool,
 }
 
+fn default_metadata() -> Arc<Budget> {
+    Budget::new(Amount {
+        bytes: 256 * MAX_REQUEST_BYTES,
+        requests: 0,
+    })
+}
+
 impl Log {
     pub fn create(path: impl AsRef<Path>, config: Config, limits: Limits) -> Result<Self> {
+        Self::create_with_metadata(path, config, limits, default_metadata())
+    }
+
+    /// Reserve all interval nodes from a shared budget before creating files.
+    pub fn create_with_metadata(
+        path: impl AsRef<Path>,
+        config: Config,
+        limits: Limits,
+        metadata: Arc<Budget>,
+    ) -> Result<Self> {
         let path = path.as_ref();
         config.header(1, 1, 0).encode()?;
         if config.segment_bytes < (format::MAX_BATCH_BYTES + 2 * BLOCK_SIZE) as u64
@@ -135,6 +160,7 @@ impl Log {
         {
             return Err(Error::Capacity);
         }
+        let index = Index::new(limits.intervals, metadata)?;
         fs::create_dir(path)?;
         File::open(
             path.parent()
@@ -153,7 +179,7 @@ impl Log {
             config,
             limits,
             segments: vec![segment],
-            index: Index::default(),
+            index,
             offset: BLOCK_SIZE as u64,
             next_batch: 1,
             highest_segment: 1,
@@ -195,6 +221,7 @@ impl Log {
     }
 
     pub fn status(&self) -> Status {
+        let (index_nodes, index_nodes_peak) = self.index.nodes();
         Status {
             image_bytes: self.config.image_bytes,
             published: self.published,
@@ -203,6 +230,9 @@ impl Log {
             epoch: self.current().header.epoch,
             segments: self.segments.len(),
             intervals: self.index.len(),
+            index_metadata_bytes: self.index.allocated_bytes(),
+            index_nodes,
+            index_nodes_peak,
             encoded_bytes: self.encoded_bytes,
             allocated_bytes: self.allocated_bytes,
             rejected_bytes: self.rejected_bytes,
@@ -280,13 +310,13 @@ impl Log {
         for descriptor in header.descriptors() {
             let source = (descriptor.kind == Kind::Write).then(|| {
                 (
-                    Arc::new(Payload {
+                    Payload {
                         segment: Arc::clone(&segment),
                         offset: offset + BLOCK_SIZE as u64 + u64::from(descriptor.payload_offset),
                         bytes: descriptor.payload_length as usize,
                         sequence: descriptor.sequence,
                         crc: descriptor.payload_crc,
-                    }),
+                    },
                     0,
                 )
             });

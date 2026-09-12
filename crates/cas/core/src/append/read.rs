@@ -2,13 +2,12 @@
 use std::fs::File;
 use std::io;
 use std::ops::Range;
-use std::sync::Arc;
 
 use super::{Error, Log, Result, format, index::Payload, verify_read_crc};
 use crate::{BLOCK_SIZE, MAX_REQUEST_BYTES, aligned::AlignedBuffer, direct};
 
 pub struct ReadRange {
-    payload: Arc<Payload>,
+    payload: Payload,
     source: Range<usize>,
     destination: Range<usize>,
 }
@@ -113,7 +112,7 @@ impl Log {
             debug_assert!(skip + last - first <= payload.bytes as u64);
             debug_assert_eq!(payload.sequence, mapping.sequence);
             ranges.push(ReadRange {
-                payload: Arc::clone(payload),
+                payload: payload.clone(),
                 source: skip as usize..(skip + last - first) as usize,
                 destination: (first - offset) as usize..(last - offset) as usize,
             });

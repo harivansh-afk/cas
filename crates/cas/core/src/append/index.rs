@@ -1,10 +1,15 @@
 //! A disjoint interval map. Entries own metadata and pin immutable payloads.
-use std::collections::BTreeMap;
+mod nodes;
+
+use crate::budget::Budget;
+use arena_btreemap::BTreeMap;
+use nodes::TreeNodes;
+use std::io;
 use std::sync::Arc;
 
 use super::segment::Segment;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct Payload {
     pub segment: Arc<Segment>,
     pub offset: u64,
@@ -17,7 +22,7 @@ pub(super) struct Payload {
 pub(super) struct Mapping {
     pub end: u64,
     pub sequence: u64,
-    pub source: Option<(Arc<Payload>, u64)>,
+    pub source: Option<(Payload, u64)>,
 }
 
 impl Mapping {
@@ -28,48 +33,75 @@ impl Mapping {
             source: self
                 .source
                 .as_ref()
-                .map(|(payload, offset)| (Arc::clone(payload), offset + skip)),
+                .map(|(payload, offset)| (payload.clone(), offset + skip)),
         }
     }
 }
 
-#[derive(Default)]
-pub(super) struct Index(BTreeMap<u64, Mapping>);
+// The pinned B=6 leaf/internal nodes fit the pool's 1 KiB/64-aligned slots.
+const _: () = assert!(size_of::<Mapping>() <= 64 && align_of::<Mapping>() <= 8);
+
+pub(super) struct Index {
+    map: BTreeMap<u64, Mapping, TreeNodes>,
+    nodes: TreeNodes,
+    limit: usize,
+}
 
 impl Index {
+    pub fn new(limit: usize, metadata: Arc<Budget>) -> io::Result<Self> {
+        let nodes = TreeNodes::new(limit, metadata)?;
+        Ok(Self {
+            map: BTreeMap::new_in(nodes.clone()),
+            nodes,
+            limit,
+        })
+    }
+    pub fn allocated_bytes(&self) -> usize {
+        self.nodes.allocated_bytes()
+    }
+    pub fn nodes(&self) -> (usize, usize) {
+        let usage = self.nodes.usage();
+        (usage.current, usage.peak)
+    }
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.map.len()
     }
 
     pub fn replace(&mut self, start: u64, mapping: Mapping) {
+        assert!(
+            self.len()
+                .checked_add(2)
+                .is_some_and(|count| count <= self.limit),
+            "interval admission must precede publication"
+        );
         let end = mapping.end;
         // The predecessor can straddle either or both boundaries.
-        if let Some((&old_start, old)) = self.0.range(..start).next_back()
+        if let Some((&old_start, old)) = self.map.range(..start).next_back()
             && old.end > start
         {
             if old.end > end {
                 let right = old.suffix(end - old_start);
-                self.0.insert(end, right);
+                self.map.insert(end, right);
             }
-            self.0.get_mut(&old_start).unwrap().end = start;
+            self.map.get_mut(&old_start).unwrap().end = start;
         }
         // Remove in place: zeroing a large range does not allocate a key list.
-        while let Some((&old_start, _)) = self.0.range(start..end).next() {
-            let old = self.0.remove(&old_start).unwrap();
+        while let Some((&old_start, _)) = self.map.range(start..end).next() {
+            let old = self.map.remove(&old_start).unwrap();
             if old.end > end {
-                self.0.insert(end, old.suffix(end - old_start));
+                self.map.insert(end, old.suffix(end - old_start));
             }
         }
-        self.0.insert(start, mapping);
+        self.map.insert(start, mapping);
     }
 
     pub fn overlapping(&self, start: u64, end: u64) -> impl Iterator<Item = (u64, &Mapping)> {
         let begin = self
-            .0
+            .map
             .range(..=start)
             .next_back()
             .map_or(start, |(&key, _)| key);
-        self.0
+        self.map
             .range(begin..end)
             .filter(move |(_, mapping)| mapping.end > start)
             .map(|(&offset, mapping)| (offset, mapping))
@@ -82,7 +114,7 @@ mod tests {
 
     #[test]
     fn splits_overwrites_and_zeroes_match_an_independent_block_array() {
-        let mut index = Index::default();
+        let mut index = Index::new(34, super::super::default_metadata()).unwrap();
         let mut expected = [0; 32];
         let mut seed = 31u64;
         for sequence in 1..=2000 {

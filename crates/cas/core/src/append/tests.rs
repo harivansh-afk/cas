@@ -346,17 +346,17 @@ fn immutable_payload_pin_retains_the_actual_file_lock_after_log_drop() {
     let path = directory.path().join("store");
     let mut log = Log::create(&path, config(), Limits::default()).unwrap();
     log.append(builder(1, 0, 9)).unwrap();
-    let payload = Arc::clone(
-        &log.index
-            .overlapping(0, 1)
-            .next()
-            .unwrap()
-            .1
-            .source
-            .as_ref()
-            .unwrap()
-            .0,
-    );
+    let payload = log
+        .index
+        .overlapping(0, 1)
+        .next()
+        .unwrap()
+        .1
+        .source
+        .as_ref()
+        .unwrap()
+        .0
+        .clone();
     let before = fs::read(path.join(segment::name(1))).unwrap();
     drop(log);
     assert!(Log::open(&path, Limits::default()).is_err());
@@ -494,4 +494,68 @@ fn a_partial_read_verifies_the_whole_original_write_before_returning_bytes() {
         .unwrap();
     assert!(log.read_into(BLOCK_SIZE as u64, &mut output).is_err());
     assert!(log.status().failed);
+}
+
+#[test]
+fn index_budget_denial_precedes_creation_or_recovery_and_publication_reuses_slots() {
+    use crate::budget::{Amount, Budget};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("log");
+    let limits = Limits {
+        intervals: 128,
+        ..Limits::default()
+    };
+    let denied = Budget::new(Amount {
+        bytes: 1024,
+        requests: 0,
+    });
+    assert!(Log::create_with_metadata(&path, config(), limits, Arc::clone(&denied)).is_err());
+    assert!(!path.exists());
+    assert_eq!(denied.usage().current.bytes, 0);
+    let metadata = Budget::new(Amount {
+        bytes: 1024 * 1024,
+        requests: 0,
+    });
+    let mut log =
+        Log::create_with_metadata(&path, config(), limits, Arc::clone(&metadata)).unwrap();
+    let charged = metadata.usage().current.bytes;
+    assert_eq!(charged, log.status().index_metadata_bytes);
+    for block in 0..32 {
+        log.append(builder(block as u64 + 1, block * BLOCK_SIZE, block as u8))
+            .unwrap();
+    }
+    let old = log.read_plan(0, IMAGE_BYTES, 32).unwrap();
+    for block in 0..32 {
+        log.append(builder(block as u64 + 33, block * BLOCK_SIZE, 0xaa))
+            .unwrap();
+    }
+    log.flush().unwrap();
+    assert_eq!(metadata.usage().current.bytes, charged);
+    assert_eq!(metadata.usage().peak.bytes, charged);
+    assert_eq!(metadata.usage().admitted, 1);
+    assert!(log.status().index_nodes_peak >= 3);
+    drop(log);
+    assert_eq!(metadata.usage().current.bytes, 0);
+    let mut data = AlignedBuffer::new(IMAGE_BYTES);
+    old.read_into(&mut data).unwrap();
+    for (block, bytes) in data
+        .as_slice()
+        .as_chunks::<BLOCK_SIZE>()
+        .0
+        .iter()
+        .enumerate()
+    {
+        assert!(bytes.iter().all(|byte| *byte == block as u8));
+    }
+    drop(old);
+    let file = path.join(segment::name(1));
+    let before = fs::read(&file).unwrap();
+    assert!(Log::inspect_with_metadata(&path, limits, Arc::clone(&denied)).is_err());
+    assert_eq!(fs::read(&file).unwrap(), before);
+    assert_eq!(denied.usage().current.bytes, 0);
+    let recovery = Log::inspect_with_metadata(&path, limits, Arc::clone(&metadata)).unwrap();
+    assert_eq!(recovery.status().published, 64);
+    assert_eq!(metadata.usage().current.bytes, charged);
+    drop(recovery);
+    assert_eq!(metadata.usage().current.bytes, 0);
 }
