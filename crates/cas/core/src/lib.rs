@@ -1,6 +1,7 @@
 // Staging log, durability tracking, and shared IO buffers.
 
 pub mod budget;
+pub mod cache;
 pub mod census;
 pub mod chunk;
 pub mod chunk_index;
