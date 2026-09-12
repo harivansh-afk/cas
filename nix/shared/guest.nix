@@ -3,6 +3,7 @@
   pkgs,
   modulesPath,
   cas,
+  pressure ? false,
   ...
 }:
 {
@@ -51,7 +52,7 @@
     ];
     serviceConfig = {
       Type = "oneshot";
-      TimeoutStartSec = 150;
+      TimeoutStartSec = if pressure then 1000 else 150;
     };
     script = ''
       exec > /results/workload.log 2>&1
@@ -76,6 +77,9 @@
       continuation=()
       if test -f /results/continued; then continuation+=(--continued); fi
       ${cas}/bin/cas-harness filesystem --root /mnt/cas --output /results/workload --phase "$phase" --image "$image" --sqlite ${pkgs.sqlite}/bin/sqlite3 "''${continuation[@]}"
+      ${lib.optionalString pressure ''
+        ${cas}/bin/cas-harness pressure --root /mnt/cas --output /results/pressure --phase "$phase" --image "$image" --fio ${pkgs.fio}/bin/fio
+      ''}
       if test -f /results/live-recovery; then
         touch /results/ready
         while ! test -f /results/continue; do sleep 0.05; done

@@ -32,6 +32,7 @@ enum Workload {
     #[default]
     Core,
     Shared,
+    Pressure,
 }
 
 #[derive(Serialize, Deserialize)]

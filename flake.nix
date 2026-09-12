@@ -76,17 +76,17 @@
           };
         };
       sharedFor =
-        pkgs: liveRecovery:
+        pkgs: { liveRecovery ? false, pressure ? false }:
         pkgs.callPackage ./nix/fixture {
-          name = if liveRecovery then "cas-shared-recovery-fixture" else "cas-shared-fixture";
-          workload = "shared";
+          name = if pressure then "cas-pressure-fixture" else if liveRecovery then "cas-shared-recovery-fixture" else "cas-shared-fixture";
+          workload = if pressure then "pressure" else "shared";
           inherit liveRecovery;
           guest = lib.nixosSystem {
             specialArgs = {
               cas = pkgs.cas;
-              inherit liveRecovery;
+              inherit liveRecovery pressure;
               inner = lib.nixosSystem {
-                specialArgs.cas = pkgs.cas;
+                specialArgs = { cas = pkgs.cas; inherit pressure; };
                 modules = [
                   ./nix/shared/guest.nix
                   { nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system; }
@@ -134,7 +134,7 @@
               source_path = toString self.outPath;
             };
           };
-          sharedRecovery = sharedFor pkgs true;
+          sharedRecovery = sharedFor pkgs { liveRecovery = true; };
         in
         {
           default = pkgs.cas;
@@ -164,7 +164,8 @@
             };
           };
           xfs-fixture = xfs;
-          shared-fixture = sharedFor pkgs false;
+          shared-fixture = sharedFor pkgs {};
+          pressure-fixture = sharedFor pkgs { pressure = true; };
           shared-recovery-fixture = sharedRecovery;
           dev-vm = smokeFor pkgs "staging" true;
           census-pilot = (pkgs.callPackage ./nix/census.nix { }).pilot;

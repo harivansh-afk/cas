@@ -5,6 +5,7 @@ mod fixture;
 mod fleet;
 mod host;
 mod persistence;
+mod pressure;
 mod process;
 mod qemu;
 mod shared;
@@ -31,6 +32,8 @@ enum Command {
     Suite(suite::Args),
     /// Exercise buffered files and SQLite on a mounted ext4 guest disk.
     Filesystem(filesystem::Args),
+    /// Run the fixed development pressure controls inside one ext4 guest.
+    Pressure(pressure::Args),
     /// Own both inner filesystem guests and the shared host inside the XFS fixture.
     Shared(shared::Args),
     /// Run native storage IO and real reflink controls on a fresh XFS KVM guest.
@@ -79,6 +82,7 @@ fn run() -> io::Result<()> {
     match args.command {
         Command::Suite(args) => suite::run(args),
         Command::Filesystem(args) => filesystem::run(args),
+        Command::Pressure(args) => pressure::run(args),
         Command::Shared(args) => shared::run(args),
         Command::Fixture(args) => fixture::run(args),
         Command::VerifyFixture { output } => fixture::verify(&output),

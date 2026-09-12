@@ -6,6 +6,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
+mod pressure;
 mod restart;
 use restart::{restart, verify_restart};
 use std::{
@@ -79,6 +80,8 @@ pub struct Build {
     pub guest_ram_bytes: u64,
     #[serde(default)]
     pub live_recovery: bool,
+    #[serde(default)]
+    pub pressure: bool,
 }
 
 fn checked(command: &mut Command, output: &Path, timeout: Duration) -> io::Result<()> {
@@ -116,6 +119,15 @@ fn start_host(
         .arg(SEGMENT_BYTES.to_string())
         .arg("--reports")
         .arg(&reports);
+    if build.pressure {
+        command.args([
+            "--cache-bytes",
+            "4194304",
+            "--staging-bytes",
+            "33554432",
+            "--telemetry",
+        ]);
+    }
     if let Some(cut) = cut {
         command.args([
             "--pause-compaction",
@@ -184,7 +196,12 @@ fn phase(args: &Args, build: &Build, scenario: &Scenario, name: &str) -> io::Res
         qemu::record(&mut guest, &directory)?;
         guests.push((guest, directory, false));
     }
-    let deadline = Instant::now() + PHASE_TIMEOUT;
+    let deadline = Instant::now()
+        + if build.pressure {
+            Duration::from_secs(900)
+        } else {
+            PHASE_TIMEOUT
+        };
     let completed = if live {
         restart(
             args,
@@ -198,6 +215,9 @@ fn phase(args: &Args, build: &Build, scenario: &Scenario, name: &str) -> io::Res
     } else {
         output.clone()
     };
+    if build.pressure && name == "write" {
+        pressure::coordinate(&output, &mut host, &mut guests, deadline)?;
+    }
     loop {
         process::check_interrupt()?;
         let mut complete = true;
@@ -410,8 +430,16 @@ pub fn run(args: Args) -> io::Result<()> {
             &args.output.join("initialize"),
             Duration::from_secs(65),
         )?;
+        if build.pressure && build.live_recovery {
+            return Err(io::Error::other(
+                "pressure and retained crash controls are separate fixtures",
+            ));
+        }
         phase(&args, &build, &scenario, "write")?;
         phase(&args, &build, &scenario, "verify")?;
+        if build.pressure {
+            pressure::record(&args.output)?;
+        }
         Ok(())
     })();
     evidence::write_json(
@@ -426,7 +454,12 @@ pub fn run(args: Args) -> io::Result<()> {
     result
 }
 
-pub fn verify(output: &Path, expected: &Scenario, live_recovery: bool) -> io::Result<()> {
+pub fn verify(
+    output: &Path,
+    expected: &Scenario,
+    live_recovery: bool,
+    pressure: bool,
+) -> io::Result<()> {
     let report: serde_json::Value = evidence::read_json(&output.join("shared.json"))?;
     if report["passed"] != true {
         return Err(io::Error::other("shared fixture did not pass"));
@@ -435,12 +468,16 @@ pub fn verify(output: &Path, expected: &Scenario, live_recovery: bool) -> io::Re
     let scenario: Scenario = evidence::read_json(&output.join("scenario.json"))?;
     if scenario != *expected
         || build.live_recovery != live_recovery
+        || build.pressure != pressure
         || report["live_recovery"] != live_recovery
         || report["crash_at"] != serde_json::to_value(expected.crash_at)?
     {
         return Err(io::Error::other(
             "shared scenario differs from fixture request",
         ));
+    }
+    if pressure {
+        pressure::verify(output)?;
     }
     for phase in ["write", "verify"] {
         verify_phase(&output.join(phase), phase, &build, &scenario)?;

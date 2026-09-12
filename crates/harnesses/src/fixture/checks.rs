@@ -167,10 +167,18 @@ pub(super) fn verify(output: &Path, build: &Build) -> io::Result<()> {
         mounts.len() == 1 && mounts[0]["target"] == "/fixture" && mounts[0]["fstype"] == "xfs",
         "fixture is not XFS",
     )?;
-    if build.workload == super::Workload::Shared {
+    if matches!(
+        build.workload,
+        super::Workload::Shared | super::Workload::Pressure
+    ) {
         require(build.memory_mib == 4096, "shared outer RAM differs")?;
         let scenario = evidence::read_json(&guest.join("scenario.json"))?;
-        return crate::shared::verify(&guest.join("shared"), &scenario, build.live_recovery);
+        return crate::shared::verify(
+            &guest.join("shared"),
+            &scenario,
+            build.live_recovery,
+            build.workload == super::Workload::Pressure,
+        );
     }
     require(build.memory_mib == 2048, "core outer RAM differs")?;
     let hashes = |file| -> io::Result<Vec<String>> {
