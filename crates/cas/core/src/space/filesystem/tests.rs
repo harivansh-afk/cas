@@ -127,21 +127,24 @@ fn observation_retires_only_its_promise_and_counts_partial_output() {
 
 #[test]
 fn delayed_frees_need_a_new_observation_before_admission_resumes() {
-    let f = Fixture::new(750);
-    assert!(f.account.foreground(1).is_err());
+    let f = Fixture::new(790);
+    assert!(f.account.foreground(11).is_err());
     let background = f.account.background(200).unwrap();
     assert!(f.account.background(1).is_err());
-    f.observe(760); // The unlink has returned; physical reclamation is delayed.
+    f.observe(810); // The unlink has returned; physical reclamation is delayed.
     background.run(|| Ok(())).unwrap();
     assert!(f.account.status().pressured);
     assert!(f.account.foreground(1).is_err());
     f.observe(610);
     f.account.refresh().unwrap();
-    assert!(f.account.foreground(1).is_err()); // Hysteresis, not just below 75%.
+    assert!(f.account.foreground(1).is_err()); // Hysteresis, not just below the cap.
     f.observe(600);
     f.account.refresh().unwrap();
+    assert!(f.account.foreground(1).is_err());
+    f.observe(599);
+    f.account.refresh().unwrap();
     assert!(f.account.foreground(100).is_ok());
-    assert_eq!(f.account.status().peak_used, 950);
+    assert_eq!(f.account.status().peak_used, 990);
 }
 
 #[test]

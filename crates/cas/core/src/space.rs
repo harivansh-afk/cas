@@ -109,6 +109,11 @@ impl Space {
             || (background && (status.background_active || bytes > self.limits.reserve))
             || (!background && status.pressured);
         if denied {
+            // A request that could fit an empty account has reached the
+            // prospective foreground cap. Preserve hysteresis until GC drains.
+            if !background && bytes <= limit && bytes > limit.saturating_sub(used) {
+                status.pressured = true;
+            }
             status.rejected = status.rejected.saturating_add(1);
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
@@ -166,9 +171,9 @@ fn update_pressure(limits: Limits, status: &mut Status) {
     let percent = used * 100;
     let capacity = u128::from(limits.capacity);
     let reserve_intact = used <= u128::from(limits.capacity - limits.reserve);
-    if percent >= capacity * 75 || !reserve_intact {
+    if used >= u128::from(limits.capacity - limits.reserve) {
         status.pressured = true;
-    } else if percent <= capacity * 60 && reserve_intact {
+    } else if percent < capacity * 60 && reserve_intact {
         status.pressured = false;
     }
 }
@@ -294,27 +299,27 @@ mod tests {
     fn promised_and_allocated_space_share_the_cap_and_reserve() {
         let s = space(590);
         let mut first = s.foreground(100).unwrap();
-        let second = s.foreground(60).unwrap();
+        let second = s.foreground(110).unwrap();
         assert!(s.status().pressured);
         assert!(s.foreground(1).is_err());
         first.materialized(40).unwrap();
-        assert_eq!((s.status().allocated, s.status().promised), (630, 120));
+        assert_eq!((s.status().allocated, s.status().promised), (630, 170));
         assert!(first.materialized(61).is_err());
         drop((first, second));
         assert_eq!((s.status().allocated, s.status().promised), (630, 0));
         // Dropping promises alone leaves 63% allocated: hysteresis still stops IO.
         assert!(s.foreground(1).is_err());
-        s.reclaimed(30).unwrap();
+        s.reclaimed(31).unwrap();
         assert!(!s.status().pressured);
         assert!(s.foreground(1).is_ok());
-        assert!(s.reclaimed(601).is_err());
-        assert_eq!(s.status().allocated, 600);
+        assert!(s.reclaimed(600).is_err());
+        assert_eq!(s.status().allocated, 599);
     }
 
     #[test]
     fn background_exclusion_outlives_materialization_and_orphans_remain_charged() {
         let s = space(790);
-        assert!(s.foreground(1).is_err());
+        assert!(s.foreground(11).is_err());
         let mut background = s.background(200).unwrap();
         assert!(s.background(1).is_err());
         background.materialized(200).unwrap();
@@ -350,5 +355,29 @@ mod tests {
         assert_eq!(s.status().promised, 0);
         assert!(s.status().peak_used <= 800);
         assert!(!s.status().pressured);
+    }
+
+    #[test]
+    fn filesystem_admission_reaches_its_usable_cap_instead_of_stopping_at_seventy_five_percent() {
+        let s = space(750);
+        assert!(!s.status().pressured);
+        let first = s.foreground(49).unwrap();
+        assert!(!s.status().pressured);
+        let last = s.foreground(1).unwrap();
+        assert!(s.status().pressured);
+        assert_eq!(s.status().allocated + s.status().promised, 800);
+        assert!(s.foreground(1).is_err());
+        drop((first, last));
+        assert!(s.foreground(1).is_err());
+        s.reclaimed(150).unwrap();
+        assert!(s.status().pressured); // Exactly 60% is not below the resume bound.
+        s.reclaimed(1).unwrap();
+        assert!(!s.status().pressured);
+        assert!(s.foreground(200).is_ok());
+
+        let s = space(0);
+        assert!(s.foreground(801).is_err());
+        assert!(!s.status().pressured);
+        assert!(s.foreground(1).is_ok());
     }
 }
