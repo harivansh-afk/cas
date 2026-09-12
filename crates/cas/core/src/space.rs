@@ -1,5 +1,7 @@
 //! Host disk accounting. Callers measure physical allocations and reclaim only
 //! after the filesystem operation and its required sync have succeeded.
+mod filesystem;
+pub use filesystem::{Governor, Observation, Permit};
 use std::{
     io,
     sync::{Arc, Mutex},
@@ -39,6 +41,7 @@ pub struct Status {
     pub pressured: bool,
     pub background_active: bool,
     pub rejected: u64,
+    pub failed: bool,
 }
 
 /// One account per host store. Its capacity covers this store's allocated bytes
@@ -90,12 +93,17 @@ impl Space {
 
     fn reserve(self: &Arc<Self>, bytes: u64, background: bool) -> io::Result<Reservation> {
         let mut status = self.status.lock().expect("space mutex poisoned");
-        let used = status.allocated + status.promised;
+        let used = status.allocated.saturating_add(status.promised);
         let limit = if background {
             self.limits.capacity
         } else {
             self.limits.capacity - self.limits.reserve
         };
+        if status.failed {
+            return Err(io::Error::other(
+                "disk account failed; explicit recovery required",
+            ));
+        }
         let denied = bytes == 0
             || bytes > limit.saturating_sub(used)
             || (background && (status.background_active || bytes > self.limits.reserve))
@@ -128,15 +136,36 @@ impl Space {
         update_pressure(self.limits, &mut status);
         Ok(())
     }
+
+    fn fail(&self) {
+        self.status.lock().expect("space mutex poisoned").failed = true;
+    }
+
+    fn observed(&self, allocated: u64) -> io::Result<()> {
+        let mut status = self.status.lock().expect("space mutex poisoned");
+        status.allocated = allocated;
+        observed(self.limits, &mut status)
+    }
+}
+
+fn observed(limits: Limits, status: &mut Status) -> io::Result<()> {
+    update_pressure(limits, status);
+    if u128::from(status.allocated) + u128::from(status.promised) > u128::from(limits.capacity) {
+        status.failed = true;
+        return Err(io::Error::other(
+            "observed filesystem allocation exceeds capacity",
+        ));
+    }
+    Ok(())
 }
 
 fn update_pressure(limits: Limits, status: &mut Status) {
-    let used = status.allocated + status.promised;
-    status.peak_used = status.peak_used.max(used);
+    let used = u128::from(status.allocated) + u128::from(status.promised);
+    status.peak_used = status.peak_used.max(used.min(u128::from(u64::MAX)) as u64);
     // u128 keeps percentages exact at u64 capacities without multiplication overflow.
-    let percent = u128::from(used) * 100;
+    let percent = used * 100;
     let capacity = u128::from(limits.capacity);
-    let reserve_intact = used <= limits.capacity - limits.reserve;
+    let reserve_intact = used <= u128::from(limits.capacity - limits.reserve);
     if percent >= capacity * 75 || !reserve_intact {
         status.pressured = true;
     } else if percent <= capacity * 60 && reserve_intact {
@@ -169,6 +198,34 @@ impl Reservation {
         status.allocated += bytes;
         self.remaining -= bytes;
         Ok(())
+    }
+
+    /// The serialized filesystem owner has completed all IO and observation.
+    /// Record excess output before failing; never erase a physical allocation.
+    fn finish(&mut self, previous: u64, allocated: u64) -> io::Result<()> {
+        let mut status = self.space.status.lock().expect("space mutex poisoned");
+        let excess = allocated.saturating_sub(previous) > self.remaining;
+        status.allocated = allocated;
+        status.promised -= self.remaining;
+        self.remaining = 0;
+        if self.background {
+            status.background_active = false;
+            self.background = false;
+        }
+        observed(self.space.limits, &mut status)?;
+        if excess {
+            status.failed = true;
+            return Err(io::Error::other("observed output exceeds its disk promise"));
+        }
+        Ok(())
+    }
+
+    /// IO returned but its physical outcome cannot be measured. Keep the full
+    /// unknown promise in the failed account until explicit filesystem recovery.
+    fn unknown(&mut self) {
+        self.space.fail();
+        self.remaining = 0;
+        self.background = false;
     }
 }
 
@@ -208,6 +265,16 @@ mod tests {
         );
         assert!(Limits::new(336 * MIB, 64 * MIB, 128 * MIB).is_err());
         assert!(Limits::new(u64::MAX, u64::MAX, 1).is_err());
+        assert!(
+            Space::new(
+                Limits {
+                    capacity: 1000,
+                    reserve: 200
+                },
+                1001
+            )
+            .is_err()
+        );
         let s = Space::new(
             Limits {
                 capacity: u64::MAX,

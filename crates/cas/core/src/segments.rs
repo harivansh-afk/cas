@@ -40,6 +40,10 @@ pub struct Tickets {
 }
 
 impl Tickets {
+    pub(crate) fn root_file(&self) -> &fs::File {
+        self.directory.file()
+    }
+
     /// Inspect existing names without creating directories or repairing files.
     /// Individual stores/logs still validate every header and required prefix.
     pub fn open(root: &Path, metadata: Arc<Budget>) -> io::Result<Arc<Self>> {

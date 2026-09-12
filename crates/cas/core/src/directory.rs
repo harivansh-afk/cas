@@ -11,6 +11,10 @@ pub(crate) struct Directory {
 }
 
 impl Directory {
+    pub fn file(&self) -> &File {
+        &self.file
+    }
+
     pub fn open(path: &Path) -> io::Result<Self> {
         let file = OpenOptions::new()
             .read(true)

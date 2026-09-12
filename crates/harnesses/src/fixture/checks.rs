@@ -11,6 +11,8 @@ use crate::evidence;
 
 const SECTORS: u64 = 16 * 1024 * 1024 / 512;
 
+mod space;
+
 fn require(ok: bool, message: &str) -> io::Result<()> {
     if ok {
         Ok(())
@@ -197,6 +199,7 @@ pub(super) fn verify(output: &Path, build: &Build) -> io::Result<()> {
         )?;
     }
     for (module, namespace) in [
+        ("space", "space::filesystem"),
         ("store", "store::file"),
         ("manifest", "manifest::file"),
         ("append", "append::shared"),
@@ -208,6 +211,7 @@ pub(super) fn verify(output: &Path, build: &Build) -> io::Result<()> {
             &fs::read_to_string(guest.join(format!("{module}.log")))?,
         )?;
     }
+    space::verify(&guest)?;
     Ok(())
 }
 

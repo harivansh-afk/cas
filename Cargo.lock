@@ -134,6 +134,7 @@ dependencies = [
  "hashbrown",
  "libc",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]
