@@ -15,6 +15,17 @@ pub struct Submission {
     offset: u64,
 }
 
+/// Pure physical position for the host's pre-mutation reservation window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct Position {
+    pub segment: u64,
+    pub capacity: u64,
+    pub end: u64,
+    pub issued: u64,
+    pub fenced: u64,
+    pub initial_fence: bool,
+}
+
 impl Submission {
     pub fn batch(&self) -> &Batch {
         &self.batch
@@ -55,6 +66,17 @@ impl From<&Submission> for Cohort {
 }
 
 impl Log {
+    pub fn position(&self) -> Position {
+        Position {
+            segment: self.current().header.number,
+            capacity: self.config.segment_bytes,
+            end: self.offset,
+            issued: self.issued,
+            fenced: self.cohort.map_or(self.durable, |cohort| cohort.boundary),
+            initial_fence: !self.fenced && self.cohort.is_none(),
+        }
+    }
+
     pub fn covers_flush(&self, boundary: u64) -> bool {
         self.fenced && self.durable >= boundary
     }

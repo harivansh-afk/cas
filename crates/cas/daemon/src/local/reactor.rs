@@ -538,10 +538,10 @@ impl Reactor {
                 requests: 0,
             })
             .ok_or_else(|| io::Error::other("internal fence control reserve exhausted"))?;
-        let submission = match self.worker.log.prepare_fence() {
+        let submission = match self.prepare_fence() {
             Err(append::Error::Rollover) if self.worker.port.is_none() => {
                 self.rotate(append::RotationKind::Rollover)?;
-                self.worker.log.prepare_fence().map_err(io::Error::other)?
+                self.prepare_fence().map_err(io::Error::other)?
             }
             Err(append::Error::Rollover) => {
                 if let Some(waiter) = waiter {
@@ -559,6 +559,13 @@ impl Reactor {
             rollover,
         }))?;
         Ok(())
+    }
+
+    fn prepare_fence(&mut self) -> append::Result<append::Submission> {
+        match &self.worker.shared.window {
+            Some(window) => window.fence(&mut self.worker.log),
+            None => self.worker.log.prepare_fence(),
+        }
     }
 
     fn rotate(&mut self, kind: append::RotationKind) -> io::Result<()> {
@@ -579,6 +586,15 @@ impl Reactor {
 
     fn dispatch(&mut self) -> io::Result<()> {
         while let Some(command) = self.commands.front_mut() {
+            // A completed prefix needs no new segment or IO. Keep this control
+            // path available while the worker allocates for future mutations.
+            if matches!(command, Command::Io(io) if self.worker.log.covers_flush(io.boundary)) {
+                let Command::Io(io) = self.commands.pop_front().unwrap() else {
+                    unreachable!()
+                };
+                self.send_io(io, Ok(()))?;
+                continue;
+            }
             if self.worker.port.as_ref().is_some_and(host::Port::rotating) {
                 break;
             }
@@ -633,6 +649,9 @@ impl Reactor {
                         self.paused_since.get_or_insert_with(Instant::now);
                         break;
                     }
+                    Err(append::Error::Rollover) if self.worker.shared.window.is_some() => {
+                        return Err(io::Error::other("admitted WRITE exceeded its WAL window"));
+                    }
                     Err(append::Error::Rollover) => {
                         let status = self.worker.log.status();
                         if status.issued == status.published && status.durable == status.published {
@@ -646,13 +665,6 @@ impl Reactor {
                     Ok(()) => (),
                 },
                 Command::Io(io) => {
-                    if self.worker.log.covers_flush(io.boundary) {
-                        let Command::Io(io) = self.commands.pop_front().unwrap() else {
-                            unreachable!()
-                        };
-                        self.send_io(io, Ok(()))?;
-                        continue;
-                    }
                     if let Some(token) = self.cohort {
                         let Work::Fence(fence) = &mut self.pending.get_mut(&token).unwrap().work
                         else {
@@ -673,7 +685,7 @@ impl Reactor {
                 Command::Append(Packing {
                     builder,
                     credits,
-                    writes,
+                    mut writes,
                 }) => {
                     if let Some(start) = self.paused_since.take() {
                         let mut metrics =
@@ -683,11 +695,19 @@ impl Reactor {
                             .saturating_add(nanos(start.elapsed()));
                     }
                     let address = builder.allocation_address();
-                    let submission = self
-                        .worker
-                        .log
-                        .prepare_append(builder)
-                        .map_err(io::Error::other)?;
+                    let submission = match &self.worker.shared.window {
+                        Some(window) => window::Window::append(
+                            window,
+                            &mut self.worker.log,
+                            builder,
+                            &mut writes,
+                        )?,
+                        None => self
+                            .worker
+                            .log
+                            .prepare_append(builder)
+                            .map_err(io::Error::other)?,
+                    };
                     assert_eq!(submission.batch().allocation_address(), address);
                     let mut metrics = self.worker.shared.metrics.lock().expect("metrics poisoned");
                     metrics.batches_submitted += 1;
@@ -740,6 +760,7 @@ impl Reactor {
                 self.enqueue(Work::Read(read))?;
             }
         }
+        self.drain_window()?;
         if !self.closed
             && !self.admission_paused
             && !self.worker.port.as_ref().is_some_and(host::Port::rotating)
@@ -751,6 +772,31 @@ impl Reactor {
             self.start_fence(None, false)?;
         }
         Ok(())
+    }
+
+    fn drain_window(&mut self) -> io::Result<()> {
+        let Some(window) = &self.worker.shared.window else {
+            return Ok(());
+        };
+        let state = window.status();
+        if self.closed
+            || self.admission_paused
+            || !state.rotation_wanted
+            || state.unsubmitted != 0
+            || self.cohort.is_some()
+            || self.worker.port.as_ref().is_some_and(host::Port::rotating)
+        {
+            return Ok(());
+        }
+        let status = self.worker.log.status();
+        if status.issued != status.published {
+            return Ok(());
+        }
+        if status.durable != status.published {
+            self.start_fence(None, false)
+        } else {
+            self.rotate(append::RotationKind::Rollover)
+        }
     }
 
     fn reject_queued(&mut self) -> io::Result<()> {
@@ -777,6 +823,12 @@ impl Reactor {
             .as_ref()
             .is_some_and(|port| port.needs_wake(&self.worker.log))
             || !self.pending.is_empty()
+            || self
+                .worker
+                .shared
+                .window
+                .as_ref()
+                .is_some_and(|window| window.status().rotation_wanted)
             || (!self.admission_paused
                 && self.worker.log.status().issued > self.worker.log.status().durable);
         let timeout = if active { 50 } else { -1 };
@@ -845,6 +897,11 @@ impl Reactor {
                 if !self.failed {
                     if let Some(port) = &mut self.worker.port {
                         port.poll(&mut self.worker.log, self.last_write, self.admission_paused)?;
+                        if let Some(window) = &self.worker.shared.window
+                            && window.installed(&self.worker.log)?
+                        {
+                            notify(&self.worker.wake.0)?;
+                        }
                         *self
                             .worker
                             .shared

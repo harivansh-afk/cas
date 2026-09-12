@@ -93,6 +93,7 @@ impl Host {
             .map_err(|_| io::Error::other("host endpoint metadata exhausted"))?;
         let (ready, input) = mpsc::sync_channel(images.len());
         for (index, (log, manifest)) in images.into_iter().enumerate() {
+            let window = window::Window::new(log.position(), &shared.resources.metadata)?;
             let view = manifest.view()?;
             let identity = view.commit();
             if identity.store != store.config().store
@@ -143,6 +144,7 @@ impl Host {
                     last_reclaim: Instant::now(),
                     attached: false,
                     rotation: None,
+                    window,
                 },
             }));
         }
@@ -192,6 +194,7 @@ impl Host {
             self.shared.resources.pools.image(),
             Arc::clone(&port.health),
             Arc::clone(&self.shared.resources.metadata),
+            Some(port.window.clone()),
         );
         port.attached = true;
         self.shared.attached.fetch_add(1, Ordering::Relaxed);
@@ -282,6 +285,7 @@ pub(super) struct Port {
     last_reclaim: Instant,
     attached: bool,
     rotation: Option<append::RotationKind>,
+    window: cas_core::budget::BudgetArc<window::Window>,
 }
 
 impl Port {
@@ -318,6 +322,7 @@ impl Port {
             return Err(io::Error::other("conflicting WAL rotation requests"));
         }
         self.rotation = Some(kind);
+        self.window.close();
         if self.active.is_none() {
             self.queue(Turn::Rotate)?;
         }
@@ -368,6 +373,7 @@ impl Port {
             }
             match event {
                 Event::Allocate => {
+                    self.window.before_rotation(log)?;
                     let kind = self
                         .rotation
                         .ok_or_else(|| io::Error::other("unrequested WAL allocation grant"))?;

@@ -27,26 +27,13 @@ fn allocation_case(timeout: bool) {
     let (entered, observed) = mpsc::channel();
     let (release, resume) = mpsc::channel();
     host.shared.control.lock().unwrap().rotation = Some(Pause { entered, resume });
-    let permit = first.prepare(Kind::Write(old.len())).unwrap().unwrap();
-    first
-        .gather(
-            8,
-            QueueHead { queue: 0, head: 8 },
-            0,
-            old.len(),
-            permit,
-            |bytes| {
-                bytes.fill(9);
-                Ok(())
-            },
-        )
-        .unwrap();
-    first.seal().unwrap();
+    assert!(first.prepare(Kind::Write(old.len())).unwrap().is_none());
+    assert_eq!(first.admitted, 7);
     observed.recv_timeout(Duration::from_secs(3)).unwrap();
     assert_eq!(first.report()["status"]["rotating"], true);
     assert_eq!(first.report()["status"]["published"], 7);
-    // Deliver a previously accepted read after the later mutation starts
-    // waiting for allocation. Its captured boundary remains P=7.
+    // Deliver a previously accepted read while the next write waits BEFORE
+    // mutation admission. Its captured boundary remains P=7.
     first.send(Command::Io(old_read)).unwrap();
     let response = completed(&mut first);
     assert_eq!(response.id, 7);
@@ -55,6 +42,10 @@ fn allocation_case(timeout: bool) {
     };
     assert_eq!(bytes.as_slice(), old);
     drop(bytes);
+    let permit = first.prepare(Kind::Control).unwrap().unwrap();
+    first.enqueue(8, Operation::Flush, permit).unwrap();
+    assert_eq!(completed(&mut first).id, 8);
+    assert_eq!(first.admitted, 7);
     read(&mut second, 1, &old);
     write(&mut second, 2, 0, &[7; BLOCK_SIZE]);
     let permit = second.prepare(Kind::Control).unwrap().unwrap();
@@ -77,25 +68,13 @@ fn allocation_case(timeout: bool) {
     }
     release.send(()).unwrap();
     if !timeout {
-        assert_eq!(completed(&mut first).id, 8);
+        write(&mut first, 9, 0, &vec![9; old.len()]);
         assert_eq!(first.status.epoch, epoch);
         drained(&mut first, 8);
         drained(&mut second, 2);
-        read(&mut first, 9, &vec![9; old.len()]);
+        read(&mut first, 10, &vec![9; old.len()]);
     } else {
-        let deadline = Instant::now() + Duration::from_secs(3);
-        loop {
-            if let Some(response) = first.receive(false).unwrap() {
-                assert_eq!(response.id, 8);
-                assert!(response.result.is_err());
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "failed allocation left its write pending"
-            );
-            thread::sleep(Duration::from_millis(1));
-        }
+        assert_eq!(first.admitted, 7); // No owned write or replay obligation was created.
     }
     drop((first, second));
     shutdown(host);
@@ -119,6 +98,37 @@ fn allocation_worker_keeps_captured_reads_and_other_image_flushes_live() {
 #[test]
 fn allocation_worker_deadline_retains_owners_and_prevents_late_installation() {
     allocation_case(true);
+}
+
+#[test]
+fn unused_admission_token_prevents_rotation_until_its_actual_release() {
+    let root = tempfile::tempdir().unwrap();
+    let mut host = create(root.path(), 1, Arc::new(Resources::default()));
+    let mut local = attach(&mut host, 2);
+    let block = vec![5; IMAGE_BYTES as usize];
+    for id in 0..7 {
+        write(&mut local, id, 0, &block);
+    }
+    drained(&mut local, 7);
+    let unused = local.prepare(Kind::Write(BLOCK_SIZE)).unwrap().unwrap();
+    let (entered, observed) = mpsc::channel();
+    let (release, resume) = mpsc::channel();
+    host.shared.control.lock().unwrap().rotation = Some(Pause { entered, resume });
+    assert!(local.prepare(Kind::Write(block.len())).unwrap().is_none());
+    assert!(matches!(
+        observed.recv_timeout(Duration::from_millis(100)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    assert_eq!(local.report()["wal_window"]["unsubmitted"], 1);
+    assert_eq!(local.admitted, 7);
+    drop(unused);
+    observed.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert_eq!(local.report()["wal_window"]["unsubmitted"], 0);
+    release.send(()).unwrap();
+    write(&mut local, 7, 0, &block);
+    assert_eq!(local.admitted, 8);
+    drop(local);
+    shutdown(host);
 }
 
 #[test]

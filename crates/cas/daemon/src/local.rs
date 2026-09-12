@@ -3,6 +3,7 @@ pub(crate) mod host;
 mod pools;
 mod reactor;
 mod state;
+mod window;
 use pools::Pools;
 pub use state::ImageState;
 use std::collections::VecDeque;
@@ -53,6 +54,7 @@ impl Execution {
 pub struct Permit {
     _request: Credits,
     _read: Option<Credits>,
+    window: Option<window::Slot>,
 }
 
 #[derive(Default, serde::Serialize)]
@@ -157,6 +159,7 @@ pub struct Shared {
     final_status: Mutex<append::Status>,
     pub health: Health,
     pub injection: OnceLock<crate::fault::Injection>,
+    window: Option<cas_core::budget::BudgetArc<window::Window>>,
 }
 
 impl Shared {
@@ -175,6 +178,7 @@ impl Shared {
                 bytes: 128 * MAX_REQUEST_BYTES,
                 requests: 0,
             }),
+            None,
         )
     }
 
@@ -183,6 +187,7 @@ impl Shared {
         pools: Pools,
         health: Health,
         metadata: Arc<Budget>,
+        window: Option<cas_core::budget::BudgetArc<window::Window>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             injection: OnceLock::new(),
@@ -191,6 +196,7 @@ impl Shared {
             metrics: Mutex::new(Metrics::default()),
             final_status: Mutex::new(status),
             health,
+            window,
         })
     }
 
@@ -228,6 +234,10 @@ impl Shared {
         Some(Permit {
             _request: request,
             _read: read,
+            window: match (kind, &self.window) {
+                (Kind::Write(bytes), Some(window)) => Some(window::Window::reserve(window, bytes)?),
+                _ => None,
+            },
         })
     }
 
@@ -354,6 +364,14 @@ impl Local {
             }
             None => None,
         };
+        if let Some(window) = &shared.window {
+            window.bind(
+                input_wake
+                    .as_ref()
+                    .expect("host reactor wake")
+                    .try_clone()?,
+            )?;
+        }
         let worker = Worker {
             log,
             output,
@@ -413,6 +431,9 @@ impl Local {
             self.seal()?;
         }
         let Some(permit) = self.shared.reserve(kind) else {
+            if self.shared.window.is_some() {
+                self.seal()?;
+            }
             return Ok(None);
         };
         if let Kind::Write(bytes) = kind {
@@ -455,6 +476,16 @@ impl Local {
         permit: Permit,
         gather: impl FnOnce(&mut [u8]) -> io::Result<()>,
     ) -> io::Result<()> {
+        if permit
+            .window
+            .as_ref()
+            .is_some_and(|slot| !slot.matches(length))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "gather differs from WAL reservation",
+            ));
+        }
         let batch = self
             .packing
             .as_mut()
@@ -612,7 +643,8 @@ impl Local {
         serde_json::json!({ "status":status, "metrics":*self.shared.metrics.lock().expect("metrics poisoned"),
             "requests":self.shared.pools.requests.usage(), "append":self.shared.pools.append.usage(),
             "read":self.shared.pools.read.usage(), "control":self.shared.pools.control.usage(),
-            "host_append":self.shared.pools.append.host_usage(), "host_read":self.shared.pools.read.host_usage() })
+            "host_append":self.shared.pools.append.host_usage(), "host_read":self.shared.pools.read.host_usage(),
+            "wal_window": self.shared.window.as_ref().map(|window| window.status()) })
     }
 
     pub fn name(&self) -> &'static str {

@@ -33,7 +33,7 @@ pub use reclaim::{ReclaimStats, Reclaimed, Reclamation};
 pub use recovery::{LiveRecovery, Mutation, Recovery};
 pub use rotation::{Rotated, Rotation, RotationKind};
 pub use shared::SharedRecovery;
-pub use submission::Submission;
+pub use submission::{Position, Submission};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

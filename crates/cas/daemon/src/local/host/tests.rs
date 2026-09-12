@@ -161,7 +161,18 @@ fn completed(local: &mut Local) -> Completed {
 }
 
 fn write(local: &mut Local, id: u64, offset: usize, bytes: &[u8]) {
-    let permit = local.prepare(Kind::Write(bytes.len())).unwrap().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let permit = loop {
+        if let Some(permit) = local.prepare(Kind::Write(bytes.len())).unwrap() {
+            break permit;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "write admission deadline: {}",
+            local.report()
+        );
+        thread::sleep(Duration::from_millis(1));
+    };
     local
         .gather(
             id,
