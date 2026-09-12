@@ -781,7 +781,7 @@ impl Reactor {
         let state = window.status();
         if self.closed
             || self.admission_paused
-            || !state.rotation_wanted
+            || !(state.rotation_wanted || state.index_pressure)
             || state.unsubmitted != 0
             || self.cohort.is_some()
             || self.worker.port.as_ref().is_some_and(host::Port::rotating)
@@ -794,8 +794,10 @@ impl Reactor {
         }
         if status.durable != status.published {
             self.start_fence(None, false)
-        } else {
+        } else if state.rotation_wanted {
             self.rotate(append::RotationKind::Rollover)
+        } else {
+            Ok(())
         }
     }
 
@@ -823,12 +825,10 @@ impl Reactor {
             .as_ref()
             .is_some_and(|port| port.needs_wake(&self.worker.log))
             || !self.pending.is_empty()
-            || self
-                .worker
-                .shared
-                .window
-                .as_ref()
-                .is_some_and(|window| window.status().rotation_wanted)
+            || self.worker.shared.window.as_ref().is_some_and(|window| {
+                let state = window.status();
+                state.rotation_wanted || state.index_pressure
+            })
             || (!self.admission_paused
                 && self.worker.log.status().issued > self.worker.log.status().durable);
         let timeout = if active { 50 } else { -1 };
@@ -910,6 +910,11 @@ impl Reactor {
                             .expect("status poisoned") = self.worker.log.status();
                     }
                     self.publish()?;
+                    if let Some(window) = &self.worker.shared.window
+                        && window.refresh(&self.worker.log)?
+                    {
+                        notify(&self.worker.wake.0)?;
+                    }
                 }
                 self.finish_ready()?;
                 if self.failed {

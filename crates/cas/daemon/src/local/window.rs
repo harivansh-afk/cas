@@ -12,8 +12,10 @@ pub(super) struct Window {
 pub(super) struct State {
     point: append::Position,
     reserved_bytes: u64,
+    index_capacity: usize,
     pub unsubmitted: usize,
     pub rotation_wanted: bool,
+    pub index_pressure: bool,
     failed: bool,
 }
 
@@ -49,14 +51,16 @@ impl State {
 
     fn bounded(&mut self) -> io::Result<()> {
         self.require(
-            self.used().is_some_and(|used| used <= self.point.capacity),
-            "WAL admission exceeded segment capacity",
+            self.used().is_some_and(|used| used <= self.point.capacity)
+                && self.unsubmitted <= self.index_capacity,
+            "WAL admission exceeded reserved capacity",
         )
     }
 }
 
 impl Window {
-    pub fn new(point: append::Position, metadata: &Arc<Budget>) -> io::Result<BudgetArc<Self>> {
+    pub fn new(log: &Log, metadata: &Arc<Budget>) -> io::Result<BudgetArc<Self>> {
+        let point = log.position();
         if point.capacity < (MAX_REQUEST_BYTES + 4 * BLOCK_SIZE) as u64 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -66,8 +70,10 @@ impl Window {
         let mut state = State {
             point,
             reserved_bytes: 0,
+            index_capacity: log.append_capacity(),
             unsubmitted: 0,
             rotation_wanted: false,
+            index_pressure: false,
             failed: false,
         };
         state.bounded()?;
@@ -110,6 +116,12 @@ impl Window {
         }
         let mut state = owner.lock();
         if state.failed || state.rotation_wanted {
+            return None;
+        }
+        if state.unsubmitted >= state.index_capacity {
+            state.index_pressure = true;
+            drop(state);
+            owner.notify();
             return None;
         }
         let bytes = (bytes + BLOCK_SIZE) as u32;
@@ -159,6 +171,7 @@ impl Window {
             slot.bytes = 0; // Consumed; Drop must not refund prepared physical IO.
         }
         state.point = log.position();
+        state.index_capacity = log.append_capacity();
         state.bounded()?;
         Ok(submission)
     }
@@ -174,6 +187,20 @@ impl Window {
 
     pub fn close(&self) {
         self.lock().rotation_wanted = true;
+    }
+
+    /// Pure sequencer refresh; an old index sample remains conservative while
+    /// append publication or compaction releases capacity in the core.
+    pub fn refresh(&self, log: &Log) -> io::Result<bool> {
+        let mut state = self.lock();
+        state.at(log)?;
+        state.index_capacity = log.append_capacity();
+        state.bounded()?;
+        let reopened = state.index_pressure && state.unsubmitted < state.index_capacity;
+        if reopened {
+            state.index_pressure = false;
+        }
+        Ok(reopened)
     }
 
     pub fn before_rotation(&self, log: &Log) -> io::Result<()> {
@@ -202,6 +229,7 @@ impl Window {
             && point.initial_fence;
         state.require(valid, "WAL successor differs from admission boundary")?;
         state.point = point;
+        state.index_capacity = log.append_capacity();
         state.rotation_wanted = false;
         state.bounded()?;
         Ok(true)

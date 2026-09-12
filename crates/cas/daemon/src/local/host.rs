@@ -93,7 +93,7 @@ impl Host {
             .map_err(|_| io::Error::other("host endpoint metadata exhausted"))?;
         let (ready, input) = mpsc::sync_channel(images.len());
         for (index, (log, manifest)) in images.into_iter().enumerate() {
-            let window = window::Window::new(log.position(), &shared.resources.metadata)?;
+            let window = window::Window::new(&log, &shared.resources.metadata)?;
             let view = manifest.view()?;
             let identity = view.commit();
             if identity.store != store.config().store
@@ -440,9 +440,10 @@ impl Port {
             self.oldest = None;
         }
         let settled = last_write.elapsed() >= Duration::from_millis(100);
-        let forced = self
-            .oldest
-            .is_some_and(|oldest| oldest.elapsed() >= Duration::from_secs(1));
+        let forced = self.window.status().index_pressure
+            || self
+                .oldest
+                .is_some_and(|oldest| oldest.elapsed() >= Duration::from_secs(1));
         let retry = self.retry && self.last_reclaim.elapsed() >= Duration::from_millis(100);
         let turn = if self.rotation.is_some() {
             Some(Turn::Rotate)

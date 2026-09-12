@@ -81,6 +81,14 @@ impl Log {
         self.fenced && self.durable >= boundary
     }
 
+    /// Additional descriptors guaranteed to fit the preallocated index, even
+    /// if each pending descriptor splits an existing interval into two nodes.
+    /// Publication and compaction can only increase this conservative bound.
+    pub fn append_capacity(&self) -> usize {
+        (self.limits.intervals.saturating_sub(self.index.len()) / 2)
+            .saturating_sub(self.pending_descriptors)
+    }
+
     /// Check without consuming the final allocation. Pending and Rollover keep
     /// an admitted builder queued while older IO or its finite cohort drains.
     pub fn check_append(&self, builder: &Builder) -> Result<()> {
@@ -91,12 +99,7 @@ impl Log {
         if builder.is_empty() || builder.image_bytes() != self.config.image_bytes {
             return Err(format::Error::Invalid("empty append or builder image mismatch").into());
         }
-        let growth = self
-            .pending_descriptors
-            .checked_add(builder.len())
-            .and_then(|count| count.checked_mul(2))
-            .and_then(|count| count.checked_add(self.index.len()));
-        if growth.is_none_or(|count| count > self.limits.intervals) {
+        if builder.len() > self.append_capacity() {
             return Err(Error::Capacity);
         }
         self.issued

@@ -10,6 +10,10 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_intervals(append::Limits::default().intervals)
+    }
+
+    fn with_intervals(intervals: usize) -> Self {
         let root = tempfile::tempdir().unwrap();
         let log = Log::create(
             root.path().join("wal"),
@@ -19,14 +23,17 @@ impl Fixture {
                 image_bytes: MAX_REQUEST_BYTES as u64,
                 segment_bytes: (MAX_REQUEST_BYTES + 4 * BLOCK_SIZE) as u64,
             },
-            append::Limits::default(),
+            append::Limits {
+                intervals,
+                ..append::Limits::default()
+            },
         )
         .unwrap();
         let metadata = Budget::new(Amount {
             bytes: 4096,
             requests: 0,
         });
-        let window = Window::new(log.position(), &metadata).unwrap();
+        let window = Window::new(&log, &metadata).unwrap();
         let mut shared = Shared::new(log.status());
         Arc::get_mut(&mut shared).unwrap().window = Some(window.clone());
         Self {
@@ -78,6 +85,40 @@ impl Fixture {
         self.log.complete_sync(&fence).unwrap();
         assert!(!self.window.installed(&self.log).unwrap());
     }
+}
+
+#[test]
+fn descriptor_tokens_cover_pending_publication_and_refund_without_mutation() {
+    let mut f = Fixture::with_intervals(126);
+    let (builder, mut writes) = f.batch(&[BLOCK_SIZE; 63]);
+    assert_eq!(f.log.append_capacity(), 63);
+    assert!(f.shared.reserve(Kind::Write(BLOCK_SIZE)).is_none());
+    assert_eq!(f.log.status().issued, 0);
+    assert!(f.window.status().index_pressure);
+    assert!(!f.window.status().rotation_wanted);
+
+    let submission = Window::append(&f.window, &mut f.log, builder, &mut writes).unwrap();
+    assert_eq!(f.log.append_capacity(), 0);
+    assert!(f.shared.reserve(Kind::Write(BLOCK_SIZE)).is_none());
+    submission.write().unwrap();
+    f.log.publish_append(&submission).unwrap();
+    assert_eq!(f.log.status().intervals, 63);
+    assert_eq!(f.log.append_capacity(), 31);
+    // The stale sample stays conservative until the sequencer refreshes it.
+    assert!(f.shared.reserve(Kind::Write(BLOCK_SIZE)).is_none());
+    assert!(f.window.refresh(&f.log).unwrap());
+    let mut tokens: Vec<_> = (0..31)
+        .map(|_| f.shared.reserve(Kind::Write(BLOCK_SIZE)).unwrap())
+        .collect();
+    assert!(f.shared.reserve(Kind::Write(BLOCK_SIZE)).is_none());
+    let point = f.log.position();
+    drop(tokens.pop());
+    let replacement = f.shared.reserve(Kind::Write(BLOCK_SIZE)).unwrap();
+    assert_eq!(f.log.position(), point);
+    assert_eq!(f.window.status().unsubmitted, 31);
+    drop((tokens, replacement, writes, submission));
+    assert_eq!(f.window.status().unsubmitted, 0);
+    f.sync();
 }
 
 #[test]
@@ -174,6 +215,6 @@ fn foreign_or_mismatched_tokens_and_unobserved_positions_fail_before_preparation
     }
     let f = Fixture::new();
     let before = f.log.position();
-    assert!(Window::new(before, &Budget::new(Amount::default())).is_err());
+    assert!(Window::new(&f.log, &Budget::new(Amount::default())).is_err());
     assert_eq!(f.log.position(), before);
 }

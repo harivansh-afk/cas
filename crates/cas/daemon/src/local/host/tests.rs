@@ -3,6 +3,7 @@ use cas_core::{
     aligned::AlignedBuffer, manifest::file::Identity, segments::Tickets, store::file::Config,
 };
 use std::{fs, path::Path};
+mod admission;
 mod rotation;
 
 const STORE: Config = Config {
@@ -47,6 +48,22 @@ fn create(root: &Path, images: u8, resources: Arc<Resources>) -> Host {
 }
 
 fn create_sized(root: &Path, images: u8, resources: Arc<Resources>, image_bytes: u64) -> Host {
+    create_with_limits(
+        root,
+        images,
+        resources,
+        image_bytes,
+        append::Limits::default(),
+    )
+}
+
+fn create_with_limits(
+    root: &Path,
+    images: u8,
+    resources: Arc<Resources>,
+    image_bytes: u64,
+    limits: append::Limits,
+) -> Host {
     let tickets = Tickets::open(root, Arc::clone(&resources.metadata)).unwrap();
     let store = Store::create(
         Arc::clone(&tickets),
@@ -77,7 +94,7 @@ fn create_sized(root: &Path, images: u8, resources: Arc<Resources>, image_bytes:
                     image_bytes,
                     segment_bytes: 2 * MAX_REQUEST_BYTES as u64,
                 },
-                append::Limits::default(),
+                limits,
                 Arc::clone(&resources.metadata),
                 manifest.view().unwrap(),
             )
