@@ -65,6 +65,16 @@ pub struct Guard<'a> {
     _host: Option<MutexGuard<'a, Option<String>>>,
 }
 
+impl Guard<'_> {
+    /// Publish shared failure while already holding the host completion gate.
+    pub(super) fn fail_host(&mut self, message: String) {
+        if let Some(host) = &mut self._host {
+            host.get_or_insert_with(|| message.clone());
+        }
+        self.image.fail(message);
+    }
+}
+
 impl Deref for Guard<'_> {
     type Target = ImageState;
     fn deref(&self) -> &Self::Target {

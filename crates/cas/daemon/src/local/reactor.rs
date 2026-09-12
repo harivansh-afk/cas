@@ -96,6 +96,7 @@ pub(super) struct Reactor {
     cohort: Option<u64>,
     paused_since: Option<Instant>,
     last_write: Instant,
+    last_sync: Instant,
     closed: bool,
     failed: bool,
     admission_paused: bool,
@@ -128,6 +129,7 @@ impl Reactor {
             cohort: None,
             paused_since: None,
             last_write: Instant::now(),
+            last_sync: Instant::now(),
             closed: false,
             failed: false,
             admission_paused: false,
@@ -288,7 +290,7 @@ impl Reactor {
                         self.last_write = Instant::now();
                     }
                     self.commands.push_back(command);
-                    if pause {
+                    if pause && !self.failed {
                         break;
                     }
                 }
@@ -482,6 +484,7 @@ impl Reactor {
                         .log
                         .complete_sync(&fence.submission)
                         .map_err(io::Error::other)?;
+                    self.last_sync = Instant::now();
                     guard.durable = self.worker.log.status().durable;
                     drop(guard);
                     let Work::Fence(fence) = pending.work else {
@@ -586,6 +589,11 @@ impl Reactor {
 
     fn dispatch(&mut self) -> io::Result<()> {
         while let Some(command) = self.commands.front_mut() {
+            if matches!(command, Command::Pause { .. })
+                && let Some(port) = &mut self.worker.port
+            {
+                port.cancel_future_rollover(&self.worker.log);
+            }
             // A completed prefix needs no new segment or IO. Keep this control
             // path available while the worker allocates for future mutations.
             if matches!(command, Command::Io(io) if self.worker.log.covers_flush(io.boundary)) {
@@ -760,6 +768,7 @@ impl Reactor {
                 self.enqueue(Work::Read(read))?;
             }
         }
+        self.sync_for_compaction()?;
         self.drain_window()?;
         if !self.closed
             && !self.admission_paused
@@ -801,6 +810,23 @@ impl Reactor {
         }
     }
 
+    fn sync_for_compaction(&mut self) -> io::Result<()> {
+        if !self.closed
+            && !self.admission_paused
+            && self.cohort.is_none()
+            && !self.worker.port.as_ref().is_some_and(host::Port::rotating)
+            && self.worker.log.status().issued > self.worker.log.status().durable
+            && self.worker.shared.window.as_ref().is_some_and(|window| {
+                window.host_pressure()
+                    || window.status().index_pressure
+                    || self.last_sync.elapsed() >= Duration::from_secs(1)
+            })
+        {
+            self.start_fence(None, false)?;
+        }
+        Ok(())
+    }
+
     fn reject_queued(&mut self) -> io::Result<()> {
         while let Some(command) = self.commands.pop_front() {
             self.worker.execute(command)?;
@@ -813,6 +839,15 @@ impl Reactor {
 
     fn stop(&mut self, error: &io::Error) {
         self.fail(error);
+        *self
+            .worker
+            .shared
+            .submissions_closed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = true;
+        // Every successful sender published before the close above. Drain it
+        // after closing so receiver destruction cannot strand a late command.
+        self.receive();
         // These commands never reached the kernel. Return their owned errors
         // before closing the producer; Drop still drains actual pending IO.
         let _ = self.reject_queued();
@@ -896,7 +931,14 @@ impl Reactor {
                 }
                 if !self.failed {
                     if let Some(port) = &mut self.worker.port {
-                        port.poll(&mut self.worker.log, self.last_write, self.admission_paused)?;
+                        if self.closed {
+                            port.cancel_future_rollover(&self.worker.log);
+                        }
+                        port.poll(
+                            &mut self.worker.log,
+                            self.last_write,
+                            self.admission_paused || self.closed,
+                        )?;
                         if let Some(window) = &self.worker.shared.window
                             && window.installed(&self.worker.log)?
                         {

@@ -4,6 +4,7 @@ use cas_core::{
 };
 use std::{fs, path::Path};
 mod admission;
+mod allocation;
 mod rotation;
 
 const STORE: Config = Config {
@@ -11,6 +12,41 @@ const STORE: Config = Config {
     segment_bytes: 128 * BLOCK_SIZE as u64,
 };
 const IMAGE_BYTES: u64 = 64 * BLOCK_SIZE as u64;
+
+fn runtime_store() -> Config {
+    Config {
+        segment_bytes: if std::env::var_os("CAS_SPACE_REPORT").is_some() {
+            2 * MAX_REQUEST_BYTES as u64
+        } else {
+            STORE.segment_bytes
+        },
+        ..STORE
+    }
+}
+
+fn start(resources: Arc<Resources>, store: Store, images: Vec<(Log, Manifest)>) -> Host {
+    if std::env::var_os("CAS_SPACE_REPORT").is_some() {
+        let initial = cas_core::space::Observation::inspect(store.tickets()).unwrap();
+        let limits = cas_core::space::Limits::new(
+            initial.capacity(),
+            store.config().segment_bytes,
+            cas_core::manifest::tree::MAX_TRANSACTION_BYTES as u64,
+        )
+        .unwrap();
+        let physical =
+            cas_core::space::Governor::open(Arc::clone(store.tickets()), limits).unwrap();
+        Host::governed(
+            resources,
+            store,
+            images,
+            physical,
+            1024 * MAX_REQUEST_BYTES as u64,
+        )
+        .unwrap()
+    } else {
+        Host::new(resources, store, images).unwrap()
+    }
+}
 
 pub(super) struct Pause {
     entered: mpsc::Sender<()>,
@@ -64,10 +100,29 @@ fn create_with_limits(
     image_bytes: u64,
     limits: append::Limits,
 ) -> Host {
+    let (store, images) = create_images(
+        root,
+        images,
+        &resources,
+        image_bytes,
+        limits,
+        runtime_store(),
+    );
+    start(resources, store, images)
+}
+
+fn create_images(
+    root: &Path,
+    images: u8,
+    resources: &Arc<Resources>,
+    image_bytes: u64,
+    limits: append::Limits,
+    config: Config,
+) -> (Store, Vec<(Log, Manifest)>) {
     let tickets = Tickets::open(root, Arc::clone(&resources.metadata)).unwrap();
     let store = Store::create(
         Arc::clone(&tickets),
-        STORE,
+        config,
         Arc::clone(&resources.metadata),
         resources.read_memory(),
     )
@@ -102,14 +157,14 @@ fn create_with_limits(
             (log, manifest)
         })
         .collect();
-    Host::new(resources, store, images).unwrap()
+    (store, images)
 }
 
 fn reopen(root: &Path, images: u8, resources: Arc<Resources>) -> Host {
     let tickets = Tickets::open(root, Arc::clone(&resources.metadata)).unwrap();
     let store = Store::inspect(
         Arc::clone(&tickets),
-        STORE,
+        runtime_store(),
         Arc::clone(&resources.metadata),
         resources.read_memory(),
     )
@@ -150,7 +205,7 @@ fn reopen(root: &Path, images: u8, resources: Arc<Resources>) -> Host {
             (log, manifest)
         })
         .collect();
-    Host::new(resources, store, images).unwrap()
+    start(resources, store, images)
 }
 
 fn attach(host: &mut Host, image: u8) -> Local {
@@ -162,10 +217,15 @@ fn attach(host: &mut Host, image: u8) -> Local {
 }
 
 fn completed(local: &mut Local) -> Completed {
+    let completed = received(local);
+    assert!(completed.result.is_ok(), "{:?}", completed.result);
+    completed
+}
+
+fn received(local: &mut Local) -> Completed {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Some(completed) = local.receive(false).unwrap() {
-            assert!(completed.result.is_ok(), "{:?}", completed.result);
             return completed;
         }
         assert!(
@@ -417,6 +477,11 @@ fn stalled_compactor_keeps_reads_live_and_retains_ownership_after_deadline() {
     observed.recv_timeout(Duration::from_secs(3)).unwrap();
     let held = resources.compaction.usage().current.bytes;
     assert!(held > 0);
+    let promise = host.shared.physical.as_ref().map(|physical| {
+        let status = physical.status();
+        assert!(status.background_active && status.promised >= capacity::METADATA_MARGIN);
+        status.promised
+    });
     read(&mut second, 1, &old);
     let deadline = Instant::now() + IO_DEADLINE + Duration::from_secs(3);
     while first.shared.health.lock().unwrap().failure.is_none() {
@@ -428,6 +493,13 @@ fn stalled_compactor_keeps_reads_live_and_retains_ownership_after_deadline() {
     }
     assert!(second.shared.health.lock().unwrap().failure.is_some());
     assert_eq!(resources.compaction.usage().current.bytes, held);
+    assert_eq!(
+        host.shared
+            .physical
+            .as_ref()
+            .map(|physical| physical.status().promised),
+        promise
+    );
     assert!(Tickets::open(root.path(), Arc::clone(&resources.metadata)).is_err());
     assert_eq!(first.report()["status"]["compacted"], 1);
     release.send(()).unwrap();

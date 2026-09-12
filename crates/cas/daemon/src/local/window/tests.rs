@@ -33,7 +33,7 @@ impl Fixture {
             bytes: 4096,
             requests: 0,
         });
-        let window = Window::new(&log, &metadata).unwrap();
+        let window = Window::new(&log, None, &metadata).unwrap();
         let mut shared = Shared::new(log.status());
         Arc::get_mut(&mut shared).unwrap().window = Some(window.clone());
         Self {
@@ -215,6 +215,6 @@ fn foreign_or_mismatched_tokens_and_unobserved_positions_fail_before_preparation
     }
     let f = Fixture::new();
     let before = f.log.position();
-    assert!(Window::new(&f.log, &Budget::new(Amount::default())).is_err());
+    assert!(Window::new(&f.log, None, &Budget::new(Amount::default())).is_err());
     assert_eq!(f.log.position(), before);
 }

@@ -30,6 +30,11 @@ fn allocation_case(timeout: bool) {
     assert!(first.prepare(Kind::Write(old.len())).unwrap().is_none());
     assert_eq!(first.admitted, 7);
     observed.recv_timeout(Duration::from_secs(3)).unwrap();
+    let promise = host.shared.physical.as_ref().map(|physical| {
+        let promised = physical.status().promised;
+        assert!(promised >= 2 * MAX_REQUEST_BYTES as u64 + capacity::METADATA_MARGIN);
+        promised
+    });
     assert_eq!(first.report()["status"]["rotating"], true);
     assert_eq!(first.report()["status"]["published"], 7);
     // Deliver a previously accepted read while the next write waits BEFORE
@@ -64,6 +69,13 @@ fn allocation_case(timeout: bool) {
         }
         assert!(second.shared.health.lock().unwrap().failure.is_some());
         assert_eq!(first.report()["status"]["published"], 7);
+        assert_eq!(
+            host.shared
+                .physical
+                .as_ref()
+                .map(|physical| physical.status().promised),
+            promise
+        );
         assert!(Tickets::open(root.path(), Arc::clone(&resources.metadata)).is_err());
     }
     release.send(()).unwrap();

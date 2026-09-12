@@ -102,6 +102,17 @@ impl Governor {
         self.domain.capacity
     }
 
+    pub fn uses_tickets(&self, tickets: &Arc<Tickets>) -> bool {
+        Arc::ptr_eq(&self.tickets, tickets)
+    }
+
+    pub fn validate_file(&self, file: &File) -> io::Result<()> {
+        require(
+            Observation::read(file)?.domain == self.domain,
+            "file is outside the allocation domain",
+        )
+    }
+
     pub fn foreground(self: &Arc<Self>, bytes: u64) -> io::Result<Permit> {
         Ok(self.permit(self.space.foreground(bytes)?))
     }

@@ -1,4 +1,5 @@
 //! One writer owner; image reactors exchange bounded, sequenced receipts.
+pub(super) mod capacity;
 #[cfg(test)]
 mod tests;
 mod worker;
@@ -45,6 +46,8 @@ struct SharedHost {
     reader: Reader,
     resources: Arc<Resources>,
     attached: AtomicUsize,
+    staging: cas_core::budget::BudgetArc<cas_core::space::Staging>,
+    physical: Option<Arc<cas_core::space::Governor>>,
     #[cfg(test)]
     control: Arc<Mutex<tests::Control>>,
 }
@@ -70,14 +73,52 @@ impl Host {
         store: Store,
         images: Vec<(Log, Manifest)>,
     ) -> io::Result<Self> {
+        Self::build(
+            resources,
+            store,
+            images,
+            1024 * MAX_REQUEST_BYTES as u64,
+            None,
+        )
+    }
+
+    pub fn governed(
+        resources: Arc<Resources>,
+        store: Store,
+        images: Vec<(Log, Manifest)>,
+        physical: Arc<cas_core::space::Governor>,
+        staging_bytes: u64,
+    ) -> io::Result<Self> {
+        capacity::validate(&store, &images, &physical)?;
+        Self::build(resources, store, images, staging_bytes, Some(physical))
+    }
+
+    fn build(
+        resources: Arc<Resources>,
+        store: Store,
+        images: Vec<(Log, Manifest)>,
+        staging_bytes: u64,
+        physical: Option<Arc<cas_core::space::Governor>>,
+    ) -> io::Result<Self> {
         if images.is_empty() {
             return Err(io::Error::other("host requires an image"));
         }
+        capacity::staging_geometry(&images, staging_bytes)?;
+        let staging = cas_core::space::Staging::new(
+            staging_bytes,
+            images.iter().map(|(log, _)| cas_core::space::StagingImage {
+                allocated: log.status().allocated_bytes,
+                capacity: log.limits().staging_bytes,
+            }),
+            &resources.metadata,
+        )?;
         let shared = Arc::new(SharedHost {
             gate: Arc::new(state::HostGate::default()),
             reader: store.reader()?,
             resources,
             attached: AtomicUsize::new(0),
+            staging,
+            physical,
             #[cfg(test)]
             control: Arc::new(Mutex::new(tests::Control::default())),
         });
@@ -93,10 +134,16 @@ impl Host {
             .map_err(|_| io::Error::other("host endpoint metadata exhausted"))?;
         let (ready, input) = mpsc::sync_channel(images.len());
         for (index, (log, manifest)) in images.into_iter().enumerate() {
-            let window = window::Window::new(&log, &shared.resources.metadata)?;
+            let admission = capacity::Admission {
+                staging: shared.staging.clone(),
+                physical: shared.physical.clone(),
+                image: index,
+            };
+            let window = window::Window::new(&log, Some(admission), &shared.resources.metadata)?;
             let view = manifest.view()?;
             let identity = view.commit();
             if identity.store != store.config().store
+                || !log.uses_tickets(store.tickets())
                 || !log.manifest().is_some_and(|base| base.same(&view))
                 || attachments
                     .iter()
@@ -144,6 +191,7 @@ impl Host {
                     last_reclaim: Instant::now(),
                     attached: false,
                     rotation: None,
+                    rotation_retry: Instant::now(),
                     window,
                 },
             }));
@@ -209,7 +257,10 @@ impl Host {
         serde_json::json!({ "failure": self.shared.gate.failure(), "store": self.store_status(),
             "pools": self.shared.resources.pools.report(), "metadata": self.shared.resources.metadata.usage(),
             "compaction_metadata": self.shared.resources.compaction.usage(),
-            "attached": self.shared.attached.load(Ordering::Acquire) })
+            "attached": self.shared.attached.load(Ordering::Acquire),
+            "staging": self.shared.staging.status(0).expect("host staging account").0,
+            "space": self.shared.physical.as_ref().map(|physical| physical.status()),
+            "collection_required": self.shared.collection_required() })
     }
 
     /// Nonblocking shutdown. Drop attached backends first; retry WouldBlock
@@ -247,13 +298,15 @@ enum Event {
     Allocate,
     Published(append::Compacted),
     Reclaimed(append::Reclaimed),
-    Rotated(append::Rotated),
+    Rotated(append::Rotated, cas_core::space::StagingPermit),
+    Deferred(Option<append::Rotation>),
     Failed(String),
 }
 
 enum Reply {
     Selected(Option<append::Selection>),
-    Rotation(append::Rotation),
+    Rotation(append::Rotation, cas_core::space::StagingPermit),
+    Deferred,
     Reclaim(append::Reclamation),
     Applied,
     Failed(String),
@@ -285,6 +338,7 @@ pub(super) struct Port {
     last_reclaim: Instant,
     attached: bool,
     rotation: Option<append::RotationKind>,
+    rotation_retry: Instant,
     window: cas_core::budget::BudgetArc<window::Window>,
 }
 
@@ -315,6 +369,12 @@ impl Port {
 
     pub fn rotating(&self) -> bool {
         self.rotation.is_some()
+    }
+
+    pub fn cancel_future_rollover(&mut self, log: &Log) {
+        if self.rotation == Some(append::RotationKind::Rollover) && !log.status().rotating {
+            self.rotation = None;
+        }
     }
 
     pub fn rotate(&mut self, kind: append::RotationKind) -> io::Result<()> {
@@ -359,13 +419,19 @@ impl Port {
     }
 
     pub fn poll(&mut self, log: &mut Log, last_write: Instant, paused: bool) -> io::Result<()> {
+        if self.shared.account_failed() {
+            self.shared
+                .gate
+                .fail("shared allocation account failed".into());
+            return Err(io::Error::other("shared allocation account failed"));
+        }
         while let Ok(event) = self.events.try_recv() {
             if matches!(event, Event::Select | Event::Allocate) {
                 self.active = Some(Instant::now());
                 self.granted = true;
             }
             let gate = Arc::clone(&self.health);
-            let health = gate.lock()?;
+            let mut health = gate.lock()?;
             if let Some(error) = &health.failure {
                 let _ = self.respond(Reply::Failed(error.clone()));
                 self.active = None;
@@ -373,21 +439,60 @@ impl Port {
             }
             match event {
                 Event::Allocate => {
+                    let Some(kind) = self.rotation else {
+                        // A pause cancelled this future-only queued turn.
+                        self.defer();
+                        self.respond(Reply::Deferred)?;
+                        continue;
+                    };
                     self.window.before_rotation(log)?;
-                    let kind = self
-                        .rotation
-                        .ok_or_else(|| io::Error::other("unrequested WAL allocation grant"))?;
-                    self.respond(Reply::Rotation(
-                        log.prepare_rotation(kind).map_err(io::Error::other)?,
-                    ))?;
+                    let permit = match cas_core::space::Staging::reserve(
+                        &self.shared.staging,
+                        self.index,
+                        log.config().segment_bytes,
+                    ) {
+                        Ok(permit) => permit,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            self.defer();
+                            self.respond(Reply::Deferred)?;
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    match log.prepare_rotation(kind) {
+                        Ok(rotation) => self.respond(Reply::Rotation(rotation, permit))?,
+                        Err(append::Error::Capacity) => {
+                            drop(permit);
+                            self.defer();
+                            self.respond(Reply::Deferred)?;
+                        }
+                        Err(error) => return Err(io::Error::other(error)),
+                    }
                 }
-                Event::Rotated(receipt) => {
-                    log.install_rotation(receipt).map_err(io::Error::other)?;
+                Event::Rotated(receipt, permit) => {
+                    let result = log
+                        .install_rotation(receipt)
+                        .map_err(io::Error::other)
+                        .and_then(|()| permit.installed(log.status().allocated_bytes));
+                    if let Err(error) = result {
+                        health.fail_host(error.to_string());
+                        return Err(error);
+                    }
                     self.respond(Reply::Applied)?;
                     self.rotation = None;
                     self.active = None;
                 }
-                Event::Select if log.status().durable > log.status().compacted => {
+                Event::Deferred(rotation) => {
+                    if let Some(rotation) = rotation {
+                        log.cancel_rotation(rotation).map_err(io::Error::other)?;
+                    }
+                    self.defer();
+                    self.respond(Reply::Applied)?;
+                }
+                Event::Select
+                    if log.status().durable > log.status().compacted
+                        && !self.shared.collection_required() =>
+                {
                     self.respond(Reply::Selected(
                         log.select_compaction(
                             Arc::clone(&self.shared.resources.compaction),
@@ -409,6 +514,14 @@ impl Port {
                 }
                 Event::Reclaimed(receipt) => {
                     let stats = log.apply_reclamation(receipt).map_err(io::Error::other)?;
+                    if let Err(error) = self
+                        .shared
+                        .staging
+                        .reclaimed(self.index, log.status().allocated_bytes)
+                    {
+                        health.fail_host(error.to_string());
+                        return Err(error);
+                    }
                     self.retry = stats.pinned_batches != 0 || log.status().segments > 1;
                     self.last_reclaim = Instant::now();
                     self.respond(Reply::Applied)?;
@@ -441,13 +554,16 @@ impl Port {
         }
         let settled = last_write.elapsed() >= Duration::from_millis(100);
         let forced = self.window.status().index_pressure
+            || self.window.host_pressure()
             || self
                 .oldest
                 .is_some_and(|oldest| oldest.elapsed() >= Duration::from_secs(1));
         let retry = self.retry && self.last_reclaim.elapsed() >= Duration::from_millis(100);
-        let turn = if self.rotation.is_some() {
+        let turn = if self.rotation.is_some() && Instant::now() >= self.rotation_retry {
             Some(Turn::Rotate)
-        } else if !paused && ((dirty && (settled || forced)) || retry) {
+        } else if !paused
+            && ((dirty && (settled || forced) && !self.shared.collection_required()) || retry)
+        {
             Some(Turn::Compact)
         } else {
             None
@@ -460,6 +576,12 @@ impl Port {
 
     pub fn needs_wake(&self, log: &Log) -> bool {
         self.pending() || self.retry || log.status().durable > log.status().compacted
+    }
+
+    fn defer(&mut self) {
+        self.active = None;
+        self.granted = false;
+        self.rotation_retry = Instant::now() + Duration::from_millis(100);
     }
 }
 

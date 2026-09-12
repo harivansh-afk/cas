@@ -6,6 +6,7 @@ use std::sync::MutexGuard;
 pub(super) struct Window {
     state: Mutex<State>,
     wake: OnceLock<EventFd>,
+    admission: Option<host::capacity::Admission>,
 }
 
 #[derive(Clone, Copy, serde::Serialize)]
@@ -59,7 +60,11 @@ impl State {
 }
 
 impl Window {
-    pub fn new(log: &Log, metadata: &Arc<Budget>) -> io::Result<BudgetArc<Self>> {
+    pub fn new(
+        log: &Log,
+        admission: Option<host::capacity::Admission>,
+        metadata: &Arc<Budget>,
+    ) -> io::Result<BudgetArc<Self>> {
         let point = log.position();
         if point.capacity < (MAX_REQUEST_BYTES + 4 * BLOCK_SIZE) as u64 {
             return Err(io::Error::new(
@@ -81,6 +86,7 @@ impl Window {
             Self {
                 state: Mutex::new(state),
                 wake: OnceLock::new(),
+                admission,
             },
             metadata,
         )
@@ -110,8 +116,22 @@ impl Window {
         *self.lock()
     }
 
+    pub fn host_pressure(&self) -> bool {
+        self.admission
+            .as_ref()
+            .is_some_and(host::capacity::Admission::pressure)
+    }
+
     pub fn reserve(owner: &BudgetArc<Self>, bytes: usize) -> Option<Slot> {
         if bytes > MAX_REQUEST_BYTES || !bytes.is_multiple_of(BLOCK_SIZE) {
+            return None;
+        }
+        if owner
+            .admission
+            .as_ref()
+            .is_some_and(|admission| !admission.admits())
+        {
+            owner.notify();
             return None;
         }
         let mut state = owner.lock();

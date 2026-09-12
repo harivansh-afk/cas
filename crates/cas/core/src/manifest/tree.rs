@@ -14,7 +14,7 @@ use crate::{
 use node::{Cursor, Node};
 use std::{io, sync::Arc};
 
-pub use editor::{MAX_CHANGES, Prepared, Stats};
+pub use editor::{MAX_CHANGES, MAX_TRANSACTION_BYTES, Prepared, Stats};
 pub use lookup::{Lookup, LookupState};
 
 /// Read exactly one aligned page. File implementations retain their own IO lock.

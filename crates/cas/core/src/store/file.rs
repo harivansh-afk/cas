@@ -167,6 +167,10 @@ impl Store {
         self.config
     }
 
+    pub fn tickets(&self) -> &Arc<Tickets> {
+        &self.shared.tickets
+    }
+
     pub fn status(&self) -> Status {
         self.shared.status()
     }

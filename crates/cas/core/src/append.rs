@@ -296,6 +296,16 @@ impl Log {
         self.config
     }
 
+    pub fn limits(&self) -> Limits {
+        self.limits
+    }
+
+    pub fn uses_tickets(&self, tickets: &Arc<crate::segments::Tickets>) -> bool {
+        self.tickets
+            .as_ref()
+            .is_some_and(|owner| Arc::ptr_eq(owner, tickets))
+    }
+
     fn rotate(&mut self, epoch: Option<u64>) -> Result<()> {
         let prepared = self.rotation(epoch)?;
         let created = self.fail_on_io(prepared.create())?;

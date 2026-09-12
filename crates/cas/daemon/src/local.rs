@@ -153,6 +153,7 @@ type Response = (Completed, append::Status);
 pub type Health = Arc<state::Gate>;
 
 pub struct Shared {
+    submissions_closed: Mutex<bool>,
     pools: Pools,
     metadata: Arc<Budget>,
     metrics: Mutex<Metrics>,
@@ -190,6 +191,7 @@ impl Shared {
         window: Option<cas_core::budget::BudgetArc<window::Window>>,
     ) -> Arc<Self> {
         Arc::new(Self {
+            submissions_closed: Mutex::new(false),
             injection: OnceLock::new(),
             pools,
             metadata,
@@ -405,6 +407,20 @@ impl Local {
     }
 
     fn send(&mut self, command: Command) -> io::Result<()> {
+        let mut closed = self
+            .shared
+            .submissions_closed
+            .lock()
+            .unwrap_or_else(|poisoned| {
+                let mut closed = poisoned.into_inner();
+                *closed = true;
+                closed
+            });
+        if *closed {
+            let message = "local command submission is closed";
+            command.reject(message, &mut self.rejected);
+            return Err(io::Error::other(message));
+        }
         if let Err(error) = self
             .sender
             .as_ref()
@@ -412,6 +428,7 @@ impl Local {
             .try_send(command)
         {
             let message = error.to_string();
+            *closed = matches!(error, mpsc::TrySendError::Disconnected(_));
             let (mpsc::TrySendError::Full(command) | mpsc::TrySendError::Disconnected(command)) =
                 error;
             command.reject(&message, &mut self.rejected);

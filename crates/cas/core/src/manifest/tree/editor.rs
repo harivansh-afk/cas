@@ -14,7 +14,7 @@ use crate::{
 use std::{io, sync::Arc};
 
 pub const MAX_CHANGES: usize = 256 + 62;
-const MAX_TRANSACTION_BYTES: usize = 128 * 1024 * 1024;
+pub const MAX_TRANSACTION_BYTES: usize = 128 * 1024 * 1024;
 
 #[derive(Debug, Default, Clone, Copy, serde::Serialize)]
 pub struct Stats {

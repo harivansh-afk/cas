@@ -1,5 +1,10 @@
 use super::*;
 
+enum Grant {
+    Ready(Option<cas_core::space::Permit>),
+    Deferred,
+}
+
 pub(super) struct Endpoint {
     pub manifest: Manifest,
     #[cfg(test)]
@@ -36,10 +41,22 @@ impl Endpoint {
         Ok(reply)
     }
 
-    fn compact(&mut self, store: &mut Store) -> io::Result<()> {
-        let reclaim = match self.exchange(Event::Select)? {
-            Reply::Selected(None) => return Ok(()),
+    fn compact(
+        &mut self,
+        store: &mut Store,
+        physical: Option<&Arc<cas_core::space::Governor>>,
+    ) -> io::Result<()> {
+        match self.exchange(Event::Select)? {
+            Reply::Selected(None) => Ok(()),
             Reply::Selected(Some(selection)) => {
+                self.healthy()?;
+                let input = selection.load()?;
+                let prepared = input.prepare(&self.manifest)?;
+                let bytes = capacity::compaction_bytes(&prepared, store.config().segment_bytes);
+                let permit = match self.background(physical, bytes)? {
+                    Grant::Ready(permit) => permit,
+                    Grant::Deferred => return Ok(()),
+                };
                 #[cfg(test)]
                 {
                     let pause = self.control.lock().unwrap().compaction.take();
@@ -48,26 +65,75 @@ impl Endpoint {
                     }
                 }
                 self.healthy()?;
-                let input = selection.load()?;
-                self.healthy()?;
-                let receipt = input.write(store, &mut self.manifest)?;
-                match self.exchange(Event::Published(receipt))? {
-                    Reply::Reclaim(reclaim) => reclaim,
-                    _ => return Err(io::Error::other("expected reclamation after D publication")),
+                let output = || {
+                    let receipt = prepared.write(store, &mut self.manifest)?;
+                    let Reply::Reclaim(reclaim) = self.exchange(Event::Published(receipt))? else {
+                        return Err(io::Error::other("expected reclamation after D publication"));
+                    };
+                    self.reclaim(reclaim)
+                };
+                match permit {
+                    Some(permit) => permit.run(output),
+                    None => output(),
                 }
             }
-            Reply::Reclaim(reclaim) => reclaim,
-            _ => return Err(io::Error::other("expected compaction selection")),
-        };
+            Reply::Reclaim(reclaim) => {
+                let permit = match self.background(physical, capacity::METADATA_MARGIN)? {
+                    Grant::Ready(permit) => permit,
+                    Grant::Deferred => return Ok(()),
+                };
+                let output = || self.reclaim(reclaim);
+                match permit {
+                    Some(permit) => permit.run(output),
+                    None => output(),
+                }
+            }
+            _ => Err(io::Error::other("expected compaction selection")),
+        }
+    }
+
+    fn background(
+        &self,
+        physical: Option<&Arc<cas_core::space::Governor>>,
+        bytes: u64,
+    ) -> io::Result<Grant> {
+        match physical
+            .map(|physical| physical.background(bytes))
+            .transpose()
+        {
+            Ok(permit) => Ok(Grant::Ready(permit)),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                self.defer(None)?;
+                Ok(Grant::Deferred)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn reclaim(&self, reclaim: append::Reclamation) -> io::Result<()> {
         match self.exchange(Event::Reclaimed(reclaim.run()?))? {
             Reply::Applied => Ok(()),
             _ => Err(io::Error::other("expected reclaimed-space acknowledgment")),
         }
     }
 
-    fn rotate(&mut self) -> io::Result<()> {
-        let Reply::Rotation(prepared) = self.exchange(Event::Allocate)? else {
-            return Err(io::Error::other("expected WAL rotation preparation"));
+    fn rotate(&mut self, physical: Option<&Arc<cas_core::space::Governor>>) -> io::Result<()> {
+        let (prepared, mut staging) = match self.exchange(Event::Allocate)? {
+            Reply::Rotation(prepared, staging) => (prepared, staging),
+            Reply::Deferred => return Ok(()),
+            _ => return Err(io::Error::other("expected WAL rotation preparation")),
+        };
+        let bytes = prepared.segment_bytes() + capacity::METADATA_MARGIN;
+        let permit = match physical
+            .map(|physical| physical.foreground(bytes))
+            .transpose()
+        {
+            Ok(permit) => permit,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                drop(staging);
+                return self.defer(Some(prepared));
+            }
+            Err(error) => return Err(error),
         };
         #[cfg(test)]
         {
@@ -77,9 +143,26 @@ impl Endpoint {
             }
         }
         self.healthy()?;
-        match self.exchange(Event::Rotated(prepared.create()?))? {
+        let output = || {
+            staging.start();
+            let created = prepared.create()?;
+            match self.exchange(Event::Rotated(created, staging))? {
+                Reply::Applied => Ok(()),
+                _ => Err(io::Error::other("expected WAL installation acknowledgment")),
+            }
+        };
+        match permit {
+            Some(permit) => permit.run(output),
+            None => output(),
+        }
+    }
+
+    fn defer(&self, rotation: Option<append::Rotation>) -> io::Result<()> {
+        match self.exchange(Event::Deferred(rotation))? {
             Reply::Applied => Ok(()),
-            _ => Err(io::Error::other("expected WAL installation acknowledgment")),
+            _ => Err(io::Error::other(
+                "expected allocation deferral acknowledgment",
+            )),
         }
     }
 }
@@ -105,11 +188,11 @@ impl Owner {
                 break;
             };
             let result = match turn {
-                Turn::Compact => endpoint.compact(&mut self.store),
-                Turn::Rotate => endpoint.rotate(),
+                Turn::Compact => endpoint.compact(&mut self.store, self.shared.physical.as_ref()),
+                Turn::Rotate => endpoint.rotate(self.shared.physical.as_ref()),
             };
             if let Err(error) = result {
-                if self.store.status().failed {
+                if self.store.status().failed || self.shared.account_failed() {
                     self.shared.gate.fail(error.to_string());
                 }
                 if let Ok(mut health) = endpoint.health.lock() {
