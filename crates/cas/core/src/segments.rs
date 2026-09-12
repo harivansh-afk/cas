@@ -35,7 +35,7 @@ pub struct Status {
 /// Retains the root lock for the host owner. Actual IO files have their own
 /// locks, which continue excluding recovery while kernel IO references survive.
 pub struct Tickets {
-    _directory: Directory,
+    directory: Directory,
     state: Mutex<Status>,
 }
 
@@ -68,7 +68,7 @@ impl Tickets {
             }
         }
         Ok(Arc::new(Self {
-            _directory: directory,
+            directory,
             state: Mutex::new(Status {
                 highest: scan.highest,
                 failed: false,
@@ -78,6 +78,10 @@ impl Tickets {
 
     pub fn status(&self) -> Status {
         *self.state.lock().expect("segment allocator mutex poisoned")
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.directory.path
     }
 
     /// `create` must retain the assigned filename and sync the header, file and

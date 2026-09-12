@@ -6,6 +6,7 @@ use crate::{
     chunk_index::{Hash, MAX_SEGMENT, MAX_SEGMENT_BYTES},
     encoding::{checksum, put16, put32, put64, require, u16_at, u32_at, u64_at},
 };
+use allocator_api2::alloc::{Allocator, Global};
 use std::io;
 
 pub const MAX_CHUNKS: usize = 63;
@@ -34,9 +35,15 @@ impl SegmentHeader {
     }
 
     pub fn encode(self) -> io::Result<AlignedBuffer> {
-        self.validate()?;
         let mut buffer = AlignedBuffer::new(BLOCK_SIZE);
-        let bytes = buffer.as_mut_slice();
+        self.encode_into(buffer.as_mut_slice())?;
+        Ok(buffer)
+    }
+
+    pub(crate) fn encode_into(self, bytes: &mut [u8]) -> io::Result<()> {
+        self.validate()?;
+        require(bytes.len() == BLOCK_SIZE, "chunk segment output size")?;
+        bytes.fill(0);
         bytes[..8].copy_from_slice(b"CASCHS02");
         put32(bytes, 8, 2);
         put32(bytes, 12, BLOCK_SIZE as u32);
@@ -44,7 +51,7 @@ impl SegmentHeader {
         put64(bytes, 56, self.number);
         put64(bytes, 64, self.capacity);
         put32(bytes, 4092, checksum(bytes, 4092));
-        Ok(buffer)
+        Ok(())
     }
 
     pub fn decode(bytes: &[u8]) -> io::Result<Self> {
@@ -185,19 +192,25 @@ impl<'a> Header<'a> {
 }
 
 /// One bounded final allocation, containing at most 63 fixed chunks.
-pub struct Builder {
-    buffer: AlignedBuffer,
+pub struct Builder<A: Allocator = Global> {
+    buffer: AlignedBuffer<A>,
     count: usize,
 }
 
 impl Builder {
     pub fn new(capacity: usize) -> io::Result<Self> {
+        Self::try_new_in(capacity, Global)
+    }
+}
+
+impl<A: Allocator> Builder<A> {
+    pub fn try_new_in(capacity: usize, allocator: A) -> io::Result<Self> {
         require(
             (1..=MAX_CHUNKS).contains(&capacity),
             "chunk packing capacity",
         )?;
         Ok(Self {
-            buffer: AlignedBuffer::new((capacity + 1) * BLOCK_SIZE),
+            buffer: AlignedBuffer::try_new_in((capacity + 1) * BLOCK_SIZE, allocator)?,
             count: 0,
         })
     }
@@ -229,7 +242,7 @@ impl Builder {
         Ok(())
     }
 
-    pub fn seal(mut self, segment: u64, batch: u64, first: u64) -> io::Result<Batch> {
+    pub fn seal(mut self, segment: u64, batch: u64, first: u64) -> io::Result<Batch<A>> {
         require(
             self.count != 0 && first != 0 && batch != 0 && (1..=MAX_SEGMENT).contains(&segment),
             "empty chunk batch identity",
@@ -256,12 +269,12 @@ impl Builder {
     }
 }
 
-pub struct Batch {
-    buffer: AlignedBuffer,
+pub struct Batch<A: Allocator = Global> {
+    buffer: AlignedBuffer<A>,
     count: usize,
 }
 
-impl Batch {
+impl<A: Allocator> Batch<A> {
     pub fn bytes(&self) -> &[u8] {
         &self.buffer.as_slice()[..(self.count + 1) * BLOCK_SIZE]
     }
