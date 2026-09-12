@@ -87,6 +87,7 @@ fn first_cold_get_exports_the_recovered_epoch_without_an_extra_rotation() {
             attachment: status.epoch,
         },
         IMAGE_BYTES,
+        crate::local::metadata_budget(),
     )
     .unwrap();
     assert_eq!(carrier.published(), status.published);

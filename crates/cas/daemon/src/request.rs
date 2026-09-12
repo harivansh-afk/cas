@@ -1,6 +1,8 @@
 // Decode the virtio wire format once
 // Execution receives validated operations
 
+use allocator_api2::vec::Vec as BudgetVec;
+use cas_core::budget::BudgetAllocator;
 use std::io;
 
 use cas_core::{BLOCK_SIZE, MAX_REQUEST_BYTES};
@@ -13,6 +15,8 @@ use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, Perm
 // Virtio addresses use 512-byte sectors even for a 4096-byte logical device.
 pub(super) const SECTOR_BYTES: u64 = 512;
 pub(super) const DEVICE_ID: &[u8; 20] = b"cas-experiment\0\0\0\0\0\0";
+
+pub(super) type Segments = BudgetVec<Segment, BudgetAllocator>;
 
 #[derive(Clone, Copy)]
 pub(super) struct Segment {
@@ -43,7 +47,7 @@ impl Completion {
 pub(super) struct DataRequest {
     pub completion: Completion,
     pub offset: u64,
-    pub segments: Vec<Segment>,
+    pub segments: Segments,
     pub len: usize,
 }
 
@@ -61,7 +65,7 @@ pub(super) enum Request {
     Flush(Completion),
     GetId {
         completion: Completion,
-        segments: Vec<Segment>,
+        segments: Segments,
     },
     Unsupported(Completion),
     Invalid(Completion),
@@ -137,7 +141,7 @@ fn invalid(message: &str) -> io::Error {
 pub(super) fn parse(
     mem: &GuestMemoryMmap,
     head: u16,
-    mut descriptors: Vec<Segment>,
+    mut descriptors: Segments,
     capacity_bytes: u64,
 ) -> io::Result<Request> {
     descriptors.retain(|segment| segment.len != 0);
@@ -298,11 +302,27 @@ fn zero(
 }
 
 #[cfg(test)]
+pub(super) fn test_segments(values: impl IntoIterator<Item = Segment>) -> Segments {
+    let mut segments = crate::local::reserved_vec(256, &crate::local::metadata_budget()).unwrap();
+    segments.extend(values);
+    segments
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use virtio_bindings::bindings::virtio_blk::{
         VIRTIO_BLK_T_FLUSH as FLUSH, VIRTIO_BLK_T_IN as IN, VIRTIO_BLK_T_OUT as OUT,
     };
+
+    fn parse(
+        mem: &GuestMemoryMmap,
+        head: u16,
+        descriptors: Vec<Segment>,
+        capacity: u64,
+    ) -> io::Result<Request> {
+        super::parse(mem, head, test_segments(descriptors), capacity)
+    }
 
     fn fixture(kind: u32, sector: u64) -> (GuestMemoryMmap, Vec<Segment>) {
         let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
@@ -328,6 +348,25 @@ mod tests {
             writable: true,
         });
         (mem, descriptors)
+    }
+
+    #[test]
+    fn descriptor_storage_keeps_its_charge_through_parsing() {
+        use cas_core::budget::{Amount, Budget};
+        let (mem, descriptors) = fixture(IN, 0);
+        let budget = Budget::new(Amount {
+            bytes: 4096,
+            requests: 0,
+        });
+        let mut owned = crate::local::reserved_vec(descriptors.len(), &budget).unwrap();
+        owned.extend(descriptors);
+        let allocated = budget.usage();
+        let request = super::parse(&mem, 7, owned, 8192).unwrap();
+        assert!(matches!(request, Request::Read(_)));
+        assert_eq!(budget.usage().admitted, allocated.admitted);
+        assert_eq!(budget.usage().current, allocated.current);
+        drop(request);
+        assert_eq!(budget.usage().current, Amount::default());
     }
 
     #[test]

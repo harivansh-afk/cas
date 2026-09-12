@@ -164,7 +164,7 @@ impl Command {
     }
 }
 
-fn reserved_vec<T>(
+pub(crate) fn reserved_vec<T>(
     capacity: usize,
     metadata: &Arc<Budget>,
 ) -> io::Result<BudgetVec<T, BudgetAllocator>> {
@@ -184,6 +184,15 @@ struct Io {
 
 type Response = (Completed, append::Status);
 pub type Health = Arc<state::Gate>;
+
+pub(crate) const IMAGE_REQUEST_LIMIT: usize = pools::IMAGE_REQUESTS + pools::IMAGE_CONTROL;
+
+pub(crate) fn metadata_budget() -> Arc<Budget> {
+    Budget::new(Amount {
+        bytes: 128 * MAX_REQUEST_BYTES,
+        requests: 0,
+    })
+}
 
 pub struct Shared {
     pools: Pools,
@@ -208,10 +217,7 @@ impl Shared {
                 },
                 None,
             ),
-            Budget::new(Amount {
-                bytes: 128 * MAX_REQUEST_BYTES,
-                requests: 0,
-            }),
+            metadata_budget(),
             None,
             None,
         )
@@ -235,6 +241,10 @@ impl Shared {
             window,
             admission,
         })
+    }
+
+    pub(crate) fn metadata(&self) -> Arc<Budget> {
+        Arc::clone(&self.metadata)
     }
 
     pub fn hit(&self, point: crate::fault::Point, count: u64) -> io::Result<()> {
@@ -410,20 +420,11 @@ impl Local {
         shared: Arc<Shared>,
         port: Option<host::Port>,
     ) -> io::Result<Self> {
-        let rejected = BudgetQueue::with_capacity(
-            pools::IMAGE_REQUESTS + pools::IMAGE_CONTROL,
-            &shared.metadata,
-        )?;
+        let rejected = BudgetQueue::with_capacity(IMAGE_REQUEST_LIMIT, &shared.metadata)?;
         let status = log.status();
         *shared.final_status.lock().expect("status poisoned") = status;
-        let (sender, input) = mailbox::bounded(
-            pools::IMAGE_REQUESTS + pools::IMAGE_CONTROL + 1,
-            &shared.metadata,
-        )?;
-        let (output, receiver) = mailbox::bounded(
-            pools::IMAGE_REQUESTS + pools::IMAGE_CONTROL,
-            &shared.metadata,
-        )?;
+        let (sender, input) = mailbox::bounded(IMAGE_REQUEST_LIMIT + 1, &shared.metadata)?;
+        let (output, receiver) = mailbox::bounded(IMAGE_REQUEST_LIMIT, &shared.metadata)?;
         let input_wake = match &port {
             Some(port) => Some(port.wake.try_clone()?),
             None if execution == Execution::Concurrent => {

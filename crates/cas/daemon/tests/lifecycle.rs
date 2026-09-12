@@ -938,6 +938,7 @@ fn concurrent_retained_fd_replays_without_flush_and_ignores_consumed_available_s
                 message,
                 identity,
                 BLOCK_SIZE as u64,
+                metadata_budget(),
             )
             .unwrap();
             // A consumed available slot is no longer an ownership record. Change
@@ -1118,4 +1119,11 @@ fn serving_stop_start_retains_epoch_and_full_reset_installs_a_fresh_carrier() {
     assert_eq!(report["local"]["status"]["durable"], 3);
     assert_eq!(report["writes"], 3);
     assert_eq!(report["reads"], 5);
+}
+
+fn metadata_budget() -> std::sync::Arc<cas_core::budget::Budget> {
+    cas_core::budget::Budget::new(cas_core::budget::Amount {
+        bytes: 128 * 1024 * 1024,
+        requests: 0,
+    })
 }

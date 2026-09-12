@@ -119,7 +119,7 @@ impl Reactor {
         let ring = IoUring::new(256)?;
         let kernel_wake = EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK)?;
         ring.submitter().register_eventfd(kernel_wake.as_raw_fd())?;
-        let capacity = pools::IMAGE_REQUESTS + pools::IMAGE_CONTROL + 1;
+        let capacity = IMAGE_REQUEST_LIMIT + 1;
         let metadata = &worker.shared.metadata;
         let pending = Slots::new(capacity, metadata)?;
         let ready = reserved_vec(capacity, metadata)?;

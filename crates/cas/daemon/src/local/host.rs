@@ -32,15 +32,9 @@ pub struct Resources {
 
 impl Default for Resources {
     fn default() -> Self {
-        let metadata = || {
-            Budget::new(Amount {
-                bytes: 128 * MAX_REQUEST_BYTES,
-                requests: 0,
-            })
-        };
         Self {
-            metadata: metadata(),
-            compaction: metadata(),
+            metadata: metadata_budget(),
+            compaction: metadata_budget(),
             pools: pools::HostPools::new(),
             fault: None,
         }

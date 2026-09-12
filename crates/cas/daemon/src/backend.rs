@@ -2,15 +2,18 @@
 
 mod admission;
 mod lifecycle;
+mod pending;
 pub(crate) mod recovery;
 use crate::inflight::Entry;
 use admission::Admission;
 use recovery::Session;
 
-use std::collections::BTreeMap;
+use cas_core::budget::Budget;
+use pending::Pending;
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use cas_core::{BLOCK_SIZE, MAX_REQUEST_BYTES, aligned::AlignedBuffer};
@@ -33,7 +36,7 @@ use vmm_sys_util::eventfd::{EFD_CLOEXEC, EFD_NONBLOCK, EventFd};
 
 use crate::deadline::Deadline;
 use crate::fault::{Fault, Point};
-use crate::request::{self, Completion, DEVICE_ID, Request, Segment, Status};
+use crate::request::{self, Completion, DEVICE_ID, Request, Segment, Segments, Status};
 use crate::storage::{CompletionData, Operation, Permit, QueueHead, Storage};
 use crate::{BackendKind, local};
 
@@ -64,7 +67,7 @@ struct Admitted {
 
 struct PendingRequest {
     completion: GuestCompletion,
-    segments: Vec<Segment>,
+    segments: Segments,
     error_published: bool,
 }
 
@@ -92,7 +95,8 @@ pub struct Backend {
     // Keep our accepted map alive independently, including after a rejected update.
     memory: Option<GuestMemoryLoadGuard<GuestMemoryMmap>>,
     capacity_bytes: u64,
-    pending: BTreeMap<u64, PendingRequest>,
+    pending: Pending<PendingRequest>,
+    metadata: Arc<Budget>,
     next_id: u64,
     counters: Counters,
     shutdown: Option<ShutdownHandle>,
@@ -200,9 +204,10 @@ fn decode_chain(
     mem: &GuestMemoryMmap,
     mut chain: virtio_queue::DescriptorChain<GuestMemoryLoadGuard<GuestMemoryMmap>>,
     capacity: u64,
+    metadata: &Arc<Budget>,
 ) -> io::Result<Request> {
     let head = chain.head_index();
-    let mut descriptors = Vec::new();
+    let mut descriptors = local::reserved_vec(CONCURRENT_QUEUE_SIZE, metadata)?;
     let mut has_next = false;
     for descriptor in chain.by_ref().take(CONCURRENT_QUEUE_SIZE) {
         has_next = descriptor.has_next();
@@ -344,6 +349,19 @@ impl Backend {
         } else {
             None
         };
+        let metadata = match &storage {
+            Storage::Local(local) => local.shared.metadata(),
+            Storage::Opening(opening) => opening.shared.metadata(),
+            _ => local::metadata_budget(),
+        };
+        let pending = Pending::new(
+            if matches!(kind, BackendKind::LocalAsync) {
+                local::IMAGE_REQUEST_LIMIT
+            } else {
+                QUEUE_SIZE
+            },
+            &metadata,
+        )?;
         let capacity_bytes = storage.image_bytes();
         let zeroes_supported = storage.shared_host();
         let exit = vmm_sys_util::event::new_event_consumer_and_notifier(
@@ -356,7 +374,8 @@ impl Backend {
             exit,
             memory: None,
             capacity_bytes,
-            pending: BTreeMap::new(),
+            pending,
+            metadata,
             next_id: 0,
             counters: Counters::default(),
             shutdown: None,
@@ -427,6 +446,7 @@ impl Backend {
             "inflight":self.live.as_ref().map(Session::report),
             "restartable":self.restartable, "restored_used":self.restored_used, "restored_pending":self.restored_pending,
             "local":self.storage.local_report(),
+            "metadata":self.metadata.usage(),
             "staging":self.storage.status().map(|s| serde_json::json!({
                 "image_bytes":s.image_bytes, "appended":s.appended, "durable":s.durable,
                 "log_bytes":s.log_bytes, "mapped_blocks":s.mapped_blocks,
@@ -518,10 +538,12 @@ impl Backend {
             id,
             PendingRequest {
                 completion,
-                segments: Vec::new(),
+                segments: Segments::new_in(cas_core::budget::BudgetAllocator::new(Arc::clone(
+                    &self.metadata,
+                ))),
                 error_published: false,
             },
-        );
+        )?;
         self.counters.peak_inflight = self.counters.peak_inflight.max(self.pending.len());
         let has_buffer = matches!(&request, Request::Read(_) | Request::Write(_));
         let mut owned = false;
@@ -792,7 +814,7 @@ impl Backend {
         let limit = if self.restartable && self.live.is_none() {
             1
         } else if self.concurrent {
-            128 + 8 // Image-wide bulk and separately reserved control requests.
+            local::IMAGE_REQUEST_LIMIT
         } else {
             QUEUE_SIZE
         };
@@ -804,7 +826,7 @@ impl Backend {
             let Some(NextChain { chain, next_avail }) = peek(mem.clone(), &mut state)? else {
                 break;
             };
-            let request = decode_chain(mem, chain, self.capacity_bytes)?
+            let request = decode_chain(mem, chain, self.capacity_bytes, &self.metadata)?
                 .negotiated(self.negotiated_features & self.features());
             let next_id = self
                 .next_id
@@ -1184,6 +1206,31 @@ mod tests {
     }
 
     #[test]
+    fn descriptor_allocation_refusal_does_not_consume_or_reclassify_a_write() {
+        let (memory, vring) = queue();
+        let mem = memory.memory();
+        data_chain(
+            &mem,
+            virtio_bindings::bindings::virtio_blk::VIRTIO_BLK_T_OUT,
+        );
+        mem.write_obj(1_u16.to_le(), GuestAddress(0x2002)).unwrap();
+        let mut state = vring.get_mut();
+        let before = state.get_queue().next_avail();
+        let chain = peek(mem.clone(), &mut state).unwrap().unwrap().chain;
+        let exhausted = Budget::new(cas_core::budget::Amount::default());
+        assert!(matches!(
+            decode_chain(&mem, chain, 8192, &exhausted),
+            Err(error) if error.kind() == io::ErrorKind::OutOfMemory
+        ));
+        assert_eq!(state.get_queue().next_avail(), before);
+        let chain = peek(mem.clone(), &mut state).unwrap().unwrap().chain;
+        assert!(matches!(
+            decode_chain(&mem, chain, 8192, &local::metadata_budget()).unwrap(),
+            Request::Write(_)
+        ));
+    }
+
+    #[test]
     fn advertised_transfer_geometry_fits_the_request_decoder() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("image.raw");
@@ -1219,9 +1266,13 @@ mod tests {
             len: 1,
             writable: true,
         });
-        let Request::Write(request) =
-            request::parse(&mem, 0, descriptors, backend.capacity_bytes).unwrap()
-        else {
+        let Request::Write(request) = request::parse(
+            &mem,
+            0,
+            request::test_segments(descriptors),
+            backend.capacity_bytes,
+        )
+        .unwrap() else {
             panic!("advertised maximum must decode as WRITE");
         };
         assert_eq!(request.len, MAX_REQUEST_BYTES);
@@ -1383,6 +1434,7 @@ mod tests {
             },
             BLOCK_SIZE as u64,
             0,
+            crate::local::metadata_budget(),
         )
         .unwrap();
         carrier.initialize_queue(0, 0, 0).unwrap();
@@ -1395,11 +1447,11 @@ mod tests {
                 },
                 offset: 0,
                 len: BLOCK_SIZE,
-                segments: vec![Segment {
+                segments: request::test_segments([Segment {
                     addr: GuestAddress(address),
                     len: BLOCK_SIZE,
                     writable: false,
-                }],
+                }]),
             });
             mem.write_obj(0xffu8, request.completion().status).unwrap();
             let permit = backend
@@ -1470,11 +1522,11 @@ mod tests {
                 },
                 offset: 0,
                 len: BLOCK_SIZE,
-                segments: vec![Segment {
+                segments: request::test_segments([Segment {
                     addr: GuestAddress(0x6000),
                     len: BLOCK_SIZE,
                     writable: !write,
-                }],
+                }]),
             };
             let request = if write {
                 Request::Write(data)

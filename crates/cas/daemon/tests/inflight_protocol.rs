@@ -106,7 +106,7 @@ impl VhostUserBackendMut for Probe {
     ) -> io::Result<(VhostUserInflight, File)> {
         self.calls += 1;
         let geometry = Geometry::new(message.num_queues, message.queue_size)?;
-        let mut carrier = Carrier::create(geometry, IDENTITY, IMAGE_BYTES, 0)?;
+        let mut carrier = Carrier::create(geometry, IDENTITY, IMAGE_BYTES, 0, metadata_budget())?;
         carrier.initialize_queue(0, 0, 0)?;
         carrier.admit(Request {
             kind: Kind::Write,
@@ -122,7 +122,13 @@ impl VhostUserBackendMut for Probe {
     }
     fn set_inflight_fd(&mut self, message: &VhostUserInflight, file: File) -> io::Result<()> {
         self.calls += 1;
-        self.carrier = Some(Carrier::attach(file, message, IDENTITY, IMAGE_BYTES)?);
+        self.carrier = Some(Carrier::attach(
+            file,
+            message,
+            IDENTITY,
+            IMAGE_BYTES,
+            metadata_budget(),
+        )?);
         Ok(())
     }
 }
@@ -280,4 +286,11 @@ fn state_change_hooks_bracket_atomic_memory_replacement_and_failed_updates() {
         0x22
     );
     assert!(!probe.paused);
+}
+
+fn metadata_budget() -> std::sync::Arc<cas_core::budget::Budget> {
+    cas_core::budget::Budget::new(cas_core::budget::Amount {
+        bytes: 128 * 1024 * 1024,
+        requests: 0,
+    })
 }

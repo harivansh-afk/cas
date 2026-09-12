@@ -34,6 +34,7 @@ impl Frontend {
             },
             opening.config.image_bytes,
             0,
+            crate::local::metadata_budget(),
         )
         .unwrap();
         carrier.initialize_queue(0, 0, 0).unwrap();
@@ -56,7 +57,7 @@ impl Frontend {
             QUEUE_SIZE as u16,
             0,
         );
-        let request = decode_chain(&mem, chain, backend.capacity_bytes).unwrap();
+        let request = decode_chain(&mem, chain, backend.capacity_bytes, &backend.metadata).unwrap();
         let first = carrier.admit(request.inflight(0, 0)).unwrap();
         if let Pending::Zero { kind, flags } = pending {
             // Reconstruct the completed WRITE's carrier history, matching the
@@ -79,7 +80,8 @@ impl Frontend {
                 QUEUE_SIZE as u16,
                 0,
             );
-            let request = decode_chain(&mem, chain, backend.capacity_bytes).unwrap();
+            let request =
+                decode_chain(&mem, chain, backend.capacity_bytes, &backend.metadata).unwrap();
             carrier.admit(request.inflight(0, 1)).unwrap();
         } else {
             assert_eq!(prefix, 0);

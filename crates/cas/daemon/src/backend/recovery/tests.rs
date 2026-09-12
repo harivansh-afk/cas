@@ -106,7 +106,16 @@ fn idle_frontend_deadline_fails_the_retained_attachment_without_guest_access() {
     assert!(state.failure.is_some());
     let carrier = state.carrier.as_ref().unwrap();
     let (message, file) = carrier.export().unwrap();
-    assert!(Carrier::attach(file, &message, carrier.identity(), BLOCK_SIZE as u64).is_err());
+    assert!(
+        Carrier::attach(
+            file,
+            &message,
+            carrier.identity(),
+            BLOCK_SIZE as u64,
+            crate::local::metadata_budget()
+        )
+        .is_err()
+    );
     assert!(backend.memory.is_none());
     assert_eq!(backend.pending_count(), 0);
 }
@@ -148,6 +157,7 @@ fn retained_read_uses_the_normal_owned_reactor_and_original_head() {
         },
         config.image_bytes,
         0,
+        crate::local::metadata_budget(),
     )
     .unwrap();
     carrier.initialize_queue(0, 0, 0).unwrap();
@@ -233,6 +243,7 @@ fn retained_rejected_write_replays_only_ioerr_without_gather_or_mutation() {
         },
         config.image_bytes,
         0,
+        crate::local::metadata_budget(),
     )
     .unwrap();
     carrier.initialize_queue(0, 0, 0).unwrap();

@@ -1,3 +1,5 @@
+use allocator_api2::vec::Vec as BudgetVec;
+use cas_core::budget::BudgetAllocator;
 use std::io;
 use std::sync::atomic::Ordering::{Acquire, Release};
 
@@ -8,7 +10,7 @@ use super::{
 
 pub struct Replay {
     /// Original admission order across all queues, including protocol requests.
-    pub entries: Vec<Entry>,
+    pub entries: BudgetVec<Entry, BudgetAllocator>,
     pub highest_serial: u64,
     pub highest_mutation: u64,
     pub published: u64,
@@ -103,10 +105,11 @@ impl Carrier {
         Ok(Some((state, entry)))
     }
 
-    pub(super) fn scan(&self) -> io::Result<Vec<Saved>> {
+    pub(super) fn scan(&self) -> io::Result<BudgetVec<Saved, BudgetAllocator>> {
         let serial = self.header().serial.load(Acquire);
         let mutation = self.header().mutation.load(Acquire);
-        let mut saved = Vec::new();
+        let capacity = usize::from(self.geometry.queues) * usize::from(self.geometry.queue_size);
+        let mut saved = crate::local::reserved_vec(capacity, &self.metadata)?;
         for queue in 0..self.geometry.queues {
             let standard = self.queue(queue)?;
             let version = standard.version.load(Acquire);
@@ -163,10 +166,12 @@ impl Carrier {
         {
             return Err(invalid("duplicate inflight operation serial"));
         }
-        let mut mutations: Vec<_> = saved
-            .iter()
-            .filter_map(|saved| (saved.entry.mutation != 0).then_some(saved.entry.mutation))
-            .collect();
+        let mut mutations = crate::local::reserved_vec(saved.len(), &self.metadata)?;
+        mutations.extend(
+            saved
+                .iter()
+                .filter_map(|saved| (saved.entry.mutation != 0).then_some(saved.entry.mutation)),
+        );
         mutations.sort_unstable();
         if mutations.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(invalid("duplicate inflight mutation sequence"));
@@ -184,7 +189,8 @@ impl Carrier {
         if guest_used.len() != usize::from(self.geometry.queues) {
             return Err(invalid("missing guest queue cursors"));
         }
-        let mut completed = Vec::new();
+        let mut completed = crate::local::reserved_vec(guest_used.len(), &self.metadata)?;
+        let mut entries = crate::local::reserved_vec(saved.len(), &self.metadata)?;
         for (queue, guest) in guest_used.iter().enumerate() {
             let standard = self.queue(queue as u16)?;
             if standard.version.load(Acquire) == 0 && guest.is_none() {
@@ -251,7 +257,6 @@ impl Carrier {
         for entry in completed.iter().copied() {
             self.finish_completion(entry, guest_used[usize::from(entry.request.queue)].unwrap())?;
         }
-        let mut entries = Vec::new();
         for record in &saved {
             if completed.contains(&record.entry) {
                 continue;

@@ -11,8 +11,10 @@ mod recovery;
 #[cfg(test)]
 mod tests;
 
+use cas_core::budget::{Amount, Budget, Lease};
 use std::fs::File;
 use std::io;
+use std::sync::Arc;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 
 use cas_core::{BLOCK_SIZE, MAX_REQUEST_BYTES};
@@ -180,6 +182,8 @@ impl Entry {
 
 pub struct Carrier {
     mapping: Mapping,
+    _mapping_credit: Lease,
+    metadata: Arc<Budget>,
     geometry: Geometry,
     identity: Identity,
     image_bytes: u64,
@@ -197,10 +201,14 @@ impl Carrier {
         identity: Identity,
         image_bytes: u64,
         prefix: u64,
+        metadata: Arc<Budget>,
     ) -> io::Result<Self> {
+        let credit = Self::mapping_credit(geometry, &metadata)?;
         let file = mapping::create(geometry.bytes())?;
         let carrier = Self {
             mapping: Mapping::open(file, geometry.bytes())?,
+            _mapping_credit: credit,
+            metadata,
             geometry,
             identity,
             image_bytes,
@@ -236,13 +244,17 @@ impl Carrier {
         message: &VhostUserInflight,
         identity: Identity,
         image_bytes: u64,
+        metadata: Arc<Budget>,
     ) -> io::Result<Self> {
         let geometry = Geometry::new(message.num_queues, message.queue_size)?;
         if message.mmap_offset != 0 || message.mmap_size != geometry.bytes() as u64 {
             return Err(invalid("inflight mapping geometry differs"));
         }
+        let credit = Self::mapping_credit(geometry, &metadata)?;
         let carrier = Self {
             mapping: Mapping::open(file, geometry.bytes())?,
+            _mapping_credit: credit,
+            metadata,
             geometry,
             identity,
             image_bytes,
@@ -250,6 +262,27 @@ impl Carrier {
         carrier.validate_header()?;
         carrier.scan()?;
         Ok(carrier)
+    }
+
+    fn mapping_credit(geometry: Geometry, metadata: &Arc<Budget>) -> io::Result<Lease> {
+        metadata
+            .reserve(Amount {
+                bytes: geometry.bytes(),
+                requests: 0,
+            })
+            .ok_or_else(|| io::ErrorKind::OutOfMemory.into())
+    }
+
+    pub fn validate_returned(&self, message: &VhostUserInflight) -> io::Result<()> {
+        if Geometry::new(message.num_queues, message.queue_size)? != self.geometry
+            || message.mmap_offset != 0
+            || message.mmap_size != self.geometry.bytes() as u64
+        {
+            return Err(invalid("returned inflight geometry differs"));
+        }
+        self.validate_header()?;
+        self.scan()?;
+        Ok(())
     }
 
     pub fn export(&self) -> io::Result<(VhostUserInflight, File)> {

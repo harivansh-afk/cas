@@ -1,10 +1,12 @@
 //! Retained attachment negotiation and replay before normal queue admission.
 use super::*;
 use crate::inflight::{Carrier, Geometry, Identity};
+use allocator_api2::vec::Vec as BudgetVec;
 use cas_core::append::{
     Mutation,
     format::{Kind, RequestId},
 };
+use cas_core::budget::BudgetAllocator;
 use std::fs::File;
 use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
@@ -169,7 +171,13 @@ impl Backend {
         // durable. Keep the old map through that transition so P stays checked.
         identity.epoch = status.epoch;
         identity.attachment = status.epoch;
-        let carrier = Carrier::create(geometry, identity, self.capacity_bytes, status.published)?;
+        let carrier = Carrier::create(
+            geometry,
+            identity,
+            self.capacity_bytes,
+            status.published,
+            Arc::clone(&self.metadata),
+        )?;
         let exported = carrier.export()?;
         shared
             .health
@@ -213,7 +221,7 @@ impl Backend {
                 return Err(io::Error::other("SET must return the current GET carrier"));
             }
             // QEMU sends SET after GET before queue setup, including on fresh boot.
-            Carrier::attach(file, message, current.identity(), self.capacity_bytes)?;
+            current.validate_returned(message)?;
             return Ok(());
         }
         if phase != Phase::AwaitingFd {
@@ -233,6 +241,7 @@ impl Backend {
             message,
             identity,
             self.capacity_bytes,
+            Arc::clone(&self.metadata),
         )?);
         self.live.as_mut().unwrap().phase = Phase::Replay;
         Ok(())
@@ -275,8 +284,9 @@ impl Backend {
             .as_mut()
             .ok_or_else(|| io::Error::other("missing retained carrier"))?;
         let geometry = carrier.geometry().message();
-        let mut queues: Vec<_> = vrings.iter().map(VringMutex::get_mut).collect();
-        let mut cursors = Vec::with_capacity(usize::from(geometry.num_queues));
+        let mut queues = local::reserved_vec(vrings.len(), &self.metadata)?;
+        queues.extend(vrings.iter().map(VringMutex::get_mut));
+        let mut cursors = local::reserved_vec(usize::from(geometry.num_queues), &self.metadata)?;
         for (index, queue) in queues.iter_mut().enumerate() {
             let ready =
                 !self.blocked_queues[index] && queue.is_enabled() && queue.get_queue().ready();
@@ -320,18 +330,22 @@ impl Backend {
             self.recovered()?;
             return Ok(true);
         }
-        let initialized: Vec<_> = (0..geometry.num_queues)
-            .map(|index| carrier.queue_initialized(index))
-            .collect::<io::Result<_>>()?;
-        let saved_used: Vec<_> = cursors
-            .iter()
-            .zip(&initialized)
-            .map(|(used, initialized)| if *initialized { *used } else { None })
-            .collect();
+        let mut initialized =
+            local::reserved_vec(usize::from(geometry.num_queues), &self.metadata)?;
+        for index in 0..geometry.num_queues {
+            initialized.push(carrier.queue_initialized(index)?);
+        }
+        let mut saved_used = local::reserved_vec(cursors.len(), &self.metadata)?;
+        saved_used.extend(
+            cursors
+                .iter()
+                .zip(&initialized)
+                .map(|(used, initialized)| if *initialized { *used } else { None }),
+        );
         let replay = carrier.reconcile(&saved_used)?;
         // Decode all original heads before allowing any WAL repair. Never read
         // heads from old available slots: they can already have wrapped.
-        let mut requests = Vec::with_capacity(replay.entries.len());
+        let mut requests = local::reserved_vec(replay.entries.len(), &self.metadata)?;
         for entry in &replay.entries {
             let queue = &queues[usize::from(entry.request.queue)];
             let chain = virtio_queue::DescriptorChain::new(
@@ -340,7 +354,7 @@ impl Backend {
                 queue.get_queue().size(),
                 entry.request.head,
             );
-            let request = decode_chain(mem, chain, self.capacity_bytes)?
+            let request = decode_chain(mem, chain, self.capacity_bytes, &self.metadata)?
                 .negotiated(self.negotiated_features & self.features());
             if request.inflight(entry.request.queue, entry.request.available) != entry.request {
                 return Err(io::Error::other(
@@ -471,7 +485,8 @@ impl Backend {
         let status = local.status;
         let gate = Arc::clone(&shared.health);
         self.storage = Storage::Local(Box::new(local));
-        let mut queues: Vec<_> = vrings.iter().map(VringMutex::get_mut).collect();
+        let mut queues = local::reserved_vec(vrings.len(), &self.metadata)?;
+        queues.extend(vrings.iter().map(VringMutex::get_mut));
         let mut state = gate.lock()?;
         if let Some(error) = &state.failure {
             return Err(io::Error::other(error.clone()));
@@ -616,7 +631,7 @@ impl Backend {
 struct Recovered {
     log: cas_core::append::Log,
     replay: crate::inflight::Replay,
-    requests: Vec<Request>,
+    requests: BudgetVec<Request, BudgetAllocator>,
     copied: u64,
     mutations: usize,
 }
@@ -628,12 +643,18 @@ fn replay_storage(
     memory: Arc<GuestMemoryMmap>,
     epoch: u64,
     replay: crate::inflight::Replay,
-    requests: Vec<Request>,
+    requests: BudgetVec<Request, BudgetAllocator>,
 ) -> io::Result<Recovered> {
-    let mutations = retained_mutations(&replay).collect();
     deadline.check()?;
     let mut storage_replay = inspected
-        .live(replay.published, epoch, replay.highest_mutation, mutations)
+        .prepare_live(
+            replay.published,
+            epoch,
+            replay.highest_mutation,
+            retained_mutations(&replay),
+        )
+        .map_err(io::Error::other)?
+        .start(Default::default())
         .map_err(io::Error::other)?;
     let publish = |prefix| -> io::Result<()> {
         deadline.check()?;
@@ -704,9 +725,9 @@ pub(crate) struct Activated {
 pub(crate) struct Validated {
     pub(crate) epoch: u64,
     pub(crate) replay: crate::inflight::Replay,
-    requests: Vec<Request>,
-    cursors: Vec<Option<u16>>,
-    initialized: Vec<bool>,
+    requests: BudgetVec<Request, BudgetAllocator>,
+    cursors: BudgetVec<Option<u16>, BudgetAllocator>,
+    initialized: BudgetVec<bool, BudgetAllocator>,
     memory: Arc<GuestMemoryMmap>,
     pub(crate) shared: Arc<local::Shared>,
     copied: u64,

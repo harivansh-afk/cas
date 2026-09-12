@@ -13,11 +13,11 @@ fn write_request() -> Request {
         },
         offset: 0,
         len: BLOCK_SIZE,
-        segments: vec![Segment {
+        segments: request::test_segments([Segment {
             addr: GuestAddress(0x5000),
             len: BLOCK_SIZE,
             writable: false,
-        }],
+        }]),
     })
 }
 
@@ -223,6 +223,7 @@ fn rejected_status_cannot_be_published_as_success() {
         },
         0x10000,
         0,
+        crate::local::metadata_budget(),
     )
     .unwrap();
     carrier.initialize_queue(0, 0, 0).unwrap();
