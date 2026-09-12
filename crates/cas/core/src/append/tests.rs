@@ -426,7 +426,7 @@ fn invalid_terminal_batch_discards_and_retains_all_later_segments() {
     let mut log = Log::create(&path, config(), Limits::default()).unwrap();
     log.append(builder(1, 0, 1)).unwrap();
     log.flush().unwrap();
-    log.rotate(1).unwrap();
+    log.rotate(Some(1)).unwrap();
     log.append(builder(2, 0, 2)).unwrap();
     log.flush().unwrap();
     drop(log);

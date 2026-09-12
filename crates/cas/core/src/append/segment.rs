@@ -46,6 +46,32 @@ pub(super) fn candidates(directory: &Directory) -> io::Result<Candidates> {
     Ok(Candidates { highest, files })
 }
 
+/// None selects a fresh epoch from the number actually assigned under the
+/// shared allocator lock. Existing epochs survive rollover/live recovery.
+pub(super) fn create(
+    directory: &Directory,
+    config: super::Config,
+    tickets: Option<&crate::segments::Tickets>,
+    highest: u64,
+    epoch: Option<u64>,
+    preceding: u64,
+) -> io::Result<Arc<Segment>> {
+    let create = |number| {
+        Segment::create(
+            directory,
+            config.header(epoch.unwrap_or(number), number, preceding),
+        )
+    };
+    match tickets {
+        Some(tickets) => tickets.allocate(create),
+        None => create(
+            highest
+                .checked_add(1)
+                .ok_or_else(|| io::Error::other("segment tickets exhausted"))?,
+        ),
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct Segment {
     pub file: Arc<File>,

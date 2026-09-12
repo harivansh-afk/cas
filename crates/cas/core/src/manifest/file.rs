@@ -63,6 +63,10 @@ pub struct View {
 }
 
 impl View {
+    pub(crate) fn owns(&self, file: &Arc<File>) -> bool {
+        Arc::ptr_eq(&self.file, file)
+    }
+
     pub fn commit(&self) -> Commit {
         self.commit
     }
@@ -259,6 +263,10 @@ pub struct Inspection {
 }
 
 impl Inspection {
+    pub(crate) fn pin(&self) -> Arc<File> {
+        Arc::clone(&self.manifest.file)
+    }
+
     pub fn selected(&self) -> Selected {
         self.selected
     }

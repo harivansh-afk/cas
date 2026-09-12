@@ -187,18 +187,14 @@ impl Log {
 
     pub fn rollover(&mut self) -> Result<()> {
         self.drained()?;
-        self.rotate(self.current().header.epoch)
+        self.rotate(Some(self.current().header.epoch))
     }
 
     /// Start a fresh frontend generation after its old published prefix is
     /// durable. The caller must sync a fence in the new segment before export.
     pub fn new_attachment(&mut self) -> Result<()> {
         self.drained()?;
-        let epoch = self
-            .highest_segment
-            .checked_add(1)
-            .ok_or(Error::Exhausted)?;
-        self.rotate(epoch)
+        self.rotate(None)
     }
 
     fn drained(&self) -> Result<()> {

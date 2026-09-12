@@ -41,8 +41,11 @@ impl ReadRange {
 }
 
 pub struct ReadPlan {
+    offset: u64,
     bytes: usize,
     ranges: Vec<ReadRange>,
+    covered: [u64; 4],
+    base: Option<crate::manifest::file::View>,
 }
 
 impl ReadPlan {
@@ -53,9 +56,35 @@ impl ReadPlan {
         &self.ranges
     }
 
+    /// Relative block coverage includes explicit ZERO and staged payload alike.
+    pub fn staged(&self, block: usize) -> bool {
+        assert!(block < self.bytes / BLOCK_SIZE);
+        self.covered[block / 64] & (1 << (block % 64)) != 0
+    }
+    pub fn manifest(&self) -> Option<&crate::manifest::file::View> {
+        self.base.as_ref()
+    }
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+
     /// Synchronous reference execution, using the same immutable plan as the
     /// reactor. The caller reserves response plus at most 1 MiB scratch bytes.
     pub fn read_into(&self, buffer: &mut AlignedBuffer) -> io::Result<()> {
+        self.read_with(buffer, |_, _| {
+            Err(io::Error::other(
+                "manifest chunk requires a verified store loader",
+            ))
+        })
+    }
+
+    /// Fill uncovered blocks through the captured manifest and a verified chunk
+    /// loader. The async caller drives these same pins/coverage through CQEs.
+    pub fn read_with(
+        &self,
+        buffer: &mut AlignedBuffer,
+        mut load: impl FnMut(crate::chunk_index::Hash, &mut [u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
         if buffer.as_slice().len() != self.bytes {
             return Err(io::Error::other("read response length differs from plan"));
         }
@@ -80,6 +109,21 @@ impl ReadPlan {
                 destination.copy_from_slice(&input[range.source()]);
             }
         }
+        if let Some(base) = &self.base
+            && (0..self.bytes / BLOCK_SIZE).any(|block| !self.staged(block))
+        {
+            let mut tree = base.tree()?;
+            for block in 0..self.bytes / BLOCK_SIZE {
+                if !self.staged(block)
+                    && let Some(hash) = tree.get(self.offset / BLOCK_SIZE as u64 + block as u64)?
+                {
+                    load(
+                        hash,
+                        &mut buffer.as_mut_slice()[block * BLOCK_SIZE..(block + 1) * BLOCK_SIZE],
+                    )?;
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -102,12 +146,18 @@ impl Log {
             return Err(Error::Pending);
         }
         let mut ranges = Vec::with_capacity(bytes / BLOCK_SIZE);
+        let mut covered = [0u64; 4];
         for (begin, mapping) in self.index.overlapping(offset, end) {
+            let first = begin.max(offset);
+            let last = mapping.end.min(end);
+            for block in
+                (first - offset) as usize / BLOCK_SIZE..(last - offset) as usize / BLOCK_SIZE
+            {
+                covered[block / 64] |= 1 << (block % 64);
+            }
             let Some((payload, payload_offset)) = &mapping.source else {
                 continue;
             };
-            let first = begin.max(offset);
-            let last = mapping.end.min(end);
             let skip = payload_offset + first - begin;
             debug_assert!(skip + last - first <= payload.bytes as u64);
             debug_assert_eq!(payload.sequence, mapping.sequence);
@@ -120,6 +170,12 @@ impl Log {
         // All mappings and requests are block aligned; no payload fragment is
         // smaller than a block, so a plan has at most 256 entries.
         debug_assert!(ranges.len() <= bytes / BLOCK_SIZE);
-        Ok(ReadPlan { bytes, ranges })
+        Ok(ReadPlan {
+            offset,
+            bytes,
+            ranges,
+            covered,
+            base: self.base.clone(),
+        })
     }
 }

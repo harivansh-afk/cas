@@ -4,6 +4,7 @@ mod index;
 mod read;
 mod recovery;
 mod segment;
+mod shared;
 mod submission;
 
 use std::fs::{self, File};
@@ -24,6 +25,7 @@ use segment::{Directory, Segment};
 pub use crate::direct::Alignment;
 pub use read::{ReadPlan, ReadRange};
 pub use recovery::{LiveRecovery, Mutation, Recovery};
+pub use shared::SharedRecovery;
 pub use submission::Submission;
 
 #[derive(Debug, thiserror::Error)]
@@ -121,6 +123,8 @@ pub struct Log {
     offset: u64,
     next_batch: u64,
     highest_segment: u64,
+    tickets: Option<Arc<crate::segments::Tickets>>,
+    base: Option<crate::manifest::file::View>,
     published: u64,
     issued: u64,
     pending_descriptors: usize,
@@ -152,7 +156,17 @@ impl Log {
         limits: Limits,
         metadata: Arc<Budget>,
     ) -> Result<Self> {
-        let path = path.as_ref();
+        Self::create_in(path.as_ref(), config, limits, metadata, None, None)
+    }
+
+    fn create_in(
+        path: &Path,
+        config: Config,
+        limits: Limits,
+        metadata: Arc<Budget>,
+        tickets: Option<Arc<crate::segments::Tickets>>,
+        base: Option<crate::manifest::file::View>,
+    ) -> Result<Self> {
         config.header(1, 1, 0).encode()?;
         if config.segment_bytes < (format::MAX_BATCH_BYTES + 2 * BLOCK_SIZE) as u64
             || config.segment_bytes > limits.staging_bytes
@@ -169,7 +183,8 @@ impl Log {
         )?
         .sync_all()?;
         let directory = Directory::open(path)?;
-        let segment = Segment::create(&directory, config.header(1, 1, 0))?;
+        let segment = segment::create(&directory, config, tickets.as_deref(), 0, None, 0)?;
+        let highest_segment = segment.header.number;
         let allocated_bytes = segment.allocated_bytes()?;
         if allocated_bytes > limits.staging_bytes {
             return Err(Error::Capacity);
@@ -182,7 +197,9 @@ impl Log {
             index,
             offset: BLOCK_SIZE as u64,
             next_batch: 1,
-            highest_segment: 1,
+            highest_segment,
+            tickets,
+            base,
             published: 0,
             issued: 0,
             pending_descriptors: 0,
@@ -245,11 +262,7 @@ impl Log {
         self.config
     }
 
-    fn rotate(&mut self, epoch: u64) -> Result<()> {
-        let number = self
-            .highest_segment
-            .checked_add(1)
-            .ok_or(Error::Exhausted)?;
+    fn rotate(&mut self, epoch: Option<u64>) -> Result<()> {
         if self
             .allocated_bytes
             .checked_add(self.config.segment_bytes)
@@ -257,13 +270,17 @@ impl Log {
         {
             return Err(Error::Capacity);
         }
-        let created = Segment::create(
+        let created = segment::create(
             &self.directory,
-            self.config.header(epoch, number, self.published),
+            self.config,
+            self.tickets.as_deref(),
+            self.highest_segment,
+            epoch,
+            self.published,
         );
         let segment = self.fail_on_io(created)?;
-        self.highest_segment = number;
-        self.allocated_bytes += segment.allocated_bytes()?;
+        self.highest_segment = segment.header.number;
+        self.allocated_bytes += self.fail_on_io(segment.allocated_bytes())?;
         if self.allocated_bytes > self.limits.staging_bytes {
             self.failed = true;
             return Err(Error::Capacity);

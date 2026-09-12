@@ -41,8 +41,18 @@ impl Log {
         limits: Limits,
         metadata: Arc<crate::budget::Budget>,
     ) -> Result<Recovery> {
+        Self::inspect_in(path.as_ref(), limits, metadata, 0, None)
+    }
+
+    pub(super) fn inspect_in(
+        path: &Path,
+        limits: Limits,
+        metadata: Arc<crate::budget::Budget>,
+        base: u64,
+        tickets: Option<Arc<crate::segments::Tickets>>,
+    ) -> Result<Recovery> {
         let index = Index::new(limits.intervals, metadata)?;
-        let directory = Directory::open(path.as_ref())?;
+        let directory = Directory::open(path)?;
         let segment::Candidates {
             highest: highest_segment,
             files: candidates,
@@ -52,8 +62,8 @@ impl Log {
             .ok_or_else(|| io::Error::other("no valid image segment"))?;
         let first = Segment::open(*number, Arc::clone(file))?;
         let h = first.header;
-        if h.preceding_sequence != 0 {
-            return Err(io::Error::other("missing initial staging prefix").into());
+        if h.preceding_sequence > base {
+            return Err(io::Error::other("missing staging prefix above manifest D").into());
         }
         let config = Config {
             store: h.store,
@@ -73,7 +83,9 @@ impl Log {
             offset: BLOCK_SIZE as u64,
             next_batch: 1,
             highest_segment,
-            published: 0,
+            tickets,
+            base: None,
+            published: h.preceding_sequence,
             issued: 0,
             pending_descriptors: 0,
             cohort: None,
@@ -110,7 +122,7 @@ impl Log {
             log.segments.push(Arc::clone(&segment));
             let length = segment.file.metadata()?.len();
             while log.offset < length {
-                if !log.replay_one(&segment, length)? {
+                if !log.replay_one(&segment, length, base)? {
                     rejected = Some((index, log.offset));
                     break;
                 }
@@ -118,6 +130,12 @@ impl Log {
             if rejected.is_some() {
                 break;
             }
+        }
+        if log.published < base {
+            return Err(Error::Prefix {
+                recovered: log.published,
+                required: base,
+            });
         }
         log.issued = log.published;
         Ok(Recovery {
@@ -127,7 +145,7 @@ impl Log {
         })
     }
 
-    fn replay_one(&mut self, segment: &Arc<Segment>, file_length: u64) -> Result<bool> {
+    fn replay_one(&mut self, segment: &Arc<Segment>, file_length: u64, base: u64) -> Result<bool> {
         if file_length - self.offset < BLOCK_SIZE as u64 {
             return Ok(false);
         }
@@ -155,17 +173,26 @@ impl Log {
             {
                 return Ok(false);
             }
-            if self.index.len() + 2 * envelope.descriptors > self.limits.intervals {
-                return Err(Error::Capacity);
+            if envelope.first <= base && base < envelope.last {
+                return Err(io::Error::other("manifest D splits a staging batch").into());
             }
-            if envelope.payload_bytes != 0 {
-                let mut payload = AlignedBuffer::new(envelope.payload_bytes);
-                direct::read(&segment.file, &mut payload, self.offset + BLOCK_SIZE as u64)?;
-                if header.verify_payload(payload.as_slice()).is_err() {
-                    return Ok(false);
+            if envelope.last <= base {
+                // Headers remain for framing and live identities; the durable
+                // manifest supplies data whose WAL payload may be punched.
+                self.published = envelope.last;
+            } else {
+                if self.index.len() + 2 * envelope.descriptors > self.limits.intervals {
+                    return Err(Error::Capacity);
                 }
+                if envelope.payload_bytes != 0 {
+                    let mut payload = AlignedBuffer::new(envelope.payload_bytes);
+                    direct::read(&segment.file, &mut payload, self.offset + BLOCK_SIZE as u64)?;
+                    if header.verify_payload(payload.as_slice()).is_err() {
+                        return Ok(false);
+                    }
+                }
+                self.publish(&header, Arc::clone(segment), self.offset);
             }
-            self.publish(&header, Arc::clone(segment), self.offset);
         }
         self.offset += length;
         self.encoded_bytes += length;
@@ -177,7 +204,7 @@ impl Log {
 /// Read-only inspection. Its locks cover all candidate files, including the
 /// rejected suffix, until validation and repair have finished.
 pub struct Recovery {
-    log: Log,
+    pub(super) log: Log,
     candidates: Vec<(u64, Arc<File>)>,
     rejected: Option<(usize, u64)>,
 }
@@ -190,7 +217,7 @@ impl Recovery {
         self.log.status()
     }
 
-    fn require_prefix(&self, required: u64) -> Result<()> {
+    pub(super) fn require_prefix(&self, required: u64) -> Result<()> {
         if self.log.published < required {
             return Err(Error::Prefix {
                 recovered: self.log.published,
@@ -203,13 +230,7 @@ impl Recovery {
     pub fn fresh(mut self, required: u64) -> Result<Log> {
         self.require_prefix(required)?;
         self.repair()?;
-        // The fresh segment ticket is also a unique, increasing epoch ticket.
-        let epoch = self
-            .log
-            .highest_segment
-            .checked_add(1)
-            .ok_or(Error::Exhausted)?;
-        self.log.rotate(epoch)?;
+        self.log.rotate(None)?;
         self.log.flush()?;
         Ok(self.log)
     }
@@ -275,7 +296,7 @@ impl Recovery {
         // A retained fence may fill its segment. All retained files have synced
         // before creating a successor, but only finish() establishes recovered E.
         if self.log.offset + BLOCK_SIZE as u64 > self.log.config.segment_bytes {
-            self.log.rotate(epoch)?;
+            self.log.rotate(Some(epoch))?;
         }
         let remaining = mutations
             .into_iter()

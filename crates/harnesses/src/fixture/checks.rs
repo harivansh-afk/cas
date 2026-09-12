@@ -96,7 +96,7 @@ fn reflink(source: &str, clone: &str, changed: bool) -> io::Result<()> {
 }
 
 fn tests(module: &str, list: &str, log: &str) -> io::Result<()> {
-    let prefix = format!("{module}::file::tests::");
+    let prefix = format!("{module}::tests::");
     let expected: BTreeSet<_> = list
         .lines()
         .filter_map(|line| line.strip_suffix(": test"))
@@ -196,9 +196,13 @@ pub(super) fn verify(output: &Path, build: &Build) -> io::Result<()> {
             changed,
         )?;
     }
-    for module in ["store", "manifest"] {
+    for (module, namespace) in [
+        ("store", "store::file"),
+        ("manifest", "manifest::file"),
+        ("append", "append::shared"),
+    ] {
         tests(
-            module,
+            namespace,
             &fs::read_to_string(guest.join(format!("{module}.list")))?,
             &fs::read_to_string(guest.join(format!("{module}.log")))?,
         )?;
@@ -235,15 +239,15 @@ mod controls {
         let list =
             "store::file::tests::a: test\nstore::file::tests::b: test\n\n2 tests, 0 benchmarks\n";
         let log = "running 2 tests\ntest store::file::tests::a ... ok\ntest store::file::tests::b ... ok\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n";
-        tests("store", list, log).unwrap();
+        tests("store::file", list, log).unwrap();
         for invalid in [
             log.replace("b ... ok", "b ... FAILED"),
             log.replace("b ... ok", "a ... ok"),
             log.replace("0 ignored", "1 ignored"),
         ] {
-            assert!(tests("store", list, &invalid).is_err());
+            assert!(tests("store::file", list, &invalid).is_err());
         }
-        assert!(tests("store", "", log).is_err());
-        assert!(tests("manifest", list, log).is_err());
+        assert!(tests("store::file", "", log).is_err());
+        assert!(tests("manifest::file", list, log).is_err());
     }
 }
