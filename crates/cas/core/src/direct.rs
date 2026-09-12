@@ -24,7 +24,30 @@ pub(crate) fn open(path: &Path, create: bool) -> io::Result<File> {
     Ok(file)
 }
 
+/// Remove aligned payload extents without changing file length or framing.
+pub(crate) fn punch(file: &File, offset: u64, length: u64) -> io::Result<()> {
+    #[cfg(test)]
+    if faults::take(faults::Fault::Punch) {
+        return Err(io::Error::from_raw_os_error(libc::EIO));
+    }
+    fallocate(
+        file,
+        offset,
+        length,
+        libc::FALLOC_FL_KEEP_SIZE | libc::FALLOC_FL_PUNCH_HOLE,
+    )
+}
+
 pub(crate) fn preallocate(file: &File, offset: u64, length: u64) -> io::Result<()> {
+    #[cfg(test)]
+    if faults::take(faults::Fault::Allocate) {
+        return Err(io::Error::from_raw_os_error(libc::ENOSPC));
+    }
+    // KEEP_SIZE reserves extents without making unwritten records visible at EOF.
+    fallocate(file, offset, length, libc::FALLOC_FL_KEEP_SIZE)
+}
+
+fn fallocate(file: &File, offset: u64, length: u64, mode: i32) -> io::Result<()> {
     if length == 0
         || !offset.is_multiple_of(BLOCK_SIZE as u64)
         || !length.is_multiple_of(BLOCK_SIZE as u64)
@@ -37,21 +60,8 @@ pub(crate) fn preallocate(file: &File, offset: u64, length: u64) -> io::Result<(
             "invalid allocation range",
         ));
     }
-    #[cfg(test)]
-    if faults::take(faults::Fault::Allocate) {
-        return Err(io::Error::from_raw_os_error(libc::ENOSPC));
-    }
-    // SAFETY: the descriptor is live and the checked range fits positive off_t.
-    // KEEP_SIZE reserves extents without making unwritten records visible at EOF.
-    if unsafe {
-        libc::fallocate(
-            file.as_raw_fd(),
-            libc::FALLOC_FL_KEEP_SIZE,
-            offset as i64,
-            length as i64,
-        )
-    } != 0
-    {
+    // SAFETY: a live descriptor and a checked aligned positive off_t range.
+    if unsafe { libc::fallocate(file.as_raw_fd(), mode, offset as i64, length as i64) } != 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
@@ -201,6 +211,7 @@ pub(crate) mod faults {
     #[derive(Clone, Copy, PartialEq, Eq)]
     pub(crate) enum Fault {
         Allocate,
+        Punch,
         Read,
         ShortWrite,
         Sync,

@@ -519,7 +519,21 @@ fn index_budget_denial_precedes_creation_or_recovery_and_publication_reuses_slot
     let mut log =
         Log::create_with_metadata(&path, config(), limits, Arc::clone(&metadata)).unwrap();
     let charged = metadata.usage().current.bytes;
-    assert_eq!(charged, log.status().index_metadata_bytes);
+    let segment_metadata = log.status().segment_metadata_bytes;
+    assert_eq!(
+        charged,
+        log.status().index_metadata_bytes + segment_metadata
+    );
+    let pins_denied = Budget::new(Amount {
+        bytes: log.status().index_metadata_bytes,
+        requests: 0,
+    });
+    let untouched = directory.path().join("pins-denied");
+    assert!(
+        Log::create_with_metadata(&untouched, config(), limits, Arc::clone(&pins_denied)).is_err()
+    );
+    assert!(!untouched.exists());
+    assert_eq!(pins_denied.usage().current.bytes, 0);
     for block in 0..32 {
         log.append(builder(block as u64 + 1, block * BLOCK_SIZE, block as u8))
             .unwrap();
@@ -532,10 +546,10 @@ fn index_budget_denial_precedes_creation_or_recovery_and_publication_reuses_slot
     log.flush().unwrap();
     assert_eq!(metadata.usage().current.bytes, charged);
     assert_eq!(metadata.usage().peak.bytes, charged);
-    assert_eq!(metadata.usage().admitted, 1);
+    assert_eq!(metadata.usage().admitted, 2);
     assert!(log.status().index_nodes_peak >= 3);
     drop(log);
-    assert_eq!(metadata.usage().current.bytes, 0);
+    assert_eq!(metadata.usage().current.bytes, segment_metadata);
     let mut data = AlignedBuffer::new(IMAGE_BYTES);
     old.read_into(&mut data).unwrap();
     for (block, bytes) in data
@@ -548,6 +562,7 @@ fn index_budget_denial_precedes_creation_or_recovery_and_publication_reuses_slot
         assert!(bytes.iter().all(|byte| *byte == block as u8));
     }
     drop(old);
+    assert_eq!(metadata.usage().current.bytes, 0);
     let file = path.join(segment::name(1));
     let before = fs::read(&file).unwrap();
     assert!(Log::inspect_with_metadata(&path, limits, Arc::clone(&denied)).is_err());

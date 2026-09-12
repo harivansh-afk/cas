@@ -333,6 +333,33 @@ impl<'a> Header<'a> {
         Ok(header)
     }
 
+    pub(crate) fn follows(
+        &self,
+        segment: SegmentHeader,
+        batch: u64,
+        preceding: u64,
+        offset: u64,
+        end: u64,
+    ) -> bool {
+        let envelope = self.envelope();
+        let length = (BLOCK_SIZE + envelope.payload_bytes) as u64;
+        envelope.segment == segment.number
+            && envelope.batch == batch
+            && offset.checked_add(length).is_some_and(|after| {
+                after <= end
+                    && after <= segment.capacity
+                    && (envelope.fence
+                        || after
+                            .checked_add(BLOCK_SIZE as u64)
+                            .is_some_and(|fenced| fenced <= segment.capacity))
+            })
+            && if envelope.fence {
+                envelope.last == preceding
+            } else {
+                preceding.checked_add(1) == Some(envelope.first)
+            }
+    }
+
     pub fn descriptors(&self) -> impl Iterator<Item = Descriptor> + '_ {
         self.bytes[ENVELOPE_BYTES..ENVELOPE_BYTES + self.envelope.descriptors * DESCRIPTOR_BYTES]
             .as_chunks::<DESCRIPTOR_BYTES>()

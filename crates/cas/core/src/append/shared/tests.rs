@@ -1,3 +1,5 @@
+mod compaction;
+
 use super::*;
 use crate::{
     BLOCK_SIZE, MAX_REQUEST_BYTES,
@@ -39,12 +41,12 @@ fn id(sequence: u64) -> RequestId {
         attachment: 1,
         serial: sequence * 2,
         queue: 0,
-        head: sequence as u16,
+        head: (sequence % 256) as u16,
     }
 }
 fn write(log: &mut Log, block: u64, value: u8) -> u64 {
     let sequence = log.status().issued + 1;
-    let mut builder = Builder::new(CONFIG.image_bytes, BLOCK_SIZE).unwrap();
+    let mut builder = Builder::new(log.config().image_bytes, BLOCK_SIZE).unwrap();
     builder
         .write(
             id(sequence),
@@ -66,31 +68,45 @@ struct Fixture {
     store: Store,
     manifest: Option<Manifest>,
     log: Option<Log>,
+    config: Config,
 }
 impl Fixture {
     fn new() -> Self {
+        Self::with_config(CONFIG)
+    }
+
+    fn with_config(config: Config) -> Self {
         let root = tempfile::tempdir().unwrap();
         let tickets = Tickets::open(root.path(), memory()).unwrap();
         let store = Store::create(
             Arc::clone(&tickets),
             chunk_file::Config {
-                store: CONFIG.store,
+                store: config.store,
                 segment_bytes: 128 * BLOCK_SIZE as u64,
             },
             memory(),
             memory(),
         )
         .unwrap();
-        let image = staging(&tickets, CONFIG.image).parent().unwrap().to_owned();
+        let image = staging(&tickets, config.image).parent().unwrap().to_owned();
         fs::create_dir_all(&image).unwrap();
         File::open(image.parent().unwrap())
             .unwrap()
             .sync_all()
             .unwrap();
-        let manifest = Manifest::create(&image, Self::identity(), memory()).unwrap();
+        let manifest = Manifest::create(
+            &image,
+            Identity {
+                store: config.store,
+                image: config.image,
+                image_bytes: config.image_bytes,
+            },
+            memory(),
+        )
+        .unwrap();
         let log = Log::create_shared(
             Arc::clone(&tickets),
-            CONFIG,
+            config,
             Limits::default(),
             memory(),
             manifest.view().unwrap(),
@@ -102,6 +118,7 @@ impl Fixture {
             store,
             manifest: Some(manifest),
             log: Some(log),
+            config,
         }
     }
     fn identity() -> Identity {
@@ -115,7 +132,7 @@ impl Fixture {
         self.log.as_mut().unwrap()
     }
     fn path(&self) -> PathBuf {
-        staging(&self.tickets, CONFIG.image)
+        staging(&self.tickets, self.config.image)
     }
     fn put(&mut self, value: u8) -> Hash {
         let bytes = [value; BLOCK_SIZE];
@@ -133,7 +150,11 @@ impl Fixture {
         drop(self.manifest.take());
         let inspection = Manifest::inspect(
             self.path().parent().unwrap(),
-            Self::identity(),
+            Identity {
+                store: self.config.store,
+                image: self.config.image,
+                image_bytes: self.config.image_bytes,
+            },
             0,
             memory(),
             |hash| require(self.store.plan(hash)?.is_some(), "missing test chunk"),
@@ -221,6 +242,7 @@ fn shared_chunk_and_image_tickets_define_fresh_epochs_and_survive_reopen() {
         store,
         manifest,
         log,
+        ..
     } = f;
     drop((log, manifest, store, tickets));
     let tickets = Tickets::open(root.path(), memory()).unwrap();
@@ -635,6 +657,7 @@ fn a_failed_shared_segment_creation_poison_stops_every_allocator_user() {
         store,
         manifest,
         log,
+        ..
     } = f;
     drop((log, manifest, store, tickets));
     assert_eq!(

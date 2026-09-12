@@ -106,6 +106,10 @@ impl Store {
         }
     }
 
+    pub fn config(&self) -> Config {
+        self.config
+    }
+
     pub fn status(&self) -> Status {
         Status {
             chunks: self.index.len(),

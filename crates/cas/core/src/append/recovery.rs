@@ -51,7 +51,7 @@ impl Log {
         base: u64,
         tickets: Option<Arc<crate::segments::Tickets>>,
     ) -> Result<Recovery> {
-        let index = Index::new(limits.intervals, metadata)?;
+        let index = Index::new(limits.intervals, Arc::clone(&metadata))?;
         let directory = Directory::open(path)?;
         let segment::Candidates {
             highest: highest_segment,
@@ -60,7 +60,7 @@ impl Log {
         let (number, file) = candidates
             .first()
             .ok_or_else(|| io::Error::other("no valid image segment"))?;
-        let first = Segment::open(*number, Arc::clone(file))?;
+        let first = Segment::open(*number, Arc::clone(file), Arc::clone(&metadata))?;
         let h = first.header;
         if h.preceding_sequence > base {
             return Err(io::Error::other("missing staging prefix above manifest D").into());
@@ -80,6 +80,7 @@ impl Log {
             limits,
             segments: Vec::new(),
             index,
+            metadata: Arc::clone(&metadata),
             offset: BLOCK_SIZE as u64,
             next_batch: 1,
             highest_segment,
@@ -98,7 +99,12 @@ impl Log {
         };
         let mut rejected = None;
         for (index, (number, file)) in candidates.iter().enumerate() {
-            let segment = match Segment::open(*number, Arc::clone(file)) {
+            let opened = if index == 0 {
+                Ok(Arc::clone(&first))
+            } else {
+                Segment::open(*number, Arc::clone(file), Arc::clone(&metadata))
+            };
+            let segment = match opened {
                 Ok(segment) => segment,
                 Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
                     rejected = Some((index, 0));
@@ -127,6 +133,9 @@ impl Log {
                     break;
                 }
             }
+            segment
+                .end
+                .store(log.offset, std::sync::atomic::Ordering::Relaxed);
             if rejected.is_some() {
                 break;
             }
@@ -156,23 +165,16 @@ impl Log {
         };
         let envelope = header.envelope();
         let length = (BLOCK_SIZE + envelope.payload_bytes) as u64;
-        if envelope.segment != segment.header.number
-            || envelope.batch != self.next_batch
-            || self.offset + length > file_length
-            || self.offset + length > segment.header.capacity
-        {
+        if !header.follows(
+            segment.header,
+            self.next_batch,
+            self.published,
+            self.offset,
+            file_length,
+        ) {
             return Ok(false);
         }
-        if envelope.fence {
-            if envelope.last != self.published {
-                return Ok(false);
-            }
-        } else {
-            if self.published.checked_add(1) != Some(envelope.first)
-                || self.offset + length + BLOCK_SIZE as u64 > segment.header.capacity
-            {
-                return Ok(false);
-            }
+        if !envelope.fence {
             if envelope.first <= base && base < envelope.last {
                 return Err(io::Error::other("manifest D splits a staging batch").into());
             }

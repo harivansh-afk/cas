@@ -23,6 +23,13 @@ impl Directory {
         })
     }
 
+    pub fn duplicate(&self) -> io::Result<Self> {
+        Ok(Self {
+            path: self.path.clone(),
+            file: self.file.try_clone()?,
+        })
+    }
+
     pub fn sync(&self) -> io::Result<()> {
         self.file.sync_all()
     }

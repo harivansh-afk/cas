@@ -110,6 +110,9 @@ impl Log {
         };
         let bytes = submission.batch.bytes().len() as u64;
         self.offset += bytes;
+        self.current()
+            .end
+            .store(self.offset, std::sync::atomic::Ordering::Relaxed);
         self.encoded_bytes += bytes;
         self.next_batch += 1; // callers check exhaustion before reserving
         submission

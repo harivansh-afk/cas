@@ -63,6 +63,10 @@ pub struct View {
 }
 
 impl View {
+    pub(crate) fn same(&self, other: &Self) -> bool {
+        self.commit == other.commit && self.end == other.end && self.owns(&other.file)
+    }
+
     pub(crate) fn owns(&self, file: &Arc<File>) -> bool {
         Arc::ptr_eq(&self.file, file)
     }
@@ -183,6 +187,16 @@ impl Manifest {
     }
 
     pub fn prepare(&self, changes: &[Extent], durable: u64) -> io::Result<Prepared> {
+        self.prepare_with_metadata(changes, durable, Arc::clone(&self.metadata))
+    }
+
+    /// A host compactor uses its separate transaction metadata partition.
+    pub fn prepare_with_metadata(
+        &self,
+        changes: &[Extent],
+        durable: u64,
+        metadata: Arc<Budget>,
+    ) -> io::Result<Prepared> {
         self.healthy()?;
         Prepared::build(
             self.file.as_ref(),
@@ -190,7 +204,7 @@ impl Manifest {
             self.end,
             changes,
             durable,
-            Arc::clone(&self.metadata),
+            metadata,
         )
     }
 

@@ -16,6 +16,7 @@ pub(super) struct Payload {
     pub bytes: usize,
     pub sequence: u64,
     pub crc: u32,
+    pub batch_block: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +94,10 @@ impl Index {
             }
         }
         self.map.insert(start, mapping);
+    }
+
+    pub fn retain_after(&mut self, durable: u64) {
+        self.map.retain(|_, mapping| mapping.sequence > durable);
     }
 
     pub fn overlapping(&self, start: u64, end: u64) -> impl Iterator<Item = (u64, &Mapping)> {

@@ -1,7 +1,9 @@
 //! Packed v2 staging, introduced separately from submission concurrency.
+mod compaction;
 pub mod format;
 mod index;
 mod read;
+mod reclaim;
 mod recovery;
 mod segment;
 mod shared;
@@ -23,7 +25,9 @@ use index::{Index, Mapping, Payload};
 use segment::{Directory, Segment};
 
 pub use crate::direct::Alignment;
+pub use compaction::{Compacted, Input, Selection};
 pub use read::{ReadPlan, ReadRange};
+pub use reclaim::{ReclaimStats, Reclaimed, Reclamation};
 pub use recovery::{LiveRecovery, Mutation, Recovery};
 pub use shared::SharedRecovery;
 pub use submission::Submission;
@@ -99,10 +103,13 @@ pub struct Status {
     pub published: u64,
     pub issued: u64,
     pub durable: u64,
+    pub compacted: u64,
     pub epoch: u64,
     pub segments: usize,
     pub intervals: usize,
     pub index_metadata_bytes: usize,
+    pub segment_metadata_bytes: usize,
+    pub read_pins: u32,
     pub index_nodes: usize,
     pub index_nodes_peak: usize,
     pub encoded_bytes: u64,
@@ -120,6 +127,7 @@ pub struct Log {
     limits: Limits,
     segments: Vec<Arc<Segment>>,
     index: Index,
+    metadata: Arc<Budget>,
     offset: u64,
     next_batch: u64,
     highest_segment: u64,
@@ -174,7 +182,8 @@ impl Log {
         {
             return Err(Error::Capacity);
         }
-        let index = Index::new(limits.intervals, metadata)?;
+        let index = Index::new(limits.intervals, Arc::clone(&metadata))?;
+        let pins = segment::Pins::new(config.segment_bytes, Arc::clone(&metadata))?;
         fs::create_dir(path)?;
         File::open(
             path.parent()
@@ -183,7 +192,7 @@ impl Log {
         )?
         .sync_all()?;
         let directory = Directory::open(path)?;
-        let segment = segment::create(&directory, config, tickets.as_deref(), 0, None, 0)?;
+        let segment = segment::create(&directory, config, tickets.as_deref(), 0, None, 0, pins)?;
         let highest_segment = segment.header.number;
         let allocated_bytes = segment.allocated_bytes()?;
         if allocated_bytes > limits.staging_bytes {
@@ -195,6 +204,7 @@ impl Log {
             limits,
             segments: vec![segment],
             index,
+            metadata,
             offset: BLOCK_SIZE as u64,
             next_batch: 1,
             highest_segment,
@@ -244,10 +254,13 @@ impl Log {
             published: self.published,
             issued: self.issued,
             durable: self.durable,
+            compacted: self.base.as_ref().map_or(0, |base| base.commit().durable),
             epoch: self.current().header.epoch,
             segments: self.segments.len(),
             intervals: self.index.len(),
             index_metadata_bytes: self.index.allocated_bytes(),
+            segment_metadata_bytes: self.segments.iter().map(|s| s.pins.bytes()).sum(),
+            read_pins: self.segments.iter().map(|s| s.pins.readers()).sum(),
             index_nodes,
             index_nodes_peak,
             encoded_bytes: self.encoded_bytes,
@@ -277,6 +290,7 @@ impl Log {
             self.highest_segment,
             epoch,
             self.published,
+            segment::Pins::new(self.config.segment_bytes, Arc::clone(&self.metadata))?,
         );
         let segment = self.fail_on_io(created)?;
         self.highest_segment = segment.header.number;
@@ -333,6 +347,7 @@ impl Log {
                         bytes: descriptor.payload_length as usize,
                         sequence: descriptor.sequence,
                         crc: descriptor.payload_crc,
+                        batch_block: (offset / BLOCK_SIZE as u64) as u32,
                     },
                     0,
                 )

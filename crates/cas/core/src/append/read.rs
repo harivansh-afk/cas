@@ -12,6 +12,12 @@ pub struct ReadRange {
     destination: Range<usize>,
 }
 
+impl Drop for ReadRange {
+    fn drop(&mut self) {
+        self.payload.segment.pins.release(self.payload.batch_block);
+    }
+}
+
 impl ReadRange {
     pub fn file(&self) -> &File {
         &self.payload.segment.file
@@ -161,6 +167,7 @@ impl Log {
             let skip = payload_offset + first - begin;
             debug_assert!(skip + last - first <= payload.bytes as u64);
             debug_assert_eq!(payload.sequence, mapping.sequence);
+            payload.segment.pins.acquire(payload.batch_block);
             ranges.push(ReadRange {
                 payload: payload.clone(),
                 source: skip as usize..(skip + last - first) as usize,

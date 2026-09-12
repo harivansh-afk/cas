@@ -1,7 +1,10 @@
+mod pins;
+pub(super) use pins::Pins;
+
 use std::fs::{self, File};
 use std::io;
 use std::os::unix::fs::MetadataExt;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicU64};
 
 use super::format::SegmentHeader;
 pub(super) use crate::directory::Directory;
@@ -55,11 +58,13 @@ pub(super) fn create(
     highest: u64,
     epoch: Option<u64>,
     preceding: u64,
+    pins: Pins,
 ) -> io::Result<Arc<Segment>> {
     let create = |number| {
         Segment::create(
             directory,
             config.header(epoch.unwrap_or(number), number, preceding),
+            pins,
         )
     };
     match tickets {
@@ -77,10 +82,16 @@ pub(super) struct Segment {
     pub file: Arc<File>,
     pub header: SegmentHeader,
     pub alignment: direct::Alignment,
+    pub pins: Pins,
+    pub end: AtomicU64,
 }
 
 impl Segment {
-    pub fn create(directory: &Directory, header: SegmentHeader) -> io::Result<Arc<Self>> {
+    pub fn create(
+        directory: &Directory,
+        header: SegmentHeader,
+        pins: Pins,
+    ) -> io::Result<Arc<Self>> {
         let buffer = header.encode().map_err(io::Error::other)?;
         let file = direct::open(&directory.path.join(name(header.number)), true)?;
         let alignment = direct::Alignment::query(&file)?;
@@ -92,10 +103,16 @@ impl Segment {
             file: Arc::new(file),
             header,
             alignment,
+            pins,
+            end: AtomicU64::new(BLOCK_SIZE as u64),
         }))
     }
 
-    pub fn open(number: u64, file: Arc<File>) -> io::Result<Arc<Self>> {
+    pub fn open(
+        number: u64,
+        file: Arc<File>,
+        metadata: Arc<crate::budget::Budget>,
+    ) -> io::Result<Arc<Self>> {
         let alignment = direct::Alignment::query(&file)?;
         let mut buffer = AlignedBuffer::new(BLOCK_SIZE);
         direct::read(&file, &mut buffer, 0)?;
@@ -103,10 +120,14 @@ impl Segment {
         if header.number != number {
             return Err(io::Error::other("segment filename/header mismatch"));
         }
+        let pins = Pins::new(header.capacity, metadata)?;
+        let end = AtomicU64::new(file.metadata()?.len());
         Ok(Arc::new(Self {
             file,
             header,
             alignment,
+            pins,
+            end,
         }))
     }
 
