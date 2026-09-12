@@ -24,6 +24,7 @@ use cas_core::{
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 pub struct Resources {
+    pub cache_bytes: usize,
     pub metadata: Arc<Budget>,
     pub compaction: Arc<Budget>,
     pools: pools::HostPools,
@@ -33,6 +34,7 @@ pub struct Resources {
 impl Default for Resources {
     fn default() -> Self {
         Self {
+            cache_bytes: 256 * MAX_REQUEST_BYTES,
             metadata: metadata_budget(),
             compaction: metadata_budget(),
             pools: pools::HostPools::new(),
@@ -51,6 +53,7 @@ struct SharedHost {
     admission: BudgetArc<admission::Admission>,
     gate: BudgetArc<state::HostGate>,
     reader: Reader,
+    cache: BudgetArc<cas_core::cache::Cache>,
     resources: Arc<Resources>,
     attached: AtomicUsize,
     administrating: AtomicBool,
@@ -211,6 +214,7 @@ impl Host {
                 admission,
                 gate,
                 reader: store.reader()?,
+                cache: cas_core::cache::Cache::new(resources.cache_bytes, &metadata)?,
                 resources,
                 attached: AtomicUsize::new(0),
                 administrating: AtomicBool::new(false),
@@ -416,6 +420,7 @@ impl Host {
     pub fn report(&self) -> serde_json::Value {
         serde_json::json!({ "failure": self.shared.gate.failure(), "store": self.store_status(),
             "admission": self.shared.admission.status(),
+            "cache": self.shared.cache.status(),
             "collection": *self.shared.collection.lock().expect("collection status poisoned"),
             "pools": self.shared.resources.pools.report(), "metadata": self.shared.resources.metadata.usage(),
             "compaction_metadata": self.shared.resources.compaction.usage(),
@@ -527,6 +532,9 @@ impl Port {
 
     pub fn reader(&self) -> Reader {
         self.shared.reader.clone()
+    }
+    pub fn cache(&self) -> BudgetArc<cas_core::cache::Cache> {
+        self.shared.cache.clone()
     }
     pub fn metadata(&self) -> Arc<Budget> {
         Arc::clone(&self.shared.resources.metadata)

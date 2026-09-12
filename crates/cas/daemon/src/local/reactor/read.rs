@@ -19,6 +19,8 @@ pub(super) struct Read {
     page: Option<AlignedBuffer<BudgetAllocator>>,
     plan: ReadPlan,
     reader: Option<store::Reader>,
+    cache: Option<BudgetArc<cas_core::cache::Cache>>,
+    chunk_hash: Option<cas_core::chunk_index::Hash>,
     io: Io,
     stage: Stage,
     block: usize,
@@ -32,6 +34,8 @@ impl Read {
             page: None,
             plan,
             reader: None,
+            cache: None,
+            chunk_hash: None,
             io,
             stage: Stage::Done,
             block: 0,
@@ -45,6 +49,7 @@ impl Read {
         {
             let port = port.ok_or_else(|| io::Error::other("manifest read has no shared store"))?;
             self.reader = Some(port.reader());
+            self.cache = Some(port.cache());
             self.page = Some(AlignedBuffer::try_new_in(
                 BLOCK_SIZE,
                 BudgetAllocator::new(port.metadata()),
@@ -71,7 +76,7 @@ impl Read {
     fn next_block(&mut self) -> io::Result<()> {
         self.shared_io = false;
         self.stage = Stage::Done;
-        let Some(view) = self.plan.manifest() else {
+        let Some(view) = self.plan.manifest().cloned() else {
             return Ok(());
         };
         while self.block < self.plan.bytes() / BLOCK_SIZE {
@@ -84,8 +89,9 @@ impl Read {
                         return Ok(());
                     }
                     LookupState::Complete(Some(hash)) => {
-                        self.chunk(hash)?;
-                        return Ok(());
+                        if self.chunk(hash)? {
+                            return Ok(());
+                        }
                     }
                     LookupState::Complete(None) => (),
                 }
@@ -95,8 +101,18 @@ impl Read {
         Ok(())
     }
 
-    fn chunk(&mut self, hash: cas_core::chunk_index::Hash) -> io::Result<()> {
+    /// True requires storage IO; a hit already filled the current response block.
+    fn chunk(&mut self, hash: cas_core::chunk_index::Hash) -> io::Result<bool> {
         self.shared_io = true;
+        self.chunk_hash = Some(hash);
+        if let Some(bytes) = self.cache.as_ref().and_then(|cache| cache.get(&hash)) {
+            let Operation::Read { buffer, .. } = &mut self.io.operation else {
+                unreachable!()
+            };
+            buffer.as_mut_slice()[self.block * BLOCK_SIZE..(self.block + 1) * BLOCK_SIZE]
+                .copy_from_slice(bytes.as_slice());
+            return Ok(false);
+        }
         let read = self
             .reader
             .as_ref()
@@ -104,7 +120,7 @@ impl Read {
             .plan(hash)?
             .ok_or_else(|| io::Error::other("manifest references an unavailable chunk"))?;
         self.stage = Stage::Header(read);
-        Ok(())
+        Ok(true)
     }
 
     pub fn entry(&mut self) -> squeue::Entry {
@@ -186,7 +202,12 @@ impl Read {
             Stage::Manifest { read, offset } => {
                 match read.accept(*offset, self.page.as_ref().unwrap().as_slice())? {
                     LookupState::Page { offset: next, .. } => *offset = next,
-                    LookupState::Complete(Some(hash)) => self.chunk(hash)?,
+                    LookupState::Complete(Some(hash)) => {
+                        if !self.chunk(hash)? {
+                            self.block += 1;
+                            self.next_block()?;
+                        }
+                    }
                     LookupState::Complete(None) => {
                         self.block += 1;
                         self.next_block()?;
@@ -197,9 +218,16 @@ impl Read {
                 self.stage = Stage::Payload(read.payload(self.page.as_ref().unwrap().as_slice())?);
             }
             Stage::Payload(read) => {
-                read.verify(
-                    &buffer.as_slice()[self.block * BLOCK_SIZE..(self.block + 1) * BLOCK_SIZE],
-                )?;
+                let bytes =
+                    &buffer.as_slice()[self.block * BLOCK_SIZE..(self.block + 1) * BLOCK_SIZE];
+                read.verify(bytes)?;
+                if let Some(cache) = &self.cache {
+                    match cache.fill(self.chunk_hash.expect("planned chunk hash"), bytes) {
+                        Ok(_) => (),
+                        Err(error) if error.kind() == io::ErrorKind::OutOfMemory => (),
+                        Err(error) => return Err(error),
+                    }
+                }
                 self.block += 1;
                 self.next_block()?;
             }

@@ -3,7 +3,10 @@ use super::*;
 pub(super) fn verify(guest: &Path) -> io::Result<()> {
     let conditions = evidence::read_json(&guest.join("host-collection-conditions.json"))?;
     let observations = evidence::read_json(&guest.join("host-collection-observations.json"))?;
-    check(&conditions, &observations)
+    check(&conditions, &observations)?;
+    check_exhaustion(&evidence::read_json(
+        &guest.join("unique-live-capacity.json"),
+    )?)
 }
 
 fn number(value: &Value) -> io::Result<u64> {
@@ -62,9 +65,98 @@ fn check(conditions: &Value, observations: &Value) -> io::Result<()> {
     )
 }
 
+fn check_exhaustion(value: &Value) -> io::Result<()> {
+    let mib = 1024 * 1024;
+    let initial = number(&value["initial"]["allocated"])?;
+    let capacity = number(&value["limits"]["capacity"])?;
+    let reserve = number(&value["limits"]["reserve"])?;
+    let after = &value["after"];
+    let allocated = number(&after["allocated"])?;
+    require(
+        value["live_bytes"] == 256 * mib
+            && value["read_bytes"] == value["live_bytes"]
+            && value["admitted_mutations"] == 0
+            && number(&value["seed_micros"])? > 0
+            && number(&value["read_micros"])? > 0
+            && reserve == 150 * mib
+            && initial.checked_add(reserve) == Some(capacity)
+            && capacity <= number(&value["initial"]["domain"]["capacity"])?
+            && capacity
+                .checked_sub(reserve)
+                .is_some_and(|limit| allocated <= limit)
+            && u128::from(allocated) * 100 >= u128::from(capacity) * 60
+            && number(&after["peak_used"])? <= capacity
+            && after["promised"] == 0
+            && after["failed"] == false
+            && after["pressured"] == true
+            && after["background_active"] == false,
+        "unique live capacity or read accounting differs",
+    )?;
+    let host = &value["host"];
+    let collection = &host["collection"];
+    require(
+        host["failure"].is_null()
+            && host["admission"]["failed"] == false
+            && host["store"]["chunks"] == 65536
+            && host["store"]["failed"] == false
+            && number(&collection["completed"])? > 0
+            && collection["error"].is_null()
+            && collection["last"]["capacity_exhausted"] == true
+            && number(&collection["last"]["rounds"])? > 0,
+        "unique live collection did not establish healthy capacity exhaustion",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exhaustion_requires_full_live_reads_intact_reserve_and_closed_admission() {
+        let mib: u64 = 1024 * 1024;
+        let good = serde_json::json!({
+            "live_bytes":256*mib, "read_bytes":256*mib, "admitted_mutations":0,
+            "seed_micros":1, "read_micros":1,
+            "initial":{"allocated":400*mib,"domain":{"capacity":2048*mib}},
+            "limits":{"capacity":550*mib,"reserve":150*mib},
+            "after":{"allocated":350*mib,"peak_used":417*mib,"promised":0,
+                "failed":false,"pressured":true,"background_active":false},
+            "host":{"failure":null,"admission":{"failed":false},
+                "store":{"chunks":65536,"failed":false},
+                "collection":{"completed":1,"error":null,
+                    "last":{"capacity_exhausted":true,"rounds":1}}}
+        });
+        check_exhaustion(&good).unwrap();
+        for field in [
+            "read_bytes",
+            "admitted_mutations",
+            "initial",
+            "limits",
+            "after",
+            "host",
+        ] {
+            let mut bad = good.clone();
+            bad[field] = Value::Null;
+            assert!(check_exhaustion(&bad).is_err());
+        }
+        for (pointer, value) in [
+            ("/read_bytes", Value::from(255 * mib)),
+            ("/admitted_mutations", Value::from(1)),
+            ("/after/allocated", Value::from(401 * mib)),
+            ("/after/allocated", Value::from(329 * mib)),
+            ("/after/promised", Value::from(4096)),
+            ("/after/pressured", Value::Bool(false)),
+            ("/host/store/chunks", Value::from(65535)),
+            (
+                "/host/collection/last/capacity_exhausted",
+                Value::Bool(false),
+            ),
+        ] {
+            let mut bad = good.clone();
+            *bad.pointer_mut(pointer).unwrap() = value;
+            assert!(check_exhaustion(&bad).is_err(), "{pointer}");
+        }
+    }
 
     #[test]
     fn missing_reclamation_retained_promises_or_failed_oracles_reject_progress() {

@@ -31,6 +31,7 @@ pub struct Counters {
 
 #[derive(serde::Serialize)]
 pub struct Status {
+    pub capacity_bytes: usize,
     pub counters: Counters,
     pub resident_bytes: usize,
     pub reader_held_bytes: usize,
@@ -46,6 +47,7 @@ struct State {
 }
 
 pub struct Cache {
+    capacity_bytes: usize,
     state: Mutex<State>,
     payload: Arc<Budget>,
     metadata: Arc<Budget>,
@@ -69,6 +71,7 @@ impl Cache {
             .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
         BudgetArc::try_new(
             Self {
+                capacity_bytes: bytes,
                 state: Mutex::new(State {
                     entries,
                     oldest: None,
@@ -130,7 +133,9 @@ impl Cache {
             }
         };
         buffer.as_mut_slice().copy_from_slice(bytes);
-        let buffer = BudgetArc::try_new(buffer, &self.metadata)?;
+        let buffer = BudgetArc::try_new(buffer, &self.metadata).inspect_err(|_| {
+            state.counters.refused += 1;
+        })?;
         // Payload admission implies a free preallocated entry: resident entries
         // each own a block from the same byte account, including evicted readers.
         assert!(state.entries.len() < state.entries.capacity());
@@ -159,6 +164,7 @@ impl Cache {
         let payload = self.payload.usage();
         let resident_bytes = state.entries.len() * BLOCK_SIZE;
         Status {
+            capacity_bytes: self.capacity_bytes,
             counters: state.counters,
             resident_bytes,
             reader_held_bytes: payload.current.bytes - resident_bytes,

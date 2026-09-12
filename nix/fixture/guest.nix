@@ -56,7 +56,7 @@
     ];
     serviceConfig = {
       Type = "oneshot";
-      TimeoutStartSec = 150;
+      TimeoutStartSec = 240;
     };
     script = ''
       export CAS_CORE_TESTS=${cas.tests}/bin/cas-core-tests

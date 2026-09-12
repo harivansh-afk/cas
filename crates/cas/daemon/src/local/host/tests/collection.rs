@@ -1,4 +1,5 @@
 use super::*;
+mod exhaustion;
 
 #[test]
 fn collection_waits_for_guest_owners_and_caller_timeout_does_not_resume_running_io() {
@@ -247,7 +248,6 @@ fn snapshot_and_private_clone_roots_survive_host_collection() {
 #[test]
 #[ignore = "requires an exclusive XFS physical-account fixture"]
 fn automatic_collection_restores_write_admission_after_physical_pressure() {
-    use cas_core::chunk::Chunk;
     let root = tempfile::tempdir().unwrap();
     let resources = Arc::new(Resources::default());
     let config = Config {
@@ -265,18 +265,7 @@ fn automatic_collection_restores_write_admission_after_physical_pressure() {
     // Preexisting unreachable contents represent a recovered store. Freeze the
     // payload volume and admission headroom before measuring the collector.
     const GARBAGE_BYTES: usize = 96 * MAX_REQUEST_BYTES;
-    let mut blocks = [[0u8; BLOCK_SIZE]; cas_core::store::format::MAX_CHUNKS];
-    for first in (0..GARBAGE_BYTES / BLOCK_SIZE).step_by(blocks.len()) {
-        let count = blocks.len().min(GARBAGE_BYTES / BLOCK_SIZE - first);
-        for (offset, block) in blocks[..count].iter_mut().enumerate() {
-            block[..8].copy_from_slice(&((first + offset + 1) as u64).to_le_bytes());
-        }
-        let chunks: Vec<_> = blocks[..count]
-            .iter()
-            .map(|block| Chunk::new(block).unwrap())
-            .collect();
-        store.insert(&chunks).unwrap();
-    }
+    insert_unique_chunks(&mut store, GARBAGE_BYTES, |_| {});
     let before = cas_core::space::Observation::inspect(store.tickets()).unwrap();
     let reserve = cas_core::space::Limits::new(
         before.capacity(),
@@ -480,4 +469,35 @@ fn a_sweep_with_no_compaction_input_does_not_strand_later_background_work() {
     shutdown(host);
     drop(physical);
     assert_eq!(resources.metadata.usage().current, Amount::default());
+}
+
+fn insert_unique_chunks(
+    store: &mut Store,
+    bytes: usize,
+    mut published: impl FnMut(&[cas_core::manifest::format::Extent]),
+) {
+    use cas_core::{chunk::Chunk, manifest::format::Extent};
+    assert!(bytes.is_multiple_of(BLOCK_SIZE));
+    let mut blocks = [[0u8; BLOCK_SIZE]; cas_core::store::format::MAX_CHUNKS];
+    for first in (0..bytes / BLOCK_SIZE).step_by(blocks.len()) {
+        let count = blocks.len().min(bytes / BLOCK_SIZE - first);
+        for (offset, block) in blocks[..count].iter_mut().enumerate() {
+            block[..8].copy_from_slice(&((first + offset + 1) as u64).to_le_bytes());
+        }
+        let chunks: Vec<_> = blocks[..count]
+            .iter()
+            .map(|block| Chunk::new(block).unwrap())
+            .collect();
+        store.insert(&chunks).unwrap();
+        let edits: Vec<_> = chunks
+            .iter()
+            .enumerate()
+            .map(|(offset, chunk)| Extent {
+                start: (first + offset) as u64,
+                end: (first + offset + 1) as u64,
+                hash: Some(chunk.hash()),
+            })
+            .collect();
+        published(&edits);
+    }
 }

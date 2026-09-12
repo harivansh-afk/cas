@@ -5,6 +5,7 @@ use cas_core::{
 use std::{fs, path::Path};
 mod admission;
 mod allocation;
+mod cache;
 mod collection;
 mod initialization;
 mod quiescence;
