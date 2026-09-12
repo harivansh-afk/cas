@@ -16,7 +16,7 @@ mod scenarios;
 #[derive(clap::Args)]
 pub struct Args {
     /// Run source-bound reference, ordering, recovery and store checkpoint checks.
-    #[arg(long, default_value = "C2", value_parser = ["C1", "C2", "C3", "C4"])]
+    #[arg(long, default_value = "C2", value_parser = ["C1", "C2", "C3", "C4", "C5"])]
     checkpoint: String,
     /// Checkout whose exact contents must match the Nix build.
     #[arg(long, default_value = ".")]
@@ -104,9 +104,14 @@ fn fixture_identity(
     case: scenarios::Fixture,
 ) -> io::Result<()> {
     let shared = case.wrapper == "shared";
+    let workload = match case.wrapper {
+        "pressure" => "pressure",
+        "shared" => "shared",
+        _ => "core",
+    };
     if info["source_path"].as_str() != build.source_path.to_str()
         || info["harness"].as_str() != build.harness.to_str()
-        || info["workload"] != if shared { "shared" } else { "core" }
+        || info["workload"] != workload
         || info["live_recovery"] != shared
         || *scenario != json!({"crash_at": case.cut})
     {
@@ -166,10 +171,9 @@ fn scenario(
     process::check_interrupt()?;
     eprintln!("checkpoint {}: {id}", report.checkpoint);
     let directory = output.join("scenarios").join(id);
-    let deadline = if matches!(validation, Validation::Fixture(..)) {
-        510
-    } else {
-        115
+    let deadline = match &validation {
+        Validation::Fixture(_, case) => case.deadline_seconds(),
+        _ => 115,
     };
     let command_result = process::run_logged(command, &directory, Duration::from_secs(deadline))?;
     let validation = if command_result.exit_code != Some(0) || command_result.error.is_some() {
@@ -253,17 +257,16 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
             "profile": "development", "host_cpu_affinity": host::cpu_affinity()?,
             "host_cache_state": "uncontrolled; no paper measurement",
             "guest_state": "fresh boot and new scratch image per scenario; live recovery retains one guest",
-            "guest_io": if args.checkpoint == "C4" {
-                "direct fio references plus buffered ext4 and SQLite in two private filesystem guests"
+            "guest_io": if matches!(args.checkpoint.as_str(), "C4" | "C5") {
+                "direct fio references plus buffered ext4 and SQLite in two private filesystem guests; C5 also requires the declared competing-workload matrix"
             } else {
                 "direct fio; workload contents and seeds retained under source/crates/harnesses/fio"
             },
             "host_payload_io": "O_DIRECT", "durability": "local; serial live reference flushes every write",
             "host_buffer_alignment_bytes":4096, "logical_block_bytes":4096, "virtio_sector_bytes":512,
             "reference_queues":{"count":1, "entries":128},
-            "concurrent_queues":(matches!(args.checkpoint.as_str(), "C3" | "C4")).then(|| json!({"count":4, "entries":256})),
-            "fixture_scenario_deadline_seconds":510,
-            "fixture_inventory":scenarios::fixtures(&args.checkpoint).iter().map(|case| json!({"id":case.id,"crash_at":case.cut})).collect::<Vec<_>>(),
+            "concurrent_queues":(matches!(args.checkpoint.as_str(), "C3" | "C4" | "C5")).then(|| json!({"count":4, "entries":256})),
+            "fixture_inventory":scenarios::fixtures(&args.checkpoint).iter().map(|case| json!({"id":case.id,"crash_at":case.cut,"deadline_seconds":case.deadline_seconds()})).collect::<Vec<_>>(),
             "scenario_deadline_seconds":115, "guest_boot_deadline_seconds":90,
             "cargo_features":"workspace defaults; resolved features in cargo-graph/stdout.log",
             "paper_gates":[],
@@ -354,7 +357,7 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
             report,
         )?;
     }
-    if matches!(args.checkpoint.as_str(), "C3" | "C4") {
+    if matches!(args.checkpoint.as_str(), "C3" | "C4" | "C5") {
         let mut command = Command::new(&build.harness);
         command
             .arg("persistence")
@@ -369,7 +372,7 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
             report,
         )?;
     }
-    for &case in scenarios::fixtures(&args.checkpoint) {
+    for case in scenarios::fixtures(&args.checkpoint) {
         let wrapper = build
             .fixtures
             .get(case.wrapper)
@@ -403,7 +406,7 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
 fn validate_results(report: &Report) -> io::Result<()> {
     let required = scenarios::required(&report.checkpoint);
     if report.schema_version != 1
-        || !matches!(report.checkpoint.as_str(), "C1" | "C2" | "C3" | "C4")
+        || !matches!(report.checkpoint.as_str(), "C1" | "C2" | "C3" | "C4" | "C5")
         || report.scenarios.len() != required.len()
     {
         return Err(io::Error::other(
@@ -483,12 +486,12 @@ pub fn verify(output: &Path) -> io::Result<()> {
             )));
         }
     }
-    if matches!(report.checkpoint.as_str(), "C3" | "C4") {
+    if matches!(report.checkpoint.as_str(), "C3" | "C4" | "C5") {
         persistence::verify(&output.join("scenarios/persistence-model/run"))?;
     }
     if !scenarios::fixtures(&report.checkpoint).is_empty() {
         let build: Build = evidence::read_json(&output.join("build.json"))?;
-        for &case in scenarios::fixtures(&report.checkpoint) {
+        for case in scenarios::fixtures(&report.checkpoint) {
             validate_fixture(&output.join("scenarios").join(case.id), &build, case)?;
         }
     }
@@ -520,57 +523,62 @@ mod tests {
     }
 
     #[test]
-    fn c4_requires_all_store_and_crash_cases_and_exact_fixture_identity() {
-        let mut report = passing_report();
-        report.checkpoint = "C4".into();
-        for id in scenarios::required("C4") {
-            let scenario =
-                serde_json::from_value(serde_json::to_value(&report.scenarios["staging"]).unwrap())
-                    .unwrap();
-            report.scenarios.insert(id.into(), scenario);
-        }
-        assert_eq!(report.scenarios.len(), 40);
-        validate_results(&report).unwrap();
-        for case in scenarios::fixtures("C4") {
-            let removed = report.scenarios.remove(case.id).unwrap();
-            assert!(validate_results(&report).is_err(), "missing {}", case.id);
-            report.scenarios.insert(case.id.into(), removed);
-        }
-        let build = Build {
-            source_revision: "revision".into(),
-            source_path: "source".into(),
-            harness: "harness".into(),
-            package: "package".into(),
-            tools: vec![],
-            wrappers: BTreeMap::new(),
-            fixtures: BTreeMap::new(),
-        };
-        for &case in scenarios::fixtures("C4") {
-            let shared = case.wrapper == "shared";
-            let info = json!({"source_path":"source", "harness":"harness", "workload":if shared {"shared"} else {"core"}, "live_recovery":shared});
-            let scenario = json!({"crash_at":case.cut});
-            fixture_identity(&info, &scenario, &build, case).unwrap();
-            for (key, wrong) in [
-                ("source_path", json!("other")),
-                ("harness", json!("other")),
-                ("workload", json!("wrong")),
-                ("live_recovery", json!(!shared)),
-            ] {
-                let mut changed = info.clone();
-                changed[key] = wrong;
-                assert!(fixture_identity(&changed, &scenario, &build, case).is_err());
-            }
-            assert!(fixture_identity(&info, &json!({}), &build, case).is_err());
-            assert!(fixture_identity(&info, &json!({"crash_at":"wrong"}), &build, case).is_err());
-            assert!(
-                fixture_identity(
-                    &info,
-                    &json!({"crash_at":case.cut,"extra":true}),
-                    &build,
-                    case
+    fn c4_and_c5_require_all_cases_and_exact_fixture_identity() {
+        for (checkpoint, count) in [("C4", 40), ("C5", 41)] {
+            let mut report = passing_report();
+            report.checkpoint = checkpoint.into();
+            for id in scenarios::required(checkpoint) {
+                let scenario = serde_json::from_value(
+                    serde_json::to_value(&report.scenarios["staging"]).unwrap(),
                 )
-                .is_err()
-            );
+                .unwrap();
+                report.scenarios.insert(id.into(), scenario);
+            }
+            assert_eq!(report.scenarios.len(), count);
+            validate_results(&report).unwrap();
+            for case in scenarios::fixtures(checkpoint) {
+                let removed = report.scenarios.remove(case.id).unwrap();
+                assert!(validate_results(&report).is_err(), "missing {}", case.id);
+                report.scenarios.insert(case.id.into(), removed);
+            }
+            let build = Build {
+                source_revision: "revision".into(),
+                source_path: "source".into(),
+                harness: "harness".into(),
+                package: "package".into(),
+                tools: vec![],
+                wrappers: BTreeMap::new(),
+                fixtures: BTreeMap::new(),
+            };
+            for case in scenarios::fixtures(checkpoint) {
+                let shared = case.wrapper == "shared";
+                let info = json!({"source_path":"source", "harness":"harness", "workload":if case.wrapper == "pressure" {"pressure"} else if shared {"shared"} else {"core"}, "live_recovery":shared});
+                let scenario = json!({"crash_at":case.cut});
+                fixture_identity(&info, &scenario, &build, case).unwrap();
+                for (key, wrong) in [
+                    ("source_path", json!("other")),
+                    ("harness", json!("other")),
+                    ("workload", json!("wrong")),
+                    ("live_recovery", json!(!shared)),
+                ] {
+                    let mut changed = info.clone();
+                    changed[key] = wrong;
+                    assert!(fixture_identity(&changed, &scenario, &build, case).is_err());
+                }
+                assert!(fixture_identity(&info, &json!({}), &build, case).is_err());
+                assert!(
+                    fixture_identity(&info, &json!({"crash_at":"wrong"}), &build, case).is_err()
+                );
+                assert!(
+                    fixture_identity(
+                        &info,
+                        &json!({"crash_at":case.cut,"extra":true}),
+                        &build,
+                        case
+                    )
+                    .is_err()
+                );
+            }
         }
     }
 

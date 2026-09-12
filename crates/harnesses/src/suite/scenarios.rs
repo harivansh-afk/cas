@@ -146,10 +146,10 @@ const CONCURRENT: &[Vm] = &[
 
 pub fn vms(checkpoint: &str) -> Vec<Vm> {
     let mut cases = REFERENCES.to_vec();
-    if matches!(checkpoint, "C2" | "C3" | "C4") {
+    if matches!(checkpoint, "C2" | "C3" | "C4" | "C5") {
         cases.extend_from_slice(PACKED);
     }
-    if matches!(checkpoint, "C3" | "C4") {
+    if matches!(checkpoint, "C3" | "C4" | "C5") {
         cases.extend_from_slice(CONCURRENT);
     }
     cases
@@ -161,7 +161,7 @@ pub fn required(checkpoint: &str) -> Vec<&'static str> {
         .map(|(id, _)| *id)
         .chain(vms(checkpoint).into_iter().map(|(id, _, _)| id))
         .collect();
-    if matches!(checkpoint, "C3" | "C4") {
+    if matches!(checkpoint, "C3" | "C4" | "C5") {
         required.push("persistence-model");
     }
     required.extend(fixtures(checkpoint).iter().map(|case| case.id));
@@ -227,6 +227,29 @@ const STORE: &[Fixture] = &[
     },
 ];
 
-pub fn fixtures(checkpoint: &str) -> &'static [Fixture] {
-    if checkpoint == "C4" { STORE } else { &[] }
+impl Fixture {
+    pub fn deadline_seconds(self) -> u64 {
+        if self.wrapper == "pressure" {
+            1260
+        } else {
+            510
+        }
+    }
+}
+
+pub fn fixtures(checkpoint: &str) -> Vec<Fixture> {
+    let mut cases = if matches!(checkpoint, "C4" | "C5") {
+        STORE.to_vec()
+    } else {
+        Vec::new()
+    };
+    if checkpoint == "C5" {
+        cases.push(Fixture {
+            id: "guest-pressure",
+            wrapper: "pressure",
+            executable: "cas-pressure-fixture",
+            cut: None,
+        });
+    }
+    cases
 }

@@ -148,6 +148,7 @@
             };
           };
           sharedRecovery = sharedFor pkgs { liveRecovery = true; };
+          pressure = sharedFor pkgs { pressure = true; };
         in
         {
           default = pkgs.cas;
@@ -159,7 +160,7 @@
           async-smoke = async;
           checkpoints = pkgs.callPackage ./nix/checkpoints.nix {
             fixtures = {
-              inherit xfs;
+              inherit xfs pressure;
               shared = sharedRecovery;
             };
             wrappers = {
@@ -178,7 +179,7 @@
           };
           xfs-fixture = xfs;
           shared-fixture = sharedFor pkgs { };
-          pressure-fixture = sharedFor pkgs { pressure = true; };
+          pressure-fixture = pressure;
           shared-recovery-fixture = sharedRecovery;
           dev-vm = smokeFor pkgs "staging" true;
           census-pilot = (pkgs.callPackage ./nix/census.nix { }).pilot;
