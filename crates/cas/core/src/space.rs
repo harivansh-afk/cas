@@ -1,7 +1,9 @@
 //! Host disk accounting. Callers measure physical allocations and reclaim only
 //! after the filesystem operation and its required sync have succeeded.
 mod filesystem;
+mod staging;
 pub use filesystem::{Governor, Observation, Permit};
+pub use staging::{Image as StagingImage, Permit as StagingPermit, Staging, Usage as StagingUsage};
 use std::{
     io,
     sync::{Arc, Mutex},
