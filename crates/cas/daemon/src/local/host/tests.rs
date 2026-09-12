@@ -6,6 +6,7 @@ use std::{fs, path::Path};
 mod admission;
 mod allocation;
 mod collection;
+mod initialization;
 mod quiescence;
 mod recovery;
 mod rotation;

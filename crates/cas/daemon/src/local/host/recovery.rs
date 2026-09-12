@@ -350,11 +350,11 @@ fn stabilize<L>(
     })
 }
 
-fn path(root: &Path, entry: catalog::Entry) -> PathBuf {
+pub(super) fn path(root: &Path, entry: catalog::Entry) -> PathBuf {
     let group = match entry.kind {
         catalog::Kind::Image { .. } => "images",
         catalog::Kind::Snapshot(_) => "snapshots",
     };
-    let id: String = entry.id.iter().map(|byte| format!("{byte:02x}")).collect();
-    root.join(group).join(id)
+    root.join(group)
+        .join(format!("{:032x}", u128::from_be_bytes(entry.id)))
 }

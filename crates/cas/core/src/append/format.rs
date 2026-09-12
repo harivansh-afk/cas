@@ -97,7 +97,7 @@ impl SegmentHeader {
         Ok(value)
     }
 
-    fn validate(self) -> Result<()> {
+    pub(super) fn validate(self) -> Result<()> {
         require(
             self.store != [0; 16] && self.image != [0; 16],
             "empty identity",

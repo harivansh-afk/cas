@@ -383,3 +383,33 @@ fn publication_retains_locks_and_returns_only_after_directory_sync() {
         assert_eq!(inspect(root.path()).contents().get([2; 16]), Some(image(2)));
     }
 }
+
+#[test]
+fn complete_initial_catalog_is_prepared_before_publication() {
+    let root = tempfile::tempdir().unwrap();
+    let metadata = metadata();
+    let entries = [image(2), image(3), snapshot(4)];
+    let initial = Initial::prepare(STORE, entries.into_iter(), Arc::clone(&metadata)).unwrap();
+    assert!(fs::read_dir(root.path()).unwrap().next().is_none());
+    assert_eq!(initial.output_bytes(), BLOCK_SIZE);
+    assert_eq!(initial.contents().generation(), 1);
+    let catalog = initial
+        .publish(Tickets::open(root.path(), Arc::clone(&metadata)).unwrap())
+        .unwrap();
+    assert_eq!(catalog.contents().entries().collect::<Vec<_>>(), entries);
+    drop(catalog);
+    let inspected = inspect(root.path());
+    assert_eq!(inspected.contents().generation(), 1);
+    assert_eq!(inspected.contents().entries().collect::<Vec<_>>(), entries);
+    drop(inspected);
+    assert_eq!(metadata.usage().current, Amount::default());
+    for entries in [
+        [image(2), image(2)],
+        [image(3), image(2)],
+        [image(0), image(2)],
+    ] {
+        assert!(Initial::prepare(STORE, entries.into_iter(), Arc::clone(&metadata)).is_err());
+        assert_eq!(metadata.usage().current, Amount::default());
+    }
+    assert!(Initial::prepare(STORE, [image(2)].into_iter(), budget(BLOCK_SIZE - 1)).is_err());
+}

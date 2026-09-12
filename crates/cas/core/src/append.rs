@@ -65,6 +65,17 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn validate(self, limits: Limits) -> Result<()> {
+        self.header(1, 1, 0).validate()?;
+        if self.segment_bytes < (format::MAX_BATCH_BYTES + 2 * BLOCK_SIZE) as u64
+            || self.segment_bytes > limits.staging_bytes
+            || limits.intervals < 2 * format::MAX_DESCRIPTORS
+        {
+            return Err(Error::Capacity);
+        }
+        Ok(())
+    }
+
     fn header(self, epoch: u64, number: u64, preceding_sequence: u64) -> SegmentHeader {
         SegmentHeader {
             store: self.store,
@@ -185,13 +196,7 @@ impl Log {
         tickets: Option<Arc<crate::segments::Tickets>>,
         base: Option<crate::manifest::file::View>,
     ) -> Result<Self> {
-        config.header(1, 1, 0).encode()?;
-        if config.segment_bytes < (format::MAX_BATCH_BYTES + 2 * BLOCK_SIZE) as u64
-            || config.segment_bytes > limits.staging_bytes
-            || limits.intervals < 2 * format::MAX_DESCRIPTORS
-        {
-            return Err(Error::Capacity);
-        }
+        config.validate(limits)?;
         let index = Index::new(limits.intervals, Arc::clone(&metadata))?;
         let pins = segment::Pins::new(config.segment_bytes, Arc::clone(&metadata))?;
         let mut segments = BudgetVec::new_in(BudgetAllocator::new(Arc::clone(&metadata)));

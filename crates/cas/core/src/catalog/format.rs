@@ -65,7 +65,26 @@ impl Contents {
     }
 
     pub(super) fn empty(store: Id, metadata: Arc<Budget>) -> io::Result<Self> {
-        let mut contents = Self::allocate(store, 1, 0, metadata)?;
+        Self::initial(store, std::iter::empty(), metadata)
+    }
+
+    pub(super) fn initial(
+        store: Id,
+        entries: impl ExactSizeIterator<Item = Entry>,
+        metadata: Arc<Budget>,
+    ) -> io::Result<Self> {
+        let mut contents = Self::allocate(store, 1, entries.len(), metadata)?;
+        let mut previous = [0; 16];
+        for (index, entry) in entries.enumerate() {
+            entry.validate(store)?;
+            require(entry.id > previous, "catalog IDs are not sorted and unique")?;
+            previous = entry.id;
+            let offset = HEADER + index * ENTRY;
+            encode(
+                entry,
+                &mut contents.buffer.as_mut_slice()[offset..offset + ENTRY],
+            );
+        }
         contents.seal();
         Ok(contents)
     }

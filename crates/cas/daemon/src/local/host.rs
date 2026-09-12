@@ -3,6 +3,7 @@ pub(super) mod admission;
 pub(super) mod capacity;
 pub use admission::Quiescence;
 mod collection;
+pub mod initialize;
 pub mod recovery;
 #[cfg(test)]
 pub(crate) mod tests;

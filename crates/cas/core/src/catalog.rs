@@ -49,6 +49,10 @@ impl Catalog {
     /// the caller reserves and accounts all allocation, including this directory.
     pub fn create(tickets: Arc<Tickets>, store: Id, metadata: Arc<Budget>) -> io::Result<Self> {
         let contents = Contents::empty(store, metadata)?;
+        Self::create_contents(tickets, contents)
+    }
+
+    fn create_contents(tickets: Arc<Tickets>, contents: Contents) -> io::Result<Self> {
         let path = tickets.root().join(DIRECTORY);
         fs::create_dir(&path)?;
         let directory = Directory::open(&path)?;
@@ -128,6 +132,36 @@ impl Catalog {
         self.contents = prepared.contents;
         self.failed = false;
         Ok(())
+    }
+}
+
+/// Fully encoded initial membership, prepared before dependency creation.
+pub struct Initial {
+    contents: Contents,
+}
+
+impl Initial {
+    pub fn prepare(
+        store: Id,
+        entries: impl ExactSizeIterator<Item = Entry>,
+        metadata: Arc<Budget>,
+    ) -> io::Result<Self> {
+        Ok(Self {
+            contents: Contents::initial(store, entries, metadata)?,
+        })
+    }
+
+    pub fn contents(&self) -> &Contents {
+        &self.contents
+    }
+
+    pub fn output_bytes(&self) -> usize {
+        self.contents.bytes().len()
+    }
+
+    /// The coordinator has synced every dependency and reserved physical output.
+    pub fn publish(self, tickets: Arc<Tickets>) -> io::Result<Catalog> {
+        Catalog::create_contents(tickets, self.contents)
     }
 }
 

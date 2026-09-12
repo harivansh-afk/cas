@@ -35,7 +35,7 @@ pub struct Config {
 }
 
 impl Config {
-    fn validate(self) -> io::Result<()> {
+    pub fn validate(self) -> io::Result<()> {
         require(
             self.store != [0; 16]
                 && ((MAX_BATCH_BYTES + BLOCK_SIZE) as u64..=MAX_SEGMENT_BYTES)

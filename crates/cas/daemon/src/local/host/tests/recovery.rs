@@ -75,7 +75,7 @@ fn setup(root: &Path, resources: &Arc<Resources>, snapshot: SnapshotFixture) {
         .unwrap();
 }
 
-fn files(root: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
+pub(super) fn files(root: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
     fn walk(path: &Path, files: &mut BTreeMap<std::path::PathBuf, Vec<u8>>) {
         for entry in fs::read_dir(path).unwrap() {
             let path = entry.unwrap().path();
