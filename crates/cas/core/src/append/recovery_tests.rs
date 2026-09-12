@@ -130,6 +130,89 @@ fn invalid_prefix_epoch_identity_and_missing_ownership_cannot_repair_files() {
 }
 
 #[test]
+fn preparing_live_replay_retains_locks_and_storage_until_explicit_start() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("log");
+    let mut log = create(&path);
+    write(&mut log, 1);
+    drop(log);
+    let segment = path.join(segment::name(1));
+    let file = fs::OpenOptions::new().write(true).open(&segment).unwrap();
+    file.set_len(file.metadata().unwrap().len() + 17).unwrap();
+    drop(file);
+    let before = tree(&path);
+    let plan = inspect(&path)
+        .prepare_live(1, 1, 2, [mutation(1), mutation(2)])
+        .unwrap();
+    assert_eq!(tree(&path), before);
+    assert!(direct::open(&segment, false).is_err());
+    drop(plan);
+    assert_eq!(tree(&path), before);
+    let plan = inspect(&path)
+        .prepare_live(1, 1, 2, [mutation(1), mutation(2)])
+        .unwrap();
+    let mut replay = plan.start(crate::space::Recovery::default()).unwrap();
+    assert_eq!(replay.next(), Some(mutation(2)));
+    assert!(path.join("rejected").exists());
+    replay
+        .replay_next(|bytes| {
+            bytes.fill(2);
+            Ok(())
+        })
+        .unwrap();
+    let mut log = replay.finish().unwrap();
+    assert_eq!(contents(&mut log), vec![2; BLOCK_SIZE]);
+}
+
+#[test]
+fn live_plan_memory_denial_cannot_repair_and_replay_retains_its_table() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("log");
+    let mut log = create(&path);
+    write(&mut log, 1);
+    drop(log);
+    let before = tree(&path);
+    let limit = 128 * MAX_REQUEST_BYTES;
+    let metadata = Budget::new(Amount {
+        bytes: limit,
+        requests: 0,
+    });
+    let inspected =
+        Log::inspect_with_metadata(&path, Limits::default(), Arc::clone(&metadata)).unwrap();
+    let held = metadata
+        .reserve(Amount {
+            bytes: limit - metadata.usage().current.bytes,
+            requests: 0,
+        })
+        .unwrap();
+    let error = inspected
+        .prepare_live(1, 1, 2, [mutation(1), mutation(2)])
+        .err()
+        .unwrap();
+    assert!(matches!(error, Error::Io(error) if error.kind() == io::ErrorKind::OutOfMemory));
+    assert_eq!(tree(&path), before);
+    drop(held);
+    assert_eq!(metadata.usage().current, Amount::default());
+    let inspected =
+        Log::inspect_with_metadata(&path, Limits::default(), Arc::clone(&metadata)).unwrap();
+    let plan = inspected
+        .prepare_live(1, 1, 2, [mutation(1), mutation(2)])
+        .unwrap();
+    let mut replay = plan.start(crate::space::Recovery::default()).unwrap();
+    let charged = metadata.usage().current.bytes;
+    replay
+        .replay_next(|bytes| {
+            bytes.fill(2);
+            Ok(())
+        })
+        .unwrap();
+    assert!(replay.next().is_none());
+    assert_eq!(metadata.usage().current.bytes, charged);
+    drop(replay);
+    assert_eq!(metadata.usage().current, Amount::default());
+}
+
+#[test]
 fn present_old_write_is_verified_but_cannot_overwrite_a_newer_version() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("log");

@@ -1,5 +1,5 @@
 //! Shared namespace and the stable manifest boundary for WAL repair.
-use super::{Config, Limits, LiveRecovery, Log, Mutation, Recovery, Result};
+use super::{Config, Limits, LivePlan, LiveRecovery, Log, Mutation, Recovery, Result};
 use crate::{
     budget::Budget,
     encoding::require,
@@ -67,9 +67,11 @@ impl Log {
         identity(recovery.config(), selected.commit)?;
         Ok(SharedRecovery {
             recovery,
-            commit: selected.commit,
-            end: selected.end,
-            file: manifest.pin(),
+            base: Candidate {
+                commit: selected.commit,
+                end: selected.end,
+                file: manifest.pin(),
+            },
         })
     }
 }
@@ -78,9 +80,24 @@ impl Log {
 /// No ordinary Recovery handle is exposed before the exact base is durable.
 pub struct SharedRecovery {
     recovery: Recovery,
+    base: Candidate,
+}
+
+struct Candidate {
     commit: Commit,
     end: u64,
     file: Arc<File>,
+}
+
+impl Candidate {
+    fn stabilize(self, log: &mut Log, base: View) -> Result<()> {
+        require(
+            base.commit() == self.commit && base.end() == self.end && base.owns(&self.file),
+            "WAL repair requires its exact stabilized manifest candidate",
+        )?;
+        log.base = Some(base);
+        Ok(())
+    }
 }
 
 impl SharedRecovery {
@@ -102,11 +119,7 @@ impl SharedRecovery {
     }
 
     fn stabilized(mut self, base: View) -> Result<Recovery> {
-        require(
-            base.commit() == self.commit && base.end() == self.end && base.owns(&self.file),
-            "WAL repair requires its exact stabilized manifest candidate",
-        )?;
-        self.recovery.log.base = Some(base);
+        self.base.stabilize(&mut self.recovery.log, base)?;
         Ok(self.recovery)
     }
 
@@ -131,8 +144,39 @@ impl SharedRecovery {
         highest_issued: u64,
         mutations: Vec<Mutation>,
     ) -> Result<LiveRecovery> {
-        self.stabilized(base)?
-            .live(required, epoch, highest_issued, mutations)
+        self.prepare_live(required, epoch, highest_issued, mutations)?
+            .start(base, crate::space::Recovery::default())
+    }
+
+    pub fn prepare_live(
+        self,
+        required: u64,
+        epoch: u64,
+        highest_issued: u64,
+        mutations: impl IntoIterator<Item = Mutation>,
+    ) -> Result<SharedLivePlan> {
+        Ok(SharedLivePlan {
+            plan: self
+                .recovery
+                .prepare_live(required, epoch, highest_issued, mutations)?,
+            base: self.base,
+        })
+    }
+}
+
+pub struct SharedLivePlan {
+    plan: LivePlan,
+    base: Candidate,
+}
+
+impl SharedLivePlan {
+    pub fn validate_recovery(&self, repair: crate::space::Recovery<'_>) -> Result<()> {
+        self.plan.validate_recovery(repair)
+    }
+
+    pub fn start(mut self, base: View, repair: crate::space::Recovery<'_>) -> Result<LiveRecovery> {
+        self.base.stabilize(&mut self.plan.recovery.log, base)?;
+        self.plan.start(repair)
     }
 }
 

@@ -7,19 +7,21 @@ use std::os::unix::fs::MetadataExt;
 use std::sync::{Arc, atomic::AtomicU64};
 
 use super::format::SegmentHeader;
+use crate::budget::{Budget, BudgetAllocator};
 pub(super) use crate::directory::Directory;
 use crate::{BLOCK_SIZE, aligned::AlignedBuffer, direct};
+use allocator_api2::vec::Vec;
 
 pub(super) use crate::segments::{name, number};
 
 pub(super) struct Candidates {
     pub highest: u64,
-    pub files: Vec<(u64, Arc<File>)>,
+    pub files: Vec<(u64, Arc<File>), BudgetAllocator>,
 }
 
-pub(super) fn candidates(directory: &Directory) -> io::Result<Candidates> {
+pub(super) fn candidates(directory: &Directory, metadata: Arc<Budget>) -> io::Result<Candidates> {
     let mut highest = 0;
-    let mut paths = Vec::new();
+    let mut files = Vec::new_in(BudgetAllocator::new(metadata));
     for entry in fs::read_dir(&directory.path)? {
         let entry = entry?;
         let name = entry.file_name();
@@ -29,7 +31,11 @@ pub(super) fn candidates(directory: &Directory) -> io::Result<Candidates> {
             if name != super::segment::name(value) {
                 return Err(io::Error::other("invalid segment filename"));
             }
-            paths.push((value, entry.path()));
+            files.try_reserve(1).map_err(|_| {
+                io::Error::new(io::ErrorKind::OutOfMemory, "WAL candidate table exhausted")
+            })?;
+            // Retain the actual locked file, including rejected suffixes.
+            files.push((value, Arc::new(direct::open(&entry.path(), false)?)));
         }
     }
     let archive = directory.path.join("rejected");
@@ -40,12 +46,7 @@ pub(super) fn candidates(directory: &Directory) -> io::Result<Candidates> {
             }
         }
     }
-    paths.sort_by_key(|(number, _)| *number);
-    // Lock the actual file descriptions before recovery can mutate anything.
-    let files = paths
-        .into_iter()
-        .map(|(number, path)| Ok((number, Arc::new(direct::open(&path, false)?))))
-        .collect::<io::Result<Vec<_>>>()?;
+    files.sort_unstable_by_key(|(number, _)| *number);
     Ok(Candidates { highest, files })
 }
 
@@ -114,8 +115,9 @@ impl Segment {
         metadata: Arc<crate::budget::Budget>,
     ) -> io::Result<Arc<Self>> {
         let alignment = direct::Alignment::query(&file)?;
-        let mut buffer = AlignedBuffer::new(BLOCK_SIZE);
-        direct::read(&file, &mut buffer, 0)?;
+        let mut buffer =
+            AlignedBuffer::try_new_in(BLOCK_SIZE, BudgetAllocator::new(Arc::clone(&metadata)))?;
+        direct::read_bytes(&file, buffer.as_mut_slice(), 0)?;
         let header = SegmentHeader::decode(buffer.as_slice()).map_err(io::Error::other)?;
         if header.number != number {
             return Err(io::Error::other("segment filename/header mismatch"));

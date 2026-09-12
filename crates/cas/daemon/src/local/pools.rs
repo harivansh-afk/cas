@@ -11,6 +11,11 @@ pub(super) struct HostPools {
     control: Arc<Budget>,
 }
 
+pub(super) struct ReplayCredits {
+    _request: cas_core::budget::Lease,
+    _append: cas_core::budget::Lease,
+}
+
 impl HostPools {
     pub fn report(&self) -> serde_json::Value {
         serde_json::json!({ "requests": self.requests.usage(), "append": self.append.usage(),
@@ -31,6 +36,23 @@ impl HostPools {
         self.control.reserve(Amount {
             bytes: BLOCK_SIZE,
             requests: 1,
+        })
+    }
+
+    /// Shared recovery executes one bounded mutation per image at a time.
+    pub fn replay(&self, payload: usize) -> Option<ReplayCredits> {
+        if payload > MAX_REQUEST_BYTES {
+            return None;
+        }
+        Some(ReplayCredits {
+            _request: self.requests.reserve(Amount {
+                bytes: 0,
+                requests: 1,
+            })?,
+            _append: self.append.reserve(Amount {
+                bytes: BLOCK_SIZE + payload,
+                requests: 0,
+            })?,
         })
     }
 

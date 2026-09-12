@@ -575,7 +575,10 @@ fn index_budget_denial_precedes_creation_or_recovery_and_publication_reuses_slot
     assert_eq!(denied.usage().current.bytes, 0);
     let recovery = Log::inspect_with_metadata(&path, limits, Arc::clone(&metadata)).unwrap();
     assert_eq!(recovery.status().published, 64);
-    assert_eq!(metadata.usage().current.bytes, charged);
+    assert_eq!(
+        metadata.usage().current.bytes,
+        charged + recovery.candidate_bytes()
+    );
     drop(recovery);
     assert_eq!(metadata.usage().current.bytes, 0);
 }

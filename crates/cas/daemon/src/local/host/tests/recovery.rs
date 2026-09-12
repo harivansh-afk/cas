@@ -3,6 +3,7 @@ use super::*;
 use cas_core::catalog::{Catalog, Change, Entry, Kind as EntryKind};
 use std::collections::BTreeMap;
 use std::io::Write;
+mod live;
 
 enum SnapshotFixture {
     Absent,

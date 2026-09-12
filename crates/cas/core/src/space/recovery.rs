@@ -11,6 +11,10 @@ pub struct Recovery<'a> {
 }
 
 impl<'a> Recovery<'a> {
+    pub(crate) fn physical(&self) -> Option<Arc<Governor>> {
+        self.physical.cloned()
+    }
+
     pub fn governed(physical: &'a Arc<Governor>) -> Self {
         Self {
             physical: Some(physical),
@@ -18,6 +22,10 @@ impl<'a> Recovery<'a> {
     }
 
     pub fn validate_output(&self, bytes: u64) -> io::Result<()> {
+        self.output_bytes(bytes).map(|_| ())
+    }
+
+    fn output_bytes(&self, bytes: u64) -> io::Result<u64> {
         let total = bytes
             .checked_add(METADATA_MARGIN)
             .ok_or_else(|| io::Error::other("recovery output bound overflow"))?;
@@ -30,7 +38,7 @@ impl<'a> Recovery<'a> {
                 "recovery output exceeds progress reserve",
             ));
         }
-        Ok(())
+        Ok(total)
     }
 
     pub fn output<T>(
@@ -38,15 +46,10 @@ impl<'a> Recovery<'a> {
         bytes: u64,
         operation: impl FnOnce() -> io::Result<T>,
     ) -> io::Result<T> {
-        self.validate_output(bytes)?;
+        let bytes = self.output_bytes(bytes)?;
         match self.physical {
             None => operation(),
-            Some(physical) => {
-                let bytes = bytes
-                    .checked_add(METADATA_MARGIN)
-                    .ok_or_else(|| io::Error::other("recovery output bound overflow"))?;
-                physical.background(bytes)?.run(operation)
-            }
+            Some(physical) => physical.background(bytes)?.run(operation),
         }
     }
 

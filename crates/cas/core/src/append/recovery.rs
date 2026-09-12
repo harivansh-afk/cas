@@ -1,6 +1,5 @@
 //! Inspect under exclusive IO locks before choosing fresh or live recovery.
 use std::{
-    collections::VecDeque,
     fs::{self, File},
     io,
     path::Path,
@@ -13,7 +12,9 @@ use super::{
     index::Index,
     segment::{self, Directory, Segment},
 };
+use crate::budget::BudgetAllocator;
 use crate::{BLOCK_SIZE, aligned::AlignedBuffer, direct};
+use allocator_api2::vec::Vec as BudgetVec;
 
 impl Log {
     pub fn open(path: impl AsRef<Path>, limits: Limits) -> Result<Self> {
@@ -56,7 +57,7 @@ impl Log {
         let segment::Candidates {
             highest: highest_segment,
             files: candidates,
-        } = super::segment::candidates(&directory)?;
+        } = super::segment::candidates(&directory, Arc::clone(&metadata))?;
         let (number, file) = candidates
             .first()
             .ok_or_else(|| io::Error::other("no valid image segment"))?;
@@ -169,8 +170,11 @@ impl Log {
         if file_length - self.offset < BLOCK_SIZE as u64 {
             return Ok(false);
         }
-        let mut buffer = AlignedBuffer::new(BLOCK_SIZE);
-        direct::read(&segment.file, &mut buffer, self.offset)?;
+        let mut buffer = AlignedBuffer::try_new_in(
+            BLOCK_SIZE,
+            BudgetAllocator::new(Arc::clone(&self.metadata)),
+        )?;
+        direct::read_bytes(&segment.file, buffer.as_mut_slice(), self.offset)?;
         let Ok(header) = Header::decode(buffer.as_slice(), self.config.image_bytes) else {
             return Ok(false);
         };
@@ -198,8 +202,15 @@ impl Log {
                     return Err(Error::Capacity);
                 }
                 if envelope.payload_bytes != 0 {
-                    let mut payload = AlignedBuffer::new(envelope.payload_bytes);
-                    direct::read(&segment.file, &mut payload, self.offset + BLOCK_SIZE as u64)?;
+                    let mut payload = AlignedBuffer::try_new_in(
+                        envelope.payload_bytes,
+                        BudgetAllocator::new(Arc::clone(&self.metadata)),
+                    )?;
+                    direct::read_bytes(
+                        &segment.file,
+                        payload.as_mut_slice(),
+                        self.offset + BLOCK_SIZE as u64,
+                    )?;
                     if header.verify_payload(payload.as_slice()).is_err() {
                         return Ok(false);
                     }
@@ -218,11 +229,15 @@ impl Log {
 /// rejected suffix, until validation and repair have finished.
 pub struct Recovery {
     pub(super) log: Log,
-    candidates: Vec<(u64, Arc<File>)>,
+    candidates: BudgetVec<(u64, Arc<File>), BudgetAllocator>,
     rejected: Option<(usize, u64)>,
 }
 
 impl Recovery {
+    pub fn candidate_bytes(&self) -> usize {
+        self.candidates.capacity() * size_of::<(u64, Arc<File>)>()
+    }
+
     pub fn config(&self) -> Config {
         self.log.config
     }
@@ -258,22 +273,41 @@ impl Recovery {
     /// Shared-state reconciliation and guest descriptor validation precede this
     /// call. Missing tail mutations must all still have an owned request.
     pub fn live(
-        mut self,
+        self,
         required: u64,
         epoch: u64,
         highest_issued: u64,
-        mut mutations: Vec<Mutation>,
+        mutations: Vec<Mutation>,
     ) -> Result<LiveRecovery> {
+        self.prepare_live(required, epoch, highest_issued, mutations)?
+            .start(crate::space::Recovery::default())
+    }
+
+    pub fn prepare_live(
+        self,
+        required: u64,
+        epoch: u64,
+        highest_issued: u64,
+        mutations: impl IntoIterator<Item = Mutation>,
+    ) -> Result<LivePlan> {
         self.require_prefix(required)?;
         let prefix = self.log.published;
-        if epoch != self.log.current().header.epoch
-            || prefix > highest_issued
-            || mutations.len() > 1024
-        {
+        if epoch != self.log.current().header.epoch || prefix > highest_issued {
             return Err(
                 io::Error::other("live epoch, issued prefix or replay bound differs").into(),
             );
         }
+        let mut retained = BudgetVec::new_in(BudgetAllocator::new(Arc::clone(&self.log.metadata)));
+        for mutation in mutations {
+            if retained.len() == 1024 {
+                return Err(io::Error::other("live mutation count exceeds replay bound").into());
+            }
+            retained.try_reserve(1).map_err(|_| {
+                io::Error::new(io::ErrorKind::OutOfMemory, "live mutation table exhausted")
+            })?;
+            retained.push(mutation);
+        }
+        let mut mutations = retained;
         mutations.sort_unstable_by_key(|mutation| mutation.sequence);
         let mut next = prefix;
         for (i, mutation) in mutations.iter().enumerate() {
@@ -311,19 +345,11 @@ impl Recovery {
             return Err(io::Error::other("issued tail has no inflight owner").into());
         }
         self.verify_identities(&mutations)?;
-        self.repair(crate::space::Recovery::default())?;
-        // A retained fence may fill its segment. All retained files have synced
-        // before creating a successor, but only finish() establishes recovered E.
-        if self.log.offset + BLOCK_SIZE as u64 > self.log.config.segment_bytes {
-            self.log.rotate(Some(epoch))?;
-        }
-        let remaining = mutations
-            .into_iter()
-            .filter(|m| m.sequence > prefix)
-            .collect();
-        Ok(LiveRecovery {
-            log: self.log,
-            remaining,
+        mutations.retain(|mutation| mutation.sequence > prefix);
+        Ok(LivePlan {
+            recovery: self,
+            remaining: mutations,
+            epoch,
         })
     }
 
@@ -333,7 +359,10 @@ impl Recovery {
             return Ok(());
         }
         let mut found = 0;
-        let mut buffer = AlignedBuffer::new(BLOCK_SIZE);
+        let mut buffer = AlignedBuffer::try_new_in(
+            BLOCK_SIZE,
+            BudgetAllocator::new(Arc::clone(&self.log.metadata)),
+        )?;
         for (index, segment) in self.log.segments.iter().enumerate() {
             let limit = if index + 1 == self.log.segments.len() {
                 self.log.offset
@@ -342,7 +371,7 @@ impl Recovery {
             };
             let mut offset = BLOCK_SIZE as u64;
             while offset < limit {
-                direct::read(&segment.file, &mut buffer, offset)?;
+                direct::read_bytes(&segment.file, buffer.as_mut_slice(), offset)?;
                 let header = Header::decode(buffer.as_slice(), self.log.config.image_bytes)?;
                 for descriptor in header.descriptors() {
                     if let Ok(index) =
@@ -440,19 +469,51 @@ impl From<format::Descriptor> for Mutation {
 
 /// A serving Log is unavailable until replay and its recovery fence finish.
 /// Dropping this handle is safe; another replacement reinspects the same WAL.
+pub struct LivePlan {
+    pub(super) recovery: Recovery,
+    remaining: BudgetVec<Mutation, BudgetAllocator>,
+    epoch: u64,
+}
+
+impl LivePlan {
+    pub fn validate_recovery(&self, repair: crate::space::Recovery<'_>) -> Result<()> {
+        self.recovery.validate_recovery(repair)
+    }
+
+    pub fn start(mut self, repair: crate::space::Recovery<'_>) -> Result<LiveRecovery> {
+        self.recovery.repair(repair)?;
+        let mut log = self.recovery.log;
+        // A retained fence may fill its segment. Only finish establishes E.
+        if log.offset + BLOCK_SIZE as u64 > log.config.segment_bytes {
+            repair.output(log.config.segment_bytes, || {
+                log.rotate(Some(self.epoch)).map_err(io::Error::other)
+            })?;
+        }
+        Ok(LiveRecovery {
+            log,
+            remaining: self.remaining,
+            next: 0,
+            physical: repair.physical(),
+        })
+    }
+}
+
 pub struct LiveRecovery {
     log: Log,
-    remaining: VecDeque<Mutation>,
+    remaining: BudgetVec<Mutation, BudgetAllocator>,
+    next: usize,
+    physical: Option<Arc<crate::space::Governor>>,
 }
 
 impl LiveRecovery {
     pub fn next(&self) -> Option<Mutation> {
-        self.remaining.front().copied()
+        self.remaining.get(self.next).copied()
     }
     pub fn published(&self) -> u64 {
         self.log.published
     }
 
+    /// The caller reserves the append buffer before gathering guest payload.
     pub fn replay_next(
         &mut self,
         gather: impl FnOnce(&mut [u8]) -> io::Result<()>,
@@ -473,16 +534,28 @@ impl LiveRecovery {
         if self.log.published.checked_add(1) != Some(mutation.sequence) {
             return Err(io::Error::other("replay is not the next original mutation").into());
         }
-        self.log.append(builder)?;
-        self.remaining.pop_front();
+        let repair = self.physical.as_ref().map_or_else(
+            crate::space::Recovery::default,
+            crate::space::Recovery::governed,
+        );
+        repair.output(self.log.config.segment_bytes, || {
+            self.log.append(builder).map_err(io::Error::other)
+        })?;
+        self.next += 1;
         Ok(mutation)
     }
 
     pub fn finish(mut self) -> Result<Log> {
-        if !self.remaining.is_empty() {
+        if self.next != self.remaining.len() {
             return Err(io::Error::other("replay has unresolved mutations").into());
         }
-        self.log.flush()?;
+        let repair = self.physical.as_ref().map_or_else(
+            crate::space::Recovery::default,
+            crate::space::Recovery::governed,
+        );
+        repair.output(self.log.config.segment_bytes, || {
+            self.log.flush().map_err(io::Error::other)
+        })?;
         Ok(self.log)
     }
 }

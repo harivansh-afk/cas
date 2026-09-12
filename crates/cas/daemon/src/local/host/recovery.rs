@@ -3,6 +3,8 @@ use super::*;
 use cas_core::{catalog, catalog::Catalog, manifest::file, segments::Tickets};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+mod live;
+pub use live::{Prepared, Replay, Retained};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Prefix {
@@ -21,20 +23,20 @@ pub struct Config {
     pub append: append::Limits,
 }
 
-pub struct Image {
+pub struct Image<L = append::SharedRecovery> {
     pub(super) manifest: file::Inspection,
-    pub(super) log: append::SharedRecovery,
+    pub(super) log: L,
     pub(super) required: Prefix,
 }
 
 /// A complete, locked dependency graph, still without serving or repair access.
-pub struct Inspection {
+pub struct Inspection<L = append::SharedRecovery> {
     segment_bytes: u64,
     pub(super) resources: Arc<Resources>,
     pub(super) tickets: Arc<Tickets>,
     pub(super) catalog: catalog::Inspection,
     pub(super) store: cas_core::store::file::Inspection,
-    pub(super) images: BudgetVec<Image, BudgetAllocator>,
+    pub(super) images: BudgetVec<Image<L>, BudgetAllocator>,
     pub(super) snapshots: BudgetVec<(catalog::Id, file::SnapshotInspection), BudgetAllocator>,
 }
 
@@ -214,61 +216,21 @@ pub struct Checked {
 
 impl Checked {
     pub fn recover_cold(self, limits: cas_core::space::Limits) -> io::Result<Recovered> {
-        let physical =
-            cas_core::space::Governor::open(Arc::clone(&self.inspected.tickets), limits)?;
-        self.recover_cold_with(physical)
-    }
-
-    fn recover_cold_with(
-        mut self,
-        physical: Arc<cas_core::space::Governor>,
-    ) -> io::Result<Recovered> {
         if !self.cold {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "retained recovery cannot use cold stabilization",
             ));
         }
-        let inspected = &mut self.inspected;
-        capacity::validate_geometry(inspected.segment_bytes, &inspected.tickets, &physical)?;
-        let repair = cas_core::space::Recovery::governed(&physical);
-        inspected.store.validate_recovery(repair)?;
-        inspected.catalog.validate_recovery(repair)?;
-        for image in &inspected.images {
-            image.manifest.validate_recovery(repair)?;
-            image
-                .log
-                .validate_recovery(repair)
-                .map_err(io::Error::other)?;
-        }
-        for (_, snapshot) in &inspected.snapshots {
-            snapshot.validate_recovery(repair)?;
-        }
-        let mut images = reserved_vec(inspected.images.len(), &inspected.resources.metadata)?;
-        let mut snapshots = reserved_vec(inspected.snapshots.len(), &inspected.resources.metadata)?;
-        // All roots and output bounds have passed before the first repair.
-        let inspected = self.inspected;
-        let store = inspected.store.recover_with(repair)?;
-        for image in inspected.images {
-            let manifest = image.manifest.recover_with(repair)?;
-            let log = image
-                .log
-                .fresh_with(manifest.view()?, image.required.published, repair)
-                .map_err(io::Error::other)?;
-            images.push((log, manifest));
-        }
-        for (_, snapshot) in inspected.snapshots {
-            snapshots.push(repair.output(0, || snapshot.recover())?);
-        }
-        let catalog = repair.output(0, || inspected.catalog.recover())?;
-        Ok(Recovered {
-            resources: inspected.resources,
-            physical,
-            catalog,
-            store,
-            images,
-            snapshots,
-        })
+        stabilize(
+            self.inspected,
+            limits,
+            |log, repair| log.validate_recovery(repair).map_err(io::Error::other),
+            |log, manifest, required, repair| {
+                log.fresh_with(manifest.view()?, required.published, repair)
+                    .map_err(io::Error::other)
+            },
+        )
     }
 
     pub fn contents(&self) -> &catalog::Contents {
@@ -321,6 +283,47 @@ impl Recovered {
             Some(self.catalog),
         )
     }
+}
+
+fn stabilize<L>(
+    mut inspected: Inspection<L>,
+    limits: cas_core::space::Limits,
+    validate: impl Fn(&L, cas_core::space::Recovery<'_>) -> io::Result<()>,
+    mut recover: impl FnMut(L, &Manifest, Prefix, cas_core::space::Recovery<'_>) -> io::Result<Log>,
+) -> io::Result<Recovered> {
+    let physical = cas_core::space::Governor::open(Arc::clone(&inspected.tickets), limits)?;
+    capacity::validate_geometry(inspected.segment_bytes, &inspected.tickets, &physical)?;
+    let repair = cas_core::space::Recovery::governed(&physical);
+    inspected.store.validate_recovery(repair)?;
+    inspected.catalog.validate_recovery(repair)?;
+    for image in &inspected.images {
+        image.manifest.validate_recovery(repair)?;
+        validate(&image.log, repair)?;
+    }
+    for (_, snapshot) in &inspected.snapshots {
+        snapshot.validate_recovery(repair)?;
+    }
+    let mut images = reserved_vec(inspected.images.len(), &inspected.resources.metadata)?;
+    let mut snapshots = reserved_vec(inspected.snapshots.len(), &inspected.resources.metadata)?;
+    // All roots and output bounds have passed before the first repair.
+    let store = inspected.store.recover_with(repair)?;
+    for image in inspected.images {
+        let manifest = image.manifest.recover_with(repair)?;
+        let log = recover(image.log, &manifest, image.required, repair)?;
+        images.push((log, manifest));
+    }
+    for (_, snapshot) in inspected.snapshots {
+        snapshots.push(repair.output(0, || snapshot.recover())?);
+    }
+    let catalog = repair.output(0, || inspected.catalog.recover())?;
+    Ok(Recovered {
+        resources: inspected.resources,
+        physical,
+        catalog,
+        store,
+        images,
+        snapshots,
+    })
 }
 
 fn path(root: &Path, entry: catalog::Entry) -> PathBuf {

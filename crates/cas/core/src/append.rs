@@ -30,9 +30,9 @@ pub use crate::direct::Alignment;
 pub use compaction::{Compacted, Input, Prepared as PreparedCompaction, Selection};
 pub use read::{ReadPlan, ReadRange};
 pub use reclaim::{ReclaimStats, Reclaimed, Reclamation};
-pub use recovery::{LiveRecovery, Mutation, Recovery};
+pub use recovery::{LivePlan, LiveRecovery, Mutation, Recovery};
 pub use rotation::{Rotated, Rotation, RotationKind};
-pub use shared::SharedRecovery;
+pub use shared::{SharedLivePlan, SharedRecovery};
 pub use submission::{Position, Submission};
 
 #[derive(Debug, thiserror::Error)]

@@ -640,6 +640,117 @@ fn missing_prefix_above_d_and_an_unrelated_identical_view_are_rejected() {
 }
 
 #[test]
+fn prepared_live_plan_is_read_only_and_requires_the_exact_stabilized_manifest() {
+    let mut f = Fixture::new();
+    write(f.log(), 0, 10);
+    let epoch = f.log().status().epoch;
+    drop(f.log.take());
+    let segment = f.path().join(segment::name(epoch));
+    let file = fs::OpenOptions::new().write(true).open(&segment).unwrap();
+    file.set_len(file.metadata().unwrap().len() + 17).unwrap();
+    drop(file);
+    let (manifest, wal) = f.inspect();
+    let before = snapshot(f.root.path());
+    let retained = Mutation {
+        id: id(1),
+        sequence: 1,
+        offset: 0,
+        length: BLOCK_SIZE as u64,
+        kind: Kind::Write,
+    };
+    let plan = wal.prepare_live(1, epoch, 1, [retained]).unwrap();
+    assert_eq!(snapshot(f.root.path()), before);
+    let other = tempfile::tempdir().unwrap();
+    let other_manifest = Manifest::create(other.path(), Fixture::identity(), memory()).unwrap();
+    assert!(
+        plan.start(
+            other_manifest.view().unwrap(),
+            crate::space::Recovery::default()
+        )
+        .is_err()
+    );
+    assert_eq!(snapshot(f.root.path()), before);
+    drop(manifest);
+    let (manifest, wal) = f.inspect();
+    let plan = wal.prepare_live(1, epoch, 1, [retained]).unwrap();
+    let manifest = manifest.recover().unwrap();
+    let replay = plan
+        .start(manifest.view().unwrap(), crate::space::Recovery::default())
+        .unwrap();
+    assert!(replay.next().is_none());
+    let mut log = replay.finish().unwrap();
+    let mut output = AlignedBuffer::new(BLOCK_SIZE);
+    log.read_into(0, &mut output).unwrap();
+    assert_eq!(output.as_slice(), &[10; BLOCK_SIZE]);
+    assert_eq!(snapshot(&f.path().join("rejected"))[0].1, vec![0; 17]);
+}
+
+#[test]
+#[ignore = "requires the exclusive XFS allocation fixture"]
+fn live_replay_retains_its_physical_governor_through_append_and_finish() {
+    let mut f = Fixture::new();
+    let epoch = f.log().status().epoch;
+    let (manifest, wal) = f.inspect();
+    let manifest = manifest.recover().unwrap();
+    let limits = crate::space::Limits::new(
+        crate::space::Observation::inspect(&f.tickets)
+            .unwrap()
+            .capacity(),
+        CONFIG.segment_bytes,
+        crate::manifest::tree::MAX_TRANSACTION_BYTES as u64,
+    )
+    .unwrap();
+    let physical = crate::space::Governor::open(Arc::clone(&f.tickets), limits).unwrap();
+    let weak = Arc::downgrade(&physical);
+    let mutation = Mutation {
+        id: id(1),
+        sequence: 1,
+        offset: 0,
+        length: BLOCK_SIZE as u64,
+        kind: Kind::Write,
+    };
+    let plan = wal.prepare_live(0, epoch, 1, [mutation]).unwrap();
+    let mut replay = plan
+        .start(
+            manifest.view().unwrap(),
+            crate::space::Recovery::governed(&physical),
+        )
+        .unwrap();
+    drop(physical);
+    let before = snapshot(f.root.path());
+    let held = weak
+        .upgrade()
+        .unwrap()
+        .background(BLOCK_SIZE as u64)
+        .unwrap();
+    let error = replay
+        .replay_next(|bytes| {
+            bytes.fill(9);
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(
+        matches!(error, super::super::Error::Io(error) if error.kind() == io::ErrorKind::WouldBlock)
+    );
+    assert_eq!(replay.published(), 0);
+    assert_eq!(snapshot(f.root.path()), before);
+    drop(held);
+    replay
+        .replay_next(|bytes| {
+            bytes.fill(9);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(weak.upgrade().unwrap().status().promised, 0);
+    let mut log = replay.finish().unwrap();
+    assert!(weak.upgrade().is_none());
+    assert_eq!(log.status().durable, 1);
+    let mut output = AlignedBuffer::new(BLOCK_SIZE);
+    log.read_into(0, &mut output).unwrap();
+    assert_eq!(output.as_slice(), &[9; BLOCK_SIZE]);
+}
+
+#[test]
 fn a_failed_shared_segment_creation_poison_stops_every_allocator_user() {
     let mut f = Fixture::new();
     f.log().flush().unwrap();
