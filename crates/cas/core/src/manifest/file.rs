@@ -20,6 +20,9 @@ const NAME: &str = "manifest.v2";
 mod snapshot;
 pub use snapshot::{Snapshot, SnapshotInspection, SnapshotKey};
 
+mod cache;
+pub use cache::PageCache;
+
 mod pins;
 use pins::Pin;
 pub use pins::Roots;
@@ -103,7 +106,7 @@ impl View {
         Ok(Read {
             lookup: Lookup::new(self.commit, self.end, block)?,
             file: Arc::clone(&self.file),
-            _pin: self.pin.clone(),
+            pin: self.pin.clone(),
         })
     }
     pub fn tree(&self) -> io::Result<Tree<'_, File>> {
@@ -120,7 +123,7 @@ impl View {
 pub struct Read {
     lookup: Lookup,
     file: Arc<File>,
-    _pin: Pin,
+    pin: Pin,
 }
 
 impl Read {
@@ -132,6 +135,33 @@ impl Read {
     }
     pub fn accept(&mut self, offset: u64, bytes: &[u8]) -> io::Result<LookupState> {
         self.lookup.accept(offset, bytes)
+    }
+
+    /// Drive cached pages through the same validation as actual page CQEs.
+    pub fn cached(&mut self, cache: &PageCache) -> io::Result<LookupState> {
+        let mut state = self.state()?;
+        while let LookupState::Page { offset, .. } = state {
+            let Some(page) = cache.get(&self.pin.page_key(offset)) else {
+                break;
+            };
+            state = self.accept(offset, &page.bytes)?;
+        }
+        Ok(state)
+    }
+
+    pub fn accept_cached(
+        &mut self,
+        offset: u64,
+        bytes: &[u8],
+        cache: &PageCache,
+    ) -> io::Result<LookupState> {
+        self.accept(offset, bytes)?;
+        match cache.fill(self.pin.page_key(offset), bytes) {
+            Ok(()) => (),
+            Err(error) if error.kind() == io::ErrorKind::OutOfMemory => (),
+            Err(error) => return Err(error),
+        }
+        self.cached(cache)
     }
 }
 

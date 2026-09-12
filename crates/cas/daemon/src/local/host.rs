@@ -25,6 +25,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 pub struct Resources {
     pub cache_bytes: usize,
+    pub metadata_cache_bytes: usize,
     pub metadata: Arc<Budget>,
     pub compaction: Arc<Budget>,
     pools: pools::HostPools,
@@ -35,6 +36,7 @@ impl Default for Resources {
     fn default() -> Self {
         Self {
             cache_bytes: 256 * MAX_REQUEST_BYTES,
+            metadata_cache_bytes: 16 * MAX_REQUEST_BYTES,
             metadata: metadata_budget(),
             compaction: metadata_budget(),
             pools: pools::HostPools::new(),
@@ -54,6 +56,7 @@ struct SharedHost {
     gate: BudgetArc<state::HostGate>,
     reader: Reader,
     cache: BudgetArc<cas_core::cache::Cache>,
+    pages: BudgetArc<cas_core::manifest::file::PageCache>,
     fetches: Fetches,
     resources: Arc<Resources>,
     attached: AtomicUsize,
@@ -216,6 +219,10 @@ impl Host {
                 gate,
                 reader: store.reader()?,
                 cache: cas_core::cache::Cache::new(resources.cache_bytes, &metadata)?,
+                pages: cas_core::manifest::file::PageCache::new(
+                    resources.metadata_cache_bytes,
+                    &metadata,
+                )?,
                 fetches: cas_core::cache::fills::Registry::new(
                     pools::HOST_REQUESTS,
                     pools::HOST_REQUESTS,
@@ -426,7 +433,7 @@ impl Host {
     pub fn report(&self) -> serde_json::Value {
         serde_json::json!({ "failure": self.shared.gate.failure(), "store": self.store_status(),
             "admission": self.shared.admission.status(),
-            "cache": self.shared.cache.status(),
+            "cache": self.shared.cache.status(), "metadata_cache": self.shared.pages.status(),
             "fetches": self.shared.fetches.status(),
             "collection": *self.shared.collection.lock().expect("collection status poisoned"),
             "pools": self.shared.resources.pools.report(), "metadata": self.shared.resources.metadata.usage(),
@@ -542,6 +549,9 @@ impl Port {
     }
     pub fn cache(&self) -> BudgetArc<cas_core::cache::Cache> {
         self.shared.cache.clone()
+    }
+    pub fn page_cache(&self) -> BudgetArc<cas_core::manifest::file::PageCache> {
+        self.shared.pages.clone()
     }
     pub fn fetches(&self) -> Fetches {
         self.shared.fetches.clone()

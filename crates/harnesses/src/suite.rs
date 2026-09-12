@@ -15,8 +15,8 @@ mod scenarios;
 
 #[derive(clap::Args)]
 pub struct Args {
-    /// Run source-bound reference, packed (C2), or concurrent recovery (C3) checks.
-    #[arg(long, default_value = "C2", value_parser = ["C1", "C2", "C3"])]
+    /// Run source-bound reference, ordering, recovery and store checkpoint checks.
+    #[arg(long, default_value = "C2", value_parser = ["C1", "C2", "C3", "C4"])]
     checkpoint: String,
     /// Checkout whose exact contents must match the Nix build.
     #[arg(long, default_value = ".")]
@@ -37,6 +37,8 @@ struct Build {
     package: PathBuf,
     tools: Vec<PathBuf>,
     wrappers: BTreeMap<String, PathBuf>,
+    #[serde(default)]
+    fixtures: BTreeMap<String, PathBuf>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -95,10 +97,47 @@ fn validate_vm(directory: &Path, source: &Path) -> io::Result<Vec<String>> {
     ])
 }
 
+fn fixture_identity(
+    info: &Value,
+    scenario: &Value,
+    build: &Build,
+    case: scenarios::Fixture,
+) -> io::Result<()> {
+    let shared = case.wrapper == "shared";
+    if info["source_path"].as_str() != build.source_path.to_str()
+        || info["harness"].as_str() != build.harness.to_str()
+        || info["workload"] != if shared { "shared" } else { "core" }
+        || info["live_recovery"] != shared
+        || *scenario != json!({"crash_at": case.cut})
+    {
+        return Err(io::Error::other(
+            "fixture identity or crash scenario differs from checkpoint inventory",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_fixture(
+    directory: &Path,
+    build: &Build,
+    case: scenarios::Fixture,
+) -> io::Result<Vec<String>> {
+    let run = directory.join("run");
+    crate::fixture::verify(&run)?;
+    let info: Value = evidence::read_json(&run.join("build.json"))?;
+    let scenario: Value = evidence::read_json(&run.join("guest/scenario.json"))?;
+    fixture_identity(&info, &scenario, build, case)?;
+    Ok(vec![
+        "nested fixture integrity and semantic checks passed".into(),
+        "fixture source, executable, workload and crash cut matched the inventory".into(),
+    ])
+}
+
 enum Validation<'a> {
     Command,
     Guest(&'a Path),
     Persistence(&'a Path),
+    Fixture(&'a Build, scenarios::Fixture),
 }
 
 fn validate_model(directory: &Path, executable: &Path) -> io::Result<Vec<String>> {
@@ -127,7 +166,12 @@ fn scenario(
     process::check_interrupt()?;
     eprintln!("checkpoint {}: {id}", report.checkpoint);
     let directory = output.join("scenarios").join(id);
-    let command_result = process::run_logged(command, &directory, Duration::from_secs(115))?;
+    let deadline = if matches!(validation, Validation::Fixture(..)) {
+        510
+    } else {
+        115
+    };
+    let command_result = process::run_logged(command, &directory, Duration::from_secs(deadline))?;
     let validation = if command_result.exit_code != Some(0) || command_result.error.is_some() {
         Err(io::Error::other(
             "scenario command failed; see retained logs",
@@ -137,6 +181,7 @@ fn scenario(
             Validation::Command => Ok(vec!["command exited successfully".into()]),
             Validation::Guest(source) => validate_vm(&directory, source),
             Validation::Persistence(executable) => validate_model(&directory, executable),
+            Validation::Fixture(build, case) => validate_fixture(&directory, build, case),
         }
     };
     let (passed, assertions, error) = match validation {
@@ -208,11 +253,17 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
             "profile": "development", "host_cpu_affinity": host::cpu_affinity()?,
             "host_cache_state": "uncontrolled; no paper measurement",
             "guest_state": "fresh boot and new scratch image per scenario; live recovery retains one guest",
-            "guest_io": "direct fio; workload contents and seeds retained under source/crates/harnesses/fio",
+            "guest_io": if args.checkpoint == "C4" {
+                "direct fio references plus buffered ext4 and SQLite in two private filesystem guests"
+            } else {
+                "direct fio; workload contents and seeds retained under source/crates/harnesses/fio"
+            },
             "host_payload_io": "O_DIRECT", "durability": "local; serial live reference flushes every write",
             "host_buffer_alignment_bytes":4096, "logical_block_bytes":4096, "virtio_sector_bytes":512,
             "reference_queues":{"count":1, "entries":128},
-            "concurrent_queues":(args.checkpoint == "C3").then(|| json!({"count":4, "entries":256})),
+            "concurrent_queues":(matches!(args.checkpoint.as_str(), "C3" | "C4")).then(|| json!({"count":4, "entries":256})),
+            "fixture_scenario_deadline_seconds":510,
+            "fixture_inventory":scenarios::fixtures(&args.checkpoint).iter().map(|case| json!({"id":case.id,"crash_at":case.cut})).collect::<Vec<_>>(),
             "scenario_deadline_seconds":115, "guest_boot_deadline_seconds":90,
             "cargo_features":"workspace defaults; resolved features in cargo-graph/stdout.log",
             "paper_gates":[],
@@ -223,6 +274,7 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
         .args(["path-info", "--recursive", "--json"])
         .arg(&build.package)
         .args(build.wrappers.values())
+        .args(build.fixtures.values())
         .args(&build.tools)
         .current_dir(&checkout);
     let result = process::run_logged(
@@ -255,6 +307,29 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
         }
         fs::copy(info_path, output.join(format!("build-{name}.json")))?;
     }
+    for case in scenarios::fixtures(&args.checkpoint) {
+        let wrapper = build
+            .fixtures
+            .get(case.wrapper)
+            .ok_or_else(|| io::Error::other("missing fixture wrapper"))?;
+        let executable = wrapper.join("bin").join(case.executable);
+        if executables.contains_key(&executable) {
+            continue;
+        }
+        let info: Value = evidence::read_json(&wrapper.join("share/cas/build.json"))?;
+        if info["source_path"].as_str() != build.source_path.to_str()
+            || info["harness"].as_str() != build.harness.to_str()
+        {
+            return Err(io::Error::other(
+                "fixture wrapper differs from checkpoint build",
+            ));
+        }
+        executables.insert(executable.clone(), source::entry(&executable)?);
+        fs::copy(
+            wrapper.join("share/cas/build.json"),
+            output.join(format!("build-{}.json", case.wrapper)),
+        )?;
+    }
     evidence::write_json(&output.join("executables.json"), &executables)?;
     fs::create_dir(output.join("scenarios"))?;
     for (id, argv) in scenarios::CHECKS {
@@ -279,7 +354,7 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
             report,
         )?;
     }
-    if args.checkpoint == "C3" {
+    if matches!(args.checkpoint.as_str(), "C3" | "C4") {
         let mut command = Command::new(&build.harness);
         command
             .arg("persistence")
@@ -294,6 +369,29 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
             report,
         )?;
     }
+    for &case in scenarios::fixtures(&args.checkpoint) {
+        let wrapper = build
+            .fixtures
+            .get(case.wrapper)
+            .ok_or_else(|| io::Error::other("missing fixture wrapper"))?;
+        let mut command = Command::new(wrapper.join("bin").join(case.executable));
+        command
+            .arg("--checkout")
+            .arg(&checkout)
+            .arg("--output")
+            .arg(output.join("scenarios").join(case.id).join("run"))
+            .current_dir(&checkout);
+        if let Some(cut) = case.cut {
+            command.args(["--crash-at", cut]);
+        }
+        scenario(
+            case.id,
+            &mut command,
+            output,
+            Validation::Fixture(&build, case),
+            report,
+        )?;
+    }
     source::compare(
         &inputs,
         &source::checkout_inputs(&checkout, &output.join("inputs-after"))?,
@@ -305,7 +403,7 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
 fn validate_results(report: &Report) -> io::Result<()> {
     let required = scenarios::required(&report.checkpoint);
     if report.schema_version != 1
-        || !matches!(report.checkpoint.as_str(), "C1" | "C2" | "C3")
+        || !matches!(report.checkpoint.as_str(), "C1" | "C2" | "C3" | "C4")
         || report.scenarios.len() != required.len()
     {
         return Err(io::Error::other(
@@ -385,8 +483,14 @@ pub fn verify(output: &Path) -> io::Result<()> {
             )));
         }
     }
-    if report.checkpoint == "C3" {
+    if matches!(report.checkpoint.as_str(), "C3" | "C4") {
         persistence::verify(&output.join("scenarios/persistence-model/run"))?;
+    }
+    if !scenarios::fixtures(&report.checkpoint).is_empty() {
+        let build: Build = evidence::read_json(&output.join("build.json"))?;
+        for &case in scenarios::fixtures(&report.checkpoint) {
+            validate_fixture(&output.join("scenarios").join(case.id), &build, case)?;
+        }
     }
     Ok(())
 }
@@ -412,6 +516,61 @@ mod tests {
             let scenario = report.scenarios.remove(id).unwrap();
             assert!(validate_results(&report).is_err(), "missing {id}");
             report.scenarios.insert(id.into(), scenario);
+        }
+    }
+
+    #[test]
+    fn c4_requires_all_store_and_crash_cases_and_exact_fixture_identity() {
+        let mut report = passing_report();
+        report.checkpoint = "C4".into();
+        for id in scenarios::required("C4") {
+            let scenario =
+                serde_json::from_value(serde_json::to_value(&report.scenarios["staging"]).unwrap())
+                    .unwrap();
+            report.scenarios.insert(id.into(), scenario);
+        }
+        assert_eq!(report.scenarios.len(), 40);
+        validate_results(&report).unwrap();
+        for case in scenarios::fixtures("C4") {
+            let removed = report.scenarios.remove(case.id).unwrap();
+            assert!(validate_results(&report).is_err(), "missing {}", case.id);
+            report.scenarios.insert(case.id.into(), removed);
+        }
+        let build = Build {
+            source_revision: "revision".into(),
+            source_path: "source".into(),
+            harness: "harness".into(),
+            package: "package".into(),
+            tools: vec![],
+            wrappers: BTreeMap::new(),
+            fixtures: BTreeMap::new(),
+        };
+        for &case in scenarios::fixtures("C4") {
+            let shared = case.wrapper == "shared";
+            let info = json!({"source_path":"source", "harness":"harness", "workload":if shared {"shared"} else {"core"}, "live_recovery":shared});
+            let scenario = json!({"crash_at":case.cut});
+            fixture_identity(&info, &scenario, &build, case).unwrap();
+            for (key, wrong) in [
+                ("source_path", json!("other")),
+                ("harness", json!("other")),
+                ("workload", json!("wrong")),
+                ("live_recovery", json!(!shared)),
+            ] {
+                let mut changed = info.clone();
+                changed[key] = wrong;
+                assert!(fixture_identity(&changed, &scenario, &build, case).is_err());
+            }
+            assert!(fixture_identity(&info, &json!({}), &build, case).is_err());
+            assert!(fixture_identity(&info, &json!({"crash_at":"wrong"}), &build, case).is_err());
+            assert!(
+                fixture_identity(
+                    &info,
+                    &json!({"crash_at":case.cut,"extra":true}),
+                    &build,
+                    case
+                )
+                .is_err()
+            );
         }
     }
 

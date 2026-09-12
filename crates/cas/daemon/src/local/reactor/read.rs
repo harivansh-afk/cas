@@ -22,6 +22,7 @@ pub(super) struct Read {
     plan: ReadPlan,
     reader: Option<store::Reader>,
     cache: Option<BudgetArc<cas_core::cache::Cache>>,
+    page_cache: Option<BudgetArc<manifest::PageCache>>,
     chunk_hash: Option<cas_core::chunk_index::Hash>,
     fetches: Option<Fetches>,
     leader: Option<Leader<Fetched>>,
@@ -43,6 +44,7 @@ impl Read {
             plan,
             reader: None,
             cache: None,
+            page_cache: None,
             chunk_hash: None,
             fetches: None,
             leader: None,
@@ -64,6 +66,7 @@ impl Read {
             let port = port.ok_or_else(|| io::Error::other("manifest read has no shared store"))?;
             self.reader = Some(port.reader());
             self.cache = Some(port.cache());
+            self.page_cache = Some(port.page_cache());
             self.fetches = Some(port.fetches());
             self.metadata = Some(port.metadata());
             #[cfg(test)]
@@ -101,9 +104,9 @@ impl Read {
         };
         while self.block < self.plan.bytes() / BLOCK_SIZE {
             if !self.plan.staged(self.block) {
-                let read =
+                let mut read =
                     view.lookup(self.plan.offset() / BLOCK_SIZE as u64 + self.block as u64)?;
-                match read.state()? {
+                match read.cached(self.page_cache.as_ref().expect("host page cache"))? {
                     LookupState::Page { offset, .. } => {
                         self.stage = Stage::Manifest { read, offset };
                         return Ok(());
@@ -125,11 +128,7 @@ impl Read {
     fn chunk(&mut self, hash: cas_core::chunk_index::Hash) -> io::Result<bool> {
         self.chunk_hash = Some(hash);
         if let Some(bytes) = self.cache.as_ref().and_then(|cache| cache.get(&hash)) {
-            let Operation::Read { buffer, .. } = &mut self.io.operation else {
-                unreachable!()
-            };
-            buffer.as_mut_slice()[self.block * BLOCK_SIZE..(self.block + 1) * BLOCK_SIZE]
-                .copy_from_slice(bytes.as_slice());
+            self.response_block().copy_from_slice(bytes.as_slice());
             return Ok(false);
         }
         match Registry::lookup(self.fetches.as_ref().expect("host fetch registry"), hash)? {
@@ -171,11 +170,7 @@ impl Read {
                 .bytes
                 .as_mut_slice()
                 .copy_from_slice(bytes.as_slice());
-            let Operation::Read { buffer, .. } = &mut self.io.operation else {
-                unreachable!()
-            };
-            buffer.as_mut_slice()[self.block * BLOCK_SIZE..(self.block + 1) * BLOCK_SIZE]
-                .copy_from_slice(bytes.as_slice());
+            self.response_block().copy_from_slice(bytes.as_slice());
             self.leader
                 .take()
                 .expect("fetch leader")
@@ -261,12 +256,19 @@ impl Read {
         }
     }
 
-    pub fn advance(&mut self) -> io::Result<bool> {
+    fn response_block(&mut self) -> &mut [u8] {
         let Operation::Read { buffer, .. } = &mut self.io.operation else {
             unreachable!()
         };
+        &mut buffer.as_mut_slice()[self.block * BLOCK_SIZE..(self.block + 1) * BLOCK_SIZE]
+    }
+
+    pub fn advance(&mut self) -> io::Result<bool> {
         match &mut self.stage {
             Stage::Staging(index) => {
+                let Operation::Read { buffer, .. } = &mut self.io.operation else {
+                    unreachable!()
+                };
                 let range = &self.plan.ranges()[*index];
                 if range.direct_to_response() {
                     range.verify(&buffer.as_slice()[range.destination()])?;
@@ -283,7 +285,11 @@ impl Read {
                 }
             }
             Stage::Manifest { read, offset } => {
-                match read.accept(*offset, self.page.as_ref().unwrap().as_slice())? {
+                match read.accept_cached(
+                    *offset,
+                    self.page.as_ref().unwrap().as_slice(),
+                    self.page_cache.as_ref().expect("host page cache"),
+                )? {
                     LookupState::Page { offset: next, .. } => *offset = next,
                     LookupState::Complete(Some(hash)) => {
                         if !self.chunk(hash)? {
@@ -325,8 +331,7 @@ impl Read {
                         Err(error) => return Err(error),
                     }
                 }
-                buffer.as_mut_slice()[self.block * BLOCK_SIZE..(self.block + 1) * BLOCK_SIZE]
-                    .copy_from_slice(bytes);
+                self.response_block().copy_from_slice(bytes);
                 self.leader
                     .take()
                     .expect("fetch leader")
@@ -338,7 +343,7 @@ impl Read {
                 let fetched = waiter
                     .poll()?
                     .ok_or_else(|| io::Error::other("fetch readiness preceded publication"))?;
-                buffer.as_mut_slice()[self.block * BLOCK_SIZE..(self.block + 1) * BLOCK_SIZE]
+                self.response_block()
                     .copy_from_slice(fetched.bytes.as_slice());
                 self.block += 1;
                 self.next_block()?;

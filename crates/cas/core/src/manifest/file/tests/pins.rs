@@ -166,3 +166,78 @@ fn concurrent_read_pins_keep_registry_charges_and_actual_file_after_owner_drop()
     assert_eq!(account.usage().current.bytes, 0);
     inspect(root.path(), 0).unwrap();
 }
+
+fn cached_lookup(view: &View, cache: &PageCache) -> (Option<Hash>, usize) {
+    let mut read = view.lookup(0).unwrap();
+    let mut page = AlignedBuffer::new(BLOCK_SIZE);
+    let mut io_count = 0;
+    let mut state = read.cached(cache).unwrap();
+    loop {
+        match state {
+            LookupState::Complete(hash) => return (hash, io_count),
+            LookupState::Page { offset, .. } => {
+                direct::read_bytes(read.file(), page.as_mut_slice(), offset).unwrap();
+                io_count += 1;
+                state = read.accept_cached(offset, page.as_slice(), cache).unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+fn page_cache_isolates_roots_and_reopened_files_without_retaining_root_pins() {
+    let root = tempfile::tempdir().unwrap();
+    let account = metadata();
+    let cache = PageCache::new(4 * BLOCK_SIZE, &account).unwrap();
+    let mut manifest = Manifest::create(root.path(), ID, Arc::clone(&account)).unwrap();
+    let first = publish(&mut manifest, 0, 11, 1);
+    assert_eq!(cached_lookup(&first, &cache), (Some([11; 32]), 1));
+    assert_eq!(cached_lookup(&first, &cache), (Some([11; 32]), 0));
+    let second = publish(&mut manifest, 0, 22, 2);
+    assert_eq!(cached_lookup(&second, &cache), (Some([22; 32]), 1));
+    assert_eq!(cached_lookup(&first, &cache), (Some([11; 32]), 0));
+    drop(first);
+    assert_eq!(
+        manifest.pinned_roots(metadata()).unwrap().keys(),
+        [second.key()]
+    );
+    drop((second, manifest));
+    let manifest = inspect(root.path(), 2).unwrap().recover().unwrap();
+    let reopened = manifest.view().unwrap();
+    assert_eq!(cached_lookup(&reopened, &cache), (Some([22; 32]), 1));
+    assert_eq!(cached_lookup(&reopened, &cache), (Some([22; 32]), 0));
+    drop((reopened, manifest, cache));
+    assert_eq!(account.usage().current, Amount::default());
+}
+
+#[test]
+fn corrupt_page_is_never_cached_and_optional_fill_denial_keeps_valid_lookup() {
+    let root = tempfile::tempdir().unwrap();
+    let account = metadata();
+    let cache = PageCache::new(BLOCK_SIZE, &account).unwrap();
+    let mut manifest = Manifest::create(root.path(), ID, metadata()).unwrap();
+    let view = publish(&mut manifest, 0, 11, 1);
+    let mut read = view.lookup(0).unwrap();
+    let LookupState::Page { offset, .. } = read.cached(&cache).unwrap() else {
+        panic!("page required");
+    };
+    assert!(
+        read.accept_cached(offset, &[0; BLOCK_SIZE], &cache)
+            .is_err()
+    );
+    assert_eq!(cache.status().counters.fills, 0);
+    let held = account
+        .reserve(Amount {
+            bytes: 128 * 1024 * 1024 - account.usage().current.bytes,
+            requests: 0,
+        })
+        .unwrap();
+    assert_eq!(cached_lookup(&view, &cache), (Some([11; 32]), 1));
+    assert_eq!(cache.status().counters.refused, 1);
+    assert_eq!(cache.status().resident_bytes, 0);
+    drop(held);
+    assert_eq!(cached_lookup(&view, &cache), (Some([11; 32]), 1));
+    assert_eq!(cached_lookup(&view, &cache), (Some([11; 32]), 0));
+    drop(cache);
+    assert_eq!(account.usage().current, Amount::default());
+}

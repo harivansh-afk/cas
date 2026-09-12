@@ -45,5 +45,9 @@ writeShellApplication {
   text = ''
     exec ${lib.getExe' cas "cas-harness"} fixture --build-info ${buildInfo} "$@"
   '';
+  derivationArgs.postCheck = ''
+    mkdir -p "$out/share/cas"
+    cp ${buildInfo} "$out/share/cas/build.json"
+  '';
   meta.description = "Run source-bound native core IO and reflink controls on fresh XFS";
 }

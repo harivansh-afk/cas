@@ -119,31 +119,7 @@
           staging = smokeFor pkgs "staging" false;
           local = smokeFor pkgs "local" false;
           async = smokeFor pkgs "local-async" false;
-        in
-        {
-          default = pkgs.cas;
-          inherit (pkgs) cas;
-          vm-smoke = raw;
-          daemon-smoke = daemon;
-          staging-smoke = staging;
-          local-smoke = local;
-          async-smoke = async;
-          checkpoints = pkgs.callPackage ./nix/checkpoints.nix {
-            wrappers = {
-              inherit
-                raw
-                daemon
-                staging
-                local
-                async
-                ;
-            };
-            provenance = {
-              source_revision = self.rev or self.dirtyRev or null;
-              source_path = toString self.outPath;
-            };
-          };
-          xfs-fixture = pkgs.callPackage ./nix/fixture {
+          xfs = pkgs.callPackage ./nix/fixture {
             guest = lib.nixosSystem {
               specialArgs = {
                 cas = pkgs.cas;
@@ -158,8 +134,38 @@
               source_path = toString self.outPath;
             };
           };
+          sharedRecovery = sharedFor pkgs true;
+        in
+        {
+          default = pkgs.cas;
+          inherit (pkgs) cas;
+          vm-smoke = raw;
+          daemon-smoke = daemon;
+          staging-smoke = staging;
+          local-smoke = local;
+          async-smoke = async;
+          checkpoints = pkgs.callPackage ./nix/checkpoints.nix {
+            fixtures = {
+              inherit xfs;
+              shared = sharedRecovery;
+            };
+            wrappers = {
+              inherit
+                raw
+                daemon
+                staging
+                local
+                async
+                ;
+            };
+            provenance = {
+              source_revision = self.rev or self.dirtyRev or null;
+              source_path = toString self.outPath;
+            };
+          };
+          xfs-fixture = xfs;
           shared-fixture = sharedFor pkgs false;
-          shared-recovery-fixture = sharedFor pkgs true;
+          shared-recovery-fixture = sharedRecovery;
           dev-vm = smokeFor pkgs "staging" true;
           census-pilot = (pkgs.callPackage ./nix/census.nix { }).pilot;
           census-fleet = (pkgs.callPackage ./nix/census.nix { }).fleet;

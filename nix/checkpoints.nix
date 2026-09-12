@@ -11,6 +11,7 @@
   qemu_kvm,
   fio,
   wrappers,
+  fixtures,
   provenance,
 }:
 let
@@ -29,6 +30,7 @@ let
       harness = lib.getExe' cas "cas-harness";
       package = toString cas;
       tools = map toString runtimeInputs;
+      fixtures = lib.mapAttrs (_: value: toString value) fixtures;
       wrappers = lib.mapAttrs (_: value: toString value) wrappers;
     }
   );

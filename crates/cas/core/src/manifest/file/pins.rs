@@ -17,7 +17,12 @@ struct Entry {
     owners: usize,
 }
 
-struct Registry(Mutex<HashTable<Entry, BudgetAllocator>>);
+struct Registry {
+    incarnation: u64,
+    entries: Mutex<HashTable<Entry, BudgetAllocator>>,
+}
+
+static NEXT_INCARNATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 pub(super) struct Pin {
     registry: BudgetArc<Registry>,
@@ -33,13 +38,31 @@ fn bucket(end: u64) -> u64 {
 impl Pin {
     pub(super) fn new(key: SnapshotKey, metadata: Arc<Budget>) -> io::Result<Self> {
         key.validate()?;
+        let incarnation = NEXT_INCARNATION
+            .fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |next| next.checked_add(1),
+            )
+            .map_err(|_| io::Error::other("manifest incarnations exhausted"))?;
         let registry = BudgetArc::try_new(
-            Registry(Mutex::new(HashTable::new_in(BudgetAllocator::new(
-                Arc::clone(&metadata),
-            )))),
+            Registry {
+                incarnation,
+                entries: Mutex::new(HashTable::new_in(BudgetAllocator::new(Arc::clone(
+                    &metadata,
+                )))),
+            },
             &metadata,
         )?;
         Self::insert(registry, key)
+    }
+
+    pub(super) fn page_key(&self, offset: u64) -> super::cache::PageKey {
+        super::cache::PageKey {
+            incarnation: self.registry.incarnation,
+            end: self.end,
+            offset,
+        }
     }
 
     pub(super) fn successor(&self, key: SnapshotKey) -> io::Result<Self> {
@@ -49,7 +72,10 @@ impl Pin {
 
     fn insert(registry: BudgetArc<Registry>, key: SnapshotKey) -> io::Result<Self> {
         {
-            let mut entries = registry.0.lock().expect("root registry mutex poisoned");
+            let mut entries = registry
+                .entries
+                .lock()
+                .expect("root registry mutex poisoned");
             if let Some(entry) = entries.find_mut(bucket(key.end), |entry| entry.key.end == key.end)
             {
                 require(
@@ -84,7 +110,7 @@ impl Pin {
         {
             let entries = self
                 .registry
-                .0
+                .entries
                 .lock()
                 .expect("root registry mutex poisoned");
             keys.try_reserve_exact(entries.len())
@@ -104,7 +130,7 @@ impl Clone for Pin {
     fn clone(&self) -> Self {
         let mut entries = self
             .registry
-            .0
+            .entries
             .lock()
             .expect("root registry mutex poisoned");
         let entry = entries
@@ -125,7 +151,7 @@ impl Drop for Pin {
     fn drop(&mut self) {
         let mut entries = self
             .registry
-            .0
+            .entries
             .lock()
             .expect("root registry mutex poisoned");
         let mut entry = entries

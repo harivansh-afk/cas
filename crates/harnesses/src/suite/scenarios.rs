@@ -146,10 +146,10 @@ const CONCURRENT: &[Vm] = &[
 
 pub fn vms(checkpoint: &str) -> Vec<Vm> {
     let mut cases = REFERENCES.to_vec();
-    if matches!(checkpoint, "C2" | "C3") {
+    if matches!(checkpoint, "C2" | "C3" | "C4") {
         cases.extend_from_slice(PACKED);
     }
-    if checkpoint == "C3" {
+    if matches!(checkpoint, "C3" | "C4") {
         cases.extend_from_slice(CONCURRENT);
     }
     cases
@@ -161,8 +161,72 @@ pub fn required(checkpoint: &str) -> Vec<&'static str> {
         .map(|(id, _)| *id)
         .chain(vms(checkpoint).into_iter().map(|(id, _, _)| id))
         .collect();
-    if checkpoint == "C3" {
+    if matches!(checkpoint, "C3" | "C4") {
         required.push("persistence-model");
     }
+    required.extend(fixtures(checkpoint).iter().map(|case| case.id));
     required
+}
+
+#[derive(Clone, Copy)]
+pub struct Fixture {
+    pub id: &'static str,
+    pub wrapper: &'static str,
+    pub executable: &'static str,
+    pub cut: Option<&'static str>,
+}
+
+const STORE: &[Fixture] = &[
+    Fixture {
+        id: "xfs-store",
+        wrapper: "xfs",
+        executable: "cas-xfs-fixture",
+        cut: None,
+    },
+    Fixture {
+        id: "shared-replacement",
+        wrapper: "shared",
+        executable: "cas-shared-recovery-fixture",
+        cut: None,
+    },
+    Fixture {
+        id: "shared-before-chunks",
+        wrapper: "shared",
+        executable: "cas-shared-recovery-fixture",
+        cut: Some("before-chunks"),
+    },
+    Fixture {
+        id: "shared-after-chunks",
+        wrapper: "shared",
+        executable: "cas-shared-recovery-fixture",
+        cut: Some("after-chunks"),
+    },
+    Fixture {
+        id: "shared-after-manifest",
+        wrapper: "shared",
+        executable: "cas-shared-recovery-fixture",
+        cut: Some("after-manifest"),
+    },
+    Fixture {
+        id: "shared-after-d",
+        wrapper: "shared",
+        executable: "cas-shared-recovery-fixture",
+        cut: Some("after-d"),
+    },
+    Fixture {
+        id: "shared-after-punch",
+        wrapper: "shared",
+        executable: "cas-shared-recovery-fixture",
+        cut: Some("after-punch"),
+    },
+    Fixture {
+        id: "shared-after-unlink",
+        wrapper: "shared",
+        executable: "cas-shared-recovery-fixture",
+        cut: Some("after-unlink"),
+    },
+];
+
+pub fn fixtures(checkpoint: &str) -> &'static [Fixture] {
+    if checkpoint == "C4" { STORE } else { &[] }
 }

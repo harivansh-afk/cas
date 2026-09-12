@@ -5,20 +5,12 @@ use crate::{
     budget::{Amount, Budget, BudgetAllocator, BudgetArc, Usage},
     chunk_index::Hash,
 };
-use hashbrown::HashTable;
 use std::{
     io,
     sync::{Arc, Mutex},
 };
 
 pub type Buffer = BudgetArc<AlignedBuffer<BudgetAllocator>>;
-
-struct Entry {
-    hash: Hash,
-    buffer: Buffer,
-    older: Option<Hash>,
-    newer: Option<Hash>,
-}
 
 #[derive(Default, Clone, Copy, serde::Serialize)]
 pub struct Counters {
@@ -39,12 +31,10 @@ pub struct Status {
     pub table_bytes: usize,
 }
 
-struct State {
-    entries: HashTable<Entry, BudgetAllocator>,
-    oldest: Option<Hash>,
-    newest: Option<Hash>,
-    counters: Counters,
-}
+mod lru;
+pub(crate) use lru::{Key, Lru};
+
+type State = Lru<Hash, AlignedBuffer<BudgetAllocator>>;
 
 pub struct Cache {
     capacity_bytes: usize,
@@ -53,8 +43,10 @@ pub struct Cache {
     metadata: Arc<Budget>,
 }
 
-fn bucket(hash: &Hash) -> u64 {
-    u64::from_le_bytes(hash[..8].try_into().unwrap())
+impl Key for Hash {
+    fn bucket(&self) -> u64 {
+        u64::from_le_bytes(self[..8].try_into().unwrap())
+    }
 }
 
 impl Cache {
@@ -65,19 +57,10 @@ impl Cache {
                 "invalid cache byte limit",
             ));
         }
-        let mut entries = HashTable::new_in(BudgetAllocator::new(Arc::clone(metadata)));
-        entries
-            .try_reserve(bytes / BLOCK_SIZE, |entry: &Entry| bucket(&entry.hash))
-            .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
         BudgetArc::try_new(
             Self {
                 capacity_bytes: bytes,
-                state: Mutex::new(State {
-                    entries,
-                    oldest: None,
-                    newest: None,
-                    counters: Counters::default(),
-                }),
+                state: Mutex::new(State::new(bytes / BLOCK_SIZE, metadata)?),
                 payload: Budget::new(Amount { bytes, requests: 0 }),
                 metadata: Arc::clone(metadata),
             },
@@ -87,13 +70,7 @@ impl Cache {
 
     pub fn get(&self, hash: &Hash) -> Option<Buffer> {
         let mut state = self.state.lock().expect("cache poisoned");
-        let Some(buffer) = state.buffer(hash) else {
-            state.counters.misses += 1;
-            return None;
-        };
-        state.promote(*hash);
-        state.counters.hits += 1;
-        Some(buffer)
+        state.get(hash)
     }
 
     /// Recheck after claiming a fetch without counting a second guest lookup.
@@ -133,21 +110,7 @@ impl Cache {
         let buffer = BudgetArc::try_new(buffer, &self.metadata).inspect_err(|_| {
             state.counters.refused += 1;
         })?;
-        // Payload admission implies a free preallocated entry: resident entries
-        // each own a block from the same byte account, including evicted readers.
-        assert!(state.entries.len() < state.entries.capacity());
-        state.entries.insert_unique(
-            bucket(&hash),
-            Entry {
-                hash,
-                buffer: buffer.clone(),
-                older: None,
-                newer: None,
-            },
-            |entry| bucket(&entry.hash),
-        );
-        state.link_newest(hash);
-        state.counters.fills += 1;
+        state.insert(hash, buffer.clone());
         Ok(Some(buffer))
     }
 
@@ -159,81 +122,15 @@ impl Cache {
     pub fn status(&self) -> Status {
         let state = self.state.lock().expect("cache poisoned");
         let payload = self.payload.usage();
-        let resident_bytes = state.entries.len() * BLOCK_SIZE;
+        let resident_bytes = state.len() * BLOCK_SIZE;
         Status {
             capacity_bytes: self.capacity_bytes,
             counters: state.counters,
             resident_bytes,
             reader_held_bytes: payload.current.bytes - resident_bytes,
             payload,
-            table_bytes: state.entries.allocation_size(),
+            table_bytes: state.table_bytes(),
         }
-    }
-}
-
-impl State {
-    fn buffer(&self, hash: &Hash) -> Option<Buffer> {
-        self.entries
-            .find(bucket(hash), |entry| &entry.hash == hash)
-            .map(|entry| entry.buffer.clone())
-    }
-
-    fn entry(&mut self, hash: Hash) -> &mut Entry {
-        self.entries
-            .find_mut(bucket(&hash), |entry| entry.hash == hash)
-            .expect("LRU link names a resident entry")
-    }
-
-    fn unlink(&mut self, hash: Hash) {
-        let entry = self.entry(hash);
-        let (older, newer) = (entry.older, entry.newer);
-        if let Some(older) = older {
-            self.entry(older).newer = newer;
-        } else {
-            self.oldest = newer;
-        }
-        if let Some(newer) = newer {
-            self.entry(newer).older = older;
-        } else {
-            self.newest = older;
-        }
-    }
-
-    fn promote(&mut self, hash: Hash) {
-        if self.newest == Some(hash) {
-            return;
-        }
-        self.unlink(hash);
-        self.link_newest(hash);
-    }
-
-    fn link_newest(&mut self, hash: Hash) {
-        let newest = self.newest;
-        let entry = self.entry(hash);
-        entry.older = newest;
-        entry.newer = None;
-        if let Some(newest) = newest {
-            self.entry(newest).newer = Some(hash);
-        } else {
-            self.oldest = Some(hash);
-        }
-        self.newest = Some(hash);
-    }
-
-    fn evict(&mut self) -> bool {
-        let Some(hash) = self.oldest else {
-            return false;
-        };
-        self.unlink(hash);
-        let entry = self
-            .entries
-            .find_entry(bucket(&hash), |entry| entry.hash == hash)
-            .unwrap_or_else(|_| panic!("oldest cache entry exists"))
-            .remove()
-            .0;
-        drop(entry);
-        self.counters.evictions += 1;
-        true
     }
 }
 

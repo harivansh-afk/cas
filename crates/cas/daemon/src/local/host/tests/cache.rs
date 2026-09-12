@@ -249,3 +249,38 @@ fn corrupt_shared_fetch_wakes_waiters_and_fails_every_image_before_publication()
     assert_eq!(resources.read_memory().usage().current, Amount::default());
     assert_eq!(resources.metadata.usage().current, Amount::default());
 }
+
+#[test]
+fn manifest_page_hits_preserve_private_images_and_successor_root_contents() {
+    let root = tempfile::tempdir().unwrap();
+    let resources = Arc::new(Resources {
+        cache_bytes: 2 * BLOCK_SIZE,
+        metadata_cache_bytes: 4 * BLOCK_SIZE,
+        ..Resources::default()
+    });
+    let mut host = create(root.path(), 2, Arc::clone(&resources));
+    let mut first = attach(&mut host, 2);
+    let mut second = attach(&mut host, 3);
+    for local in [&mut first, &mut second] {
+        write(local, 0, 0, &[7; BLOCK_SIZE]);
+        drained(local, 1);
+    }
+    assert_eq!(host.shared.pages.status().counters.fills, 0);
+    read(&mut first, 1, &[7; BLOCK_SIZE]);
+    assert_eq!(host.shared.pages.status().counters.fills, 1);
+    read(&mut first, 2, &[7; BLOCK_SIZE]);
+    assert_eq!(host.shared.pages.status().counters.hits, 1);
+    read(&mut second, 1, &[7; BLOCK_SIZE]);
+    assert_eq!(host.shared.pages.status().counters.fills, 2);
+    write(&mut first, 3, 0, &[9; BLOCK_SIZE]);
+    drained(&mut first, 2);
+    assert_eq!(host.shared.pages.status().counters.fills, 2);
+    read(&mut first, 4, &[9; BLOCK_SIZE]);
+    read(&mut second, 2, &[7; BLOCK_SIZE]);
+    assert_eq!(host.shared.pages.status().counters.fills, 3);
+    assert!(host.shared.pages.status().payload.peak.bytes <= 4 * BLOCK_SIZE);
+    assert!(host.shared.gate.failure().is_none());
+    drop((first, second));
+    shutdown(host);
+    assert_eq!(resources.metadata.usage().current, Amount::default());
+}
