@@ -27,7 +27,7 @@ use index::{Index, Mapping, Payload};
 use segment::{Directory, Segment};
 
 pub use crate::direct::Alignment;
-pub use compaction::{Compacted, Input, Selection};
+pub use compaction::{Compacted, Input, Prepared as PreparedCompaction, Selection};
 pub use read::{ReadPlan, ReadRange};
 pub use reclaim::{ReclaimStats, Reclaimed, Reclamation};
 pub use recovery::{LiveRecovery, Mutation, Recovery};

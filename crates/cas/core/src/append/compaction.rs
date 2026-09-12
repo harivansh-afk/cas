@@ -1,4 +1,7 @@
 //! Bounded background IO and sequenced publication share one compaction receipt.
+mod output;
+pub use output::Prepared;
+
 use super::{
     Log, Result,
     format::{Header, Kind},
@@ -8,15 +11,9 @@ use crate::{
     BLOCK_SIZE, MAX_REQUEST_BYTES,
     aligned::AlignedBuffer,
     budget::{Budget, BudgetAllocator},
-    chunk::Chunk,
     direct,
     encoding::require,
-    manifest::{
-        file::{Manifest, View},
-        format::Extent,
-        tree::MAX_CHANGES,
-    },
-    store::file::Store,
+    manifest::{file::View, tree::MAX_CHANGES},
 };
 use allocator_api2::vec::Vec;
 use arrayvec::ArrayVec;
@@ -268,51 +265,6 @@ impl Input {
     }
     pub fn edits(&self) -> usize {
         self.edits.len()
-    }
-
-    /// The one background owner supplies mutable IO state; shared lookup must
-    /// not hold a mutex around this whole operation. All hash publication follows sync.
-    pub fn write(self, store: &mut Store, manifest: &mut Manifest) -> io::Result<Compacted> {
-        require(
-            !store.status().failed && store.config().store == self.base.commit().store,
-            "compaction store is failed or differs",
-        )?;
-        require(
-            manifest.view()?.same(&self.base),
-            "compaction manifest changed before output",
-        )?;
-        let mut changes = ArrayVec::<Extent, MAX_CHANGES>::new();
-        let mut chunks = ArrayVec::<Chunk<'_>, { crate::store::format::MAX_CHUNKS }>::new();
-        for edit in &self.edits {
-            let chunk = edit.payload.and_then(|offset| {
-                Chunk::new(
-                    self.payload.as_slice()[offset..offset + BLOCK_SIZE]
-                        .try_into()
-                        .unwrap(),
-                )
-            });
-            changes.push(Extent {
-                start: edit.start,
-                end: edit.end,
-                hash: chunk.map(|chunk| chunk.hash()),
-            });
-            if let Some(chunk) = chunk {
-                chunks.push(chunk);
-            }
-            if chunks.is_full() {
-                store.insert(&chunks)?;
-                chunks.clear();
-            }
-        }
-        if !chunks.is_empty() {
-            store.insert(&chunks)?;
-        }
-        let prepared = manifest.prepare_with_metadata(&changes, self.through, self.metadata)?;
-        manifest.publish(prepared)?;
-        Ok(Compacted {
-            previous: self.base,
-            view: manifest.view()?,
-        })
     }
 }
 

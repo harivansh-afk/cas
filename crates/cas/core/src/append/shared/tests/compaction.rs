@@ -1,5 +1,6 @@
 use super::*;
 use crate::append::{Compacted, Input, ReclaimStats};
+mod planning;
 
 impl Fixture {
     fn input(&self) -> Input {
