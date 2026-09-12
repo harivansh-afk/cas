@@ -21,6 +21,7 @@ enum Phase {
 
 #[derive(Default)]
 pub(super) struct Session {
+    cold: Option<Identity>,
     phase: Phase,
     replayed_requests: usize,
     replayed_mutations: usize,
@@ -57,6 +58,26 @@ fn geometry(message: &VhostUserInflight) -> io::Result<Geometry> {
 }
 
 impl Backend {
+    pub(crate) fn cold_attachment(
+        &mut self,
+        config: cas_core::append::Config,
+        status: cas_core::append::Status,
+        deadline: Deadline,
+    ) -> io::Result<()> {
+        deadline.check()?;
+        self.live = Some(Session {
+            cold: Some(Identity {
+                store: config.store,
+                image: config.image,
+                epoch: status.epoch,
+                attachment: status.epoch,
+            }),
+            ..Session::default()
+        });
+        self.recovery_deadline = Some(deadline);
+        self.rearm_deadline_timer()
+    }
+
     pub(super) fn create_attachment(
         &mut self,
         message: &VhostUserInflight,
@@ -64,6 +85,21 @@ impl Backend {
         let geometry = geometry(message)?;
         let phase = self.live.as_ref().map(|session| session.phase);
         let (shared, mut identity, status) = match (&mut self.storage, phase) {
+            (Storage::Local(local), Some(Phase::AwaitingFd)) => {
+                let identity = self
+                    .live
+                    .as_ref()
+                    .and_then(|session| session.cold)
+                    .ok_or_else(|| io::Error::other("fresh GET has no cold recovery proof"))?;
+                if local.status.epoch != identity.epoch
+                    || local.status.durable != local.status.published
+                {
+                    return Err(io::Error::other(
+                        "cold attachment lost its recovered boundary",
+                    ));
+                }
+                (Arc::clone(&local.shared), identity, local.status)
+            }
             (Storage::Opening(opening), Some(Phase::AwaitingFd)) => {
                 let shared = Arc::clone(&opening.shared);
                 let log = opening.fresh()?;

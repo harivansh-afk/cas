@@ -102,6 +102,7 @@ impl Prepared {
         stabilize(
             self.inspected,
             limits,
+            Mode::Retained,
             |log, repair| log.validate_recovery(repair).map_err(io::Error::other),
             |log, manifest, required, repair| {
                 let mut log = log

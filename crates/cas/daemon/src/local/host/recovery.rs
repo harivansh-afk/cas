@@ -6,6 +6,12 @@ use std::path::{Path, PathBuf};
 mod live;
 pub use live::{Prepared, Replay, Retained};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Mode {
+    Cold,
+    Retained,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Prefix {
     pub image: catalog::Id,
@@ -225,6 +231,7 @@ impl Checked {
         stabilize(
             self.inspected,
             limits,
+            Mode::Cold,
             |log, repair| log.validate_recovery(repair).map_err(io::Error::other),
             |log, manifest, required, repair| {
                 log.fresh_with(manifest.view()?, required.published, repair)
@@ -257,6 +264,7 @@ impl Checked {
 
 /// Stabilized membership; no reader escapes before the whole graph is durable.
 pub struct Recovered {
+    mode: Mode,
     resources: Arc<Resources>,
     physical: Arc<cas_core::space::Governor>,
     catalog: Catalog,
@@ -280,7 +288,10 @@ impl Recovered {
             },
             staging_bytes,
             Some(self.physical),
-            Some(self.catalog),
+            Context {
+                catalog: Some(self.catalog),
+                mode: Some(self.mode),
+            },
         )
     }
 }
@@ -288,6 +299,7 @@ impl Recovered {
 fn stabilize<L>(
     mut inspected: Inspection<L>,
     limits: cas_core::space::Limits,
+    mode: Mode,
     validate: impl Fn(&L, cas_core::space::Recovery<'_>) -> io::Result<()>,
     mut recover: impl FnMut(L, &Manifest, Prefix, cas_core::space::Recovery<'_>) -> io::Result<Log>,
 ) -> io::Result<Recovered> {
@@ -317,6 +329,7 @@ fn stabilize<L>(
     }
     let catalog = repair.output(0, || inspected.catalog.recover())?;
     Ok(Recovered {
+        mode,
         resources: inspected.resources,
         physical,
         catalog,

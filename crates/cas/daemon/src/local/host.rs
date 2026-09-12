@@ -61,9 +61,16 @@ struct SharedHost {
 }
 
 struct Attachment {
+    mode: Option<recovery::Mode>,
     image: [u8; 16],
     log: Log,
     port: Port,
+}
+
+#[derive(Default)]
+struct Context {
+    catalog: Option<cas_core::catalog::Catalog>,
+    mode: Option<recovery::Mode>,
 }
 
 /// Complete retained membership, stabilized together before starting the host.
@@ -135,7 +142,14 @@ impl Host {
         staging_bytes: u64,
         physical: Option<Arc<cas_core::space::Governor>>,
     ) -> io::Result<Self> {
-        Self::build_owned(resources, store, roots, staging_bytes, physical, None)
+        Self::build_owned(
+            resources,
+            store,
+            roots,
+            staging_bytes,
+            physical,
+            Context::default(),
+        )
     }
 
     fn build_owned<I, S>(
@@ -144,7 +158,7 @@ impl Host {
         roots: Roots<I, S>,
         staging_bytes: u64,
         physical: Option<Arc<cas_core::space::Governor>>,
-        catalog: Option<cas_core::catalog::Catalog>,
+        context: Context,
     ) -> io::Result<Self>
     where
         I: AsRef<[(Log, Manifest)]> + IntoIterator<Item = (Log, Manifest)>,
@@ -245,6 +259,7 @@ impl Host {
                 replies,
             });
             attachments.push(Some(Attachment {
+                mode: context.mode,
                 image: identity.image,
                 log,
                 port: Port {
@@ -271,7 +286,7 @@ impl Host {
         let mut retained = reserved_vec(snapshots.as_ref().len(), &shared.resources.metadata)?;
         retained.extend(snapshots);
         let owner = worker::Owner {
-            _catalog: catalog,
+            _catalog: context.catalog,
             snapshots: retained,
             store,
             endpoints,
@@ -304,6 +319,44 @@ impl Host {
             false,
             fault,
         )
+    }
+
+    /// Export cold recovery's synced epoch; retained startup uses its coordinator.
+    pub fn attach_cold(
+        &mut self,
+        image: [u8; 16],
+        timeout: Duration,
+        fault: crate::fault::Fault,
+    ) -> io::Result<crate::backend::Backend> {
+        let deadline = crate::deadline::Deadline::after(timeout);
+        deadline.check()?;
+        let attachment = self
+            .images
+            .iter()
+            .flatten()
+            .find(|a| a.image == image)
+            .ok_or_else(|| io::Error::other("unknown or already attached host image"))?;
+        let status = attachment.log.status();
+        if attachment.mode != Some(recovery::Mode::Cold)
+            || !attachment.log.covers_flush(status.published)
+        {
+            return Err(io::Error::other(
+                "attachment has no completed cold recovery",
+            ));
+        }
+        let config = attachment.log.config();
+        let event = EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK)?;
+        let local = self.local(image, &event)?;
+        let mut backend = crate::backend::Backend::from_storage(
+            crate::storage::Storage::Local(Box::new(local)),
+            event,
+            crate::BackendKind::LocalAsync,
+            true,
+            true,
+            fault,
+        )?;
+        backend.cold_attachment(config, status, deadline)?;
+        Ok(backend)
     }
 
     fn local(&mut self, image: [u8; 16], event: &EventFd) -> io::Result<Local> {
