@@ -209,3 +209,52 @@ fn spurious_notifications_do_not_extend_receive_deadline() {
         assert!(started.elapsed() < Duration::from_secs(1));
     });
 }
+
+#[test]
+fn racing_close_delivers_every_accepted_message_exactly_once() {
+    let budget = budget(4096);
+    let (tx, rx) = bounded(7, &budget).unwrap();
+    let accepted = AtomicUsize::new(0);
+    let mut seen = [false; 8000];
+    std::thread::scope(|scope| {
+        for producer in 0..8 {
+            let tx = tx.clone();
+            let accepted = &accepted;
+            scope.spawn(move || {
+                for value in producer * 1000..(producer + 1) * 1000 {
+                    loop {
+                        match tx.try_send(value) {
+                            Ok(()) => {
+                                accepted.fetch_add(1, Ordering::Relaxed);
+                                break;
+                            }
+                            Err(TrySendError::Full(returned)) => {
+                                assert_eq!(returned, value);
+                                std::thread::yield_now();
+                            }
+                            Err(TrySendError::Disconnected(returned)) => {
+                                assert_eq!(returned, value);
+                                return;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        drop(tx);
+        for _ in 0..128 {
+            let value = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert!(!std::mem::replace(&mut seen[value], true));
+        }
+        rx.close();
+        while let Ok(value) = rx.recv() {
+            assert!(!std::mem::replace(&mut seen[value], true));
+        }
+    });
+    assert_eq!(
+        seen.into_iter().filter(|seen| *seen).count(),
+        accepted.load(Ordering::Relaxed)
+    );
+    drop(rx);
+    assert_eq!(budget.usage().current, Amount::default());
+}

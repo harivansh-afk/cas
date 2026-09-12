@@ -120,10 +120,10 @@ fn operation(shared: &Shared, id: u64, boundary: u64, operation: Operation) -> C
 struct Run {
     directory: tempfile::TempDir,
     control: Arc<Control>,
-    output: mpsc::Receiver<Response>,
+    output: mailbox::Receiver<Response>,
     thread: Option<JoinHandle<()>>,
     shared: Arc<Shared>,
-    paused: Option<mpsc::Receiver<io::Result<append::Status>>>,
+    paused: Option<mailbox::Receiver<io::Result<append::Status>>>,
 }
 
 impl Run {
@@ -150,7 +150,7 @@ impl Run {
         )
         .unwrap();
         let shared = Shared::new(log.status());
-        let (output, receiver) = mpsc::channel();
+        let (output, receiver) = mailbox::bounded(136, &shared.metadata).unwrap();
         let worker = Worker {
             log,
             port: None,
@@ -158,18 +158,18 @@ impl Run {
             wake: Wake(EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK).unwrap()),
             shared: Arc::clone(&shared),
         };
-        let (sender, input) = mpsc::sync_channel(8);
+        let (sender, input) = mailbox::bounded(8, &shared.metadata).unwrap();
         for id in 1..=2 {
             sender
-                .send(append(&shared, id, (id - 1) as u16, id as u8))
+                .try_send(append(&shared, id, (id - 1) as u16, id as u8))
                 .unwrap();
         }
         if matches!(case, Case::Cohort { .. }) {
             sender
-                .send(operation(&shared, 3, 2, Operation::Flush))
+                .try_send(operation(&shared, 3, 2, Operation::Flush))
                 .unwrap();
             sender
-                .send(operation(
+                .try_send(operation(
                     &shared,
                     4,
                     2,
@@ -179,15 +179,15 @@ impl Run {
                     },
                 ))
                 .unwrap();
-            sender.send(append(&shared, 5, 0, 3)).unwrap();
+            sender.try_send(append(&shared, 5, 0, 3)).unwrap();
             sender
-                .send(operation(&shared, 6, 3, Operation::Flush))
+                .try_send(operation(&shared, 6, 3, Operation::Flush))
                 .unwrap();
         }
         let paused = matches!(case, Case::Reorder { pause: true, .. }).then(|| {
-            let (done, result) = mpsc::sync_channel(1);
+            let (done, result) = mailbox::bounded(1, &shared.metadata).unwrap();
             sender
-                .send(Command::Pause {
+                .try_send(Command::Pause {
                     done,
                     _permit: shared.reserve(Kind::Control).unwrap(),
                 })
@@ -271,7 +271,7 @@ fn held_sync_keeps_a_finite_prefix_while_reads_progress_and_later_writes_wait() 
         }
         assert!(matches!(
             run.output.try_recv(),
-            Err(mpsc::TryRecvError::Empty)
+            Err(mailbox::TryRecvError::Empty)
         ));
         assert_eq!(run.shared.final_status.lock().unwrap().published, 2);
         assert_eq!(run.shared.health.lock().unwrap().durable, 0);
@@ -319,7 +319,7 @@ fn observed_b_completion_cannot_acknowledge_over_withheld_a() {
     run.wait_for_b();
     assert!(matches!(
         run.output.try_recv(),
-        Err(mpsc::TryRecvError::Empty)
+        Err(mailbox::TryRecvError::Empty)
     ));
     assert_eq!(run.shared.final_status.lock().unwrap().published, 0);
     // The intentionally wrong maximum-completed rule claims 2 while the
@@ -353,7 +353,7 @@ fn short_a_then_complete_b_fails_without_publication_and_rejects_the_suffix() {
     run.wait_for_b();
     assert!(matches!(
         run.output.try_recv(),
-        Err(mpsc::TryRecvError::Empty)
+        Err(mailbox::TryRecvError::Empty)
     ));
     run.release();
     for _ in 0..2 {
@@ -384,7 +384,7 @@ fn pause_waits_for_the_oldest_owned_append_even_after_a_later_cqe() {
     run.wait_for_b();
     assert!(matches!(
         run.paused.as_ref().unwrap().try_recv(),
-        Err(mpsc::TryRecvError::Empty)
+        Err(mailbox::TryRecvError::Empty)
     ));
     assert_eq!(run.shared.pools.control.usage().current.requests, 1);
     run.release();
@@ -405,7 +405,7 @@ fn timed_out_pause_preserves_owners_and_no_late_write_can_succeed() {
             .as_ref()
             .unwrap()
             .recv_timeout(Duration::from_millis(20)),
-        Err(mpsc::RecvTimeoutError::Timeout)
+        Err(mailbox::RecvTimeoutError::Timeout)
     ));
     // The frontend's deadline expires while A remains owned by storage.
     drop(run.paused.take());

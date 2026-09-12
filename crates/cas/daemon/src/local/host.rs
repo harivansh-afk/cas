@@ -63,7 +63,7 @@ struct Attachment {
 pub struct Host {
     shared: Arc<SharedHost>,
     images: BudgetVec<Option<Attachment>, BudgetAllocator>,
-    ready: Option<mpsc::SyncSender<Ready>>,
+    ready: Option<mailbox::Sender<Ready>>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -132,7 +132,7 @@ impl Host {
         endpoints
             .try_reserve_exact(images.len())
             .map_err(|_| io::Error::other("host endpoint metadata exhausted"))?;
-        let (ready, input) = mpsc::sync_channel(images.len());
+        let (ready, input) = mailbox::bounded(images.len(), &shared.resources.metadata)?;
         for (index, (log, manifest)) in images.into_iter().enumerate() {
             let admission = capacity::Admission {
                 staging: shared.staging.clone(),
@@ -162,8 +162,8 @@ impl Host {
                 Some(Arc::clone(&shared.gate)),
             );
             let wake = EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK)?;
-            let (output, events) = mpsc::sync_channel(1);
-            let (reply, replies) = mpsc::sync_channel(1);
+            let (output, events) = mailbox::bounded(1, &shared.resources.metadata)?;
+            let (reply, replies) = mailbox::bounded(1, &shared.resources.metadata)?;
             endpoints.push(worker::Endpoint {
                 manifest,
                 #[cfg(test)]
@@ -327,9 +327,9 @@ pub(super) struct Port {
     index: usize,
     shared: Arc<SharedHost>,
     health: Health,
-    ready: mpsc::SyncSender<Ready>,
-    events: mpsc::Receiver<Event>,
-    reply: mpsc::SyncSender<Reply>,
+    ready: mailbox::Sender<Ready>,
+    events: mailbox::Receiver<Event>,
+    reply: mailbox::Sender<Reply>,
     pub wake: EventFd,
     active: Option<Instant>,
     granted: bool,

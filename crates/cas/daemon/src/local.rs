@@ -4,13 +4,16 @@ mod pools;
 mod reactor;
 mod state;
 mod window;
+use cas_core::budget::channel as mailbox;
 use pools::Pools;
 pub use state::ImageState;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock, mpsc};
+#[cfg(test)]
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -93,11 +96,11 @@ enum Command {
     Append(Packing),
     Io(Io),
     Pause {
-        done: mpsc::SyncSender<io::Result<append::Status>>,
+        done: mailbox::Sender<io::Result<append::Status>>,
         _permit: Permit,
     },
     NewAttachment {
-        done: mpsc::SyncSender<io::Result<append::Status>>,
+        done: mailbox::Sender<io::Result<append::Status>>,
         _permit: Permit,
         rotated: bool,
     },
@@ -135,7 +138,7 @@ impl Command {
             Self::Io(io) => complete(io.id, io.operation.into(), io.permit),
             Self::Pause { done, _permit } | Self::NewAttachment { done, _permit, .. } => {
                 drop(_permit);
-                let _ = done.send(Err(io::Error::other(error.to_owned())));
+                let _ = done.try_send(Err(io::Error::other(error.to_owned())));
             }
             Self::Resume => (),
         }
@@ -153,7 +156,6 @@ type Response = (Completed, append::Status);
 pub type Health = Arc<state::Gate>;
 
 pub struct Shared {
-    submissions_closed: Mutex<bool>,
     pools: Pools,
     metadata: Arc<Budget>,
     metrics: Mutex<Metrics>,
@@ -191,7 +193,6 @@ impl Shared {
         window: Option<cas_core::budget::BudgetArc<window::Window>>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            submissions_closed: Mutex::new(false),
             injection: OnceLock::new(),
             pools,
             metadata,
@@ -298,8 +299,8 @@ pub fn create_log(path: &Path, image_bytes: u64) -> io::Result<Log> {
 }
 
 pub struct Local {
-    sender: Option<mpsc::SyncSender<Command>>,
-    receiver: Mutex<mpsc::Receiver<Response>>,
+    sender: Option<mailbox::Sender<Command>>,
+    receiver: Mutex<mailbox::Receiver<Response>>,
     worker: Option<JoinHandle<()>>,
     input_wake: Option<EventFd>,
     execution: Execution,
@@ -357,8 +358,14 @@ impl Local {
     ) -> io::Result<Self> {
         let status = log.status();
         *shared.final_status.lock().expect("status poisoned") = status;
-        let (sender, input) = mpsc::sync_channel(136);
-        let (output, receiver) = mpsc::channel();
+        let (sender, input) = mailbox::bounded(
+            pools::IMAGE_REQUESTS + pools::IMAGE_CONTROL + 1,
+            &shared.metadata,
+        )?;
+        let (output, receiver) = mailbox::bounded(
+            pools::IMAGE_REQUESTS + pools::IMAGE_CONTROL,
+            &shared.metadata,
+        )?;
         let input_wake = match &port {
             Some(port) => Some(port.wake.try_clone()?),
             None if execution == Execution::Concurrent => {
@@ -407,20 +414,6 @@ impl Local {
     }
 
     fn send(&mut self, command: Command) -> io::Result<()> {
-        let mut closed = self
-            .shared
-            .submissions_closed
-            .lock()
-            .unwrap_or_else(|poisoned| {
-                let mut closed = poisoned.into_inner();
-                *closed = true;
-                closed
-            });
-        if *closed {
-            let message = "local command submission is closed";
-            command.reject(message, &mut self.rejected);
-            return Err(io::Error::other(message));
-        }
         if let Err(error) = self
             .sender
             .as_ref()
@@ -428,9 +421,8 @@ impl Local {
             .try_send(command)
         {
             let message = error.to_string();
-            *closed = matches!(error, mpsc::TrySendError::Disconnected(_));
-            let (mpsc::TrySendError::Full(command) | mpsc::TrySendError::Disconnected(command)) =
-                error;
+            let (mailbox::TrySendError::Full(command)
+            | mailbox::TrySendError::Disconnected(command)) = error;
             command.reject(&message, &mut self.rejected);
             return Err(io::Error::other(message));
         }
@@ -578,19 +570,19 @@ impl Local {
     fn barrier(
         &mut self,
         deadline: Instant,
-        command: impl FnOnce(mpsc::SyncSender<io::Result<append::Status>>, Permit) -> Command,
+        command: impl FnOnce(mailbox::Sender<io::Result<append::Status>>, Permit) -> Command,
     ) -> io::Result<()> {
         let permit = self
             .shared
             .reserve(Kind::Control)
             .ok_or_else(|| io::Error::other("no control credit for storage barrier"))?;
-        let (done, completion) = mpsc::sync_channel(1);
+        let (done, completion) = mailbox::bounded(1, &self.shared.metadata)?;
         self.send(command(done, permit))?;
         self.status = completion
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
             .map_err(|error| {
                 io::Error::new(
-                    if matches!(error, mpsc::RecvTimeoutError::Timeout) {
+                    if matches!(error, mailbox::RecvTimeoutError::Timeout) {
                         io::ErrorKind::TimedOut
                     } else {
                         io::ErrorKind::BrokenPipe
@@ -645,7 +637,7 @@ impl Local {
         } else {
             match receiver.try_recv() {
                 Ok(response) => Some(response),
-                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mailbox::TryRecvError::Empty) => None,
                 Err(error) => return Err(io::Error::other(error)),
             }
         };
@@ -715,7 +707,7 @@ impl Drop for Wake {
 
 struct Worker {
     log: Log,
-    output: mpsc::Sender<Response>,
+    output: mailbox::Sender<Response>,
     wake: Wake,
     shared: Arc<Shared>,
     port: Option<host::Port>,
@@ -746,7 +738,7 @@ impl Worker {
             failed.fail(error.to_string());
         }
         self.output
-            .send((
+            .try_send((
                 Completed {
                     id,
                     data,
@@ -759,8 +751,8 @@ impl Worker {
         notify(&self.wake.0)
     }
 
-    fn run(mut self, input: mpsc::Receiver<Command>) {
-        for command in input {
+    fn run(mut self, input: mailbox::Receiver<Command>) {
+        while let Ok(command) = input.recv() {
             if self.execute(command).is_err() {
                 break;
             }
@@ -785,7 +777,7 @@ impl Worker {
                 let status = self.log.status();
                 *self.shared.final_status.lock().expect("status poisoned") = status;
                 drop(_permit);
-                done.send(if failed {
+                done.try_send(if failed {
                     Err(io::Error::other("local image failed"))
                 } else {
                     Ok(status)
@@ -798,7 +790,7 @@ impl Worker {
                 rotated: false,
             } => {
                 drop(_permit);
-                let _ = done.send(Err(io::Error::other("attachment did not rotate")));
+                let _ = done.try_send(Err(io::Error::other("attachment did not rotate")));
             }
             Command::Resume => (),
             Command::Append(Packing {

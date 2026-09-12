@@ -11,8 +11,8 @@ pub(super) struct Endpoint {
     pub control: Arc<Mutex<tests::Control>>,
     pub health: Health,
     pub wake: EventFd,
-    pub output: mpsc::SyncSender<Event>,
-    pub replies: mpsc::Receiver<Reply>,
+    pub output: mailbox::Sender<Event>,
+    pub replies: mailbox::Receiver<Reply>,
 }
 
 impl Endpoint {
@@ -171,7 +171,7 @@ pub(super) struct Owner {
     pub store: Store,
     pub endpoints: BudgetVec<Endpoint, BudgetAllocator>,
     pub shared: Arc<SharedHost>,
-    pub input: mpsc::Receiver<Ready>,
+    pub input: mailbox::Receiver<Ready>,
 }
 
 impl Owner {

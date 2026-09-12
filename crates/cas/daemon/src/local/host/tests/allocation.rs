@@ -288,17 +288,10 @@ fn terminal_close_drains_commands_beyond_a_queued_pause() {
     let control = local.prepare(Kind::Control).unwrap().unwrap();
     let second = local.prepare(Kind::Read(BLOCK_SIZE)).unwrap().unwrap();
     let shared = Arc::clone(&local.shared);
-    let publication = shared.submissions_closed.lock().unwrap();
-    assert!(!*publication);
+    // Stop the reactor at its completion gate until all accepted commands are
+    // queued. Terminal drain must cross Pause after this shared failure.
+    let publication = shared.health.lock().unwrap();
     assert!(host.shared.staging.reclaimed(0, u64::MAX).is_err());
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while host.shared.gate.failure().is_none() {
-        // Wake the idle reactor to observe failure, then block its close behind
-        // this producer's publication guard until all three commands are queued.
-        notify(local.input_wake.as_ref().unwrap()).unwrap();
-        assert!(Instant::now() < deadline);
-        thread::sleep(Duration::from_millis(1));
-    }
     let read = |id, permit| {
         Command::Io(Io {
             id,
@@ -311,7 +304,7 @@ fn terminal_close_drains_commands_beyond_a_queued_pause() {
         })
     };
     let sender = local.sender.as_ref().unwrap();
-    let (done, pause) = mpsc::sync_channel(1);
+    let (done, pause) = mailbox::bounded(1, &shared.metadata).unwrap();
     assert!(sender.try_send(read(0, first)).is_ok());
     assert!(
         sender
@@ -323,13 +316,14 @@ fn terminal_close_drains_commands_beyond_a_queued_pause() {
     );
     assert!(sender.try_send(read(1, second)).is_ok());
     drop(publication);
+    notify(local.input_wake.as_ref().unwrap()).unwrap();
     for id in 0..2 {
         let response = received(&mut local);
         assert_eq!(response.id, id);
         assert!(response.result.is_err());
     }
     assert!(pause.recv_timeout(Duration::from_secs(3)).unwrap().is_err());
-    drop((shared, local));
+    drop((pause, shared, local));
     shutdown(host);
     assert_eq!(resources.read_memory().usage().current.bytes, 0);
     assert_eq!(resources.metadata.usage().current.bytes, 0);

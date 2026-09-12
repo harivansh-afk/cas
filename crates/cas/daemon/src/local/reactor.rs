@@ -89,7 +89,7 @@ pub(super) struct Reactor {
     commands: VecDeque<Command>,
     reads: VecDeque<Io>,
     worker: Worker,
-    input: mpsc::Receiver<Command>,
+    input: mailbox::Receiver<Command>,
     input_wake: EventFd,
     kernel_wake: EventFd,
     next_token: u64,
@@ -109,7 +109,7 @@ pub(super) struct Reactor {
 impl Reactor {
     pub fn new(
         worker: Worker,
-        input: mpsc::Receiver<Command>,
+        input: mailbox::Receiver<Command>,
         input_wake: EventFd,
     ) -> io::Result<Self> {
         let ring = IoUring::new(256)?;
@@ -294,8 +294,8 @@ impl Reactor {
                         break;
                     }
                 }
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
+                Err(mailbox::TryRecvError::Empty) => break,
+                Err(mailbox::TryRecvError::Disconnected) => {
                     self.closed = true;
                     break;
                 }
@@ -839,12 +839,7 @@ impl Reactor {
 
     fn stop(&mut self, error: &io::Error) {
         self.fail(error);
-        *self
-            .worker
-            .shared
-            .submissions_closed
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = true;
+        self.input.close();
         // Every successful sender published before the close above. Drain it
         // after closing so receiver destruction cannot strand a late command.
         self.receive();

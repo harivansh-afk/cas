@@ -435,7 +435,8 @@ fn rejected_batch_and_following_read_return_each_owner_until_credits_are_release
         drop(local.sender.take());
         local.input_wake.as_ref().unwrap().write(1).unwrap();
         local.worker.take().unwrap().join().unwrap();
-        let (sender, receiver) = mpsc::sync_channel(0);
+        let (sender, receiver) = mailbox::bounded(1, &local.shared.metadata).unwrap();
+        sender.try_send(Command::Resume).unwrap();
         let receiver = (!disconnected).then_some(receiver);
         local.sender = Some(sender);
         let read = local.shared.reserve(Kind::Read(BLOCK_SIZE)).unwrap();
@@ -500,7 +501,7 @@ fn accepted_command_survives_an_already_pending_wake_notification() {
     drop(local.sender.take());
     local.input_wake.as_ref().unwrap().write(1).unwrap();
     local.worker.take().unwrap().join().unwrap();
-    let (sender, receiver) = mpsc::sync_channel(1);
+    let (sender, receiver) = mailbox::bounded(1, &local.shared.metadata).unwrap();
     local.sender = Some(sender);
     let wake = EventFd::new(EFD_NONBLOCK | EFD_CLOEXEC).unwrap();
     wake.write(u64::MAX - 1).unwrap();
@@ -609,4 +610,95 @@ fn fresh_attachment_syncs_both_epochs_and_keeps_image_mutations_monotonic() {
         assert_eq!(chunk, &[index as u8 + 1; BLOCK_SIZE]);
     }
     assert_eq!((log.status().published, log.status().durable), (3, 3));
+}
+
+#[test]
+fn channel_allocations_fail_before_worker_start_and_release_partial_startup() {
+    let probe = Budget::new(Amount {
+        bytes: MAX_REQUEST_BYTES,
+        requests: 0,
+    });
+    let channel =
+        mailbox::bounded::<Command>(pools::IMAGE_REQUESTS + pools::IMAGE_CONTROL + 1, &probe)
+            .unwrap();
+    let command_bytes = probe.usage().current.bytes;
+    drop(channel);
+    for bytes in [0, command_bytes] {
+        let directory = tempfile::tempdir().unwrap();
+        let log = create_log(&directory.path().join("log"), MAX_REQUEST_BYTES as u64).unwrap();
+        let mut shared = Shared::new(log.status());
+        let metadata = Budget::new(Amount { bytes, requests: 0 });
+        Arc::get_mut(&mut shared).unwrap().metadata = Arc::clone(&metadata);
+        let event = EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK).unwrap();
+        let result = Local::from_log(log, &event, Execution::Concurrent, shared);
+        assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::OutOfMemory));
+        assert_eq!(metadata.usage().current, Amount::default());
+        assert!(metadata.usage().rejected > 0);
+    }
+}
+
+#[test]
+fn all_request_completions_fit_without_frontend_consumption() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut local = concurrent(&directory.path().join("log"));
+    let metadata = Arc::clone(&local.shared.metadata);
+    for id in 0..pools::IMAGE_REQUESTS as u64 {
+        let permit = local.prepare(Kind::Write(BLOCK_SIZE)).unwrap().unwrap();
+        local
+            .gather(
+                id,
+                QueueHead {
+                    queue: 0,
+                    head: id as u16,
+                },
+                id * BLOCK_SIZE as u64,
+                BLOCK_SIZE,
+                permit,
+                |bytes| {
+                    bytes.fill(id as u8);
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+    local.seal().unwrap();
+    for id in pools::IMAGE_REQUESTS..pools::IMAGE_REQUESTS + pools::IMAGE_CONTROL {
+        let permit = local.prepare(Kind::Control).unwrap().unwrap();
+        local.enqueue(id as u64, Operation::Flush, permit).unwrap();
+    }
+    assert!(local.shared.reserve(Kind::Write(BLOCK_SIZE)).is_none());
+    assert!(local.shared.reserve(Kind::Control).is_none());
+    let (done, result) = mpsc::channel();
+    std::thread::spawn(move || {
+        drop(local.sender.take());
+        local.input_wake.as_ref().unwrap().write(1).unwrap();
+        local.worker.take().unwrap().join().unwrap();
+        done.send(local).expect("test receiver retained");
+    });
+    let mut local = result.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert_eq!(
+        local.shared.pools.requests.usage().current.requests,
+        pools::IMAGE_REQUESTS
+    );
+    assert_eq!(
+        local.shared.pools.control.usage().current.requests,
+        pools::IMAGE_CONTROL
+    );
+    for id in 0..pools::IMAGE_REQUESTS + pools::IMAGE_CONTROL {
+        let completed = local.receive(false).unwrap().unwrap();
+        assert_eq!(completed.id, id as u64);
+        assert!(completed.result.is_ok());
+        drop(completed);
+    }
+    assert_eq!(local.status.durable, pools::IMAGE_REQUESTS as u64);
+    assert_eq!(
+        local.shared.pools.requests.usage().current,
+        Amount::default()
+    );
+    assert_eq!(
+        local.shared.pools.control.usage().current,
+        Amount::default()
+    );
+    drop(local);
+    assert_eq!(metadata.usage().current, Amount::default());
 }

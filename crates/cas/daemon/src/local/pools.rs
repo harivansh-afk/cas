@@ -1,5 +1,8 @@
 use super::*;
 
+pub(super) const IMAGE_REQUESTS: usize = 128;
+pub(super) const IMAGE_CONTROL: usize = 8;
+
 /// Construct once per host; every image Share retains these same budgets.
 pub(super) struct HostPools {
     requests: Arc<Budget>,
@@ -28,10 +31,10 @@ impl HostPools {
         let share =
             |host, bytes, requests| Share::new(Arc::clone(host), Amount { bytes, requests });
         Pools {
-            requests: share(&self.requests, 0, 128),
+            requests: share(&self.requests, 0, IMAGE_REQUESTS),
             append: share(&self.append, 8 * MAX_REQUEST_BYTES, 0),
             read: share(&self.read, 8 * MAX_REQUEST_BYTES, 0),
-            control: share(&self.control, 64 * 1024, 8),
+            control: share(&self.control, 64 * 1024, IMAGE_CONTROL),
         }
     }
 }
