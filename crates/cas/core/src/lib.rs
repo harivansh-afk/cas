@@ -32,3 +32,6 @@ mod encoding;
 pub mod manifest;
 pub mod space;
 pub mod store;
+
+#[cfg(target_os = "linux")]
+pub mod catalog;

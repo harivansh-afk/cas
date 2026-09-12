@@ -98,7 +98,7 @@ fn reflink(source: &str, clone: &str, changed: bool) -> io::Result<()> {
 }
 
 fn tests(module: &str, list: &str, log: &str) -> io::Result<()> {
-    let prefix = format!("{module}::tests::");
+    let prefix = format!("{module}::");
     let expected: BTreeSet<_> = list
         .lines()
         .filter_map(|line| line.strip_suffix(": test"))
@@ -199,11 +199,12 @@ pub(super) fn verify(output: &Path, build: &Build) -> io::Result<()> {
         )?;
     }
     for (module, namespace) in [
-        ("space", "space::filesystem"),
-        ("store", "store::file"),
-        ("manifest", "manifest::file"),
-        ("append", "append::shared"),
-        ("runtime", "local::host"),
+        ("space", "space::filesystem::tests"),
+        ("store", "store::file::tests"),
+        ("manifest", "manifest::file::tests"),
+        ("append", "append::shared::tests"),
+        ("catalog", "catalog"),
+        ("runtime", "local::host::tests"),
     ] {
         tests(
             namespace,

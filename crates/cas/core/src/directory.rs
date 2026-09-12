@@ -42,6 +42,14 @@ impl Directory {
         self.file.sync_all()
     }
 
+    pub fn replace(&self, from: &str, to: &str) -> io::Result<()> {
+        #[cfg(test)]
+        if crate::direct::faults::take(crate::direct::faults::Fault::Rename) {
+            return Err(io::Error::from_raw_os_error(libc::EIO));
+        }
+        fs::rename(self.path.join(from), self.path.join(to))
+    }
+
     pub fn archive(&self, name: &str, file: &File, offset: u64) -> io::Result<PathBuf> {
         use std::io::Write;
         use std::os::unix::fs::FileExt;

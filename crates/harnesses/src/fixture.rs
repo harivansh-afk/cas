@@ -168,7 +168,7 @@ fn execute(args: &Args) -> io::Result<()> {
 pub fn run(mut args: Args) -> io::Result<()> {
     args.output = crate::qemu::prepare_output(&args.output)?;
     let mut report = Report {
-        schema_version: 3,
+        schema_version: 4,
         passed: false,
         started_at_utc: host::utc_now()?,
         ended_at_utc: String::new(),
@@ -187,7 +187,7 @@ pub fn run(mut args: Args) -> io::Result<()> {
 
 pub fn verify(output: &Path) -> io::Result<()> {
     let report: Report = evidence::read_json(&output.join("fixture.json"))?;
-    if report.schema_version != 3 || !report.passed || report.error.is_some() {
+    if report.schema_version != 4 || !report.passed || report.error.is_some() {
         return Err(io::Error::other("XFS fixture failed"));
     }
     let mut actual = source::scan(output)?;

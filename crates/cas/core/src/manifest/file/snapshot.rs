@@ -8,7 +8,7 @@ pub struct SnapshotKey {
 }
 
 impl SnapshotKey {
-    fn validate(self) -> io::Result<()> {
+    pub(crate) fn validate(self) -> io::Result<()> {
         require(
             self.end >= (2 * BLOCK_SIZE) as u64
                 && self.end <= i64::MAX as u64

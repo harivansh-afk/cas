@@ -30,6 +30,7 @@ for scope in store:file manifest:file append:shared; do
   filter="$module::${scope#*:}::tests"
   run_tests "$module" "$CAS_CORE_TESTS" "$filter"
 done
+run_tests catalog "$CAS_CORE_TESTS" catalog::
 run_tests runtime "$CAS_DAEMON_TESTS" local::host::tests
 df -B1 /fixture > /results/space-after.log
 sync -f /fixture
