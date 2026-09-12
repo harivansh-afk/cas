@@ -75,6 +75,33 @@
             lock = ./flake.lock;
           };
         };
+      sharedFor =
+        pkgs: liveRecovery:
+        pkgs.callPackage ./nix/fixture {
+          name = if liveRecovery then "cas-shared-recovery-fixture" else "cas-shared-fixture";
+          workload = "shared";
+          guest = lib.nixosSystem {
+            specialArgs = {
+              cas = pkgs.cas;
+              inherit liveRecovery;
+              inner = lib.nixosSystem {
+                specialArgs.cas = pkgs.cas;
+                modules = [
+                  ./nix/shared/guest.nix
+                  { nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system; }
+                ];
+              };
+            };
+            modules = [
+              ./nix/shared/outer.nix
+              { nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system; }
+            ];
+          };
+          provenance = {
+            source_revision = self.rev or self.dirtyRev or null;
+            source_path = toString self.outPath;
+          };
+        };
     in
     {
       # Adds `cas` (and the rust-bin toolchain it is built with) to a nixpkgs.
@@ -130,30 +157,8 @@
               source_path = toString self.outPath;
             };
           };
-          shared-fixture = pkgs.callPackage ./nix/fixture {
-            name = "cas-shared-fixture";
-            workload = "shared";
-            guest = lib.nixosSystem {
-              specialArgs = {
-                cas = pkgs.cas;
-                inner = lib.nixosSystem {
-                  specialArgs.cas = pkgs.cas;
-                  modules = [
-                    ./nix/shared/guest.nix
-                    { nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system; }
-                  ];
-                };
-              };
-              modules = [
-                ./nix/shared/outer.nix
-                { nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system; }
-              ];
-            };
-            provenance = {
-              source_revision = self.rev or self.dirtyRev or null;
-              source_path = toString self.outPath;
-            };
-          };
+          shared-fixture = sharedFor pkgs false;
+          shared-recovery-fixture = sharedFor pkgs true;
           dev-vm = smokeFor pkgs "staging" true;
           census-pilot = (pkgs.callPackage ./nix/census.nix { }).pilot;
           census-fleet = (pkgs.callPackage ./nix/census.nix { }).fleet;

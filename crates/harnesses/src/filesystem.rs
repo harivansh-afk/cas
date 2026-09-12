@@ -15,6 +15,7 @@ use std::{
 pub enum Phase {
     Write,
     Verify,
+    Resume,
 }
 
 #[derive(clap::Args)]
@@ -143,6 +144,18 @@ pub fn run(args: Args) -> io::Result<()> {
         require_ext4(&args.root)?;
         if matches!(args.phase, Phase::Write) {
             write(&args)?;
+        }
+        if matches!(args.phase, Phase::Resume) {
+            // Dirty actual file data after reconnect; a cached read alone would
+            // not demonstrate continued WRITE and fsync service.
+            let bytes: Vec<_> = (0..4096)
+                .map(|offset| initial_byte(offset, args.image))
+                .collect();
+            let mut file = File::options()
+                .write(true)
+                .open(args.root.join("renamed.bin"))?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
         }
         verify(&args)
     })();

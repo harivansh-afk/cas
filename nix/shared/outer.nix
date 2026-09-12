@@ -3,6 +3,7 @@
   pkgs,
   cas,
   inner,
+  liveRecovery ? false,
   ...
 }:
 let
@@ -14,6 +15,7 @@ let
         if pkgs.stdenv.hostPlatform.isAarch64 then "aarch64" else "x86_64"
       }";
       kernel = inner.config.boot.kernelPackages.kernel.version;
+      live_recovery = liveRecovery;
       guest_ram_bytes = inner.config.virtualisation.memorySize * 1024 * 1024;
     }
   );

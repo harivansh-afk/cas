@@ -5,6 +5,9 @@ use crate::{
     qemu,
 };
 use serde::{Deserialize, Serialize};
+
+mod restart;
+use restart::{restart, verify_restart};
 use std::{
     fs,
     fs::File,
@@ -42,6 +45,8 @@ pub struct Build {
     pub qemu: PathBuf,
     pub kernel: String,
     pub guest_ram_bytes: u64,
+    #[serde(default)]
+    pub live_recovery: bool,
 }
 
 fn checked(command: &mut Command, output: &Path, timeout: Duration) -> io::Result<()> {
@@ -61,24 +66,24 @@ fn spawn(command: &mut Command, output: &Path) -> io::Result<ManagedChild> {
     ManagedChild::spawn(command)
 }
 
-fn phase(args: &Args, build: &Build, name: &str) -> io::Result<()> {
-    let output = args.output.join(name);
-    fs::create_dir(&output)?;
+fn start_host(
+    args: &Args,
+    build: &Build,
+    output: &Path,
+    paths: &[PathBuf; 2],
+    mode: &str,
+) -> io::Result<ManagedChild> {
     let reports = output.join("daemon");
     fs::create_dir(&reports)?;
-    let sockets = tempfile::Builder::new()
-        .prefix("cas-shared-")
-        .tempdir_in("/run")?;
-    let paths = [sockets.path().join("0.sock"), sockets.path().join("1.sock")];
     let mut command = Command::new(&build.host);
     command
         .arg("--root")
         .arg(&args.root)
-        .args(["--store", STORE, "--mode", "cold", "--segment-bytes"])
+        .args(["--store", STORE, "--mode", mode, "--segment-bytes"])
         .arg(SEGMENT_BYTES.to_string())
         .arg("--reports")
         .arg(&reports);
-    for (id, socket) in IMAGES.iter().zip(&paths) {
+    for (id, socket) in IMAGES.iter().zip(paths) {
         command
             .arg("--image")
             .arg(format!("{id}={}", socket.display()));
@@ -87,7 +92,7 @@ fn phase(args: &Args, build: &Build, name: &str) -> io::Result<()> {
     evidence::write_json(
         &output.join("daemon-command.json"),
         &serde_json::json!({
-            "pid":host.pid(), "executable":build.host, "argv":command.get_args().collect::<Vec<_>>()
+            "pid":host.pid(), "executable":build.host, "argv":command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>()
         }),
     )?;
     let startup = Instant::now() + Duration::from_secs(60);
@@ -98,6 +103,18 @@ fn phase(args: &Args, build: &Build, name: &str) -> io::Result<()> {
         }
         thread::sleep(process::POLL);
     }
+    Ok(host)
+}
+
+fn phase(args: &Args, build: &Build, name: &str) -> io::Result<()> {
+    let output = args.output.join(name);
+    fs::create_dir(&output)?;
+    let sockets = tempfile::Builder::new()
+        .prefix("cas-shared-")
+        .tempdir_in("/run")?;
+    let paths = [sockets.path().join("0.sock"), sockets.path().join("1.sock")];
+    let mut host = start_host(args, build, &output, &paths, "cold")?;
+    let live = build.live_recovery && name == "write";
     let mut guests = Vec::new();
     for (index, socket) in paths.iter().enumerate() {
         let directory = output.join(format!("guest-{index}"));
@@ -106,6 +123,9 @@ fn phase(args: &Args, build: &Build, name: &str) -> io::Result<()> {
         fs::create_dir(&temporary)?;
         fs::write(directory.join("phase"), name)?;
         fs::write(directory.join("image"), index.to_string())?;
+        if live {
+            fs::write(directory.join("live-recovery"), "retained")?;
+        }
         let mut command = Command::new(&build.guest);
         command
             .env("CAS_RESULTS_DIR", &directory)
@@ -117,6 +137,19 @@ fn phase(args: &Args, build: &Build, name: &str) -> io::Result<()> {
         guests.push((guest, directory, false));
     }
     let deadline = Instant::now() + PHASE_TIMEOUT;
+    let completed = if live {
+        restart(
+            args,
+            build,
+            &output,
+            &paths,
+            &mut host,
+            &mut guests,
+            deadline,
+        )?
+    } else {
+        output.clone()
+    };
     loop {
         process::check_interrupt()?;
         let mut complete = true;
@@ -158,7 +191,7 @@ fn phase(args: &Args, build: &Build, name: &str) -> io::Result<()> {
     }
     let status = host.wait(Duration::from_secs(35))?;
     evidence::write_json(
-        &output.join("daemon-exit.json"),
+        &completed.join("daemon-exit.json"),
         &serde_json::json!({"exit_code":process::exit_code(status)}),
     )?;
     if !status.success() {
@@ -168,7 +201,14 @@ fn phase(args: &Args, build: &Build, name: &str) -> io::Result<()> {
 }
 
 fn verify_phase(output: &Path, phase: &str, build: &Build) -> io::Result<()> {
-    let host: serde_json::Value = evidence::read_json(&output.join("daemon/host.json"))?;
+    let live = build.live_recovery && phase == "write";
+    let completed = if live {
+        verify_restart(output)?;
+        output.join("replacement")
+    } else {
+        output.to_owned()
+    };
+    let host: serde_json::Value = evidence::read_json(&completed.join("daemon/host.json"))?;
     // The executable's report carries actual shared owner shutdown and budgets.
     if host["services_ok"] != true
         || !host["shutdown_error"].is_null()
@@ -177,7 +217,7 @@ fn verify_phase(output: &Path, phase: &str, build: &Build) -> io::Result<()> {
     {
         return Err(io::Error::other("shared host report failed"));
     }
-    let exit: serde_json::Value = evidence::read_json(&output.join("daemon-exit.json"))?;
+    let exit: serde_json::Value = evidence::read_json(&completed.join("daemon-exit.json"))?;
     if exit["exit_code"] != 0 {
         return Err(io::Error::other("daemon exit evidence failed"));
     }
@@ -211,6 +251,17 @@ fn verify_phase(output: &Path, phase: &str, build: &Build) -> io::Result<()> {
             return Err(io::Error::other(
                 "filesystem report differs from required workload",
             ));
+        }
+        if live {
+            let resumed: serde_json::Value =
+                evidence::read_json(&directory.join("resumed/filesystem.json"))?;
+            if resumed["passed"] != true
+                || resumed["phase"] != "resume"
+                || resumed["file_blake3"] != actual["file_blake3"]
+                || resumed["sqlite_integrity"] != "ok"
+            {
+                return Err(io::Error::other("resumed application oracle failed"));
+            }
         }
         let qemu: serde_json::Value = evidence::read_json(&directory.join("qemu.json"))?;
         let argv = qemu["argv"]
@@ -247,7 +298,7 @@ fn verify_phase(output: &Path, phase: &str, build: &Build) -> io::Result<()> {
             ));
         }
         let backend: serde_json::Value =
-            evidence::read_json(&output.join("daemon").join(format!("{id}.json")))?;
+            evidence::read_json(&completed.join("daemon").join(format!("{id}.json")))?;
         if phase == "write"
             && (backend["zeroes"].as_u64().unwrap_or(0) == 0
                 || backend["flushes"].as_u64().unwrap_or(0) == 0)
@@ -297,7 +348,7 @@ pub fn run(args: Args) -> io::Result<()> {
             "schema_version":1,"passed":result.is_ok(),"started_at_utc":started,"ended_at_utc":crate::host::utc_now()?,
             "error":result.as_ref().err().map(ToString::to_string),"images":2,"image_bytes":IMAGE_BYTES,
             "segment_bytes":SEGMENT_BYTES,"guest_ram_bytes_each":build.guest_ram_bytes,"inner_acceleration":"tcg",
-            "paper_gates":[],"checkpoint_complete":false,
+            "paper_gates":[],"checkpoint_complete":false,"live_recovery":build.live_recovery,
         }),
     )?;
     result

@@ -26,7 +26,7 @@
       options = [
         "-machine accel=tcg"
         "-no-reboot"
-        ''-chardev "socket,id=cas,path=$CAS_VHOST_SOCKET,reconnect-ms=0"''
+        ''-chardev "socket,id=cas,path=$CAS_VHOST_SOCKET,reconnect-ms=100"''
         "-device vhost-user-blk-pci,chardev=cas,num-queues=4,queue-size=256"
       ];
     };
@@ -51,7 +51,7 @@
     ];
     serviceConfig = {
       Type = "oneshot";
-      TimeoutStartSec = 90;
+      TimeoutStartSec = 150;
     };
     script = ''
       exec > /results/workload.log 2>&1
@@ -71,6 +71,11 @@
       findmnt --json /mnt/cas > /results/mount.json
       tune2fs -l /dev/vda > /results/ext4.log
       ${cas}/bin/cas-harness filesystem --root /mnt/cas --output /results/workload --phase "$phase" --image "$image" --sqlite ${pkgs.sqlite}/bin/sqlite3
+      if test -f /results/live-recovery; then
+        touch /results/ready
+        while ! test -f /results/resume; do sleep 0.05; done
+        ${cas}/bin/cas-harness filesystem --root /mnt/cas --output /results/resumed --phase resume --image "$image" --sqlite ${pkgs.sqlite}/bin/sqlite3
+      fi
       if test "$phase" = write; then
         fstrim -v /mnt/cas > /results/trim.log
       fi
