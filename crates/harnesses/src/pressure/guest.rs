@@ -133,7 +133,7 @@ fn checked_reads(path: &Path, domain: u64, stage: Stage, image: u8) -> io::Resul
     })
 }
 fn fio(args: &Args, directory: &Path, data: &Path, stage: Stage) -> io::Result<Completed> {
-    let (bytes, depth) = stage.fio().expect("fio stage");
+    let control = stage.fio().expect("fio stage");
     let mut command = Command::new(&args.fio);
     command
         .arg(format!("--name={}", stage.name()))
@@ -142,7 +142,6 @@ fn fio(args: &Args, directory: &Path, data: &Path, stage: Stage) -> io::Result<C
             "--rw=write",
             "--direct=1",
             "--ioengine=io_uring",
-            "--size=8m",
             "--verify=crc32c",
             "--verify_fatal=1",
             "--verify_state_save=0",
@@ -152,8 +151,9 @@ fn fio(args: &Args, directory: &Path, data: &Path, stage: Stage) -> io::Result<C
             "--refill_buffers=1",
             "--output-format=json+",
         ])
-        .arg(format!("--bs={bytes}"))
-        .arg(format!("--iodepth={depth}"))
+        .arg(format!("--size={}", control.size_bytes))
+        .arg(format!("--bs={}", control.block_bytes))
+        .arg(format!("--iodepth={}", control.depth))
         .arg(format!("--output={}", directory.join("fio.json").display()));
     let start = Instant::now();
     let result = process::run_logged(&mut command, &directory.join("command"), COMMAND_TIMEOUT)?;
@@ -162,13 +162,13 @@ fn fio(args: &Args, directory: &Path, data: &Path, stage: Stage) -> io::Result<C
     }
     evidence::read_json::<evidence::Fio>(&directory.join("fio.json"))?.verify(
         stage.name(),
-        SET_BYTES,
-        SET_BYTES,
+        control.size_bytes,
+        control.size_bytes,
     )?;
     Ok(Completed {
         stage,
         image: args.image,
-        bytes: SET_BYTES,
+        bytes: control.size_bytes,
         elapsed_ns: start.elapsed().as_nanos() as u64,
         read_latency: None,
     })

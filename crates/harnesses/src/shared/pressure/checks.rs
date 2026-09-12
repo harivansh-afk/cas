@@ -189,11 +189,9 @@ pub(super) fn completed(value: &Completed, stage: Stage, image: u8) -> io::Resul
         require(
             value.read_latency.is_none()
                 && value.bytes
-                    == if stage.fio().is_some() {
-                        pressure::SET_BYTES
-                    } else {
-                        pressure::WRITE_BYTES
-                    },
+                    == stage
+                        .fio()
+                        .map_or(pressure::WRITE_BYTES, |control| control.size_bytes),
             "write byte count differs",
         )?;
     } else {
@@ -302,6 +300,53 @@ fn memory(path: &Path) -> io::Result<Value> {
     require((2..=4096).contains(&samples), "memory coverage incomplete")?;
     Ok(serde_json::json!({"samples":samples,"peak_cohort_pss_bytes":peak_pss}))
 }
+fn file_inventory(report: &Value) -> io::Result<(String, String)> {
+    let mut expected = vec![
+        ("shared", pressure::SET_BYTES),
+        ("private", pressure::SET_BYTES),
+        ("calibration", pressure::WRITE_BYTES),
+        ("burst", pressure::WRITE_BYTES),
+    ];
+    expected.extend(Stage::ALL.into_iter().filter_map(|stage| {
+        stage
+            .fio()
+            .map(|control| (stage.name(), control.size_bytes))
+    }));
+    let files = array(report, "/files")?;
+    require(
+        files.len() == expected.len(),
+        "guest content inventory incomplete",
+    )?;
+    let mut names = BTreeSet::new();
+    for file in files {
+        let name = file["name"]
+            .as_str()
+            .ok_or_else(|| io::Error::other("file name absent"))?;
+        let bytes = expected
+            .iter()
+            .find(|(expected, _)| *expected == name)
+            .map(|(_, bytes)| *bytes)
+            .ok_or_else(|| io::Error::other("unexpected content file"))?;
+        let hash = file["blake3"]
+            .as_str()
+            .ok_or_else(|| io::Error::other("file digest absent"))?;
+        require(
+            names.insert(name)
+                && number(file, "/bytes")? == bytes
+                && hash.len() == 64
+                && hash.bytes().all(|b| b.is_ascii_hexdigit()),
+            "duplicate file, wrong length or invalid digest",
+        )?;
+    }
+    let hash = |name: &str| {
+        files.iter().find(|file| file["name"] == name).unwrap()["blake3"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    Ok((hash("shared"), hash("private")))
+}
+
 pub(super) fn verify(output: &Path) -> io::Result<Value> {
     let root = output.join("write");
     let stages = root.join("pressure");
@@ -343,7 +388,7 @@ pub(super) fn verify(output: &Path) -> io::Result<Value> {
                 stage,
                 image,
             )?;
-            if let Some((bytes, depth)) = stage.fio() {
+            if let Some(control) = stage.fio() {
                 let command: process::CommandResult =
                     evidence::read_json(&guest.join("command/command.json"))?;
                 require(
@@ -351,8 +396,8 @@ pub(super) fn verify(output: &Path) -> io::Result<Value> {
                     "fio process failed",
                 )?;
                 for flag in [
-                    format!("--bs={bytes}"),
-                    format!("--iodepth={depth}"),
+                    format!("--bs={}", control.block_bytes),
+                    format!("--iodepth={}", control.depth),
                     "--direct=1".into(),
                     "--verify=crc32c".into(),
                     "--do_verify=1".into(),
@@ -361,8 +406,8 @@ pub(super) fn verify(output: &Path) -> io::Result<Value> {
                 }
                 evidence::read_json::<evidence::Fio>(&guest.join("fio.json"))?.verify(
                     stage.name(),
-                    pressure::SET_BYTES,
-                    pressure::SET_BYTES,
+                    control.size_bytes,
+                    control.size_bytes,
                 )?;
                 let fio: Value = evidence::read_json(&guest.join("fio.json"))?;
                 require(
@@ -409,6 +454,7 @@ pub(super) fn verify(output: &Path) -> io::Result<Value> {
     let idle: Value = evidence::read_json(&stages.join("idle.json"))?;
     sample(&idle)?;
     require(drained(&idle)?, "final D/E drain missing")?;
+    let mut seed_digests = Vec::new();
     for image in 0..2 {
         let reports = ["write", "verify"].map(|phase| {
             evidence::read_json::<Value>(
@@ -428,16 +474,18 @@ pub(super) fn verify(output: &Path) -> io::Result<Value> {
                     && report["image"] == image,
                 "guest content oracle failed",
             )?;
-            require(
-                array(report, "/files")?.len() == 8,
-                "guest content inventory incomplete",
-            )?;
+            file_inventory(report)?;
         }
+        seed_digests.push(file_inventory(&written)?);
         require(
             written["files"] == read["files"],
             "fresh-boot file digests differ",
         )?;
     }
+    require(
+        seed_digests[0].0 == seed_digests[1].0 && seed_digests[0].1 != seed_digests[1].1,
+        "shared/disjoint dataset digests differ from the workload contract",
+    )?;
     // Validate every recorded sample, not only selected stage endpoints.
     for line in BufReader::new(File::open(root.join("daemon/telemetry.jsonl"))?).lines() {
         sample(&serde_json::from_str::<Value>(&line?)?)?;
@@ -454,6 +502,24 @@ pub(super) fn verify(output: &Path) -> io::Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn write_completion_requires_the_entire_configured_file() {
+        for stage in Stage::ALL {
+            let Some(control) = stage.fio() else {
+                continue;
+            };
+            let mut result = Completed {
+                stage,
+                image: 0,
+                bytes: control.size_bytes,
+                elapsed_ns: 1,
+                read_latency: None,
+            };
+            completed(&result, stage, 0).unwrap();
+            result.bytes -= control.block_bytes;
+            assert!(completed(&result, stage, 0).is_err());
+        }
+    }
     #[test]
     fn missing_counters_and_forged_memory_never_default_to_zero() {
         assert!(number(&serde_json::json!({}), "/host/compaction/input_bytes").is_err());

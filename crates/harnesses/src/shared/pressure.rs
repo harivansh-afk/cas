@@ -174,14 +174,21 @@ pub(super) fn coordinate(
     fs::create_dir(&stages)?;
     let mut rate = None;
     for stage in Stage::ALL {
-        let until = deadline.min(Instant::now() + COMMAND_TIMEOUT);
+        let readiness = if stage == Stage::Shared {
+            PHASE_TIMEOUT
+        } else {
+            COMMAND_TIMEOUT
+        };
+        let until = deadline.min(Instant::now() + readiness);
         while !guests.iter().all(|(_, root, _)| {
             root.join("pressure")
                 .join(stage.name())
                 .join("ready.json")
                 .exists()
         }) {
-            samples.tick(host, guests, until)?;
+            samples.tick(host, guests, until).map_err(|error| {
+                io::Error::new(error.kind(), format!("{} readiness: {error}", stage.name()))
+            })?;
         }
         // All seed writes and previous stages are compacted before measuring the next delta.
         let before = drain(&mut samples, host, guests, deadline)?;
@@ -194,6 +201,7 @@ pub(super) fn coordinate(
         };
         evidence::write_json(&directory.join("request.json"), &request)?;
         let started = Instant::now();
+        let until = deadline.min(started + COMMAND_TIMEOUT);
         for (_, root, _) in guests.iter() {
             pressure::publish(
                 &root
@@ -209,7 +217,9 @@ pub(super) fn coordinate(
                 .join("completed.json")
                 .exists()
         }) {
-            samples.tick(host, guests, until)?;
+            samples.tick(host, guests, until).map_err(|error| {
+                io::Error::new(error.kind(), format!("{} execution: {error}", stage.name()))
+            })?;
         }
         let guest_elapsed_ns = started.elapsed().as_nanos() as u64;
         for (image, (_, root, _)) in guests.iter().enumerate() {

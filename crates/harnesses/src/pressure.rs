@@ -54,15 +54,29 @@ impl Stage {
             Self::Burst => "burst",
         }
     }
-    pub fn fio(self) -> Option<(u64, u32)> {
-        match self {
-            Self::Write4kQ1 => Some((4096, 1)),
-            Self::Write4kQ32 => Some((4096, 32)),
-            Self::Write1mQ1 => Some((1024 * 1024, 1)),
-            Self::Write1mQ32 => Some((1024 * 1024, 32)),
-            _ => None,
-        }
+    pub fn fio(self) -> Option<FioControl> {
+        let (block_bytes, depth) = match self {
+            Self::Write4kQ1 => (4096, 1),
+            Self::Write4kQ32 => (4096, 32),
+            Self::Write1mQ1 => (1024 * 1024, 1),
+            Self::Write1mQ32 => (1024 * 1024, 32),
+            _ => return None,
+        };
+        Some(FioControl {
+            block_bytes,
+            depth,
+            size_bytes: if block_bytes == 4096 {
+                SET_BYTES
+            } else {
+                64 * 1024 * 1024
+            },
+        })
     }
+}
+pub struct FioControl {
+    pub block_bytes: u64,
+    pub depth: u32,
+    pub size_bytes: u64,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -121,4 +135,16 @@ pub fn wait(path: &Path) -> io::Result<()> {
         std::thread::sleep(process::POLL);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn every_fio_control_can_fill_two_requested_queue_windows() {
+        for control in Stage::ALL.into_iter().filter_map(Stage::fio) {
+            assert!(control.size_bytes >= 2 * control.block_bytes * u64::from(control.depth));
+            assert!(control.size_bytes.is_multiple_of(control.block_bytes));
+        }
+    }
 }
