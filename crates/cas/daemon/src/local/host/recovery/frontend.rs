@@ -6,7 +6,7 @@ use crate::storage::Opening;
 use std::sync::mpsc::TryRecvError;
 
 pub(crate) struct Gates {
-    pub(in crate::local::host) host: Arc<state::HostGate>,
+    pub(in crate::local::host) host: BudgetArc<state::HostGate>,
     pub(in crate::local::host) images: BudgetVec<(catalog::Id, Health), BudgetAllocator>,
 }
 
@@ -44,7 +44,7 @@ pub(crate) struct Endpoint {
     index: usize,
     input: Option<mailbox::Sender<Input>>,
     output: mailbox::Receiver<Activated>,
-    host: Arc<state::HostGate>,
+    host: BudgetArc<state::HostGate>,
     resolved: bool,
 }
 
@@ -103,7 +103,7 @@ pub struct RetainedHost {
     attachments: BudgetVec<Option<Attachment>, BudgetAllocator>,
     worker: Option<JoinHandle<io::Result<Host>>>,
     host: Option<Host>,
-    gate: Arc<state::HostGate>,
+    gate: BudgetArc<state::HostGate>,
 }
 
 impl RetainedHost {
@@ -139,7 +139,7 @@ impl RetainedHost {
         let mut outputs = reserved_vec(count, &resources.metadata)?;
         let mut images = reserved_vec(count, &resources.metadata)?;
         let (send, input) = mailbox::bounded(count, &resources.metadata)?;
-        let gate = Arc::new(state::HostGate::default());
+        let gate = state::HostGate::new(&resources.metadata)?;
         for (index, image) in inspected.images.iter().enumerate() {
             let status = image.log.status();
             let health = state::Gate::new(
@@ -147,9 +147,10 @@ impl RetainedHost {
                     durable: status.durable,
                     ..ImageState::default()
                 },
-                Some(Arc::clone(&gate)),
-            );
-            images.push((image.required.image, Arc::clone(&health)));
+                Some(gate.clone()),
+                &resources.metadata,
+            )?;
+            images.push((image.required.image, health.clone()));
             let shared = Shared::with_pools(
                 status,
                 resources.pools.image(),
@@ -157,7 +158,7 @@ impl RetainedHost {
                 Arc::clone(&resources.metadata),
                 None,
                 None,
-            );
+            )?;
             let event = EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK)?;
             let (done, output) = mailbox::bounded(1, &resources.metadata)?;
             outputs.push(Output {
@@ -168,7 +169,7 @@ impl RetainedHost {
                 index,
                 input: Some(send.clone()),
                 output,
-                host: Arc::clone(&gate),
+                host: gate.clone(),
                 resolved: false,
             };
             attachments.push(Some(Attachment {
@@ -179,14 +180,14 @@ impl RetainedHost {
         }
         drop(send);
         let gates = Gates {
-            host: Arc::clone(&gate),
+            host: gate.clone(),
             images,
         };
         let worker = thread::Builder::new()
             .name("cas-host-recovery".into())
             .spawn(move || {
                 let failure = Failure {
-                    gate: Arc::clone(&gates.host),
+                    gate: gates.host.clone(),
                     outputs,
                 };
                 let result = recover(
@@ -227,7 +228,7 @@ impl RetainedHost {
             .ok_or_else(|| io::Error::other("unknown or already attached retained image"))?;
         let attachment = slot.take().unwrap();
         crate::backend::Backend::from_storage(
-            crate::storage::Storage::Opening(Box::new(attachment.opening)),
+            crate::storage::Storage::from_opening(attachment.opening)?,
             attachment.event,
             crate::BackendKind::LocalAsync,
             true,
@@ -260,7 +261,7 @@ impl RetainedHost {
 
 // Also closes the host on panic; never release guest owners to fake completion.
 struct Failure {
-    gate: Arc<state::HostGate>,
+    gate: BudgetArc<state::HostGate>,
     outputs: BudgetVec<Output, BudgetAllocator>,
 }
 impl Failure {

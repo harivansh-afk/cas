@@ -124,7 +124,7 @@ struct Run {
     control: Arc<Control>,
     output: mailbox::Receiver<Response>,
     thread: Option<JoinHandle<()>>,
-    shared: Arc<Shared>,
+    shared: BudgetArc<Shared>,
     paused: Option<mailbox::Receiver<io::Result<append::Status>>>,
 }
 
@@ -151,14 +151,14 @@ impl Run {
             append::Limits::default(),
         )
         .unwrap();
-        let shared = Shared::new(log.status());
+        let shared = Shared::new(log.status()).unwrap();
         let (output, receiver) = mailbox::bounded(136, &shared.metadata).unwrap();
         let worker = Worker {
             log,
             port: None,
             output,
             wake: Wake(EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK).unwrap()),
-            shared: Arc::clone(&shared),
+            shared: shared.clone(),
         };
         let (sender, input) = mailbox::bounded(8, &shared.metadata).unwrap();
         for id in 1..=2 {

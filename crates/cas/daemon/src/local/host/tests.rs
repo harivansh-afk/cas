@@ -396,9 +396,10 @@ fn multiple_reactors_compact_private_images_and_reopen_shared_chunks() {
 
 #[test]
 fn shared_failure_linearizes_before_every_image_completion() {
-    let host = Arc::new(state::HostGate::default());
-    let first = state::Gate::new(ImageState::default(), Some(Arc::clone(&host)));
-    let second = state::Gate::new(ImageState::default(), Some(Arc::clone(&host)));
+    let metadata = metadata_budget();
+    let host = state::HostGate::new(&metadata).unwrap();
+    let first = state::Gate::new(ImageState::default(), Some(host.clone()), &metadata).unwrap();
+    let second = state::Gate::new(ImageState::default(), Some(host.clone()), &metadata).unwrap();
     let guard = first.lock().unwrap();
     let (started, start) = mpsc::channel();
     let (finished, finish) = mpsc::channel();
@@ -673,7 +674,7 @@ fn read_page_metadata_denial_returns_ioerr_without_failing_the_shared_store() {
     let mut first = attach(&mut host, 2);
     let mut other = attach(&mut host, 3);
     let permit = first.prepare(Kind::Read(BLOCK_SIZE)).unwrap().unwrap();
-    let shared = Arc::clone(&first.shared);
+    let shared = first.shared.clone();
     let gate = shared.health.lock().unwrap();
     let held = resources
         .metadata

@@ -73,7 +73,7 @@ impl Endpoint {
                 let chunks = Some(prepared.chunk_count());
                 let image = self.manifest.current().image;
                 let resources = Arc::clone(&self.resources);
-                let health = Arc::clone(&self.health);
+                let health = self.health.clone();
                 let output = || {
                     let receipt =
                         prepared.write_with(store, &mut self.manifest, |stage, durable| {
@@ -229,14 +229,14 @@ pub(super) struct Owner {
     pub store: Store,
     pub snapshots: BudgetVec<Snapshot, BudgetAllocator>,
     pub endpoints: BudgetVec<Endpoint, BudgetAllocator>,
-    pub shared: Arc<SharedHost>,
+    pub shared: BudgetArc<SharedHost>,
     pub input: mailbox::Receiver<Ready>,
 }
 
 impl Owner {
     pub fn run(mut self) {
         let mut exit = UnexpectedExit {
-            shared: Arc::clone(&self.shared),
+            shared: self.shared.clone(),
             normal: false,
         };
         let mut next_collection = Instant::now();
@@ -298,7 +298,7 @@ impl Owner {
 }
 
 struct UnexpectedExit {
-    shared: Arc<SharedHost>,
+    shared: BudgetArc<SharedHost>,
     normal: bool,
 }
 

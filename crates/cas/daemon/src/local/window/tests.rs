@@ -3,7 +3,7 @@ use super::*;
 struct Fixture {
     _root: tempfile::TempDir,
     log: Log,
-    shared: Arc<Shared>,
+    shared: BudgetArc<Shared>,
     window: BudgetArc<Window>,
     metadata: Arc<Budget>,
 }
@@ -34,8 +34,8 @@ impl Fixture {
             requests: 0,
         });
         let window = Window::new(&log, None, &metadata).unwrap();
-        let mut shared = Shared::new(log.status());
-        Arc::get_mut(&mut shared).unwrap().window = Some(window.clone());
+        let mut shared = Shared::new(log.status()).unwrap();
+        BudgetArc::get_mut(&mut shared).unwrap().window = Some(window.clone());
         Self {
             _root: root,
             log,

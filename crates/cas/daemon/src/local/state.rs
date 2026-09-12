@@ -1,6 +1,7 @@
 //! Shared image completion state. The caller holds its mutex through both
 //! the storage decision and guest status/used publication.
 use crate::inflight::Carrier;
+use cas_core::budget::{Budget, BudgetArc};
 use std::{
     io,
     ops::{Deref, DerefMut},
@@ -13,6 +14,10 @@ pub(super) struct HostGate {
 }
 
 impl HostGate {
+    pub(super) fn new(metadata: &Arc<Budget>) -> io::Result<BudgetArc<Self>> {
+        BudgetArc::try_new(Self::default(), metadata)
+    }
+
     pub fn failure(&self) -> Option<String> {
         self.failure
             .lock()
@@ -30,15 +35,22 @@ impl HostGate {
 
 pub struct Gate {
     image: Mutex<ImageState>,
-    host: Option<Arc<HostGate>>,
+    host: Option<BudgetArc<HostGate>>,
 }
 
 impl Gate {
-    pub(super) fn new(image: ImageState, host: Option<Arc<HostGate>>) -> Arc<Self> {
-        Arc::new(Self {
-            image: Mutex::new(image),
-            host,
-        })
+    pub(super) fn new(
+        image: ImageState,
+        host: Option<BudgetArc<HostGate>>,
+        metadata: &Arc<Budget>,
+    ) -> io::Result<BudgetArc<Self>> {
+        BudgetArc::try_new(
+            Self {
+                image: Mutex::new(image),
+                host,
+            },
+            metadata,
+        )
     }
 
     pub fn lock(&self) -> io::Result<Guard<'_>> {
@@ -117,5 +129,50 @@ impl ImageState {
             carrier.publish(prefix)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cas_core::budget::Amount;
+
+    #[test]
+    fn gate_allocation_refusal_preserves_existing_host_failure_ownership() {
+        let metadata = Budget::new(Amount {
+            bytes: 4096,
+            requests: 0,
+        });
+        let host = HostGate::new(&metadata).unwrap();
+        let baseline = metadata.usage().current.bytes;
+        let held = metadata
+            .reserve(Amount {
+                bytes: 4096 - baseline,
+                requests: 0,
+            })
+            .unwrap();
+        assert_eq!(
+            HostGate::new(&metadata).err().unwrap().kind(),
+            io::ErrorKind::OutOfMemory
+        );
+        assert_eq!(
+            Gate::new(ImageState::default(), Some(host.clone()), &metadata)
+                .err()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::OutOfMemory
+        );
+        assert_eq!(metadata.usage().current.bytes, 4096);
+        drop(held);
+        let image = Gate::new(ImageState::default(), Some(host.clone()), &metadata).unwrap();
+        host.fail("retained host failed".into());
+        drop(host);
+        assert_eq!(
+            image.lock().unwrap().failure.as_deref(),
+            Some("retained host failed")
+        );
+        assert!(metadata.usage().current.bytes > baseline);
+        drop(image);
+        assert_eq!(metadata.usage().current, Amount::default());
     }
 }

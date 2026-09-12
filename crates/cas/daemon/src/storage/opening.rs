@@ -2,9 +2,9 @@
 use crate::deadline::{Deadline, RECOVERY_TIMEOUT};
 use crate::local::{self, Shared};
 use cas_core::append::{self, Config, Log, Recovery, Status};
+use cas_core::budget::BudgetArc;
 use std::io;
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 enum Source {
@@ -17,7 +17,7 @@ pub struct Opening {
     source: Option<Source>,
     pub config: Config,
     pub status: Status,
-    pub shared: Arc<Shared>,
+    pub shared: BudgetArc<Shared>,
     pub deadline: Deadline,
 }
 
@@ -28,7 +28,7 @@ impl Opening {
     pub(crate) fn shared(
         config: Config,
         status: Status,
-        shared: Arc<Shared>,
+        shared: BudgetArc<Shared>,
         deadline: Deadline,
         endpoint: local::host::recovery::frontend::Endpoint,
     ) -> Self {
@@ -81,7 +81,7 @@ impl Opening {
             source: Some(source),
             config,
             status,
-            shared: Shared::new(status),
+            shared: Shared::new(status)?,
             deadline,
         })
     }
@@ -121,6 +121,35 @@ mod tests {
     use super::*;
     use std::fs::File;
     use std::sync::mpsc;
+
+    #[test]
+    fn box_refusal_releases_storage_lock_but_preserves_health_owner() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("log");
+        let opening = Opening::new(&path, Some(4096)).unwrap();
+        let metadata = opening.shared.metadata();
+        let health = opening.shared.health.clone();
+        let held = metadata
+            .reserve(cas_core::budget::Amount {
+                bytes: 128 * cas_core::MAX_REQUEST_BYTES - metadata.usage().current.bytes,
+                requests: 0,
+            })
+            .unwrap();
+        let error = crate::storage::Storage::from_opening(opening)
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::OutOfMemory);
+        drop(held);
+        assert!(metadata.usage().current.bytes > 0);
+        let inspected = Log::inspect(&path, append::Limits::default()).unwrap();
+        assert_eq!(inspected.status().published, 0);
+        drop(inspected);
+        drop(health);
+        assert_eq!(
+            metadata.usage().current,
+            cas_core::budget::Amount::default()
+        );
+    }
 
     #[test]
     fn inspection_retries_actual_segment_contention_until_release_or_deadline() {

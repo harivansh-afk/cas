@@ -1,6 +1,5 @@
 //! Guest owners outlive queue publication; GC owns the pause through its IO.
 use super::*;
-use cas_core::budget::BudgetArc;
 
 #[derive(Clone, Copy, Default, serde::Serialize)]
 pub struct Status {

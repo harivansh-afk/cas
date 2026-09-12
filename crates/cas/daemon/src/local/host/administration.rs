@@ -21,12 +21,12 @@ impl<T> Handle<T> {
 }
 
 pub(super) struct Control {
-    shared: Arc<SharedHost>,
+    shared: BudgetArc<SharedHost>,
     _credit: Lease,
 }
 
 impl Control {
-    pub fn claim(shared: &Arc<SharedHost>) -> io::Result<Self> {
+    pub fn claim(shared: &BudgetArc<SharedHost>) -> io::Result<Self> {
         let credit = shared
             .resources
             .pools
@@ -37,7 +37,7 @@ impl Control {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| io::ErrorKind::WouldBlock)?;
         Ok(Self {
-            shared: Arc::clone(shared),
+            shared: shared.clone(),
             _credit: credit,
         })
     }
@@ -53,7 +53,7 @@ pub(super) struct Request<T> {
     control: Control,
 }
 impl<T> Request<T> {
-    pub fn new(shared: &Arc<SharedHost>) -> io::Result<(Self, Handle<T>)> {
+    pub fn new(shared: &BudgetArc<SharedHost>) -> io::Result<(Self, Handle<T>)> {
         let control = Control::claim(shared)?;
         let (done, receiver) = mailbox::bounded(1, &shared.resources.metadata)?;
         Ok((Self { done, control }, Handle { done: receiver }))

@@ -6,7 +6,7 @@ mod state;
 mod window;
 use allocator_api2::vec::Vec as BudgetVec;
 use cas_core::budget::channel as mailbox;
-use cas_core::budget::{BudgetAllocator, Queue as BudgetQueue};
+use cas_core::budget::{BudgetAllocator, BudgetArc, Queue as BudgetQueue};
 use pools::Pools;
 pub use state::ImageState;
 use std::fs::File;
@@ -183,7 +183,7 @@ struct Io {
 }
 
 type Response = (Completed, append::Status);
-pub type Health = Arc<state::Gate>;
+pub type Health = BudgetArc<state::Gate>;
 
 pub(crate) const IMAGE_REQUEST_LIMIT: usize = pools::IMAGE_REQUESTS + pools::IMAGE_CONTROL;
 
@@ -201,12 +201,13 @@ pub struct Shared {
     final_status: Mutex<append::Status>,
     pub health: Health,
     pub injection: OnceLock<crate::fault::Injection>,
-    window: Option<cas_core::budget::BudgetArc<window::Window>>,
-    admission: Option<cas_core::budget::BudgetArc<host::admission::Admission>>,
+    window: Option<BudgetArc<window::Window>>,
+    admission: Option<BudgetArc<host::admission::Admission>>,
 }
 
 impl Shared {
-    pub fn new(status: append::Status) -> Arc<Self> {
+    pub fn new(status: append::Status) -> io::Result<BudgetArc<Self>> {
+        let metadata = metadata_budget();
         Self::with_pools(
             status,
             Pools::new(),
@@ -216,8 +217,9 @@ impl Shared {
                     ..ImageState::default()
                 },
                 None,
-            ),
-            metadata_budget(),
+                &metadata,
+            )?,
+            metadata,
             None,
             None,
         )
@@ -228,19 +230,23 @@ impl Shared {
         pools: Pools,
         health: Health,
         metadata: Arc<Budget>,
-        window: Option<cas_core::budget::BudgetArc<window::Window>>,
-        admission: Option<cas_core::budget::BudgetArc<host::admission::Admission>>,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            injection: OnceLock::new(),
-            pools,
-            metadata,
-            metrics: Mutex::new(Metrics::default()),
-            final_status: Mutex::new(status),
-            health,
-            window,
-            admission,
-        })
+        window: Option<BudgetArc<window::Window>>,
+        admission: Option<BudgetArc<host::admission::Admission>>,
+    ) -> io::Result<BudgetArc<Self>> {
+        let budget = Arc::clone(&metadata);
+        BudgetArc::try_new(
+            Self {
+                injection: OnceLock::new(),
+                pools,
+                metadata,
+                metrics: Mutex::new(Metrics::default()),
+                final_status: Mutex::new(status),
+                health,
+                window,
+                admission,
+            },
+            &budget,
+        )
     }
 
     pub(crate) fn metadata(&self) -> Arc<Budget> {
@@ -369,7 +375,7 @@ pub struct Local {
     packing: Option<Packing>,
     rejected: BudgetQueue<Completed>,
     paused: bool,
-    pub shared: Arc<Shared>,
+    pub shared: BudgetArc<Shared>,
     pub status: append::Status,
 }
 
@@ -391,7 +397,7 @@ impl Local {
             Some(image_bytes) => create_log(path, image_bytes),
             None => Log::open(path, append::Limits::default()).map_err(io::Error::other),
         }?;
-        let shared = Shared::new(log.status());
+        let shared = Shared::new(log.status())?;
         Self::from_log(log, event, execution, shared)
     }
 
@@ -399,7 +405,7 @@ impl Local {
         log: Log,
         event: &EventFd,
         execution: Execution,
-        shared: Arc<Shared>,
+        shared: BudgetArc<Shared>,
     ) -> io::Result<Self> {
         Self::start(log, event, execution, shared, None)
     }
@@ -407,7 +413,7 @@ impl Local {
     fn from_host(
         log: Log,
         event: &EventFd,
-        shared: Arc<Shared>,
+        shared: BudgetArc<Shared>,
         port: host::Port,
     ) -> io::Result<Self> {
         Self::start(log, event, Execution::Concurrent, shared, Some(port))
@@ -417,7 +423,7 @@ impl Local {
         log: Log,
         event: &EventFd,
         execution: Execution,
-        shared: Arc<Shared>,
+        shared: BudgetArc<Shared>,
         port: Option<host::Port>,
     ) -> io::Result<Self> {
         let rejected = BudgetQueue::with_capacity(IMAGE_REQUEST_LIMIT, &shared.metadata)?;
@@ -444,19 +450,17 @@ impl Local {
             log,
             output,
             wake: Wake(event.try_clone()?),
-            shared: Arc::clone(&shared),
+            shared: shared.clone(),
             port,
         };
-        let task: Box<dyn FnOnce() + Send> = match &input_wake {
+        let builder = thread::Builder::new().name(execution.name().into());
+        let worker = match &input_wake {
             Some(wake) => {
                 let reactor = reactor::Reactor::new(worker, input, wake.try_clone()?)?;
-                Box::new(move || reactor.run())
+                builder.spawn(move || reactor.run())?
             }
-            None => Box::new(move || worker.run(input)),
+            None => builder.spawn(move || worker.run(input))?,
         };
-        let worker = thread::Builder::new()
-            .name(execution.name().into())
-            .spawn(task)?;
         Ok(Self {
             sender: Some(sender),
             receiver: Mutex::new(receiver),
@@ -798,7 +802,7 @@ struct Worker {
     log: Log,
     output: mailbox::Sender<Response>,
     wake: Wake,
-    shared: Arc<Shared>,
+    shared: BudgetArc<Shared>,
     port: Option<host::Port>,
 }
 

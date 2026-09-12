@@ -1,6 +1,5 @@
 //! Conservative physical framing reservations before guest mutation admission.
 use super::*;
-use cas_core::budget::BudgetArc;
 use std::sync::MutexGuard;
 
 pub(super) struct Window {

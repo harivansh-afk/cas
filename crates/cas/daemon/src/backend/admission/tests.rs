@@ -1,7 +1,6 @@
 use super::*;
 use crate::inflight::Geometry;
 use crate::request::DataRequest;
-use std::sync::Arc;
 use virtio_bindings::bindings::virtio_blk::{VIRTIO_BLK_T_IN, VIRTIO_BLK_T_OUT};
 use vm_memory::GuestAddress;
 
@@ -21,11 +20,11 @@ fn write_request() -> Request {
     })
 }
 
-fn shared(backend: &Backend) -> Arc<local::Shared> {
+fn shared(backend: &Backend) -> cas_core::budget::BudgetArc<local::Shared> {
     let Storage::Local(local) = &backend.storage else {
         panic!("expected local worker")
     };
-    Arc::clone(&local.shared)
+    local.shared.clone()
 }
 
 #[test]

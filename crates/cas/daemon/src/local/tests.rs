@@ -57,7 +57,7 @@ fn read(local: &mut Local, id: u64, offset: u64, length: usize) {
 fn concurrent_appends_flush_and_read_use_owned_kernel_io() {
     let directory = tempfile::tempdir().unwrap();
     let mut local = concurrent(&directory.path().join("store"));
-    let gate = Arc::clone(&local.shared.health);
+    let gate = local.shared.health.clone();
     let stalled = gate.lock().unwrap();
     for id in 0..3 {
         write(&mut local, id, 0, BLOCK_SIZE, id as u8 + 1);
@@ -94,7 +94,7 @@ fn concurrent_appends_flush_and_read_use_owned_kernel_io() {
 fn concurrent_flush_keeps_its_boundary_while_later_writes_wait() {
     let directory = tempfile::tempdir().unwrap();
     let mut local = concurrent(&directory.path().join("store"));
-    let gate = Arc::clone(&local.shared.health);
+    let gate = local.shared.health.clone();
     let stalled = gate.lock().unwrap();
     write(&mut local, 0, 0, BLOCK_SIZE, 1);
     let permit = local.prepare(Kind::Control).unwrap().unwrap();
@@ -231,7 +231,7 @@ fn guest_gathers_share_the_final_batch_and_release_after_completion() {
 fn allocation_cap_blocks_before_gather_but_reserved_flush_still_enters() {
     let directory = tempfile::tempdir().unwrap();
     let mut local = open(&directory.path().join("store"));
-    let gate = Arc::clone(&local.shared.health);
+    let gate = local.shared.health.clone();
     let stalled = gate.lock().unwrap();
     for id in 0..7 {
         let permit = local
@@ -383,7 +383,7 @@ fn failed_gather_and_disconnected_owner_release_without_an_extra_fence() {
             },
         )
         .unwrap();
-    let shared = Arc::clone(&local.shared);
+    let shared = local.shared.clone();
     let pools = &shared.pools;
     // Drop drains the owned work even when no caller will consume completion.
     drop(local);
@@ -403,7 +403,7 @@ fn failed_gather_and_disconnected_owner_release_without_an_extra_fence() {
 fn returned_read_keeps_request_and_byte_credits_after_worker_shutdown() {
     let directory = tempfile::tempdir().unwrap();
     let mut local = open(&directory.path().join("store"));
-    let shared = Arc::clone(&local.shared);
+    let shared = local.shared.clone();
     let pools = &shared.pools;
     let permit = local.prepare(Kind::Read(BLOCK_SIZE)).unwrap().unwrap();
     local
@@ -628,9 +628,9 @@ fn channel_allocations_fail_before_worker_start_and_release_partial_startup() {
     for bytes in [0, command_bytes] {
         let directory = tempfile::tempdir().unwrap();
         let log = create_log(&directory.path().join("log"), MAX_REQUEST_BYTES as u64).unwrap();
-        let mut shared = Shared::new(log.status());
+        let mut shared = Shared::new(log.status()).unwrap();
         let metadata = Budget::new(Amount { bytes, requests: 0 });
-        Arc::get_mut(&mut shared).unwrap().metadata = Arc::clone(&metadata);
+        BudgetArc::get_mut(&mut shared).unwrap().metadata = Arc::clone(&metadata);
         let event = EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK).unwrap();
         let result = Local::from_log(log, &event, Execution::Concurrent, shared);
         assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::OutOfMemory));
@@ -714,8 +714,8 @@ fn descriptor_metadata_denial_precedes_mutation_and_refunds_partial_admission() 
         bytes: capacity,
         requests: 0,
     });
-    let mut shared = Shared::new(log.status());
-    Arc::get_mut(&mut shared).unwrap().metadata = Arc::clone(&metadata);
+    let mut shared = Shared::new(log.status()).unwrap();
+    BudgetArc::get_mut(&mut shared).unwrap().metadata = Arc::clone(&metadata);
     let event = EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK).unwrap();
     let mut local = Local::from_log(log, &event, Execution::Concurrent, shared).unwrap();
     let baseline = metadata.usage().current;
@@ -748,7 +748,7 @@ fn read_preparation_errors_return_every_owner_before_credit_release() {
     for exhaust_metadata in [false, true] {
         let directory = tempfile::tempdir().unwrap();
         let mut local = concurrent(&directory.path().join("log"));
-        let shared = Arc::clone(&local.shared);
+        let shared = local.shared.clone();
         let first = local.prepare(Kind::Read(BLOCK_SIZE)).unwrap().unwrap();
         let second = local.prepare(Kind::Read(BLOCK_SIZE)).unwrap().unwrap();
         let gate = shared.health.lock().unwrap();
@@ -806,7 +806,10 @@ fn read_preparation_errors_return_every_owner_before_credit_release() {
         assert_eq!(shared.pools.requests.usage().current, Amount::default());
         assert_eq!(shared.pools.read.usage().current, Amount::default());
         drop((held, local));
-        assert_eq!(shared.metadata.usage().current, Amount::default());
+        let metadata = shared.metadata();
+        assert!(metadata.usage().current.bytes > 0);
+        drop(shared);
+        assert_eq!(metadata.usage().current, Amount::default());
     }
 }
 

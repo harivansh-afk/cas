@@ -15,6 +15,8 @@ mod opening;
 pub use opening::Opening;
 
 use crate::local::{self, Local};
+use allocator_api2::boxed::Box as BudgetBox;
+use cas_core::budget::BudgetAllocator;
 use cas_core::{
     BLOCK_SIZE,
     aligned::AlignedBuffer,
@@ -95,11 +97,25 @@ impl From<Operation> for CompletionData {
 pub enum Storage {
     Raw(Raw),
     Staging(Staging),
-    Local(Box<Local>),
-    Opening(Box<Opening>),
+    Local(BudgetBox<Local, BudgetAllocator>),
+    Opening(BudgetBox<Opening, BudgetAllocator>),
 }
 
 impl Storage {
+    pub(crate) fn from_local(local: Local) -> io::Result<Self> {
+        let allocator = BudgetAllocator::new(local.shared.metadata());
+        BudgetBox::try_new_in(local, allocator)
+            .map(Self::Local)
+            .map_err(|_| io::ErrorKind::OutOfMemory.into())
+    }
+
+    pub(crate) fn from_opening(opening: Opening) -> io::Result<Self> {
+        let allocator = BudgetAllocator::new(opening.shared.metadata());
+        BudgetBox::try_new_in(opening, allocator)
+            .map(Self::Opening)
+            .map_err(|_| io::ErrorKind::OutOfMemory.into())
+    }
+
     pub fn shared_host(&self) -> bool {
         match self {
             Self::Local(local) => local.shared_host(),
@@ -124,11 +140,7 @@ impl Storage {
         }
     }
     pub fn local(path: &Path, create_bytes: Option<u64>, event: &EventFd) -> io::Result<Self> {
-        Ok(Self::Local(Box::new(Local::open(
-            path,
-            create_bytes,
-            event,
-        )?)))
+        Self::from_local(Local::open(path, create_bytes, event)?)
     }
 
     pub fn local_async(
@@ -136,16 +148,16 @@ impl Storage {
         create_bytes: Option<u64>,
         event: &EventFd,
     ) -> io::Result<Self> {
-        Ok(Self::Local(Box::new(Local::open_with_execution(
+        Self::from_local(Local::open_with_execution(
             path,
             create_bytes,
             event,
             local::Execution::Concurrent,
-        )?)))
+        )?)
     }
 
     pub fn local_live(path: &Path, create_bytes: Option<u64>) -> io::Result<Self> {
-        Ok(Self::Opening(Box::new(Opening::new(path, create_bytes)?)))
+        Self::from_opening(Opening::new(path, create_bytes)?)
     }
 
     pub fn prepare(&mut self, kind: local::Kind) -> io::Result<Option<Permit>> {
@@ -164,8 +176,8 @@ impl Storage {
 
     pub fn completion_gate(&self) -> Option<local::Health> {
         match self {
-            Self::Local(local) => Some(std::sync::Arc::clone(&local.shared.health)),
-            Self::Opening(opening) => Some(std::sync::Arc::clone(&opening.shared.health)),
+            Self::Local(local) => Some(local.shared.health.clone()),
+            Self::Opening(opening) => Some(opening.shared.health.clone()),
             _ => None,
         }
     }

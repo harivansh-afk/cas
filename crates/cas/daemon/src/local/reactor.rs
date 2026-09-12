@@ -414,7 +414,7 @@ impl Reactor {
             };
             {
                 // Shares the frontend's success/failure linearization lock.
-                let gate = Arc::clone(&self.worker.shared.health);
+                let gate = self.worker.shared.health.clone();
                 let mut state = gate.lock().expect("completion gate poisoned");
                 if state.failure.is_some() {
                     break;
@@ -488,7 +488,7 @@ impl Reactor {
                     }
                 },
                 Work::Fence(fence) if fence.syncing => {
-                    let gate = Arc::clone(&self.worker.shared.health);
+                    let gate = self.worker.shared.health.clone();
                     let mut guard = gate.lock().expect("completion gate poisoned");
                     if let Some(error) = guard.failure.as_ref() {
                         return Err(io::Error::other(error.clone()));

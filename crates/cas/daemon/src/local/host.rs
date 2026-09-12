@@ -48,14 +48,14 @@ impl Resources {
 }
 
 struct SharedHost {
-    admission: cas_core::budget::BudgetArc<admission::Admission>,
-    gate: Arc<state::HostGate>,
+    admission: BudgetArc<admission::Admission>,
+    gate: BudgetArc<state::HostGate>,
     reader: Reader,
     resources: Arc<Resources>,
     attached: AtomicUsize,
     administrating: AtomicBool,
     collection: Mutex<collection::Status>,
-    staging: cas_core::budget::BudgetArc<cas_core::space::Staging>,
+    staging: BudgetArc<cas_core::space::Staging>,
     physical: Option<Arc<cas_core::space::Governor>>,
     #[cfg(test)]
     control: Arc<Mutex<tests::Control>>,
@@ -84,7 +84,7 @@ pub struct Roots<I = Vec<(Log, Manifest)>, S = Vec<Snapshot>> {
 /// Embedding API for the catalog owner and the same native validation frontend.
 /// Inputs must be inspected/stabilized together and allocated from Resources.
 pub struct Host {
-    shared: Arc<SharedHost>,
+    shared: BudgetArc<SharedHost>,
     images: BudgetVec<Option<Attachment>, BudgetAllocator>,
     ready: Option<mailbox::Sender<Ready>>,
     worker: Option<JoinHandle<()>>,
@@ -201,22 +201,27 @@ impl Host {
             gates.validate(images.as_ref())?;
         }
         let admission = admission::Admission::new(image_count, &resources.metadata)?;
-        let shared = Arc::new(SharedHost {
-            admission,
-            gate: context.gates.as_ref().map_or_else(
-                || Arc::new(state::HostGate::default()),
-                |gates| Arc::clone(&gates.host),
-            ),
-            reader: store.reader()?,
-            resources,
-            attached: AtomicUsize::new(0),
-            administrating: AtomicBool::new(false),
-            collection: Mutex::new(collection::Status::default()),
-            staging,
-            physical,
-            #[cfg(test)]
-            control: Arc::new(Mutex::new(tests::Control::default())),
-        });
+        let metadata = Arc::clone(&resources.metadata);
+        let gate = match &context.gates {
+            Some(gates) => gates.host.clone(),
+            None => state::HostGate::new(&metadata)?,
+        };
+        let shared = BudgetArc::try_new(
+            SharedHost {
+                admission,
+                gate,
+                reader: store.reader()?,
+                resources,
+                attached: AtomicUsize::new(0),
+                administrating: AtomicBool::new(false),
+                collection: Mutex::new(collection::Status::default()),
+                staging,
+                physical,
+                #[cfg(test)]
+                control: Arc::new(Mutex::new(tests::Control::default())),
+            },
+            &metadata,
+        )?;
         let mut attachments =
             BudgetVec::new_in(BudgetAllocator::new(Arc::clone(&shared.resources.metadata)));
         let mut endpoints =
@@ -250,14 +255,15 @@ impl Host {
                 ));
             }
             let health = match &context.gates {
-                Some(gates) => Arc::clone(&gates.images[index].1),
+                Some(gates) => gates.images[index].1.clone(),
                 None => state::Gate::new(
                     ImageState {
                         durable: log.status().durable,
                         ..ImageState::default()
                     },
-                    Some(Arc::clone(&shared.gate)),
-                ),
+                    Some(shared.gate.clone()),
+                    &metadata,
+                )?,
             };
             let wake = EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK)?;
             let (output, events) = mailbox::bounded(1, &shared.resources.metadata)?;
@@ -268,7 +274,7 @@ impl Host {
                 quiescent: None,
                 #[cfg(test)]
                 control: Arc::clone(&shared.control),
-                health: Arc::clone(&health),
+                health: health.clone(),
                 wake: wake.try_clone()?,
                 output,
                 replies,
@@ -279,7 +285,7 @@ impl Host {
                 log,
                 port: Port {
                     index,
-                    shared: Arc::clone(&shared),
+                    shared: shared.clone(),
                     health,
                     ready: ready.clone(),
                     events,
@@ -305,7 +311,7 @@ impl Host {
             snapshots: retained,
             store,
             endpoints,
-            shared: Arc::clone(&shared),
+            shared: shared.clone(),
             input,
         };
         let worker = thread::Builder::new()
@@ -327,7 +333,7 @@ impl Host {
         let event = EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK)?;
         let local = self.local(image, &event)?;
         crate::backend::Backend::from_storage(
-            crate::storage::Storage::Local(Box::new(local)),
+            crate::storage::Storage::from_local(local)?,
             event,
             crate::BackendKind::LocalAsync,
             false,
@@ -363,7 +369,7 @@ impl Host {
         let event = EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK)?;
         let local = self.local(image, &event)?;
         let mut backend = crate::backend::Backend::from_storage(
-            crate::storage::Storage::Local(Box::new(local)),
+            crate::storage::Storage::from_local(local)?,
             event,
             crate::BackendKind::LocalAsync,
             true,
@@ -389,11 +395,11 @@ impl Host {
         let shared = Shared::with_pools(
             log.status(),
             self.shared.resources.pools.image(),
-            Arc::clone(&port.health),
+            port.health.clone(),
             Arc::clone(&self.shared.resources.metadata),
             Some(port.window.clone()),
             Some(self.shared.admission.clone()),
-        );
+        )?;
         port.attached = true;
         self.shared.attached.fetch_add(1, Ordering::Relaxed);
         Local::from_host(log, event, shared, port)
@@ -486,7 +492,7 @@ enum Ready {
 
 pub(super) struct Port {
     index: usize,
-    shared: Arc<SharedHost>,
+    shared: BudgetArc<SharedHost>,
     health: Health,
     ready: mailbox::Sender<Ready>,
     events: mailbox::Receiver<Event>,
@@ -501,7 +507,7 @@ pub(super) struct Port {
     attached: bool,
     rotation: Option<append::RotationKind>,
     rotation_retry: Instant,
-    window: cas_core::budget::BudgetArc<window::Window>,
+    window: BudgetArc<window::Window>,
 }
 
 impl Port {
@@ -592,7 +598,7 @@ impl Port {
                 self.active = Some(Instant::now());
                 self.granted = true;
             }
-            let gate = Arc::clone(&self.health);
+            let gate = self.health.clone();
             let mut health = gate.lock()?;
             if let Some(error) = &health.failure {
                 let _ = self.respond(Reply::Failed(error.clone()));

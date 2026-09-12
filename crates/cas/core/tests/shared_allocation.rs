@@ -218,5 +218,17 @@ fn actual_layout_credit_order_concurrent_final_drops_and_unwind() {
     );
     assert_eq!(ALLOCATIONS.load(SeqCst), 0);
     assert_eq!(denied.usage().current.bytes, 0);
+    let mut unique = BudgetArc::try_new(7u64, &account).unwrap();
+    let retained_charge = account.usage().current;
+    *unique.get_mut().unwrap() = 11;
+    let other = unique.clone();
+    assert!(unique.get_mut().is_none());
+    assert_eq!(*other, 11);
+    drop(other);
+    *unique.get_mut().unwrap() = 19;
+    assert_eq!(*unique, 19);
+    assert_eq!(account.usage().current, retained_charge);
+    drop(unique);
+    assert_eq!(account.usage().current, Amount::default());
     ACCOUNT.store(ptr::null_mut(), SeqCst);
 }

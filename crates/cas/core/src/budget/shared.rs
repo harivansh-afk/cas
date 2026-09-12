@@ -37,6 +37,10 @@ impl<T> BudgetArc<T> {
         self.0.as_ref().expect("shared owner is present until Drop")
     }
 
+    pub fn get_mut(&mut self) -> Option<&mut T> {
+        Arc::get_mut(self.0.as_mut()?).map(|owner| &mut owner.value)
+    }
+
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(self.arc(), other.arc())
     }

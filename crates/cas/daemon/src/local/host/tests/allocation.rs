@@ -335,7 +335,7 @@ fn terminal_close_drains_commands_beyond_a_queued_pause() {
     let first = local.prepare(Kind::Read(BLOCK_SIZE)).unwrap().unwrap();
     let control = local.prepare(Kind::Control).unwrap().unwrap();
     let second = local.prepare(Kind::Read(BLOCK_SIZE)).unwrap().unwrap();
-    let shared = Arc::clone(&local.shared);
+    let shared = local.shared.clone();
     // Stop the reactor at its completion gate until all accepted commands are
     // queued. Terminal drain must cross Pause after this shared failure.
     let publication = shared.health.lock().unwrap();
@@ -375,4 +375,30 @@ fn terminal_close_drains_commands_beyond_a_queued_pause() {
     shutdown(host);
     assert_eq!(resources.read_memory().usage().current.bytes, 0);
     assert_eq!(resources.metadata.usage().current.bytes, 0);
+}
+
+#[test]
+fn surviving_shared_state_and_health_keep_their_allocation_charges() {
+    let root = tempfile::tempdir().unwrap();
+    let resources = Arc::new(Resources::default());
+    let mut host = create(root.path(), 1, Arc::clone(&resources));
+    let local = attach(&mut host, 2);
+    let shared = local.shared.clone();
+    let health = shared.health.clone();
+    let host_state = host.shared.clone();
+    drop(local);
+    shutdown(host);
+    let retained = resources.metadata.usage().current.bytes;
+    assert!(retained > 0);
+    drop(host_state);
+    drop(shared);
+    let gates = resources.metadata.usage().current.bytes;
+    assert!(gates > 0 && gates < retained);
+    health.lock().unwrap().publish(1).unwrap();
+    drop(health);
+    assert_eq!(resources.metadata.usage().current, Amount::default());
+    assert_eq!(
+        resources.metadata.usage().admitted,
+        resources.metadata.usage().released
+    );
 }

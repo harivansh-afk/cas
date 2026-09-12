@@ -6,7 +6,7 @@ use cas_core::append::{
     Mutation,
     format::{Kind, RequestId},
 };
-use cas_core::budget::BudgetAllocator;
+use cas_core::budget::{BudgetAllocator, BudgetArc};
 use std::fs::File;
 use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
@@ -117,19 +117,19 @@ impl Backend {
                         "cold attachment lost its recovered boundary",
                     ));
                 }
-                (Arc::clone(&local.shared), identity, local.status)
+                (local.shared.clone(), identity, local.status)
             }
             (Storage::Opening(opening), Some(Phase::AwaitingFd)) => {
-                let shared = Arc::clone(&opening.shared);
+                let shared = opening.shared.clone();
                 let log = opening.fresh()?;
                 let config = log.config();
                 let status = log.status();
-                self.storage = Storage::Local(Box::new(local::Local::from_log(
+                self.storage = Storage::from_local(local::Local::from_log(
                     log,
                     &self.completion_event,
                     local::Execution::Concurrent,
-                    Arc::clone(&shared),
-                )?));
+                    shared.clone(),
+                )?)?;
                 (
                     shared,
                     Identity {
@@ -163,7 +163,7 @@ impl Backend {
                         "fresh attachment lost the old required prefix",
                     ));
                 }
-                (Arc::clone(&local.shared), identity, status)
+                (local.shared.clone(), identity, status)
             }
             _ => return Err(io::Error::other("unexpected fresh inflight request")),
         };
@@ -368,7 +368,7 @@ impl Backend {
         let Storage::Opening(opening) = &mut self.storage else {
             return Err(io::Error::other("missing locked recovery"));
         };
-        let shared = Arc::clone(&opening.shared);
+        let shared = opening.shared.clone();
         if let Some(endpoint) = opening.endpoint() {
             self.live.as_mut().unwrap().frozen_queues.fill(true);
             for (frozen, cursor) in self
@@ -396,7 +396,7 @@ impl Backend {
             self.live.as_mut().unwrap().phase = Phase::Waiting;
             return Ok(false);
         }
-        let worker_shared = Arc::clone(&shared);
+        let worker_shared = shared.clone();
         let deadline = opening.deadline;
         let inspected = opening.take_inspection()?;
         let memory = mem.clone().into_inner();
@@ -422,7 +422,7 @@ impl Backend {
             log,
             &self.completion_event,
             local::Execution::Concurrent,
-            Arc::clone(&shared),
+            shared.clone(),
         )?;
         self.finish_attachment(
             mem,
@@ -468,14 +468,14 @@ impl Backend {
                 "guest memory changed during shared recovery",
             ));
         }
-        let shared = Arc::clone(&local.shared);
-        if !Arc::ptr_eq(&original.health, &shared.health) {
+        let shared = local.shared.clone();
+        if !original.health.ptr_eq(&shared.health) {
             return Err(io::Error::other(
                 "recovered image changed its completion gate",
             ));
         }
         if let Some(injection) = original.injection.get()
-            && !Arc::ptr_eq(&original, &shared)
+            && !original.ptr_eq(&shared)
         {
             shared
                 .injection
@@ -483,8 +483,8 @@ impl Backend {
                 .map_err(|_| io::Error::other("duplicate recovered injection"))?;
         }
         let status = local.status;
-        let gate = Arc::clone(&shared.health);
-        self.storage = Storage::Local(Box::new(local));
+        let gate = shared.health.clone();
+        self.storage = Storage::from_local(local)?;
         let mut queues = local::reserved_vec(vrings.len(), &self.metadata)?;
         queues.extend(vrings.iter().map(VringMutex::get_mut));
         let mut state = gate.lock()?;
@@ -639,7 +639,7 @@ struct Recovered {
 fn replay_storage(
     deadline: crate::deadline::Deadline,
     inspected: cas_core::append::Recovery,
-    shared: Arc<local::Shared>,
+    shared: BudgetArc<local::Shared>,
     memory: Arc<GuestMemoryMmap>,
     epoch: u64,
     replay: crate::inflight::Replay,
@@ -729,7 +729,7 @@ pub(crate) struct Validated {
     cursors: BudgetVec<Option<u16>, BudgetAllocator>,
     initialized: BudgetVec<bool, BudgetAllocator>,
     memory: Arc<GuestMemoryMmap>,
-    pub(crate) shared: Arc<local::Shared>,
+    pub(crate) shared: BudgetArc<local::Shared>,
     copied: u64,
     mutation_count: usize,
     last_p: Option<u64>,
