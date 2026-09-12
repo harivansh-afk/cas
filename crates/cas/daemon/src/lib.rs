@@ -10,6 +10,7 @@ pub mod inflight;
 pub mod backend;
 mod deadline;
 pub mod fault;
+pub mod host_service;
 mod local;
 mod request;
 pub mod service;

@@ -53,37 +53,7 @@ impl Deadline {
     }
 
     pub fn wait_readable(self, fd: RawFd) -> io::Result<()> {
-        loop {
-            let remaining = self.remaining()?;
-            let mut event = libc::pollfd {
-                fd,
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            // SAFETY: the caller owns fd and the pointer covers one pollfd.
-            let ready = unsafe {
-                libc::poll(
-                    &mut event,
-                    1,
-                    remaining.as_millis().clamp(1, i32::MAX as u128) as i32,
-                )
-            };
-            if ready < 0 {
-                let error = io::Error::last_os_error();
-                if error.kind() == io::ErrorKind::Interrupted {
-                    continue;
-                }
-                return Err(error);
-            }
-            if ready > 0 {
-                if event.revents & libc::POLLIN != 0 {
-                    return self.check();
-                }
-                return Err(io::Error::other(
-                    "recovery listener closed before connection",
-                ));
-            }
-        }
+        wait_readable(fd, None, Some(self))
     }
 
     pub fn instant(self) -> Instant {
@@ -112,6 +82,55 @@ pub fn timer() -> io::Result<TimerFd> {
     }
     // SAFETY: fd is newly created and its ownership moves into TimerFd.
     Ok(unsafe { TimerFd::from_raw_fd(fd) })
+}
+
+pub fn wait_readable(
+    listener: RawFd,
+    canceled: Option<RawFd>,
+    deadline: Option<Deadline>,
+) -> io::Result<()> {
+    loop {
+        let timeout = deadline
+            .map(|d| {
+                d.remaining()
+                    .map(|remaining| remaining.as_millis().clamp(1, i32::MAX as u128) as i32)
+            })
+            .transpose()?
+            .unwrap_or(-1);
+        let mut events = [
+            libc::pollfd {
+                fd: listener,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: canceled.unwrap_or(-1),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        // SAFETY: both owned descriptors remain live; the array has two pollfds.
+        let ready = unsafe { libc::poll(events.as_mut_ptr(), events.len() as _, timeout) };
+        if ready < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if events[1].revents != 0 {
+            return Err(io::Error::other("socket service canceled"));
+        }
+        if events[0].revents & libc::POLLIN != 0 {
+            if let Some(deadline) = deadline {
+                deadline.check()?;
+            }
+            return Ok(());
+        }
+        if events[0].revents != 0 {
+            return Err(io::Error::other("socket listener failed"));
+        }
+    }
 }
 
 #[cfg(test)]

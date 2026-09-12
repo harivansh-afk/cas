@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 mod frontend;
 mod live;
+mod service;
 
 enum SnapshotFixture {
     Absent,

@@ -1,5 +1,6 @@
 [package]
 name = "cas-daemon"
+default-run = "cas-daemon"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

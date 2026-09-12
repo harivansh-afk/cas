@@ -10,79 +10,221 @@ use std::{
 use vhost::vhost_user::{Error as ProtocolError, Listener};
 use vhost_user_backend::{Error as DaemonError, VhostUserDaemon};
 use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
-use vmm_sys_util::epoll::EventSet;
+use vmm_sys_util::{
+    epoll::EventSet,
+    eventfd::{EFD_CLOEXEC, EFD_NONBLOCK, EventFd},
+};
 
-// The framework error does not implement std::error::Error.
 fn daemon_error(error: DaemonError) -> io::Error {
     io::Error::other(error.to_string())
 }
 
-/// The caller preflights all socket/report paths before opening storage.
-/// Listener creation refuses an existing socket; it never replaces one.
-pub fn serve(backend: Backend, socket: &Path, report: File) -> io::Result<()> {
-    let recovery_deadline = backend.recovery_deadline();
-    let deadline_listener = backend.deadline_listener();
-    let completion_fd = backend.completion_fd();
-    let completion_token = backend.completion_token();
-    let backend = Arc::new(Mutex::new(backend));
-    let mut daemon = VhostUserDaemon::new(
-        "cas-daemon".into(),
-        backend.clone(),
-        GuestMemoryAtomic::new(GuestMemoryMmap::new()),
-    )
-    .map_err(daemon_error)?;
-    daemon.get_epoll_handlers()[0].register_listener(
-        completion_fd,
-        EventSet::IN,
-        u64::from(completion_token),
-    )?;
-    if let Some((fd, token)) = deadline_listener {
-        daemon.get_epoll_handlers()[0].register_listener(fd, EventSet::IN, u64::from(token))?;
+pub struct Control {
+    backend: Arc<Mutex<Backend>>,
+    canceled: EventFd,
+}
+impl Control {
+    /// Wake an unconnected listener and close any accepted frontend.
+    pub fn cancel(&self, reason: &str) -> io::Result<()> {
+        self.canceled.write(1)?;
+        self.backend
+            .lock()
+            .map_err(|_| io::Error::other("backend worker panicked"))?
+            .fail(reason.to_owned());
+        Ok(())
     }
-    let mut listener = Listener::new(socket, false)?;
-    if let Some(deadline) = recovery_deadline {
-        deadline.wait_readable(listener.as_raw_fd())?;
+}
+
+pub struct Service {
+    backend: Arc<Mutex<Backend>>,
+    canceled: EventFd,
+    report: File,
+}
+impl Service {
+    pub fn new(backend: Backend, report: File) -> io::Result<Self> {
+        Ok(Self {
+            backend: Arc::new(Mutex::new(backend)),
+            canceled: EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK)?,
+            report,
+        })
     }
-    {
-        // Workers cannot run before their fatal-error shutdown path is installed.
-        // start accepts a connection and spawns the socket thread; it does not
-        // call into Backend while this guard is held.
-        let mut state = backend
+    pub fn control(&self) -> io::Result<Control> {
+        Ok(Control {
+            backend: Arc::clone(&self.backend),
+            canceled: self.canceled.try_clone()?,
+        })
+    }
+    /// Caller preflights all paths. Listener creation never replaces a socket.
+    pub fn serve(self, socket: &Path) -> io::Result<()> {
+        let result = self.connection(socket);
+        // connection's daemon has dropped and joined its queue workers.
+        let mut backend = self
+            .backend
             .lock()
             .map_err(|_| io::Error::other("backend worker panicked"))?;
-        daemon.start(&mut listener).map_err(daemon_error)?;
-        let shutdown = daemon
-            .shutdown_handle()
-            .ok_or_else(|| io::Error::other("missing connection shutdown handle"))?;
-        state.set_shutdown_handle(shutdown);
+        if let Err(error) = &result {
+            backend.fail(error.to_string());
+        }
+        let pending_at_disconnect = backend.pending_count();
+        eprintln!("cas-daemon: draining {pending_at_disconnect} requests");
+        let drain_result = backend.drain();
+        serde_json::to_writer_pretty(
+            self.report,
+            &backend.report(
+                pending_at_disconnect,
+                result.is_ok() && drain_result.is_ok() && backend.failure().is_none(),
+            ),
+        )?;
+        if let Some(failure) = backend.failure() {
+            return Err(io::Error::other(failure));
+        }
+        drain_result?;
+        result
     }
-    eprintln!("cas-daemon: frontend connected");
-    let result = match daemon.wait() {
-        Err(DaemonError::HandleRequest(
-            ProtocolError::Disconnected | ProtocolError::PartialMessage,
-        )) => Ok(()),
-        result => result,
+    fn connection(&self, socket: &Path) -> io::Result<()> {
+        let (recovery_deadline, deadline_listener, completion_fd, completion_token) = {
+            let backend = self
+                .backend
+                .lock()
+                .map_err(|_| io::Error::other("backend worker panicked"))?;
+            (
+                backend.recovery_deadline(),
+                backend.deadline_listener(),
+                backend.completion_fd(),
+                backend.completion_token(),
+            )
+        };
+        let mut daemon = VhostUserDaemon::new(
+            "cas-daemon".into(),
+            Arc::clone(&self.backend),
+            GuestMemoryAtomic::new(GuestMemoryMmap::new()),
+        )
+        .map_err(daemon_error)?;
+        daemon.get_epoll_handlers()[0].register_listener(
+            completion_fd,
+            EventSet::IN,
+            u64::from(completion_token),
+        )?;
+        if let Some((fd, token)) = deadline_listener {
+            daemon.get_epoll_handlers()[0].register_listener(fd, EventSet::IN, u64::from(token))?;
+        }
+        let mut listener = Listener::new(socket, false)?;
+        crate::deadline::wait_readable(
+            listener.as_raw_fd(),
+            Some(self.canceled.as_raw_fd()),
+            recovery_deadline,
+        )?;
+        {
+            let mut state = self
+                .backend
+                .lock()
+                .map_err(|_| io::Error::other("backend worker panicked"))?;
+            if let Some(error) = state.failure() {
+                return Err(io::Error::other(error));
+            }
+            daemon.start(&mut listener).map_err(daemon_error)?;
+            let shutdown = daemon
+                .shutdown_handle()
+                .ok_or_else(|| io::Error::other("missing connection shutdown handle"))?;
+            state.set_shutdown_handle(shutdown);
+        }
+        eprintln!("cas-daemon: frontend connected");
+        let result = match daemon.wait() {
+            Err(DaemonError::HandleRequest(
+                ProtocolError::Disconnected | ProtocolError::PartialMessage,
+            )) => Ok(()),
+            result => result,
+        };
+        eprintln!("cas-daemon: frontend disconnected: {result:?}");
+        drop(daemon);
+        eprintln!("cas-daemon: queue workers stopped");
+        result.map_err(daemon_error)
+    }
+}
+
+pub fn serve(backend: Backend, socket: &Path, report: File) -> io::Result<()> {
+    Service::new(backend, report)?.serve(socket)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        os::unix::net::UnixStream,
+        sync::mpsc,
+        thread,
+        time::{Duration, Instant},
     };
-    eprintln!("cas-daemon: frontend disconnected: {result:?}");
-    // Dropping the daemon joins workers. Do this before locking their backend.
-    drop(daemon);
-    eprintln!("cas-daemon: queue workers stopped");
-    let mut backend = backend
-        .lock()
-        .map_err(|_| io::Error::other("backend worker panicked"))?;
-    let pending_at_disconnect = backend.pending_count();
-    eprintln!("cas-daemon: draining {pending_at_disconnect} requests");
-    let drain_result = backend.drain();
-    serde_json::to_writer_pretty(
-        report,
-        &backend.report(
-            pending_at_disconnect,
-            result.is_ok() && drain_result.is_ok() && backend.failure().is_none(),
-        ),
-    )?;
-    if let Some(failure) = backend.failure() {
-        return Err(io::Error::other(failure));
+    use vhost::{VhostBackend, vhost_user::Frontend};
+
+    #[test]
+    fn cancellation_wakes_a_listener_or_connection_and_reports_the_failure() {
+        for connected in [false, true] {
+            let directory = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let image = directory.path().join("image.raw");
+            File::create(&image).unwrap().set_len(4096).unwrap();
+            let socket = directory.path().join("image.sock");
+            let report = directory.path().join("report.json");
+            let service = Service::new(
+                Backend::new(&image).unwrap(),
+                File::create(&report).unwrap(),
+            )
+            .unwrap();
+            let control = service.control().unwrap();
+            let (done, completed) = mpsc::channel();
+            let service_socket = socket.clone();
+            let worker = thread::spawn(move || done.send(service.serve(&service_socket)).unwrap());
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !socket.exists() {
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(1));
+            }
+            let frontend = connected.then(|| {
+                let stream = UnixStream::connect(&socket).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let frontend = Frontend::from_stream(stream, 1);
+                frontend.set_owner().unwrap();
+                assert_ne!(frontend.get_features().unwrap(), 0);
+                frontend
+            });
+            control.cancel("supervisor stopped the host").unwrap();
+            assert!(
+                completed
+                    .recv_timeout(Duration::from_secs(1))
+                    .unwrap()
+                    .is_err()
+            );
+            worker.join().unwrap();
+            let report: serde_json::Value =
+                serde_json::from_reader(File::open(report).unwrap()).unwrap();
+            assert_eq!(report["connection_ok"], false);
+            assert!(!socket.exists());
+            drop((frontend, control));
+        }
     }
-    drain_result?;
-    result.map_err(daemon_error)
+
+    #[test]
+    fn rejected_listener_reports_failure_without_removing_the_existing_socket() {
+        let directory = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let image = directory.path().join("image.raw");
+        File::create(&image).unwrap().set_len(4096).unwrap();
+        let socket = directory.path().join("image.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let report = directory.path().join("report.json");
+        assert!(
+            serve(
+                Backend::new(&image).unwrap(),
+                &socket,
+                File::create(&report).unwrap()
+            )
+            .is_err()
+        );
+        assert!(socket.exists());
+        let report: serde_json::Value =
+            serde_json::from_reader(File::open(report).unwrap()).unwrap();
+        assert_eq!(report["connection_ok"], false);
+        drop(listener);
+    }
 }

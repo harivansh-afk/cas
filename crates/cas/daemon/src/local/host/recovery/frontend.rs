@@ -107,6 +107,9 @@ pub struct RetainedHost {
 }
 
 impl RetainedHost {
+    pub(crate) fn fail_all(&self, reason: &str) {
+        self.gate.fail(reason.to_owned());
+    }
     pub fn open(
         root: &Path,
         config: Config,
@@ -120,7 +123,7 @@ impl RetainedHost {
         Self::start(inspected, limits, staging_bytes, deadline)
     }
 
-    pub(in crate::local::host) fn start(
+    pub(crate) fn start(
         inspected: Inspection,
         limits: cas_core::space::Limits,
         staging_bytes: u64,

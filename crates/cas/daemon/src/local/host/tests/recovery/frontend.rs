@@ -68,35 +68,7 @@ fn first_cold_get_exports_the_recovered_epoch_without_an_extra_rotation() {
             .send(crate::service::serve(backend, &server_socket, report))
             .unwrap();
     });
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let stream = loop {
-        match UnixStream::connect(&socket) {
-            Ok(stream) => break stream,
-            Err(error)
-                if Instant::now() < deadline
-                    && matches!(
-                        error.kind(),
-                        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
-                    ) =>
-            {
-                thread::sleep(Duration::from_millis(1))
-            }
-            Err(error) => panic!("frontend connection: {error}"),
-        }
-    };
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    let mut frontend = Frontend::from_stream(stream, 4);
-    frontend.set_owner().unwrap();
-    let features = frontend.get_features().unwrap();
-    frontend.set_features(features).unwrap();
-    let protocol = frontend.get_protocol_features().unwrap();
-    assert!(protocol.contains(VhostUserProtocolFeatures::INFLIGHT_SHMFD));
-    frontend.set_protocol_features(protocol).unwrap();
+    let mut frontend = connect(&socket);
     let (message, file) = frontend
         .get_inflight_fd(&VhostUserInflight {
             mmap_size: 0,
@@ -303,4 +275,37 @@ fn retained_captured_queue_changes_fail_before_repair() {
         thread::sleep(Duration::from_millis(1));
     }
     assert_eq!(files(root.path()), before);
+}
+
+pub(super) fn connect(socket: &Path) -> Frontend {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let stream = loop {
+        match UnixStream::connect(socket) {
+            Ok(stream) => break stream,
+            Err(error)
+                if Instant::now() < deadline
+                    && matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                    ) =>
+            {
+                thread::sleep(Duration::from_millis(1))
+            }
+            Err(error) => panic!("frontend connection: {error}"),
+        }
+    };
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut frontend = Frontend::from_stream(stream, 4);
+    frontend.set_owner().unwrap();
+    let features = frontend.get_features().unwrap();
+    frontend.set_features(features).unwrap();
+    let protocol = frontend.get_protocol_features().unwrap();
+    assert!(protocol.contains(VhostUserProtocolFeatures::INFLIGHT_SHMFD));
+    frontend.set_protocol_features(protocol).unwrap();
+    frontend
 }

@@ -374,7 +374,7 @@ impl Backend {
     pub fn failure(&self) -> Option<&str> {
         self.failure.as_deref()
     }
-    fn fail(&mut self, message: String) {
+    pub(crate) fn fail(&mut self, message: String) {
         if let Some(gate) = self.storage.completion_gate() {
             let mut failed = gate.lock().expect("completion gate poisoned");
             failed.fail(message.clone());
