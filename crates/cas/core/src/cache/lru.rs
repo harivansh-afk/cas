@@ -17,6 +17,7 @@ struct Entry<K, V> {
 
 pub(crate) struct Lru<K, V> {
     entries: HashTable<Entry<K, V>, BudgetAllocator>,
+    capacity: usize,
     oldest: Option<K>,
     newest: Option<K>,
     pub counters: Counters,
@@ -25,11 +26,15 @@ pub(crate) struct Lru<K, V> {
 impl<K: Key, V> Lru<K, V> {
     pub fn new(capacity: usize, metadata: &Arc<Budget>) -> io::Result<Self> {
         let mut entries = HashTable::new_in(BudgetAllocator::new(Arc::clone(metadata)));
+        // Pinned hashbrown rehashes tombstones in place below half capacity.
+        // Reserve that headroom once so eviction churn never grows the table.
+        let slots = capacity.checked_mul(2).ok_or(io::ErrorKind::OutOfMemory)?;
         entries
-            .try_reserve(capacity, |entry: &Entry<K, V>| entry.key.bucket())
+            .try_reserve(slots, |entry: &Entry<K, V>| entry.key.bucket())
             .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
         Ok(Self {
             entries,
+            capacity,
             oldest: None,
             newest: None,
             counters: Counters::default(),
@@ -61,9 +66,8 @@ impl<K: Key, V> Lru<K, V> {
     }
 
     pub fn insert(&mut self, key: K, buffer: BudgetArc<V>) {
-        // Each resident owner holds a byte credit. Admission to that fixed
-        // capacity implies a free slot in the table reserved at startup.
-        assert!(self.entries.len() < self.entries.capacity());
+        // Payload admission bounds residents, independently of tombstones.
+        assert!(self.entries.len() < self.capacity);
         self.entries.insert_unique(
             key.bucket(),
             Entry {

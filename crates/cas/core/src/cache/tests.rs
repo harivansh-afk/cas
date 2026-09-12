@@ -117,3 +117,23 @@ fn fetch_recheck_does_not_count_or_promote_another_guest_lookup() {
     drop(cache);
     assert_eq!(metadata.usage().current, Amount::default());
 }
+
+#[test]
+fn large_working_set_churn_reuses_the_reserved_membership_table() {
+    let metadata = metadata();
+    let cache = Cache::new(1024 * BLOCK_SIZE, &metadata).unwrap();
+    let table_bytes = cache.status().table_bytes;
+    for value in 0u64..16 * 1024 {
+        let mut bytes = [0; BLOCK_SIZE];
+        bytes[..8].copy_from_slice(&value.to_le_bytes());
+        let hash = *blake3::hash(&bytes).as_bytes();
+        drop(cache.fill(hash, &bytes).unwrap().unwrap());
+        assert_eq!(cache.get(&hash).unwrap().as_slice(), bytes);
+        let status = cache.status();
+        assert_eq!(status.table_bytes, table_bytes);
+        assert!(status.payload.peak.bytes <= 1024 * BLOCK_SIZE);
+    }
+    assert_eq!(cache.status().counters.evictions, 15 * 1024);
+    drop(cache);
+    assert_eq!(metadata.usage().current, Amount::default());
+}
