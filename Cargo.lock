@@ -112,6 +112,7 @@ name = "cas-core"
 version = "0.1.0"
 dependencies = [
  "allocator-api2",
+ "arrayvec",
  "blake3",
  "crc32fast",
  "hashbrown",

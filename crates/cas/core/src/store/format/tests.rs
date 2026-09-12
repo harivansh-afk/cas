@@ -106,6 +106,7 @@ fn chunk_and_wal_headers_cannot_be_interchanged_and_segment_fields_are_strict() 
     };
     let encoded = value.encode().unwrap();
     assert_eq!(SegmentHeader::decode(encoded.as_slice()).unwrap(), value);
+    #[cfg(target_os = "linux")]
     assert!(crate::append::format::SegmentHeader::decode(encoded.as_slice()).is_err());
     for offset in [8, 12, 32, 48, 72, 4091] {
         let mut bytes = encoded.as_slice().to_vec();
@@ -119,8 +120,13 @@ fn chunk_and_wal_headers_cannot_be_interchanged_and_segment_fields_are_strict() 
     for capacity in [0, 8192, 12289, MAX_SEGMENT_BYTES + 4096] {
         assert!(SegmentHeader { capacity, ..value }.encode().is_err());
     }
-    let batch = batch(1);
-    assert!(crate::append::format::Header::decode(&batch.bytes()[..BLOCK_SIZE], 1 << 20).is_err());
+    #[cfg(target_os = "linux")]
+    {
+        let batch = batch(1);
+        assert!(
+            crate::append::format::Header::decode(&batch.bytes()[..BLOCK_SIZE], 1 << 20).is_err()
+        );
+    }
 }
 
 #[test]

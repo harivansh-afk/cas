@@ -138,24 +138,10 @@ impl<'a> Page<'a> {
             Kind::Commit => {
                 let commit = page.commit()?;
                 require(
-                    page.count == 0
-                        && commit.store != [0; 16]
-                        && commit.image != [0; 16]
-                        && commit.generation != 0
-                        && commit.image_bytes == image_bytes,
-                    "manifest COMMIT identity/capacity",
+                    page.count == 0 && commit.image_bytes == image_bytes,
+                    "manifest COMMIT shape/capacity",
                 )?;
-                let root = commit.root;
-                require(
-                    if root.offset == 0 {
-                        root.height == 0
-                    } else {
-                        page_offset(root.offset)
-                            && root.offset < offset
-                            && (1..=MAX_HEIGHT).contains(&root.height)
-                    },
-                    "manifest COMMIT root",
-                )?;
+                commit.validate(offset)?;
                 require(
                     bytes[128..].iter().all(|&b| b == 0),
                     "manifest COMMIT reserved bytes",
@@ -275,32 +261,39 @@ impl<'a> Page<'a> {
     }
 }
 
-fn start(kind: Kind, offset: u64, level: u16, count: usize) -> AlignedBuffer {
-    let mut buffer = AlignedBuffer::new(BLOCK_SIZE);
-    let bytes = buffer.as_mut_slice();
+fn start(bytes: &mut [u8], kind: Kind, offset: u64, level: u16, count: usize) -> io::Result<()> {
+    require(bytes.len() == BLOCK_SIZE, "manifest output page size")?;
+    bytes.fill(0);
     bytes[..8].copy_from_slice(b"CASMAN02");
     put16(bytes, 8, 2);
     put16(bytes, 10, kind as u16);
     put16(bytes, 12, level);
     put16(bytes, 14, count as u16);
     put64(bytes, 16, offset);
-    buffer
+    Ok(())
 }
 
-fn finish(mut buffer: AlignedBuffer, offset: u64, image_bytes: u64) -> io::Result<AlignedBuffer> {
-    let bytes = buffer.as_mut_slice();
+fn finish(bytes: &mut [u8], offset: u64, image_bytes: u64) -> io::Result<()> {
     put32(bytes, 56, checksum(bytes, 56));
     Page::decode(bytes, offset, image_bytes)?;
-    Ok(buffer)
+    Ok(())
 }
 
 pub fn leaf(offset: u64, image_bytes: u64, extents: &[Extent]) -> io::Result<AlignedBuffer> {
+    let mut buffer = AlignedBuffer::new(BLOCK_SIZE);
+    leaf_into(buffer.as_mut_slice(), offset, image_bytes, extents)?;
+    Ok(buffer)
+}
+
+pub(crate) fn leaf_into(
+    bytes: &mut [u8],
+    offset: u64,
+    image_bytes: u64,
+    extents: &[Extent],
+) -> io::Result<()> {
     require(extents.len() <= LEAF_CAPACITY, "manifest leaf capacity")?;
-    let mut buffer = start(Kind::Leaf, offset, 0, extents.len());
-    for (extent, slot) in extents
-        .iter()
-        .zip(buffer.as_mut_slice()[64..].as_chunks_mut::<64>().0)
-    {
+    start(bytes, Kind::Leaf, offset, 0, extents.len())?;
+    for (extent, slot) in extents.iter().zip(bytes[64..].as_chunks_mut::<64>().0) {
         put64(slot, 0, extent.start);
         put64(slot, 8, extent.end);
         if let Some(hash) = extent.hash {
@@ -308,7 +301,7 @@ pub fn leaf(offset: u64, image_bytes: u64, extents: &[Extent]) -> io::Result<Ali
         }
         put16(slot, 52, if extent.hash.is_some() { 1 } else { 2 });
     }
-    finish(buffer, offset, image_bytes)
+    finish(bytes, offset, image_bytes)
 }
 
 pub fn branch(
@@ -317,27 +310,39 @@ pub fn branch(
     level: u16,
     children: &[Child],
 ) -> io::Result<AlignedBuffer> {
+    let mut buffer = AlignedBuffer::new(BLOCK_SIZE);
+    branch_into(buffer.as_mut_slice(), offset, image_bytes, level, children)?;
+    Ok(buffer)
+}
+
+pub(crate) fn branch_into(
+    bytes: &mut [u8],
+    offset: u64,
+    image_bytes: u64,
+    level: u16,
+    children: &[Child],
+) -> io::Result<()> {
     require(
         children.len() <= BRANCH_CAPACITY,
         "manifest branch capacity",
     )?;
-    let mut buffer = start(Kind::Branch, offset, level, children.len());
-    for (child, slot) in children
-        .iter()
-        .zip(buffer.as_mut_slice()[64..].as_chunks_mut::<16>().0)
-    {
+    start(bytes, Kind::Branch, offset, level, children.len())?;
+    for (child, slot) in children.iter().zip(bytes[64..].as_chunks_mut::<16>().0) {
         put64(slot, 0, child.start);
         put64(slot, 8, child.offset);
     }
-    finish(buffer, offset, image_bytes)
+    finish(bytes, offset, image_bytes)
 }
 
 impl FileHeader {
     pub fn encode(self) -> io::Result<AlignedBuffer> {
-        let mut buffer = start(Kind::File, 0, 0, 0);
-        buffer.as_mut_slice()[64..80].copy_from_slice(&self.store);
-        put64(buffer.as_mut_slice(), 80, self.image_bytes);
-        finish(buffer, 0, self.image_bytes)
+        let mut buffer = AlignedBuffer::new(BLOCK_SIZE);
+        let bytes = buffer.as_mut_slice();
+        start(bytes, Kind::File, 0, 0, 0)?;
+        bytes[64..80].copy_from_slice(&self.store);
+        put64(bytes, 80, self.image_bytes);
+        finish(bytes, 0, self.image_bytes)?;
+        Ok(buffer)
     }
 
     pub fn decode(bytes: &[u8]) -> io::Result<Self> {
@@ -353,16 +358,43 @@ impl FileHeader {
 }
 
 impl Commit {
+    pub(crate) fn validate(self, offset: u64) -> io::Result<()> {
+        require(
+            page_offset(offset)
+                && self.store != [0; 16]
+                && self.image != [0; 16]
+                && self.generation != 0
+                && self.image_bytes != 0
+                && self.image_bytes.is_multiple_of(BLOCK_SIZE as u64),
+            "manifest COMMIT identity/capacity",
+        )?;
+        require(
+            if self.root.offset == 0 {
+                self.root.height == 0
+            } else {
+                page_offset(self.root.offset)
+                    && self.root.offset < offset
+                    && (1..=MAX_HEIGHT).contains(&self.root.height)
+            },
+            "manifest COMMIT root",
+        )
+    }
+
     pub fn encode(self, offset: u64) -> io::Result<AlignedBuffer> {
-        let mut buffer = start(Kind::Commit, offset, self.root.height, 0);
-        let bytes = buffer.as_mut_slice();
+        let mut buffer = AlignedBuffer::new(BLOCK_SIZE);
+        self.encode_into(buffer.as_mut_slice(), offset)?;
+        Ok(buffer)
+    }
+
+    pub(crate) fn encode_into(self, bytes: &mut [u8], offset: u64) -> io::Result<()> {
+        start(bytes, Kind::Commit, offset, self.root.height, 0)?;
         bytes[64..80].copy_from_slice(&self.store);
         bytes[80..96].copy_from_slice(&self.image);
         put64(bytes, 96, self.generation);
         put64(bytes, 104, self.root.offset);
         put64(bytes, 112, self.durable);
         put64(bytes, 120, self.image_bytes);
-        finish(buffer, offset, self.image_bytes)
+        finish(bytes, offset, self.image_bytes)
     }
 }
 
