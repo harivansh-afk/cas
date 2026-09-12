@@ -87,17 +87,18 @@ impl Cache {
 
     pub fn get(&self, hash: &Hash) -> Option<Buffer> {
         let mut state = self.state.lock().expect("cache poisoned");
-        let Some(entry) = state
-            .entries
-            .find(bucket(hash), |entry| &entry.hash == hash)
-        else {
+        let Some(buffer) = state.buffer(hash) else {
             state.counters.misses += 1;
             return None;
         };
-        let buffer = entry.buffer.clone();
         state.promote(*hash);
         state.counters.hits += 1;
         Some(buffer)
+    }
+
+    /// Recheck after claiming a fetch without counting a second guest lookup.
+    pub fn peek(&self, hash: &Hash) -> Option<Buffer> {
+        self.state.lock().expect("cache poisoned").buffer(hash)
     }
 
     /// Read-fill publication. None means reader-held bytes prevent a new fill.
@@ -109,11 +110,7 @@ impl Cache {
             ));
         }
         let mut state = self.state.lock().expect("cache poisoned");
-        if let Some(entry) = state
-            .entries
-            .find(bucket(&hash), |entry| entry.hash == hash)
-        {
-            let buffer = entry.buffer.clone();
+        if let Some(buffer) = state.buffer(&hash) {
             state.promote(hash);
             return Ok(Some(buffer));
         }
@@ -175,6 +172,12 @@ impl Cache {
 }
 
 impl State {
+    fn buffer(&self, hash: &Hash) -> Option<Buffer> {
+        self.entries
+            .find(bucket(hash), |entry| &entry.hash == hash)
+            .map(|entry| entry.buffer.clone())
+    }
+
     fn entry(&mut self, hash: Hash) -> &mut Entry {
         self.entries
             .find_mut(bucket(&hash), |entry| entry.hash == hash)

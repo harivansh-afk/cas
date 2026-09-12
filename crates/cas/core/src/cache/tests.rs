@@ -97,3 +97,23 @@ fn invalid_fills_and_metadata_refusal_do_not_replace_or_leak_owners() {
     );
     assert_eq!(denied.usage().current, Amount::default());
 }
+
+#[test]
+fn fetch_recheck_does_not_count_or_promote_another_guest_lookup() {
+    let metadata = metadata();
+    let cache = Cache::new(2 * BLOCK_SIZE, &metadata).unwrap();
+    let (old, first) = block(1);
+    let (new, second) = block(2);
+    drop(cache.fill(old, &first).unwrap());
+    drop(cache.fill(new, &second).unwrap());
+    assert_eq!(cache.peek(&old).unwrap().as_slice(), first);
+    assert!(cache.peek(&block(3).0).is_none());
+    assert_eq!(cache.status().counters.hits, 0);
+    assert_eq!(cache.status().counters.misses, 0);
+    let (third, bytes) = block(3);
+    drop(cache.fill(third, &bytes).unwrap());
+    assert!(cache.peek(&old).is_none());
+    assert!(cache.peek(&new).is_some());
+    drop(cache);
+    assert_eq!(metadata.usage().current, Amount::default());
+}

@@ -54,14 +54,16 @@ fn start(resources: Arc<Resources>, store: Store, images: Vec<(Log, Manifest)>) 
     }
 }
 
-pub(super) struct Pause {
+pub(crate) struct Pause {
     entered: mpsc::Sender<()>,
     resume: mpsc::Receiver<()>,
 }
 
 #[derive(Default)]
-pub(super) struct Control {
+pub(crate) struct Control {
     pub compaction: Option<Pause>,
+    pub fetch: Option<Pause>,
+    pub before_fetch: Option<Pause>,
     pub rotation: Option<Pause>,
     pub collection: Option<Pause>,
     pub snapshot: Option<Pause>,

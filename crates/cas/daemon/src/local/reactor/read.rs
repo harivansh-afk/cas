@@ -1,6 +1,7 @@
 use super::*;
 use cas_core::{
     budget::BudgetAllocator,
+    cache::fills::{Leader, Lookup, Registry, Waiter},
     manifest::{file as manifest, tree::LookupState},
     store::file as store,
 };
@@ -10,6 +11,7 @@ enum Stage {
     Manifest { read: manifest::Read, offset: u64 },
     Header(store::Read),
     Payload(store::Payload),
+    Waiting(Waiter<Fetched>),
     Done,
 }
 
@@ -21,6 +23,12 @@ pub(super) struct Read {
     reader: Option<store::Reader>,
     cache: Option<BudgetArc<cas_core::cache::Cache>>,
     chunk_hash: Option<cas_core::chunk_index::Hash>,
+    fetches: Option<Fetches>,
+    leader: Option<Leader<Fetched>>,
+    fetched: Option<BudgetArc<Fetched>>,
+    metadata: Option<Arc<Budget>>,
+    #[cfg(test)]
+    control: Option<Arc<Mutex<host::tests::Control>>>,
     io: Io,
     stage: Stage,
     block: usize,
@@ -36,6 +44,12 @@ impl Read {
             reader: None,
             cache: None,
             chunk_hash: None,
+            fetches: None,
+            leader: None,
+            fetched: None,
+            metadata: None,
+            #[cfg(test)]
+            control: None,
             io,
             stage: Stage::Done,
             block: 0,
@@ -50,6 +64,12 @@ impl Read {
             let port = port.ok_or_else(|| io::Error::other("manifest read has no shared store"))?;
             self.reader = Some(port.reader());
             self.cache = Some(port.cache());
+            self.fetches = Some(port.fetches());
+            self.metadata = Some(port.metadata());
+            #[cfg(test)]
+            {
+                self.control = Some(port.read_control());
+            }
             self.page = Some(AlignedBuffer::try_new_in(
                 BLOCK_SIZE,
                 BudgetAllocator::new(port.metadata()),
@@ -101,9 +121,8 @@ impl Read {
         Ok(())
     }
 
-    /// True requires storage IO; a hit already filled the current response block.
+    /// True requires an IO CQE; a hit already filled the current response block.
     fn chunk(&mut self, hash: cas_core::chunk_index::Hash) -> io::Result<bool> {
-        self.shared_io = true;
         self.chunk_hash = Some(hash);
         if let Some(bytes) = self.cache.as_ref().and_then(|cache| cache.get(&hash)) {
             let Operation::Read { buffer, .. } = &mut self.io.operation else {
@@ -113,6 +132,57 @@ impl Read {
                 .copy_from_slice(bytes.as_slice());
             return Ok(false);
         }
+        match Registry::lookup(self.fetches.as_ref().expect("host fetch registry"), hash)? {
+            Some(Lookup::Waiter(waiter)) => {
+                self.shared_io = true;
+                self.stage = Stage::Waiting(waiter);
+                return Ok(true);
+            }
+            Some(Lookup::Leader(leader)) => {
+                self.leader = Some(leader);
+                let bytes = AlignedBuffer::try_new_in(BLOCK_SIZE, allocator_api2::alloc::Global)?;
+                self.fetched = Some(BudgetArc::try_new(
+                    Fetched {
+                        bytes,
+                        _credits: self
+                            .io
+                            .permit
+                            ._read
+                            .as_ref()
+                            .expect("read byte reservation")
+                            .clone(),
+                    },
+                    self.metadata.as_ref().expect("host metadata"),
+                )?);
+            }
+            None => {
+                return Err(io::Error::other(
+                    "admitted read exceeded host fetch capacity",
+                ));
+            }
+        }
+        // A previous leader may have filled the cache between our miss and
+        // registry lookup. Publish that value through our new cell as well.
+        if let Some(bytes) = self.cache.as_ref().and_then(|cache| cache.peek(&hash)) {
+            let mut fetched = self.fetched.take().expect("owned fetch payload");
+            fetched
+                .get_mut()
+                .expect("unpublished fetch is unique")
+                .bytes
+                .as_mut_slice()
+                .copy_from_slice(bytes.as_slice());
+            let Operation::Read { buffer, .. } = &mut self.io.operation else {
+                unreachable!()
+            };
+            buffer.as_mut_slice()[self.block * BLOCK_SIZE..(self.block + 1) * BLOCK_SIZE]
+                .copy_from_slice(bytes.as_slice());
+            self.leader
+                .take()
+                .expect("fetch leader")
+                .complete(fetched)?;
+            return Ok(false);
+        }
+        self.shared_io = true;
         let read = self
             .reader
             .as_ref()
@@ -124,6 +194,10 @@ impl Read {
     }
 
     pub fn entry(&mut self) -> squeue::Entry {
+        if let Stage::Waiting(waiter) = &self.stage {
+            return opcode::PollAdd::new(types::Fd(waiter.notification()), libc::POLLIN as u32)
+                .build();
+        }
         let Operation::Read { buffer, .. } = &mut self.io.operation else {
             unreachable!()
         };
@@ -159,10 +233,18 @@ impl Read {
             ),
             Stage::Payload(read) => (
                 read.file(),
-                buffer.as_mut_slice()[self.block * BLOCK_SIZE..].as_mut_ptr(),
+                self.fetched
+                    .as_mut()
+                    .unwrap()
+                    .get_mut()
+                    .expect("unpublished fetch is unique")
+                    .bytes
+                    .as_mut_slice()
+                    .as_mut_ptr(),
                 BLOCK_SIZE,
                 read.offset(),
             ),
+            Stage::Waiting(_) => unreachable!("waiter submits readiness above"),
             Stage::Done => unreachable!("completed read has no SQE"),
         };
         opcode::Read::new(types::Fd(file.as_raw_fd()), pointer, bytes as u32)
@@ -174,6 +256,7 @@ impl Read {
         match self.stage {
             Stage::Staging(index) => self.plan.ranges()[index].input_bytes(),
             Stage::Manifest { .. } | Stage::Header(_) | Stage::Payload(_) => BLOCK_SIZE,
+            Stage::Waiting(_) => libc::POLLIN as usize,
             Stage::Done => unreachable!("completed read has no CQE"),
         }
     }
@@ -216,11 +299,25 @@ impl Read {
             }
             Stage::Header(read) => {
                 self.stage = Stage::Payload(read.payload(self.page.as_ref().unwrap().as_slice())?);
+                #[cfg(test)]
+                if let Some(control) = &self.control {
+                    let pause = control.lock().unwrap().before_fetch.take();
+                    if let Some(pause) = pause {
+                        pause.wait();
+                    }
+                }
             }
             Stage::Payload(read) => {
-                let bytes =
-                    &buffer.as_slice()[self.block * BLOCK_SIZE..(self.block + 1) * BLOCK_SIZE];
+                let fetched = self.fetched.take().expect("owned fetch payload");
+                let bytes = fetched.bytes.as_slice();
                 read.verify(bytes)?;
+                #[cfg(test)]
+                if let Some(control) = &self.control {
+                    let pause = control.lock().unwrap().fetch.take();
+                    if let Some(pause) = pause {
+                        pause.wait();
+                    }
+                }
                 if let Some(cache) = &self.cache {
                     match cache.fill(self.chunk_hash.expect("planned chunk hash"), bytes) {
                         Ok(_) => (),
@@ -228,6 +325,21 @@ impl Read {
                         Err(error) => return Err(error),
                     }
                 }
+                buffer.as_mut_slice()[self.block * BLOCK_SIZE..(self.block + 1) * BLOCK_SIZE]
+                    .copy_from_slice(bytes);
+                self.leader
+                    .take()
+                    .expect("fetch leader")
+                    .complete(fetched)?;
+                self.block += 1;
+                self.next_block()?;
+            }
+            Stage::Waiting(waiter) => {
+                let fetched = waiter
+                    .poll()?
+                    .ok_or_else(|| io::Error::other("fetch readiness preceded publication"))?;
+                buffer.as_mut_slice()[self.block * BLOCK_SIZE..(self.block + 1) * BLOCK_SIZE]
+                    .copy_from_slice(fetched.bytes.as_slice());
                 self.block += 1;
                 self.next_block()?;
             }

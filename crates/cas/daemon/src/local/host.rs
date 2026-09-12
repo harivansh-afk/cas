@@ -54,6 +54,7 @@ struct SharedHost {
     gate: BudgetArc<state::HostGate>,
     reader: Reader,
     cache: BudgetArc<cas_core::cache::Cache>,
+    fetches: Fetches,
     resources: Arc<Resources>,
     attached: AtomicUsize,
     administrating: AtomicBool,
@@ -215,6 +216,11 @@ impl Host {
                 gate,
                 reader: store.reader()?,
                 cache: cas_core::cache::Cache::new(resources.cache_bytes, &metadata)?,
+                fetches: cas_core::cache::fills::Registry::new(
+                    pools::HOST_REQUESTS,
+                    pools::HOST_REQUESTS,
+                    &metadata,
+                )?,
                 resources,
                 attached: AtomicUsize::new(0),
                 administrating: AtomicBool::new(false),
@@ -421,6 +427,7 @@ impl Host {
         serde_json::json!({ "failure": self.shared.gate.failure(), "store": self.store_status(),
             "admission": self.shared.admission.status(),
             "cache": self.shared.cache.status(),
+            "fetches": self.shared.fetches.status(),
             "collection": *self.shared.collection.lock().expect("collection status poisoned"),
             "pools": self.shared.resources.pools.report(), "metadata": self.shared.resources.metadata.usage(),
             "compaction_metadata": self.shared.resources.compaction.usage(),
@@ -535,6 +542,13 @@ impl Port {
     }
     pub fn cache(&self) -> BudgetArc<cas_core::cache::Cache> {
         self.shared.cache.clone()
+    }
+    pub fn fetches(&self) -> Fetches {
+        self.shared.fetches.clone()
+    }
+    #[cfg(test)]
+    pub fn read_control(&self) -> Arc<Mutex<tests::Control>> {
+        Arc::clone(&self.shared.control)
     }
     pub fn metadata(&self) -> Arc<Budget> {
         Arc::clone(&self.shared.resources.metadata)

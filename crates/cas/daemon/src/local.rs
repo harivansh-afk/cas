@@ -59,10 +59,17 @@ impl Execution {
 
 pub struct Permit {
     _request: Credits,
-    _read: Option<Credits>,
+    _read: Option<BudgetArc<Credits>>,
     window: Option<window::Slot>,
     _admission: Option<host::admission::Entry>,
 }
+
+struct Fetched {
+    bytes: cas_core::aligned::AlignedBuffer,
+    _credits: BudgetArc<Credits>,
+}
+
+type Fetches = BudgetArc<cas_core::cache::fills::Registry<Fetched>>;
 
 #[derive(Default, serde::Serialize)]
 struct Metrics {
@@ -293,10 +300,11 @@ impl Shared {
             }),
         }?;
         let read = if let Kind::Read(bytes) = kind {
-            Some(self.pools.read.reserve(Amount {
+            let credits = self.pools.read.reserve(Amount {
                 bytes: bytes + MAX_REQUEST_BYTES,
                 requests: 0,
-            })?)
+            })?;
+            Some(BudgetArc::try_new(credits, &self.metadata).ok()?)
         } else {
             None
         };

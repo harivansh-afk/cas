@@ -1,5 +1,7 @@
 use super::*;
 
+pub(super) const HOST_REQUESTS: usize = 1024;
+
 pub(super) const IMAGE_REQUESTS: usize = 128;
 pub(super) const IMAGE_CONTROL: usize = 8;
 
@@ -25,7 +27,7 @@ impl HostPools {
     pub fn new() -> Self {
         let budget = |bytes, requests| Budget::new(Amount { bytes, requests });
         Self {
-            requests: budget(0, 1024),
+            requests: budget(0, HOST_REQUESTS),
             append: budget(64 * MAX_REQUEST_BYTES, 0),
             read: budget(64 * MAX_REQUEST_BYTES, 0),
             control: budget(256 * 1024, 32),
