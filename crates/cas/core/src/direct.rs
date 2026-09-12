@@ -18,10 +18,43 @@ pub(crate) fn open(path: &Path, create: bool) -> io::Result<File> {
         .custom_flags(libc::O_DIRECT | libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)?;
     if !file.metadata()?.is_file() {
-        return Err(io::Error::other("staging log must be a regular file"));
+        return Err(io::Error::other("storage IO requires a regular file"));
     }
     file.try_lock().map_err(io::Error::from)?;
     Ok(file)
+}
+
+pub(crate) fn preallocate(file: &File, offset: u64, length: u64) -> io::Result<()> {
+    if length == 0
+        || !offset.is_multiple_of(BLOCK_SIZE as u64)
+        || !length.is_multiple_of(BLOCK_SIZE as u64)
+        || offset
+            .checked_add(length)
+            .is_none_or(|end| end > i64::MAX as u64)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid allocation range",
+        ));
+    }
+    #[cfg(test)]
+    if faults::take(faults::Fault::Allocate) {
+        return Err(io::Error::from_raw_os_error(libc::ENOSPC));
+    }
+    // SAFETY: the descriptor is live and the checked range fits positive off_t.
+    // KEEP_SIZE reserves extents without making unwritten records visible at EOF.
+    if unsafe {
+        libc::fallocate(
+            file.as_raw_fd(),
+            libc::FALLOC_FL_KEEP_SIZE,
+            offset as i64,
+            length as i64,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 pub(crate) fn read(file: &File, buffer: &mut AlignedBuffer, offset: u64) -> io::Result<()> {
@@ -30,6 +63,10 @@ pub(crate) fn read(file: &File, buffer: &mut AlignedBuffer, offset: u64) -> io::
 
 pub(crate) fn read_bytes(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<()> {
     aligned(buffer, offset)?;
+    #[cfg(test)]
+    if faults::take(faults::Fault::Read) {
+        return Err(io::Error::from_raw_os_error(libc::EIO));
+    }
     let read = loop {
         match file.read_at(buffer, offset) {
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -163,26 +200,35 @@ pub(crate) mod faults {
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     pub(crate) enum Fault {
+        Allocate,
+        Read,
         ShortWrite,
         Sync,
     }
 
     thread_local! {
-        static NEXT: Cell<Option<Fault>> = const { Cell::new(None) };
+        static NEXT: Cell<Option<(Fault, usize)>> = const { Cell::new(None) };
     }
 
     pub(crate) fn inject(fault: Fault) {
-        NEXT.with(|next| assert!(next.replace(Some(fault)).is_none()));
+        inject_after(fault, 0);
+    }
+
+    pub(crate) fn inject_after(fault: Fault, successful_calls: usize) {
+        NEXT.with(|next| assert!(next.replace(Some((fault, successful_calls))).is_none()));
     }
 
     pub(super) fn take(fault: Fault) -> bool {
-        NEXT.with(|next| {
-            if next.get() == Some(fault) {
+        NEXT.with(|next| match next.get() {
+            Some((expected, 0)) if expected == fault => {
                 next.set(None);
                 true
-            } else {
+            }
+            Some((expected, remaining)) if expected == fault => {
+                next.set(Some((expected, remaining - 1)));
                 false
             }
+            _ => false,
         })
     }
 }

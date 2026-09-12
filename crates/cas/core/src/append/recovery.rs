@@ -36,7 +36,7 @@ impl Log {
         let segment::Candidates {
             highest: highest_segment,
             files: candidates,
-        } = directory.candidates()?;
+        } = super::segment::candidates(&directory)?;
         let (number, file) = candidates
             .first()
             .ok_or_else(|| io::Error::other("no valid image segment"))?;
@@ -321,7 +321,9 @@ impl Recovery {
             // Retain every rejected byte before the first destructive change.
             for (relative, (number, file)) in self.candidates[index..].iter().enumerate() {
                 let begin = if relative == 0 { offset } else { 0 };
-                self.log.directory.archive(*number, file, begin)?;
+                self.log
+                    .directory
+                    .archive(&super::segment::name(*number), file, begin)?;
                 self.log.rejected_bytes += file.metadata()?.len() - begin;
             }
             for (relative, (number, file)) in self.candidates[index..].iter().enumerate() {

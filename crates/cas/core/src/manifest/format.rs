@@ -337,12 +337,15 @@ pub(crate) fn branch_into(
 impl FileHeader {
     pub fn encode(self) -> io::Result<AlignedBuffer> {
         let mut buffer = AlignedBuffer::new(BLOCK_SIZE);
-        let bytes = buffer.as_mut_slice();
+        self.encode_into(buffer.as_mut_slice())?;
+        Ok(buffer)
+    }
+
+    pub(crate) fn encode_into(self, bytes: &mut [u8]) -> io::Result<()> {
         start(bytes, Kind::File, 0, 0, 0)?;
         bytes[64..80].copy_from_slice(&self.store);
         put64(bytes, 80, self.image_bytes);
-        finish(bytes, 0, self.image_bytes)?;
-        Ok(buffer)
+        finish(bytes, 0, self.image_bytes)
     }
 
     pub fn decode(bytes: &[u8]) -> io::Result<Self> {
