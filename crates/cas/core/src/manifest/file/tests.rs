@@ -4,6 +4,7 @@ use crate::{
     direct::faults::{self, Fault},
 };
 use std::{fs, io::Write, os::unix::fs::FileExt};
+mod snapshots;
 
 const ID: Identity = Identity {
     store: [1; 16],

@@ -46,6 +46,20 @@ pub(crate) fn sync_all(file: &File) -> io::Result<()> {
     file.sync_all()
 }
 
+/// Require actual filesystem reflink; no ordinary-copy fallback is permitted.
+pub(crate) fn reflink(source: &File, destination: &File) -> io::Result<()> {
+    #[cfg(test)]
+    if faults::take(faults::Fault::Reflink) {
+        return Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP));
+    }
+    // SAFETY: both file descriptions remain open. FICLONE takes a source FD
+    // as its integer argument and retains no userspace pointer after return.
+    if unsafe { libc::ioctl(destination.as_raw_fd(), libc::FICLONE, source.as_raw_fd()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 pub(crate) fn preallocate(file: &File, offset: u64, length: u64) -> io::Result<()> {
     #[cfg(test)]
     if faults::take(faults::Fault::Allocate) {
@@ -225,6 +239,7 @@ pub(crate) mod faults {
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     pub(crate) enum Fault {
+        Reflink,
         Write,
         FileSync,
         DirectorySync,

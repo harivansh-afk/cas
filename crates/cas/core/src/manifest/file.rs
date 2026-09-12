@@ -17,6 +17,9 @@ use std::{fs::File, io, path::Path, sync::Arc};
 
 const NAME: &str = "manifest.v2";
 
+mod snapshot;
+pub use snapshot::{Snapshot, SnapshotInspection, SnapshotKey};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Identity {
     pub store: [u8; 16],
