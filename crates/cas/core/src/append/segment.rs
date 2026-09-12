@@ -7,17 +7,7 @@ use super::format::SegmentHeader;
 pub(super) use crate::directory::Directory;
 use crate::{BLOCK_SIZE, aligned::AlignedBuffer, direct};
 
-pub(super) fn name(number: u64) -> String {
-    format!("segment-{number:020}.v2")
-}
-
-pub(super) fn number(name: &str) -> Option<u64> {
-    let digits = name.strip_prefix("segment-")?.get(..20)?;
-    if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    digits.parse().ok().filter(|value| *value != 0)
-}
+pub(super) use crate::segments::{name, number};
 
 pub(super) struct Candidates {
     pub highest: u64,

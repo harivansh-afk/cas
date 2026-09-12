@@ -13,6 +13,9 @@ mod direct;
 mod directory;
 
 #[cfg(target_os = "linux")]
+pub mod segments;
+
+#[cfg(target_os = "linux")]
 pub mod staging;
 
 #[cfg(target_os = "linux")]
