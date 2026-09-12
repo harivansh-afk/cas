@@ -1,6 +1,9 @@
 //! V2 adapters. The queue thread gathers into its final append allocation.
+pub(crate) mod host;
+mod pools;
 mod reactor;
 mod state;
+use pools::Pools;
 pub use state::ImageState;
 use std::collections::VecDeque;
 use std::fs::File;
@@ -50,36 +53,6 @@ impl Execution {
 pub struct Permit {
     _request: Credits,
     _read: Option<Credits>,
-}
-
-struct Pools {
-    requests: Share,
-    append: Share,
-    read: Share,
-    control: Share,
-}
-
-impl Pools {
-    fn new() -> Self {
-        let share = |host_bytes, host_requests, image_bytes, image_requests| {
-            Share::new(
-                Budget::new(Amount {
-                    bytes: host_bytes,
-                    requests: host_requests,
-                }),
-                Amount {
-                    bytes: image_bytes,
-                    requests: image_requests,
-                },
-            )
-        };
-        Self {
-            requests: share(0, 1024, 0, 128),
-            append: share(64 * MAX_REQUEST_BYTES, 0, 8 * MAX_REQUEST_BYTES, 0),
-            read: share(64 * MAX_REQUEST_BYTES, 0, 8 * MAX_REQUEST_BYTES, 0),
-            control: share(256 * 1024, 32, 64 * 1024, 8),
-        }
-    }
 }
 
 #[derive(Default, serde::Serialize)]
@@ -174,10 +147,11 @@ struct Io {
 }
 
 type Response = (Completed, append::Status);
-pub type Health = Arc<Mutex<ImageState>>;
+pub type Health = Arc<state::Gate>;
 
 pub struct Shared {
     pools: Pools,
+    metadata: Arc<Budget>,
     metrics: Mutex<Metrics>,
     final_status: Mutex<append::Status>,
     pub health: Health,
@@ -186,15 +160,36 @@ pub struct Shared {
 
 impl Shared {
     pub fn new(status: append::Status) -> Arc<Self> {
+        Self::with_pools(
+            status,
+            Pools::new(),
+            state::Gate::new(
+                ImageState {
+                    durable: status.durable,
+                    ..ImageState::default()
+                },
+                None,
+            ),
+            Budget::new(Amount {
+                bytes: 128 * MAX_REQUEST_BYTES,
+                requests: 0,
+            }),
+        )
+    }
+
+    fn with_pools(
+        status: append::Status,
+        pools: Pools,
+        health: Health,
+        metadata: Arc<Budget>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             injection: OnceLock::new(),
-            pools: Pools::new(),
+            pools,
+            metadata,
             metrics: Mutex::new(Metrics::default()),
             final_status: Mutex::new(status),
-            health: Arc::new(Mutex::new(ImageState {
-                durable: status.durable,
-                ..ImageState::default()
-            })),
+            health,
         })
     }
 
@@ -328,20 +323,42 @@ impl Local {
         execution: Execution,
         shared: Arc<Shared>,
     ) -> io::Result<Self> {
+        Self::start(log, event, execution, shared, None)
+    }
+
+    fn from_host(
+        log: Log,
+        event: &EventFd,
+        shared: Arc<Shared>,
+        port: host::Port,
+    ) -> io::Result<Self> {
+        Self::start(log, event, Execution::Concurrent, shared, Some(port))
+    }
+
+    fn start(
+        log: Log,
+        event: &EventFd,
+        execution: Execution,
+        shared: Arc<Shared>,
+        port: Option<host::Port>,
+    ) -> io::Result<Self> {
         let status = log.status();
         *shared.final_status.lock().expect("status poisoned") = status;
         let (sender, input) = mpsc::sync_channel(136);
         let (output, receiver) = mpsc::channel();
+        let input_wake = match &port {
+            Some(port) => Some(port.wake.try_clone()?),
+            None if execution == Execution::Concurrent => {
+                Some(EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK)?)
+            }
+            None => None,
+        };
         let worker = Worker {
             log,
             output,
             wake: Wake(event.try_clone()?),
             shared: Arc::clone(&shared),
-        };
-        let input_wake = if execution == Execution::Concurrent {
-            Some(EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK)?)
-        } else {
-            None
+            port,
         };
         let task: Box<dyn FnOnce() + Send> = match &input_wake {
             Some(wake) => {
@@ -651,6 +668,7 @@ struct Worker {
     output: mpsc::Sender<Response>,
     wake: Wake,
     shared: Arc<Shared>,
+    port: Option<host::Port>,
 }
 
 impl Drop for Worker {

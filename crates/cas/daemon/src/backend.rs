@@ -3,8 +3,8 @@
 mod admission;
 mod lifecycle;
 mod recovery;
+use crate::inflight::Entry;
 use admission::Admission;
-use cas_daemon::inflight::Entry;
 use recovery::Session;
 
 use std::collections::BTreeMap;
@@ -75,7 +75,7 @@ struct Counters {
     peak_inflight: usize,
 }
 
-pub(super) struct Backend {
+pub struct Backend {
     storage: Storage,
     completion_event: EventFd,
     exit: (EventConsumer, EventNotifier),
@@ -299,6 +299,17 @@ impl Backend {
             BackendKind::LocalAsync if live => Storage::local_live(path, create_bytes)?,
             BackendKind::LocalAsync => Storage::local_async(path, create_bytes, &completion_event)?,
         };
+        Self::from_storage(storage, completion_event, kind, restartable, live, fault)
+    }
+
+    pub(crate) fn from_storage(
+        storage: Storage,
+        completion_event: EventFd,
+        kind: BackendKind,
+        restartable: bool,
+        live: bool,
+        fault: Fault,
+    ) -> io::Result<Self> {
         if let Some(injection) = fault.injection() {
             let shared = match &storage {
                 Storage::Local(local) => Some(&local.shared),
@@ -784,7 +795,7 @@ impl Backend {
                 .map(|carrier| {
                     let request = request.inflight(queue, next_avail.wrapping_sub(1));
                     carrier.admit_observed(request, rejected, |phase| {
-                        use cas_daemon::inflight::AdmissionPhase;
+                        use crate::inflight::AdmissionPhase;
                         let point = match phase {
                             AdmissionPhase::Prepared => Point::AfterPrepared,
                             AdmissionPhase::Active => Point::AfterActive,
@@ -1245,7 +1256,7 @@ mod tests {
     }
     #[test]
     fn failed_gather_retires_its_head_and_drains_an_earlier_unsealed_batch() {
-        use cas_daemon::inflight::{Carrier, Geometry, Identity};
+        use crate::inflight::{Carrier, Geometry, Identity};
         let directory = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
         let mut backend = Backend::open_with_recovery(
             &directory.path().join("log"),

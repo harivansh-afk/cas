@@ -77,15 +77,15 @@ impl Request {
         }
     }
 
-    pub fn inflight(&self, queue: u16, available: u16) -> cas_daemon::inflight::Request {
-        use cas_daemon::inflight::Kind;
+    pub fn inflight(&self, queue: u16, available: u16) -> crate::inflight::Request {
+        use crate::inflight::Kind;
         let (kind, offset, length) = match self {
             Self::Read(data) => (Kind::Read, data.offset, data.len as u64),
             Self::Write(data) => (Kind::Write, data.offset, data.len as u64),
             Self::Flush(_) => (Kind::Flush, 0, 0),
             _ => (Kind::Protocol, 0, 0),
         };
-        cas_daemon::inflight::Request {
+        crate::inflight::Request {
             kind,
             queue,
             head: self.completion().head,

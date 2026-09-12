@@ -1,11 +1,6 @@
 // Vhost-user block device with reference storage and a concurrent local adapter.
 
-mod backend;
-mod deadline;
-mod fault;
-mod local;
-mod request;
-mod storage;
+use cas_daemon::{BackendKind, backend, fault};
 
 use std::io;
 use std::num::NonZeroU64;
@@ -13,19 +8,11 @@ use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use clap::{Parser, ValueEnum};
+use clap::Parser;
 use vhost::vhost_user::{Error as ProtocolError, Listener};
 use vhost_user_backend::{Error as DaemonError, VhostUserDaemon};
 use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
 use vmm_sys_util::epoll::EventSet;
-
-#[derive(Clone, Copy, ValueEnum)]
-enum BackendKind {
-    Raw,
-    Staging,
-    Local,
-    LocalAsync,
-}
 
 #[derive(Parser)]
 #[command(

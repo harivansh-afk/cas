@@ -301,6 +301,23 @@ impl Carrier {
         self.header().failed.store(1, Release);
     }
 
+    /// Called under the image sequencer; no admission/retirement can interleave.
+    pub fn oldest_live_mutation(&self) -> io::Result<Option<u64>> {
+        self.healthy()?;
+        let mut oldest = None;
+        for queue in 0..self.geometry.queues {
+            for head in 0..self.geometry.queue_size {
+                if let Some((_, entry)) = self.read_slot(queue, head)?
+                    && entry.mutation != 0
+                {
+                    oldest =
+                        Some(oldest.map_or(entry.mutation, |old: u64| old.min(entry.mutation)));
+                }
+            }
+        }
+        Ok(oldest)
+    }
+
     pub fn published(&self) -> u64 {
         self.header().published.load(Acquire)
     }

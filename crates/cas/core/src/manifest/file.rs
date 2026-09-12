@@ -63,7 +63,8 @@ pub struct View {
 }
 
 impl View {
-    pub(crate) fn same(&self, other: &Self) -> bool {
+    /// Equality includes the actual pinned file owner, exact COMMIT and end.
+    pub fn same(&self, other: &Self) -> bool {
         self.commit == other.commit && self.end == other.end && self.owns(&other.file)
     }
 

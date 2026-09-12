@@ -153,6 +153,10 @@ fn default_metadata() -> Arc<Budget> {
 }
 
 impl Log {
+    pub fn manifest(&self) -> Option<&crate::manifest::file::View> {
+        self.base.as_ref()
+    }
+
     pub fn create(path: impl AsRef<Path>, config: Config, limits: Limits) -> Result<Self> {
         Self::create_with_metadata(path, config, limits, default_metadata())
     }

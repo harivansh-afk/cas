@@ -153,6 +153,7 @@ impl Run {
         let (output, receiver) = mpsc::channel();
         let worker = Worker {
             log,
+            port: None,
             output,
             wake: Wake(EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK).unwrap()),
             shared: Arc::clone(&shared),

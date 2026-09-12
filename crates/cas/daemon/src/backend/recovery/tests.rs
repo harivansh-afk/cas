@@ -84,8 +84,8 @@ fn retained_read_uses_the_normal_owned_reactor_and_original_head() {
     )
     .unwrap();
     carrier.initialize_queue(0, 0, 0).unwrap();
-    let request = cas_daemon::inflight::Request {
-        kind: cas_daemon::inflight::Kind::Write,
+    let request = crate::inflight::Request {
+        kind: crate::inflight::Kind::Write,
         queue: 0,
         head: 3,
         available: 0,
@@ -96,8 +96,8 @@ fn retained_read_uses_the_normal_owned_reactor_and_original_head() {
     carrier.publish(1).unwrap();
     carrier.complete(write, 0, || Ok(())).unwrap();
     let read = carrier
-        .admit(cas_daemon::inflight::Request {
-            kind: cas_daemon::inflight::Kind::Read,
+        .admit(crate::inflight::Request {
+            kind: crate::inflight::Kind::Read,
             head: 0,
             available: 1,
             ..request
@@ -170,8 +170,8 @@ fn retained_rejected_write_replays_only_ioerr_without_gather_or_mutation() {
     .unwrap();
     carrier.initialize_queue(0, 0, 0).unwrap();
     carrier
-        .reject(cas_daemon::inflight::Request {
-            kind: cas_daemon::inflight::Kind::Write,
+        .reject(crate::inflight::Request {
+            kind: crate::inflight::Kind::Write,
             queue: 0,
             head: 0,
             available: 0,

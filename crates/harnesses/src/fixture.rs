@@ -32,6 +32,7 @@ struct Build {
     vm: PathBuf,
     harness: PathBuf,
     tests: PathBuf,
+    daemon_tests: PathBuf,
     qemu: PathBuf,
     qemu_executable: PathBuf,
     guest_kernel: String,
@@ -83,6 +84,7 @@ fn execute(args: &Args) -> io::Result<()> {
         &build.vm,
         &build.harness,
         &build.tests,
+        &build.daemon_tests,
         &build.qemu,
         &build.qemu_executable,
     ] {
@@ -166,7 +168,7 @@ fn execute(args: &Args) -> io::Result<()> {
 pub fn run(mut args: Args) -> io::Result<()> {
     args.output = crate::qemu::prepare_output(&args.output)?;
     let mut report = Report {
-        schema_version: 1,
+        schema_version: 2,
         passed: false,
         started_at_utc: host::utc_now()?,
         ended_at_utc: String::new(),
@@ -185,7 +187,7 @@ pub fn run(mut args: Args) -> io::Result<()> {
 
 pub fn verify(output: &Path) -> io::Result<()> {
     let report: Report = evidence::read_json(&output.join("fixture.json"))?;
-    if report.schema_version != 1 || !report.passed || report.error.is_some() {
+    if report.schema_version != 2 || !report.passed || report.error.is_some() {
         return Err(io::Error::other("XFS fixture failed"));
     }
     let mut actual = source::scan(output)?;

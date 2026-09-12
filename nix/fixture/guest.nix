@@ -60,6 +60,7 @@
     };
     script = ''
       export CAS_CORE_TESTS=${cas.tests}/bin/cas-core-tests
+      export CAS_DAEMON_TESTS=${cas.tests}/bin/cas-daemon-tests
       ${builtins.readFile ./workload.sh}
     '';
     postStop = ''

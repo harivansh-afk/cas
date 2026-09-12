@@ -4,8 +4,10 @@ use std::collections::{BTreeMap, VecDeque};
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
+use allocator_api2::boxed::Box as BudgetBox;
 use cas_core::aligned::AlignedBuffer;
 use cas_core::append::{ReadPlan, Submission};
+use cas_core::budget::BudgetAllocator;
 use io_uring::{IoUring, opcode, squeue, types};
 
 use super::*;
@@ -22,64 +24,8 @@ struct Append {
     writes: Vec<Write>,
 }
 
-struct Read {
-    // Scratch must be destroyed before the IO's response and byte credits.
-    scratch: Option<AlignedBuffer>,
-    plan: ReadPlan,
-    io: Io,
-    range: usize,
-}
-
-impl Read {
-    fn entry(&mut self) -> squeue::Entry {
-        let range = &self.plan.ranges()[self.range];
-        let Operation::Read { buffer, .. } = &mut self.io.operation else {
-            unreachable!()
-        };
-        let pointer = if range.direct_to_response() {
-            buffer.as_mut_slice()[range.destination()].as_mut_ptr()
-        } else {
-            if self
-                .scratch
-                .as_ref()
-                .is_none_or(|buffer| buffer.as_slice().len() < range.input_bytes())
-            {
-                drop(self.scratch.take());
-                self.scratch = Some(AlignedBuffer::new(range.input_bytes()));
-            }
-            self.scratch.as_mut().unwrap().as_mut_slice().as_mut_ptr()
-        };
-        opcode::Read::new(
-            types::Fd(range.file().as_raw_fd()),
-            pointer,
-            range.input_bytes() as u32,
-        )
-        .offset(range.offset())
-        .build()
-    }
-
-    fn advance(&mut self) -> io::Result<bool> {
-        let range = &self.plan.ranges()[self.range];
-        let Operation::Read { buffer, .. } = &mut self.io.operation else {
-            unreachable!()
-        };
-        if range.direct_to_response() {
-            range.verify(&buffer.as_slice()[range.destination()])?;
-        } else {
-            let input = &self.scratch.as_ref().unwrap().as_slice()[..range.input_bytes()];
-            range.verify(input)?;
-            buffer.as_mut_slice()[range.destination()].copy_from_slice(&input[range.source()]);
-        }
-        self.range += 1;
-        Ok(self.range == self.plan.ranges().len())
-    }
-
-    fn into_io(self) -> Io {
-        // Remaining fields, including scratch, drop before the caller receives
-        // the IO and can release its permit through a completion response.
-        self.io
-    }
-}
+mod read;
+use read::Read;
 
 struct Fence {
     submission: Submission,
@@ -91,7 +37,7 @@ struct Fence {
 
 enum Work {
     Append(Append),
-    Read(Read),
+    Read(BudgetBox<Read, BudgetAllocator>),
     Fence(Fence),
 }
 
@@ -118,7 +64,7 @@ impl Pending {
     fn expected_bytes(&self) -> usize {
         match &self.work {
             Work::Append(append) => append.submission.batch().bytes().len(),
-            Work::Read(read) => read.plan.ranges()[read.range].input_bytes(),
+            Work::Read(read) => read.expected_bytes(),
             Work::Fence(fence) if fence.syncing => 0,
             Work::Fence(fence) => fence.submission.batch().bytes().len(),
         }
@@ -202,6 +148,9 @@ impl Reactor {
             .lock()
             .expect("completion gate poisoned");
         failed.fail(error.to_string());
+        if let Some(port) = &mut self.worker.port {
+            port.abort(error);
+        }
         self.appends.clear();
         let _ = self.worker.wake.0.write(1);
     }
@@ -258,7 +207,9 @@ impl Reactor {
     fn reject(&mut self, work: Work) -> io::Result<()> {
         match work {
             Work::Append(append) => self.finish_append(append, Err(self.failure())),
-            Work::Read(read) => self.send_io(read.into_io(), Err(self.failure())),
+            Work::Read(read) => {
+                self.send_io(BudgetBox::into_inner(read).into_io(), Err(self.failure()))
+            }
             Work::Fence(fence) => {
                 let Fence {
                     submission,
@@ -420,6 +371,11 @@ impl Reactor {
             }
         }
         if let Some(error) = error {
+            if matches!(&pending.work, Work::Read(read) if read.shared_io())
+                && let Some(port) = &self.worker.port
+            {
+                port.fail_shared(&error);
+            }
             self.fail(&error);
         } else if matches!(pending.work, Work::Append(_)) && self.appends.front() != Some(&token) {
             self.worker
@@ -500,13 +456,18 @@ impl Reactor {
                         let Work::Read(read) = pending.work else {
                             unreachable!()
                         };
-                        self.send_io(read.into_io(), Ok(()))?;
+                        self.send_io(BudgetBox::into_inner(read).into_io(), Ok(()))?;
                     }
                     Ok(false) => {
                         self.pending.insert(token, pending);
                         self.push(token)?;
                     }
                     Err(error) => {
+                        if read.shared_io()
+                            && let Some(port) = &self.worker.port
+                        {
+                            port.fail_shared(&error);
+                        }
                         self.fail(&error);
                         self.reject(pending.work)?;
                     }
@@ -591,7 +552,11 @@ impl Reactor {
     fn dispatch(&mut self) -> io::Result<()> {
         while let Some(command) = self.commands.front_mut() {
             match command {
-                Command::Pause { .. } if !self.pending.is_empty() || !self.reads.is_empty() => {
+                Command::Pause { .. }
+                    if !self.pending.is_empty()
+                        || !self.reads.is_empty()
+                        || self.worker.port.as_ref().is_some_and(host::Port::pending) =>
+                {
                     break;
                 }
                 Command::Pause { .. } => {
@@ -728,15 +693,18 @@ impl Reactor {
                 .read_plan(*offset, buffer.as_slice().len(), io.boundary)
                 .map_err(io::Error::other)?;
             buffer.as_mut_slice().fill(0);
-            if plan.ranges().is_empty() {
-                self.send_io(io, Ok(()))?;
+            let read = Read::new(plan, io, self.worker.port.as_ref())?;
+            if read.done() {
+                self.send_io(read.into_io(), Ok(()))?;
             } else {
-                self.enqueue(Work::Read(Read {
-                    scratch: None,
-                    plan,
-                    io,
-                    range: 0,
-                }))?;
+                let read = BudgetBox::try_new_in(
+                    read,
+                    BudgetAllocator::new(Arc::clone(&self.worker.shared.metadata)),
+                )
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::OutOfMemory, "read state metadata exhausted")
+                })?;
+                self.enqueue(Work::Read(read))?;
             }
         }
         if !self.closed
@@ -762,7 +730,12 @@ impl Reactor {
     }
 
     fn wait(&self) -> io::Result<()> {
-        let active = !self.pending.is_empty()
+        let active = self
+            .worker
+            .port
+            .as_ref()
+            .is_some_and(|port| port.needs_wake(&self.worker.log))
+            || !self.pending.is_empty()
             || (!self.admission_paused
                 && self.worker.log.status().issued > self.worker.log.status().durable);
         let timeout = if active { 50 } else { -1 };
@@ -807,17 +780,16 @@ impl Reactor {
             self.receive();
             let result = (|| {
                 self.reap()?;
-                if self
+                let failure = self
                     .worker
                     .shared
                     .health
                     .lock()
                     .expect("completion gate poisoned")
                     .failure
-                    .is_some()
-                {
-                    self.failed = true;
-                    self.worker.log.fail();
+                    .clone();
+                if let Some(error) = failure {
+                    self.fail(&io::Error::other(error));
                 }
                 if !self.failed
                     && self.pending.values().any(|pending| {
@@ -830,6 +802,15 @@ impl Reactor {
                     ));
                 }
                 if !self.failed {
+                    if let Some(port) = &mut self.worker.port {
+                        port.poll(&mut self.worker.log, self.last_write, self.admission_paused)?;
+                        *self
+                            .worker
+                            .shared
+                            .final_status
+                            .lock()
+                            .expect("status poisoned") = self.worker.log.status();
+                    }
                     self.publish()?;
                 }
                 self.finish_ready()?;
@@ -851,6 +832,7 @@ impl Reactor {
                 && self.pending.is_empty()
                 && self.commands.is_empty()
                 && self.reads.is_empty()
+                && !self.worker.port.as_ref().is_some_and(host::Port::pending)
             {
                 break;
             }

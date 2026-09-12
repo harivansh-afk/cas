@@ -35,6 +35,17 @@ rustPlatform.buildRustPackage {
     done
     test "''${#coreTests[@]}" -eq 1
     install -Dm755 "''${coreTests[0]}" "$tests/bin/cas-core-tests"
+    daemonTests=()
+    for candidate in target/*/release/deps/cas_daemon-* target/release/deps/cas_daemon-*; do
+      if [[ -f "$candidate" && -x "$candidate" ]]; then
+        if "$candidate" --list > "$TMPDIR/daemon-test-inventory" 2> "$TMPDIR/daemon-test-probe-error" &&
+          grep -Fxq 'local::host::tests::multiple_reactors_compact_private_images_and_reopen_shared_chunks: test' "$TMPDIR/daemon-test-inventory"; then
+          daemonTests+=("$candidate")
+        fi
+      fi
+    done
+    test "''${#daemonTests[@]}" -eq 1
+    install -Dm755 "''${daemonTests[0]}" "$tests/bin/cas-daemon-tests"
   '';
 
   src = lib.fileset.toSource {

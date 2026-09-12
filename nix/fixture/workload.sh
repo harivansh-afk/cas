@@ -18,11 +18,16 @@ sha256sum /fixture/source /fixture/clone > /results/after.sha256
 for file in source clone; do
   xfs_io -c 'fiemap -v' "/fixture/$file" > "/results/$file-after.fiemap"
 done
+run_tests() {
+  local module="$1" executable="$2" filter="$3"
+  "$executable" "$filter" --list > "/results/$module.list"
+  "$executable" "$filter" --test-threads=1 > "/results/$module.log" 2>&1
+}
 for scope in store:file manifest:file append:shared; do
   module="${scope%:*}"
   filter="$module::${scope#*:}::tests"
-  "$CAS_CORE_TESTS" "$filter" --list > "/results/$module.list"
-  "$CAS_CORE_TESTS" "$filter" --test-threads=1 > "/results/$module.log" 2>&1
+  run_tests "$module" "$CAS_CORE_TESTS" "$filter"
 done
+run_tests runtime "$CAS_DAEMON_TESTS" local::host::tests
 df -B1 /fixture > /results/space-after.log
 sync -f /fixture

@@ -1,10 +1,10 @@
 //! Retained attachment negotiation and replay before normal queue admission.
 use super::*;
+use crate::inflight::{Carrier, Geometry, Identity};
 use cas_core::append::{
     Mutation,
     format::{Kind, RequestId},
 };
-use cas_daemon::inflight::{Carrier, Geometry, Identity};
 use std::fs::File;
 use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
@@ -437,7 +437,7 @@ impl Backend {
 
 struct Recovered {
     log: cas_core::append::Log,
-    replay: cas_daemon::inflight::Replay,
+    replay: crate::inflight::Replay,
     requests: Vec<Request>,
     copied: u64,
     mutations: usize,
@@ -449,7 +449,7 @@ fn replay_storage(
     shared: Arc<local::Shared>,
     memory: Arc<GuestMemoryMmap>,
     epoch: u64,
-    replay: cas_daemon::inflight::Replay,
+    replay: crate::inflight::Replay,
     requests: Vec<Request>,
 ) -> io::Result<Recovered> {
     let mutations = replay
@@ -466,7 +466,7 @@ fn replay_storage(
             sequence: entry.mutation,
             offset: entry.request.offset,
             length: entry.request.length,
-            kind: if entry.request.kind == cas_daemon::inflight::Kind::Write {
+            kind: if entry.request.kind == crate::inflight::Kind::Write {
                 Kind::Write
             } else {
                 Kind::Zero

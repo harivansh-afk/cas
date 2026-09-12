@@ -1,6 +1,6 @@
 use super::*;
+use crate::inflight::Geometry;
 use crate::request::DataRequest;
-use cas_daemon::inflight::Geometry;
 use std::sync::Arc;
 use virtio_bindings::bindings::virtio_blk::{VIRTIO_BLK_T_IN, VIRTIO_BLK_T_OUT};
 use vm_memory::GuestAddress;
@@ -208,7 +208,7 @@ fn five_second_timer_rejects_before_mutation_and_later_io_keeps_dense_ids() {
 
 #[test]
 fn rejected_status_cannot_be_published_as_success() {
-    use cas_daemon::inflight::{Carrier, Identity};
+    use crate::inflight::{Carrier, Identity};
     let (memory, vring) = crate::backend::tests::queue();
     let mem = memory.memory();
     let request = write_request();

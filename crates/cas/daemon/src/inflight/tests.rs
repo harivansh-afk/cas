@@ -48,6 +48,32 @@ fn reopen(carrier: Carrier) -> Carrier {
     Carrier::attach(file, &message, identity(), IMAGE_BYTES).unwrap()
 }
 
+#[test]
+fn reclamation_keeps_prepared_and_active_mutation_identities_until_retirement() {
+    let mut carrier = fresh(2);
+    assert_eq!(carrier.oldest_live_mutation().unwrap(), None);
+    let first = carrier.admit(request(Kind::Write, 0, 0, 0)).unwrap();
+    let second = carrier.admit(request(Kind::Write, 1, 0, 0)).unwrap();
+    carrier.publish(2).unwrap();
+    assert_eq!(carrier.oldest_live_mutation().unwrap(), Some(1));
+    carrier.complete(first, 0, || Ok(())).unwrap();
+    assert_eq!(carrier.oldest_live_mutation().unwrap(), Some(2));
+    carrier.complete(second, 0, || Ok(())).unwrap();
+    let read = carrier.admit(request(Kind::Read, 0, 1, 1)).unwrap();
+    carrier.complete(read, 1, || Ok(())).unwrap();
+    let rejected = carrier.reject(request(Kind::Write, 0, 2, 2)).unwrap();
+    carrier.complete(rejected, 2, || Ok(())).unwrap();
+    assert_eq!(carrier.oldest_live_mutation().unwrap(), None);
+    assert!(
+        carrier
+            .admit_observed(request(Kind::Write, 0, 3, 3), false, |_| {
+                Err(io::Error::other("stop after PREPARED"))
+            })
+            .is_err()
+    );
+    assert_eq!(carrier.oldest_live_mutation().unwrap(), Some(3));
+}
+
 fn bytes(carrier: &Carrier) -> Vec<u8> {
     let mut result = vec![0; carrier.geometry.bytes()];
     carrier.mapping.file.read_exact_at(&mut result, 0).unwrap();

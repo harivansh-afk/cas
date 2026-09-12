@@ -17,6 +17,7 @@ let
       vm = "${vm}/bin/run-cas-fixture-vm";
       harness = lib.getExe' cas "cas-harness";
       tests = "${cas.tests}/bin/cas-core-tests";
+      daemon_tests = "${cas.tests}/bin/cas-daemon-tests";
       qemu = lib.getExe' guest.config.virtualisation.qemu.package "qemu-system-${
         if guest.config.nixpkgs.hostPlatform.isAarch64 then "aarch64" else "x86_64"
       }";

@@ -6,3 +6,19 @@
     target_has_atomic = "64"
 ))]
 pub mod inflight;
+
+pub mod backend;
+mod deadline;
+pub mod fault;
+mod local;
+mod request;
+pub mod storage;
+pub use local::host::{Host, Resources};
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum BackendKind {
+    Raw,
+    Staging,
+    Local,
+    LocalAsync,
+}

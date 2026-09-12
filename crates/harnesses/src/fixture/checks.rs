@@ -200,6 +200,7 @@ pub(super) fn verify(output: &Path, build: &Build) -> io::Result<()> {
         ("store", "store::file"),
         ("manifest", "manifest::file"),
         ("append", "append::shared"),
+        ("runtime", "local::host"),
     ] {
         tests(
             namespace,
