@@ -76,6 +76,7 @@ pub struct Completed {
 pub enum CompletionData {
     Read(AlignedBuffer),
     Write { bytes: usize },
+    Zero { bytes: usize },
     Flush,
 }
 
@@ -99,6 +100,29 @@ pub enum Storage {
 }
 
 impl Storage {
+    pub fn shared_host(&self) -> bool {
+        match self {
+            Self::Local(local) => local.shared_host(),
+            Self::Opening(opening) => opening.shared_host(),
+            _ => false,
+        }
+    }
+
+    pub fn zero(
+        &mut self,
+        id: u64,
+        head: QueueHead,
+        offset: u64,
+        length: usize,
+        permit: Permit,
+    ) -> io::Result<()> {
+        match (self, permit) {
+            (Self::Local(local), Permit::Local { _credits }) => {
+                local.zero(id, head, offset, length, _credits)
+            }
+            _ => Err(io::Error::other("ZERO requires local admission credits")),
+        }
+    }
     pub fn local(path: &Path, create_bytes: Option<u64>, event: &EventFd) -> io::Result<Self> {
         Ok(Self::Local(Box::new(Local::open(
             path,

@@ -210,12 +210,8 @@ impl Reactor {
                 .as_ref()
                 .copied()
                 .map_err(|error| io::Error::other(error.to_string()));
-            self.worker.send(
-                write.id,
-                CompletionData::Write { bytes: write.bytes },
-                result,
-                write.permit,
-            )?;
+            self.worker
+                .send(write.id, write.data.completion(), result, write.permit)?;
         }
         Ok(())
     }

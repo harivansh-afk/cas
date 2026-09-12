@@ -340,7 +340,8 @@ impl Backend {
                 queue.get_queue().size(),
                 entry.request.head,
             );
-            let request = decode_chain(mem, chain, self.capacity_bytes)?;
+            let request = decode_chain(mem, chain, self.capacity_bytes)?
+                .negotiated(self.negotiated_features & self.features());
             if request.inflight(entry.request.queue, entry.request.available) != entry.request {
                 return Err(io::Error::other(
                     "retained guest descriptor identity or range differs",
@@ -376,6 +377,7 @@ impl Backend {
                 shared,
                 copied: 0,
                 mutation_count: 0,
+                last_p: None,
             })?;
             self.live.as_mut().unwrap().phase = Phase::Waiting;
             return Ok(false);
@@ -423,6 +425,7 @@ impl Backend {
                     shared,
                     copied,
                     mutation_count: mutations,
+                    last_p: None,
                 },
             },
         )
@@ -549,6 +552,11 @@ impl Backend {
                 .reserve(completion_kind)
                 .ok_or_else(|| io::Error::other("replay completion reserve exhausted"))?;
             match request {
+                Request::Zero(range) => {
+                    self.finish(mem, queue, completion, Status::Ok, None, Some(&mut state))?;
+                    self.counters.zeroes += 1;
+                    self.counters.zero_bytes += range.len as u64;
+                }
                 Request::Read(data) => {
                     self.enqueue(
                         mem,
@@ -703,8 +711,23 @@ pub(crate) struct Validated {
     pub(crate) shared: Arc<local::Shared>,
     copied: u64,
     mutation_count: usize,
+    last_p: Option<u64>,
 }
 impl Validated {
+    pub(crate) fn record_prefix(&mut self, prefix: u64) -> io::Result<()> {
+        if let Some(previous) = self.last_p {
+            let appended = prefix
+                .checked_sub(previous)
+                .and_then(|count| usize::try_from(count).ok())
+                .ok_or_else(|| io::Error::other("replay publication regressed"))?;
+            self.mutation_count = self
+                .mutation_count
+                .checked_add(appended)
+                .ok_or_else(|| io::Error::other("replay mutation count overflow"))?;
+        }
+        self.last_p = Some(prefix);
+        Ok(())
+    }
     pub(crate) fn mutations(&self) -> impl Iterator<Item = Mutation> + '_ {
         retained_mutations(&self.replay)
     }
@@ -718,7 +741,6 @@ impl Validated {
             return Err(io::Error::other("unexpected replay mutation kind"));
         };
         gather(&self.memory, &data.segments, bytes, &mut self.copied)?;
-        self.mutation_count += 1;
         Ok(())
     }
 }

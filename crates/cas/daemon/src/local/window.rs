@@ -175,11 +175,9 @@ impl Window {
         state.require(
             writes.len() == builder.len()
                 && writes.iter().all(|write| {
-                    write
-                        .permit
-                        .window
-                        .as_ref()
-                        .is_some_and(|slot| slot.owner.ptr_eq(owner) && slot.matches(write.bytes))
+                    write.permit.window.as_ref().is_some_and(|slot| {
+                        slot.owner.ptr_eq(owner) && slot.matches(write.data.payload_bytes())
+                    })
                 }),
             "WAL batch lacks matching admission tokens",
         )?;

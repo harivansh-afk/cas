@@ -309,3 +309,95 @@ pub(super) fn connect(socket: &Path) -> Frontend {
     frontend.set_protocol_features(protocol).unwrap();
     frontend
 }
+
+#[test]
+#[ignore = "requires the exclusive XFS allocation fixture"]
+fn retained_zero_variants_replace_written_data_without_gather_and_survive_compaction() {
+    use crate::backend::recovery::testing::Frontend as RetainedFrontend;
+    use virtio_bindings::bindings::virtio_blk::{VIRTIO_BLK_T_DISCARD, VIRTIO_BLK_T_WRITE_ZEROES};
+    for (kind, flags) in [
+        (VIRTIO_BLK_T_WRITE_ZEROES, 0),
+        (VIRTIO_BLK_T_WRITE_ZEROES, 1),
+        (VIRTIO_BLK_T_DISCARD, 0),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let resources = Arc::new(Resources::default());
+        setup(root.path(), &resources, SnapshotFixture::Present);
+        let inspected = scan(root.path(), &resources).unwrap();
+        let limits = physical_limits(&inspected);
+        let mut host = inspected
+            .require(Prefixes::Cold)
+            .unwrap()
+            .recover_cold(limits)
+            .unwrap()
+            .into_host(1024 * MAX_REQUEST_BYTES as u64)
+            .unwrap();
+        for image in 2..4 {
+            let mut local = attach(&mut host, image);
+            write(&mut local, 0, 0, &[0x55; BLOCK_SIZE]);
+            read(&mut local, 1, &[0x55; BLOCK_SIZE]);
+        }
+        shutdown(host);
+        let mut host = retained(root.path(), &resources, Duration::from_secs(60));
+        let mut first = RetainedFrontend::zero_after_write(
+            host.attach([2; 16], crate::fault::Fault::default())
+                .unwrap(),
+            kind,
+            flags,
+        );
+        let mut second = RetainedFrontend::zero_after_write(
+            host.attach([3; 16], crate::fault::Fault::default())
+                .unwrap(),
+            kind,
+            flags,
+        );
+        assert!(!first.activate().unwrap());
+        assert!(!second.activate().unwrap());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        for frontend in [&mut first, &mut second] {
+            while !frontend.activate().unwrap() {
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(1));
+            }
+            assert_eq!(frontend.status(), 0);
+            assert_eq!(frontend.used(), 2);
+            assert_eq!(frontend.carrier.published(), 2);
+            let report = frontend.backend.report(0, true);
+            assert_eq!(report["inflight"]["replayed_mutations"], 1);
+            assert_eq!(report["inflight"]["replay_copy_bytes"], 0);
+            assert_eq!(report["zeroes"], 1);
+            read(frontend.local(), 2, &[0; BLOCK_SIZE]);
+            drained(frontend.local(), 2);
+            read(frontend.local(), 3, &[0; BLOCK_SIZE]);
+        }
+        drop((first, second));
+        loop {
+            if let Some(host) = host.host().unwrap() {
+                match host.shutdown() {
+                    Ok(()) => break,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => (),
+                    Err(error) => panic!("shutdown: {error}"),
+                }
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(1));
+        }
+        drop(host);
+        assert_eq!(resources.metadata.usage().current.bytes, 0);
+        let inspected = scan(root.path(), &resources).unwrap();
+        let limits = physical_limits(&inspected);
+        let mut host = inspected
+            .require(Prefixes::Cold)
+            .unwrap()
+            .recover_cold(limits)
+            .unwrap()
+            .into_host(1024 * MAX_REQUEST_BYTES as u64)
+            .unwrap();
+        for image in 2..4 {
+            let mut local = attach(&mut host, image);
+            read(&mut local, 0, &[0; BLOCK_SIZE]);
+        }
+        shutdown(host);
+        assert_eq!(resources.metadata.usage().current.bytes, 0);
+    }
+}

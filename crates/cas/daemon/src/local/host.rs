@@ -5,7 +5,7 @@ pub use admission::Quiescence;
 mod collection;
 pub mod recovery;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 mod worker;
 pub use collection::{CollectionHandle, CollectionReport};
 

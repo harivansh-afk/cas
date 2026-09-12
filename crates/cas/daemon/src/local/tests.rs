@@ -72,6 +72,7 @@ fn concurrent_appends_flush_and_read_use_owned_kernel_io() {
         assert!(completed.result.is_ok(), "{:?}", completed.result);
         match completed.data {
             CompletionData::Write { .. } => writes.push(completed.id),
+            CompletionData::Zero { .. } => panic!("unexpected ZERO"),
             CompletionData::Read(buffer) => assert_eq!(buffer.as_slice(), &[3; BLOCK_SIZE]),
             CompletionData::Flush => assert_eq!(local.status.durable, 3),
         }
@@ -117,6 +118,7 @@ fn concurrent_flush_keeps_its_boundary_while_later_writes_wait() {
         }
         match completed.data {
             CompletionData::Write { .. } => writes.push(completed.id),
+            CompletionData::Zero { .. } => panic!("unexpected ZERO"),
             CompletionData::Read(buffer) => assert_eq!(buffer.as_slice(), &[2; BLOCK_SIZE]),
             CompletionData::Flush => (),
         }
@@ -805,5 +807,72 @@ fn read_preparation_errors_return_every_owner_before_credit_release() {
         assert_eq!(shared.pools.read.usage().current, Amount::default());
         drop((held, local));
         assert_eq!(shared.metadata.usage().current, Amount::default());
+    }
+}
+
+#[test]
+fn zero_batches_reserve_only_a_header_and_preserve_mutation_and_flush_order() {
+    for execution in [Execution::Synchronous, Execution::Concurrent] {
+        let directory = tempfile::tempdir().unwrap();
+        let event = EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK).unwrap();
+        let mut local = Local::open_with_execution(
+            &directory.path().join("log"),
+            Some(8 * MAX_REQUEST_BYTES as u64),
+            &event,
+            execution,
+        )
+        .unwrap();
+        write(&mut local, 0, 0, MAX_REQUEST_BYTES, 1);
+        local.receive(true).unwrap().unwrap().result.unwrap();
+        let permit = local.prepare(Kind::Write(0)).unwrap().unwrap();
+        assert_eq!(
+            local.packing.as_ref().unwrap().builder.allocation_bytes(),
+            BLOCK_SIZE
+        );
+        assert_eq!(local.shared.pools.append.usage().current.bytes, BLOCK_SIZE);
+        local
+            .zero(
+                1,
+                QueueHead { queue: 0, head: 1 },
+                0,
+                MAX_REQUEST_BYTES,
+                permit,
+            )
+            .unwrap();
+        assert_eq!(local.packing.as_ref().unwrap().builder.payload_bytes(), 0);
+        // A later WRITE seals the header-only batch before choosing its final allocation.
+        write(&mut local, 2, BLOCK_SIZE as u64, BLOCK_SIZE, 2);
+        let permit = local.prepare(Kind::Control).unwrap().unwrap();
+        local.enqueue(3, Operation::Flush, permit).unwrap();
+        read(&mut local, 4, 0, MAX_REQUEST_BYTES);
+        let mut saw_zero = false;
+        let mut saw_read = false;
+        for _ in 0..4 {
+            let completed = local.receive(true).unwrap().unwrap();
+            completed.result.unwrap();
+            match completed.data {
+                CompletionData::Zero { bytes } => {
+                    assert_eq!(bytes, MAX_REQUEST_BYTES);
+                    saw_zero = true;
+                }
+                CompletionData::Write { bytes } => assert_eq!(bytes, BLOCK_SIZE),
+                CompletionData::Flush => assert_eq!(local.status.durable, 3),
+                CompletionData::Read(buffer) => {
+                    let mut expected = vec![0; MAX_REQUEST_BYTES];
+                    expected[BLOCK_SIZE..2 * BLOCK_SIZE].fill(2);
+                    assert_eq!(buffer.as_slice(), expected);
+                    saw_read = true;
+                }
+            }
+        }
+        assert!(saw_zero && saw_read);
+        assert_eq!(local.status.published, 3);
+        let report = local.report();
+        assert_eq!(report["metrics"]["gather_calls"], 2);
+        assert_eq!(
+            report["metrics"]["gathered_bytes"],
+            MAX_REQUEST_BYTES + BLOCK_SIZE
+        );
+        assert_eq!(report["append"]["current"]["bytes"], 0);
     }
 }

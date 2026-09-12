@@ -405,6 +405,10 @@ impl Replay for FrontendReplay<'_> {
             .images
             .binary_search_by_key(&prefix.image, |entry| entry.0)
             .map_err(|_| io::Error::other("replay image lost its completion owner"))?;
-        self.gates.images[index].1.lock()?.publish(prefix.published)
+        self.gates.images[index]
+            .1
+            .lock()?
+            .publish(prefix.published)?;
+        self.inputs[index].record_prefix(prefix.published)
     }
 }

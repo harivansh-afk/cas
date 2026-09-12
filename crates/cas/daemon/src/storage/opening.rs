@@ -22,6 +22,9 @@ pub struct Opening {
 }
 
 impl Opening {
+    pub(crate) fn shared_host(&self) -> bool {
+        matches!(self.source, Some(Source::Shared(_)))
+    }
     pub(crate) fn shared(
         config: Config,
         status: Status,

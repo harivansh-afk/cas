@@ -8,11 +8,22 @@ pub(crate) struct Frontend {
     vrings: [VringMutex; 2],
     pub(crate) carrier: Carrier,
 }
+enum Pending {
+    Write(u8),
+    Zero { kind: u32, flags: u32 },
+}
 impl Frontend {
-    pub(crate) fn write(mut backend: Backend, byte: u8) -> Self {
+    pub(crate) fn write(backend: Backend, byte: u8) -> Self {
+        Self::new(backend, Pending::Write(byte))
+    }
+    pub(crate) fn zero_after_write(backend: Backend, kind: u32, flags: u32) -> Self {
+        Self::new(backend, Pending::Zero { kind, flags })
+    }
+    fn new(mut backend: Backend, pending: Pending) -> Self {
         let Storage::Opening(opening) = &backend.storage else {
             panic!("expected retained opening")
         };
+        let prefix = opening.status.published;
         let mut carrier = Carrier::create(
             Geometry::new(2, QUEUE_SIZE as u16).unwrap(),
             Identity {
@@ -33,6 +44,10 @@ impl Frontend {
             &mem,
             virtio_bindings::bindings::virtio_blk::VIRTIO_BLK_T_OUT,
         );
+        let byte = match pending {
+            Pending::Write(byte) => byte,
+            Pending::Zero { .. } => 0x55,
+        };
         mem.write_slice(&[byte; BLOCK_SIZE], GuestAddress(0x5000))
             .unwrap();
         let chain = virtio_queue::DescriptorChain::new(
@@ -42,7 +57,35 @@ impl Frontend {
             0,
         );
         let request = decode_chain(&mem, chain, backend.capacity_bytes).unwrap();
-        carrier.admit(request.inflight(0, 0)).unwrap();
+        let first = carrier.admit(request.inflight(0, 0)).unwrap();
+        if let Pending::Zero { kind, flags } = pending {
+            // Reconstruct the completed WRITE's carrier history, matching the
+            // actual seeded WAL identity before admitting a pending ZERO.
+            assert_eq!(prefix, 1);
+            carrier.publish(1).unwrap();
+            carrier.complete(first, 0, || Ok(())).unwrap();
+            mem.write_obj(1u32.to_le(), GuestAddress(0x3008)).unwrap();
+            mem.write_obj(1u16.to_le(), GuestAddress(0x3002)).unwrap();
+            vring.get_mut().get_queue_mut().set_next_avail(1);
+            super::super::tests::data_chain(&mem, kind);
+            mem.write_obj(16u32.to_le(), GuestAddress(0x1018)).unwrap();
+            let mut range = [0; 16];
+            range[8..12].copy_from_slice(&8u32.to_le_bytes());
+            range[12..].copy_from_slice(&flags.to_le_bytes());
+            mem.write_slice(&range, GuestAddress(0x5000)).unwrap();
+            let chain = virtio_queue::DescriptorChain::new(
+                mem.clone(),
+                GuestAddress(0x1000),
+                QUEUE_SIZE as u16,
+                0,
+            );
+            let request = decode_chain(&mem, chain, backend.capacity_bytes).unwrap();
+            carrier.admit(request.inflight(0, 1)).unwrap();
+        } else {
+            assert_eq!(prefix, 0);
+        }
+        mem.write_obj(carrier.available(0).unwrap().to_le(), GuestAddress(0x2002))
+            .unwrap();
         let (message, file) = carrier.export().unwrap();
         assert!(backend.create_attachment(&message).is_err());
         backend.restore_attachment(&message, file).unwrap();

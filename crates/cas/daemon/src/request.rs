@@ -5,7 +5,8 @@ use std::io;
 
 use cas_core::{BLOCK_SIZE, MAX_REQUEST_BYTES};
 use virtio_bindings::bindings::virtio_blk::{
-    VIRTIO_BLK_T_FLUSH, VIRTIO_BLK_T_GET_ID, VIRTIO_BLK_T_IN, VIRTIO_BLK_T_OUT,
+    VIRTIO_BLK_F_DISCARD, VIRTIO_BLK_F_WRITE_ZEROES, VIRTIO_BLK_T_DISCARD, VIRTIO_BLK_T_FLUSH,
+    VIRTIO_BLK_T_GET_ID, VIRTIO_BLK_T_IN, VIRTIO_BLK_T_OUT, VIRTIO_BLK_T_WRITE_ZEROES,
 };
 use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, Permissions};
 
@@ -46,9 +47,17 @@ pub(super) struct DataRequest {
     pub len: usize,
 }
 
+pub(super) struct ZeroRequest {
+    pub completion: Completion,
+    pub offset: u64,
+    pub len: usize,
+    pub kind: crate::inflight::Kind,
+}
+
 pub(super) enum Request {
     Read(DataRequest),
     Write(DataRequest),
+    Zero(ZeroRequest),
     Flush(Completion),
     GetId {
         completion: Completion,
@@ -62,6 +71,7 @@ impl Request {
     pub fn completion(&self) -> Completion {
         match self {
             Self::Read(data) | Self::Write(data) => data.completion,
+            Self::Zero(range) => range.completion,
             Self::Flush(completion)
             | Self::Unsupported(completion)
             | Self::Invalid(completion)
@@ -73,6 +83,7 @@ impl Request {
         match self {
             Self::Read(data) => crate::local::Kind::Read(data.len),
             Self::Write(data) => crate::local::Kind::Write(data.len),
+            Self::Zero(range) if range.len != 0 => crate::local::Kind::Write(0),
             _ => crate::local::Kind::Control,
         }
     }
@@ -82,6 +93,7 @@ impl Request {
         let (kind, offset, length) = match self {
             Self::Read(data) => (Kind::Read, data.offset, data.len as u64),
             Self::Write(data) => (Kind::Write, data.offset, data.len as u64),
+            Self::Zero(range) => (range.kind, range.offset, range.len as u64),
             Self::Flush(_) => (Kind::Flush, 0, 0),
             _ => (Kind::Protocol, 0, 0),
         };
@@ -93,6 +105,20 @@ impl Request {
             offset,
             length,
         }
+    }
+
+    pub fn negotiated(self, features: u64) -> Self {
+        if let Self::Zero(range) = &self {
+            let feature = if range.kind == crate::inflight::Kind::Discard {
+                VIRTIO_BLK_F_DISCARD
+            } else {
+                VIRTIO_BLK_F_WRITE_ZEROES
+            };
+            if features & (1 << feature) == 0 {
+                return Self::Unsupported(range.completion);
+            }
+        }
+        self
     }
 }
 
@@ -177,6 +203,9 @@ pub(super) fn parse(
     let sector = u64::from_le_bytes(header[8..].try_into().unwrap());
     let segments = descriptors;
     match kind {
+        VIRTIO_BLK_T_DISCARD | VIRTIO_BLK_T_WRITE_ZEROES => {
+            zero(mem, completion, &segments, kind, len, capacity_bytes)
+        }
         VIRTIO_BLK_T_IN | VIRTIO_BLK_T_OUT => {
             let offset = sector
                 .checked_mul(SECTOR_BYTES)
@@ -216,6 +245,56 @@ pub(super) fn parse(
         VIRTIO_BLK_T_GET_ID => Err(invalid("invalid GET_ID buffer")),
         _ => Ok(Request::Unsupported(completion)),
     }
+}
+
+fn zero(
+    mem: &GuestMemoryMmap,
+    completion: Completion,
+    segments: &[Segment],
+    kind: u32,
+    len: usize,
+    capacity: u64,
+) -> io::Result<Request> {
+    use crate::inflight::Kind;
+    if !matches!(len, 0 | 16) || segments.iter().any(|segment| segment.writable) {
+        return Err(invalid("zero/discard requires at most one readable range"));
+    }
+    let mut range = [0; 16];
+    let mut copied = 0;
+    for segment in segments {
+        mem.read_slice(&mut range[copied..copied + segment.len], segment.addr)
+            .map_err(io::Error::other)?;
+        copied += segment.len;
+    }
+    let sector = u64::from_le_bytes(range[..8].try_into().unwrap());
+    let sectors = u32::from_le_bytes(range[8..12].try_into().unwrap());
+    let flags = u32::from_le_bytes(range[12..].try_into().unwrap());
+    if flags & !1 != 0 || (kind == VIRTIO_BLK_T_DISCARD && flags != 0) {
+        return Ok(Request::Unsupported(completion));
+    }
+    let offset = sector
+        .checked_mul(SECTOR_BYTES)
+        .ok_or_else(|| invalid("range sector overflow"))?;
+    let bytes = u64::from(sectors) * SECTOR_BYTES;
+    if bytes > MAX_REQUEST_BYTES as u64
+        || !offset.is_multiple_of(BLOCK_SIZE as u64)
+        || !bytes.is_multiple_of(BLOCK_SIZE as u64)
+        || offset.checked_add(bytes).is_none_or(|end| end > capacity)
+    {
+        return Err(invalid("invalid zero/discard range, size or alignment"));
+    }
+    Ok(Request::Zero(ZeroRequest {
+        completion,
+        offset,
+        len: bytes as usize,
+        kind: if kind == VIRTIO_BLK_T_DISCARD {
+            Kind::Discard
+        } else if flags == 1 {
+            Kind::ZeroUnmap
+        } else {
+            Kind::Zero
+        },
+    }))
 }
 
 #[cfg(test)]
@@ -449,6 +528,120 @@ mod tests {
             };
             assert!(Completion::from_descriptors(&mem, 0, &descriptors).is_none());
             assert!(parse(&mem, 0, descriptors, 8192).is_err());
+        }
+    }
+
+    fn range_request(
+        kind: u32,
+        sector: u64,
+        sectors: u32,
+        flags: u32,
+    ) -> (GuestMemoryMmap, Vec<Segment>) {
+        let (memory, mut descriptors) = fixture(kind, 0);
+        descriptors[1].len = 16;
+        let mut range = [0; 16];
+        range[..8].copy_from_slice(&sector.to_le_bytes());
+        range[8..12].copy_from_slice(&sectors.to_le_bytes());
+        range[12..].copy_from_slice(&flags.to_le_bytes());
+        memory.write_slice(&range, GuestAddress(0x1000)).unwrap();
+        (memory, descriptors)
+    }
+
+    #[test]
+    fn zero_ranges_preserve_flags_and_decode_across_descriptor_boundaries() {
+        use crate::inflight::Kind;
+        for (kind, flags, expected) in [
+            (VIRTIO_BLK_T_DISCARD, 0, Kind::Discard),
+            (VIRTIO_BLK_T_WRITE_ZEROES, 0, Kind::Zero),
+            (VIRTIO_BLK_T_WRITE_ZEROES, 1, Kind::ZeroUnmap),
+        ] {
+            for split in 1..16 {
+                let (memory, mut descriptors) = range_request(kind, 8, 16, flags);
+                descriptors[1].len = split;
+                descriptors.insert(
+                    2,
+                    Segment {
+                        addr: GuestAddress(0x1000 + split as u64),
+                        len: 16 - split,
+                        writable: false,
+                    },
+                );
+                let Request::Zero(range) =
+                    parse(&memory, 7, descriptors, 4 * BLOCK_SIZE as u64).unwrap()
+                else {
+                    panic!("expected ZERO");
+                };
+                assert_eq!(range.kind, expected);
+                assert_eq!(
+                    (range.offset, range.len, range.completion.head),
+                    (BLOCK_SIZE as u64, 2 * BLOCK_SIZE, 7)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zero_flags_feature_negotiation_and_malformed_ranges_cannot_mutate() {
+        for kind in [VIRTIO_BLK_T_DISCARD, VIRTIO_BLK_T_WRITE_ZEROES] {
+            for flags in [2, 3, u32::MAX] {
+                let (memory, descriptors) = range_request(kind, 0, 8, flags);
+                assert!(matches!(
+                    parse(&memory, 0, descriptors, BLOCK_SIZE as u64).unwrap(),
+                    Request::Unsupported(_)
+                ));
+            }
+            let (memory, descriptors) = range_request(kind, 0, 8, 0);
+            assert!(matches!(
+                parse(&memory, 0, descriptors.clone(), BLOCK_SIZE as u64)
+                    .unwrap()
+                    .negotiated(0),
+                Request::Unsupported(_)
+            ));
+            let required = if kind == VIRTIO_BLK_T_DISCARD {
+                VIRTIO_BLK_F_DISCARD
+            } else {
+                VIRTIO_BLK_F_WRITE_ZEROES
+            };
+            assert!(matches!(
+                parse(&memory, 0, descriptors, BLOCK_SIZE as u64)
+                    .unwrap()
+                    .negotiated(1 << required),
+                Request::Zero(_)
+            ));
+            for (sector, sectors) in [(1, 8), (0, 1), (0, 2056), (8, 8), (u64::MAX, 8)] {
+                let (memory, descriptors) = range_request(kind, sector, sectors, 0);
+                assert!(parse(&memory, 0, descriptors, BLOCK_SIZE as u64).is_err());
+            }
+            for (len, writable) in [(15, false), (17, false), (32, false), (16, true)] {
+                let (memory, mut descriptors) = range_request(kind, 0, 8, 0);
+                descriptors[1].len = len;
+                descriptors[1].writable = writable;
+                assert!(parse(&memory, 0, descriptors, BLOCK_SIZE as u64).is_err());
+            }
+        }
+        let (memory, descriptors) = range_request(VIRTIO_BLK_T_DISCARD, 0, 8, 1);
+        assert!(matches!(
+            parse(&memory, 0, descriptors, BLOCK_SIZE as u64).unwrap(),
+            Request::Unsupported(_)
+        ));
+    }
+
+    #[test]
+    fn empty_zero_ranges_and_lists_are_serial_only_controls() {
+        for kind in [VIRTIO_BLK_T_DISCARD, VIRTIO_BLK_T_WRITE_ZEROES] {
+            let (memory, descriptors) = range_request(kind, 8, 0, 0);
+            for empty_list in [false, true] {
+                let mut descriptors = descriptors.clone();
+                if empty_list {
+                    descriptors.remove(1);
+                }
+                let request = parse(&memory, 0, descriptors, BLOCK_SIZE as u64).unwrap();
+                assert!(matches!(
+                    request.admission_kind(),
+                    crate::local::Kind::Control
+                ));
+                assert_eq!(request.inflight(0, 0).length, 0);
+            }
         }
     }
 }

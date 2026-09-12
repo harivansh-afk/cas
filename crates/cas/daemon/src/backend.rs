@@ -17,7 +17,10 @@ use cas_core::{BLOCK_SIZE, MAX_REQUEST_BYTES, aligned::AlignedBuffer};
 use vhost::vhost_user::message::VhostUserProtocolFeatures;
 use vhost_user_backend::{ShutdownHandle, VhostUserBackendMut, VringMutex, VringState, VringT};
 use virtio_bindings::bindings::{
-    virtio_blk::{VIRTIO_BLK_F_BLK_SIZE, VIRTIO_BLK_F_FLUSH, VIRTIO_BLK_F_MQ},
+    virtio_blk::{
+        VIRTIO_BLK_F_BLK_SIZE, VIRTIO_BLK_F_DISCARD, VIRTIO_BLK_F_FLUSH, VIRTIO_BLK_F_MQ,
+        VIRTIO_BLK_F_WRITE_ZEROES,
+    },
     virtio_config::VIRTIO_F_VERSION_1,
 };
 use virtio_queue::{Queue, QueueOwnedT, QueueT};
@@ -69,6 +72,8 @@ struct Counters {
     flushes: u64,
     read_bytes: u64,
     write_bytes: u64,
+    zeroes: u64,
+    zero_bytes: u64,
     guest_payload_copy_bytes: u64,
     errors: u64,
     bounce_requests: u64,
@@ -76,6 +81,7 @@ struct Counters {
 }
 
 pub struct Backend {
+    zeroes_supported: bool,
     storage: Storage,
     completion_event: EventFd,
     exit: (EventConsumer, EventNotifier),
@@ -336,10 +342,12 @@ impl Backend {
             None
         };
         let capacity_bytes = storage.image_bytes();
+        let zeroes_supported = storage.shared_host();
         let exit = vmm_sys_util::event::new_event_consumer_and_notifier(
             EventFlag::NONBLOCK | EventFlag::CLOEXEC,
         )?;
         Ok(Self {
+            zeroes_supported,
             storage,
             completion_event,
             exit,
@@ -425,6 +433,7 @@ impl Backend {
             "flush_negotiated":self.negotiated_features & (1 << VIRTIO_BLK_F_FLUSH) != 0,
             "pending_at_disconnect":pending_at_disconnect, "reads":c.reads, "writes":c.writes,
             "flushes":c.flushes, "read_bytes":c.read_bytes, "write_bytes":c.write_bytes,
+            "zeroes":c.zeroes, "zero_bytes":c.zero_bytes,
             "guest_payload_copy_bytes":c.guest_payload_copy_bytes,
             "errors":c.errors, "bounce_requests":c.bounce_requests, "peak_inflight":c.peak_inflight,
             "queues":self.num_queues(), "queue_requests":&self.queue_requests[..self.num_queues()]
@@ -467,7 +476,9 @@ impl Backend {
             permit,
             inflight,
         } = admitted;
-        let write_number = matches!(&request, Request::Write(_)).then(|| self.fault.next_write());
+        let mutation = matches!(&request, Request::Write(_))
+            || matches!(&request, Request::Zero(range) if range.len != 0);
+        let write_number = mutation.then(|| self.fault.next_write());
         let completion = GuestCompletion {
             queue,
             target: request.completion(),
@@ -475,6 +486,11 @@ impl Backend {
             write_number,
         };
         match &request {
+            Request::Zero(range) if range.len == 0 => {
+                self.finish(mem, state, completion, Status::Ok, None, health)?;
+                self.counters.zeroes += 1;
+                return Ok(());
+            }
             Request::GetId { segments, .. } => {
                 return self.finish(
                     mem,
@@ -504,13 +520,27 @@ impl Backend {
             },
         );
         self.counters.peak_inflight = self.counters.peak_inflight.max(self.pending.len());
-        let has_buffer = !matches!(&request, Request::Flush(_));
+        let has_buffer = matches!(&request, Request::Read(_) | Request::Write(_));
         let mut owned = false;
         let result = (|| {
             self.fault
                 .set_snapshot(health.as_deref().and_then(local::ImageState::snapshot));
             self.fault.hit(Point::BeforeSubmit, write_number)?;
             let operation = match request {
+                Request::Zero(range) => {
+                    self.storage.zero(
+                        id,
+                        QueueHead {
+                            queue,
+                            head: range.completion.head,
+                        },
+                        range.offset,
+                        range.len,
+                        permit,
+                    )?;
+                    owned = true;
+                    return Ok(());
+                }
                 Request::Read(data) => {
                     self.pending.get_mut(&id).unwrap().segments = data.segments;
                     Operation::Read {
@@ -638,7 +668,7 @@ impl Backend {
                     self.counters.reads += 1;
                     self.counters.read_bytes += buffer.as_slice().len() as u64;
                 }
-                CompletionData::Write { bytes } => {
+                data @ (CompletionData::Write { .. } | CompletionData::Zero { .. }) => {
                     self.fault
                         .hit(Point::AfterStorage, pending.completion.write_number)?;
                     self.finish(
@@ -651,8 +681,17 @@ impl Backend {
                     )?;
                     self.fault
                         .hit(Point::AfterUsed, pending.completion.write_number)?;
-                    self.counters.writes += 1;
-                    self.counters.write_bytes += bytes as u64;
+                    match data {
+                        CompletionData::Write { bytes } => {
+                            self.counters.writes += 1;
+                            self.counters.write_bytes += bytes as u64;
+                        }
+                        CompletionData::Zero { bytes } => {
+                            self.counters.zeroes += 1;
+                            self.counters.zero_bytes += bytes as u64;
+                        }
+                        _ => unreachable!(),
+                    }
                 }
                 CompletionData::Flush => {
                     self.finish(
@@ -762,7 +801,8 @@ impl Backend {
             let Some(NextChain { chain, next_avail }) = peek(mem.clone(), &mut state)? else {
                 break;
             };
-            let request = decode_chain(mem, chain, self.capacity_bytes)?;
+            let request = decode_chain(mem, chain, self.capacity_bytes)?
+                .negotiated(self.negotiated_features & self.features());
             let next_id = self
                 .next_id
                 .checked_add(1)
@@ -949,6 +989,11 @@ impl VhostUserBackendMut for Backend {
             }
             | (1 << VIRTIO_RING_F_INDIRECT_DESC)
             | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits()
+            | if self.zeroes_supported {
+                (1 << VIRTIO_BLK_F_DISCARD) | (1 << VIRTIO_BLK_F_WRITE_ZEROES)
+            } else {
+                0
+            }
     }
     fn acked_features(&mut self, features: u64) {
         self.negotiated_features = features;
@@ -991,6 +1036,17 @@ impl VhostUserBackendMut for Backend {
         config[12..16].copy_from_slice(&((self.max_queue_size() - 2) as u32).to_le_bytes());
         config[20..24].copy_from_slice(&(BLOCK_SIZE as u32).to_le_bytes());
         config[34..36].copy_from_slice(&(self.num_queues() as u16).to_le_bytes());
+        if self.zeroes_supported {
+            let sectors = (MAX_REQUEST_BYTES as u64 / request::SECTOR_BYTES) as u32;
+            config[36..40].copy_from_slice(&sectors.to_le_bytes());
+            config[40..44].copy_from_slice(&1u32.to_le_bytes());
+            config[44..48].copy_from_slice(
+                &((BLOCK_SIZE as u64 / request::SECTOR_BYTES) as u32).to_le_bytes(),
+            );
+            config[48..52].copy_from_slice(&sectors.to_le_bytes());
+            config[52..56].copy_from_slice(&1u32.to_le_bytes());
+            config[56] = 1;
+        }
         let start = offset as usize;
         let Some(end) = start.checked_add(size as usize) else {
             return Vec::new();
@@ -1474,3 +1530,6 @@ mod tests {
         backend.drain().unwrap();
     }
 }
+
+#[cfg(test)]
+mod zero_tests;

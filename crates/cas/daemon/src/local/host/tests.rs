@@ -84,7 +84,7 @@ fn path(root: &Path, image: u8) -> std::path::PathBuf {
     root.join("images").join(format!("{image:02x}").repeat(16))
 }
 
-fn create(root: &Path, images: u8, resources: Arc<Resources>) -> Host {
+pub(crate) fn create(root: &Path, images: u8, resources: Arc<Resources>) -> Host {
     create_sized(root, images, resources, IMAGE_BYTES)
 }
 
@@ -327,7 +327,7 @@ fn drained(local: &mut Local, prefix: u64) {
     }
 }
 
-fn shutdown(mut host: Host) {
+pub(crate) fn shutdown(mut host: Host) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         match host.shutdown() {

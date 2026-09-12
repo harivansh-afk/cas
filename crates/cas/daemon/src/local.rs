@@ -20,11 +20,13 @@ use std::time::{Duration, Instant};
 
 pub const IO_DEADLINE: Duration = Duration::from_secs(30);
 
+#[cfg(test)]
+use cas_core::append::format::MAX_BATCH_BYTES;
 use cas_core::{
     BLOCK_SIZE, MAX_REQUEST_BYTES,
     append::{
         self, Log,
-        format::{Builder, MAX_BATCH_BYTES, MAX_DESCRIPTORS, RequestId},
+        format::{Builder, MAX_DESCRIPTORS, RequestId},
     },
     budget::{Amount, Budget, Credits, Share},
 };
@@ -81,9 +83,28 @@ struct Metrics {
     cohort_pause_ns: u64,
 }
 
+#[derive(Clone, Copy)]
+enum Written {
+    Data(usize),
+    Zero(usize),
+}
+impl Written {
+    fn payload_bytes(self) -> usize {
+        match self {
+            Self::Data(bytes) => bytes,
+            Self::Zero(_) => 0,
+        }
+    }
+    fn completion(self) -> CompletionData {
+        match self {
+            Self::Data(bytes) => CompletionData::Write { bytes },
+            Self::Zero(bytes) => CompletionData::Zero { bytes },
+        }
+    }
+}
 struct Write {
     id: u64,
-    bytes: usize,
+    data: Written,
     permit: Permit,
 }
 
@@ -130,11 +151,7 @@ impl Command {
                 drop(builder);
                 drop(credits);
                 for write in writes {
-                    complete(
-                        write.id,
-                        CompletionData::Write { bytes: write.bytes },
-                        write.permit,
-                    );
+                    complete(write.id, write.data.completion(), write.permit);
                 }
             }
             Self::Io(io) => complete(io.id, io.operation.into(), io.permit),
@@ -347,6 +364,9 @@ pub struct Local {
 }
 
 impl Local {
+    pub fn shared_host(&self) -> bool {
+        self.shared.window.is_some()
+    }
     pub fn open(path: &Path, create_bytes: Option<u64>, event: &EventFd) -> io::Result<Self> {
         Self::open_with_execution(path, create_bytes, event, Execution::Synchronous)
     }
@@ -486,20 +506,23 @@ impl Local {
         if let Kind::Write(bytes) = kind {
             if self.packing.as_ref().is_some_and(|batch| {
                 batch.builder.len() == MAX_DESCRIPTORS
-                    || batch.builder.payload_bytes() + bytes > MAX_REQUEST_BYTES
+                    || batch.builder.payload_bytes() + bytes
+                        > batch.builder.allocation_bytes() - BLOCK_SIZE
             }) {
                 self.seal()?;
             }
             if self.packing.is_none() {
+                let payload_capacity = if bytes == 0 { 0 } else { MAX_REQUEST_BYTES };
+                let allocation_bytes = BLOCK_SIZE + payload_capacity;
                 let Some(credits) = self.shared.pools.append.reserve(Amount {
-                    bytes: MAX_BATCH_BYTES,
+                    bytes: allocation_bytes,
                     requests: 0,
                 }) else {
                     return Ok(None);
                 };
-                let builder = Builder::new(self.status.image_bytes, MAX_REQUEST_BYTES)
+                let builder = Builder::new(self.status.image_bytes, payload_capacity)
                     .map_err(io::Error::other)?;
-                assert_eq!(builder.allocation_bytes(), MAX_BATCH_BYTES);
+                assert_eq!(builder.allocation_bytes(), allocation_bytes);
                 self.packing = Some(Packing {
                     builder,
                     credits,
@@ -523,20 +546,58 @@ impl Local {
         permit: Permit,
         gather: impl FnOnce(&mut [u8]) -> io::Result<()>,
     ) -> io::Result<()> {
+        self.pack(
+            id,
+            head,
+            permit,
+            Written::Data(length),
+            |builder, identity| builder.write(identity, offset, length, gather),
+        )?;
+        let mut metrics = self.shared.metrics.lock().expect("metrics poisoned");
+        metrics.gathered_bytes += length as u64;
+        metrics.gather_calls += 1;
+        Ok(())
+    }
+
+    pub fn zero(
+        &mut self,
+        id: u64,
+        head: QueueHead,
+        offset: u64,
+        length: usize,
+        permit: Permit,
+    ) -> io::Result<()> {
+        self.pack(
+            id,
+            head,
+            permit,
+            Written::Zero(length),
+            |builder, identity| builder.zero(identity, offset, length as u64),
+        )
+    }
+
+    fn pack(
+        &mut self,
+        id: u64,
+        head: QueueHead,
+        permit: Permit,
+        data: Written,
+        encode: impl FnOnce(&mut Builder, RequestId) -> append::format::Result<()>,
+    ) -> io::Result<()> {
         if permit
             .window
             .as_ref()
-            .is_some_and(|slot| !slot.matches(length))
+            .is_some_and(|slot| !slot.matches(data.payload_bytes()))
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "gather differs from WAL reservation",
+                "mutation differs from WAL reservation",
             ));
         }
         let batch = self
             .packing
             .as_mut()
-            .ok_or_else(|| io::Error::other("write without append reservation"))?;
+            .ok_or_else(|| io::Error::other("mutation without append reservation"))?;
         let serial = id
             .checked_add(1)
             .ok_or_else(|| io::Error::other("operation serial exhausted"))?;
@@ -544,29 +605,18 @@ impl Local {
             .admitted
             .checked_add(1)
             .ok_or_else(|| io::Error::other("mutation sequence exhausted"))?;
-        batch
-            .builder
-            .write(
-                RequestId {
-                    serial,
-                    attachment: self.status.epoch,
-                    queue: head.queue,
-                    head: head.head,
-                },
-                offset,
-                length,
-                gather,
-            )
-            .map_err(io::Error::other)?;
+        encode(
+            &mut batch.builder,
+            RequestId {
+                serial,
+                attachment: self.status.epoch,
+                queue: head.queue,
+                head: head.head,
+            },
+        )
+        .map_err(io::Error::other)?;
         self.admitted = mutation;
-        batch.writes.push(Write {
-            id,
-            bytes: length,
-            permit,
-        });
-        let mut metrics = self.shared.metrics.lock().expect("metrics poisoned");
-        metrics.gathered_bytes += length as u64;
-        metrics.gather_calls += 1;
+        batch.writes.push(Write { id, data, permit });
         Ok(())
     }
 
@@ -875,12 +925,7 @@ impl Worker {
                         .as_ref()
                         .copied()
                         .map_err(|error| io::Error::other(error.to_string()));
-                    self.send(
-                        write.id,
-                        CompletionData::Write { bytes: write.bytes },
-                        result,
-                        write.permit,
-                    )?;
+                    self.send(write.id, write.data.completion(), result, write.permit)?;
                 }
             }
             Command::Io(Io {

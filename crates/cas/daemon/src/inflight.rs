@@ -92,6 +92,8 @@ pub enum Kind {
     Zero = 3,
     Flush = 4,
     Protocol = 5,
+    Discard = 6,
+    ZeroUnmap = 7,
 }
 
 impl TryFrom<u16> for Kind {
@@ -104,8 +106,16 @@ impl TryFrom<u16> for Kind {
             3 => Ok(Self::Zero),
             4 => Ok(Self::Flush),
             5 => Ok(Self::Protocol),
+            6 => Ok(Self::Discard),
+            7 => Ok(Self::ZeroUnmap),
             _ => Err(invalid("unknown inflight request kind")),
         }
+    }
+}
+
+impl Kind {
+    pub fn zero(self) -> bool {
+        matches!(self, Self::Zero | Self::Discard | Self::ZeroUnmap)
     }
 }
 
@@ -121,20 +131,20 @@ pub struct Request {
 
 impl Request {
     fn mutates(self) -> bool {
-        matches!(self.kind, Kind::Write | Kind::Zero) && self.length != 0
+        (self.kind == Kind::Write || self.kind.zero()) && self.length != 0
     }
 
     fn validate(self, image_bytes: u64) -> io::Result<()> {
         match self.kind {
             Kind::Flush | Kind::Protocol if self.offset == 0 && self.length == 0 => Ok(()),
-            Kind::Read | Kind::Write | Kind::Zero => {
+            Kind::Read | Kind::Write | Kind::Zero | Kind::Discard | Kind::ZeroUnmap => {
                 if !self.offset.is_multiple_of(BLOCK_SIZE as u64)
                     || !self.length.is_multiple_of(BLOCK_SIZE as u64)
                     || self
                         .offset
                         .checked_add(self.length)
                         .is_none_or(|end| end > image_bytes)
-                    || (self.kind != Kind::Zero
+                    || (!self.kind.zero()
                         && (self.length == 0 || self.length > MAX_REQUEST_BYTES as u64))
                 {
                     return Err(invalid("invalid inflight logical range"));

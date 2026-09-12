@@ -229,29 +229,36 @@ fn old_head_across_full_available_wrap_never_advances_cursor() {
 
 #[test]
 fn global_order_and_boundaries_span_queues_and_empty_zero() {
-    let mut carrier = fresh(4);
-    let a = carrier.admit(request(Kind::Write, 3, 9, 0)).unwrap();
-    let b = carrier.admit(request(Kind::Read, 0, 8, 0)).unwrap();
-    let c = carrier
-        .admit(Request {
-            length: 0,
-            ..request(Kind::Zero, 2, 7, 0)
-        })
-        .unwrap();
-    let d = carrier.admit(request(Kind::Zero, 1, 6, 0)).unwrap();
-    let e = carrier.admit(request(Kind::Flush, 3, 10, 1)).unwrap();
-    assert_eq!(
-        (a.mutation, b.mutation, c.mutation, d.mutation, e.mutation),
-        (1, 0, 0, 2, 0)
-    );
-    assert_eq!(
-        (b.boundary, c.boundary, d.boundary, e.boundary),
-        (1, 1, 1, 2)
-    );
-    assert_eq!(
-        reopen(carrier).reconcile(&[Some(0); 4]).unwrap().entries,
-        vec![a, b, c, d, e]
-    );
+    for kind in [Kind::Zero, Kind::Discard, Kind::ZeroUnmap] {
+        let mut carrier = fresh(4);
+        let a = carrier.admit(request(Kind::Write, 3, 9, 0)).unwrap();
+        let b = carrier.admit(request(Kind::Read, 0, 8, 0)).unwrap();
+        let c = carrier
+            .admit(Request {
+                length: 0,
+                ..request(kind, 2, 7, 0)
+            })
+            .unwrap();
+        let d = carrier
+            .admit(Request {
+                length: BLOCK_SIZE as u64,
+                ..request(kind, 1, 6, 0)
+            })
+            .unwrap();
+        let e = carrier.admit(request(Kind::Flush, 3, 10, 1)).unwrap();
+        assert_eq!(
+            (a.mutation, b.mutation, c.mutation, d.mutation, e.mutation),
+            (1, 0, 0, 2, 0)
+        );
+        assert_eq!(
+            (b.boundary, c.boundary, d.boundary, e.boundary),
+            (1, 1, 1, 2)
+        );
+        assert_eq!(
+            reopen(carrier).reconcile(&[Some(0); 4]).unwrap().entries,
+            vec![a, b, c, d, e]
+        );
+    }
 }
 
 #[test]

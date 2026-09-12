@@ -70,7 +70,7 @@ impl Fixture {
             offset += bytes as u64;
             writes.push(Write {
                 id: index as u64,
-                bytes,
+                data: Written::Data(bytes),
                 permit,
             });
         }
@@ -200,7 +200,7 @@ fn foreign_or_mismatched_tokens_and_unobserved_positions_fail_before_preparation
             f.batch(&[BLOCK_SIZE])
         };
         if case == 1 {
-            writes[0].bytes *= 2;
+            writes[0].data = Written::Data(2 * BLOCK_SIZE);
         }
         if case == 2 {
             let fence = f.log.prepare_fence().unwrap(); // Bypass the host's sequencer deliberately.
