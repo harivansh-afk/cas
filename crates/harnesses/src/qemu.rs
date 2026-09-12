@@ -65,6 +65,11 @@ pub fn record(guest: &mut ManagedChild, output: &Path) -> io::Result<()> {
                     .filter(|value| !value.is_empty())
                     .map(|value| String::from_utf8_lossy(value).into_owned())
                     .collect();
+                // A Nix launcher can exec QEMU between these procfs reads.
+                // Retry that transition instead of retaining incomplete argv.
+                if argv.len() < 2 || fs::read_link(root.join("exe"))? != executable {
+                    continue;
+                }
                 return evidence::write_json(
                     &output.join("qemu.json"),
                     &serde_json::json!({

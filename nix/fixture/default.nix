@@ -8,12 +8,16 @@
   util-linux,
   guest,
   provenance,
+  workload ? "core",
+  name ? "cas-xfs-fixture",
 }:
 let
   vm = guest.config.system.build.vm;
   buildInfo = writeText "cas-fixture-build.json" (
     builtins.toJSON {
       inherit (provenance) source_revision source_path;
+      inherit workload;
+      memory_mib = guest.config.virtualisation.memorySize;
       vm = "${vm}/bin/run-cas-fixture-vm";
       harness = lib.getExe' cas "cas-harness";
       tests = "${cas.tests}/bin/cas-core-tests";
@@ -30,7 +34,7 @@ let
   );
 in
 writeShellApplication {
-  name = "cas-xfs-fixture";
+  inherit name;
   runtimeInputs = [
     git
     nix

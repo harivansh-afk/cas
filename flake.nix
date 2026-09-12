@@ -130,6 +130,30 @@
               source_path = toString self.outPath;
             };
           };
+          shared-fixture = pkgs.callPackage ./nix/fixture {
+            name = "cas-shared-fixture";
+            workload = "shared";
+            guest = lib.nixosSystem {
+              specialArgs = {
+                cas = pkgs.cas;
+                inner = lib.nixosSystem {
+                  specialArgs.cas = pkgs.cas;
+                  modules = [
+                    ./nix/shared/guest.nix
+                    { nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system; }
+                  ];
+                };
+              };
+              modules = [
+                ./nix/shared/outer.nix
+                { nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system; }
+              ];
+            };
+            provenance = {
+              source_revision = self.rev or self.dirtyRev or null;
+              source_path = toString self.outPath;
+            };
+          };
           dev-vm = smokeFor pkgs "staging" true;
           census-pilot = (pkgs.callPackage ./nix/census.nix { }).pilot;
           census-fleet = (pkgs.callPackage ./nix/census.nix { }).fleet;

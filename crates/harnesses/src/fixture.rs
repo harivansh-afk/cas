@@ -24,9 +24,21 @@ pub struct Args {
     build_info: PathBuf,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Workload {
+    #[default]
+    Core,
+    Shared,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Build {
+    #[serde(default)]
+    workload: Workload,
+    #[serde(default = "core_memory")]
+    memory_mib: u64,
     source_revision: String,
     source_path: PathBuf,
     vm: PathBuf,
@@ -37,6 +49,10 @@ struct Build {
     qemu_executable: PathBuf,
     guest_kernel: String,
     service_deadline_seconds: u64,
+}
+
+fn core_memory() -> u64 {
+    2048
 }
 
 #[derive(Serialize, Deserialize)]
@@ -124,7 +140,7 @@ fn execute(args: &Args) -> io::Result<()> {
         &output.join("conditions.json"),
         &serde_json::json!({
             "profile":"development", "paper_gates":[], "checkpoint_complete":false,
-            "guest_ram_bytes":2 * 1024_u64 * 1024 * 1024, "vcpus":4,
+            "guest_ram_bytes":build.memory_mib * 1024 * 1024, "workload":build.workload, "vcpus":4,
             "disk_bytes":2 * 1024_u64 * 1024 * 1024, "host_allocation":"sparse",
             "filesystem":"XFS", "payload_io":"O_DIRECT", "network":"none",
             "acceleration":"KVM", "service_deadline_seconds":service_deadline,

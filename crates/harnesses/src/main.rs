@@ -1,11 +1,13 @@
 //! Development VM checks and host inventories. No paper gate is inferred here.
 mod evidence;
+mod filesystem;
 mod fixture;
 mod fleet;
 mod host;
 mod persistence;
 mod process;
 mod qemu;
+mod shared;
 mod source;
 mod suite;
 mod vm;
@@ -27,6 +29,10 @@ struct Args {
 enum Command {
     /// Run the source-bound development checkpoint suite from a Nix wrapper.
     Suite(suite::Args),
+    /// Exercise buffered files and SQLite on a mounted ext4 guest disk.
+    Filesystem(filesystem::Args),
+    /// Own both inner filesystem guests and the shared host inside the XFS fixture.
+    Shared(shared::Args),
     /// Run native storage IO and real reflink controls on a fresh XFS KVM guest.
     Fixture(fixture::Args),
     /// Verify every retained XFS fixture assertion and artifact.
@@ -72,6 +78,8 @@ fn run() -> io::Result<()> {
     process::install_signal_handlers()?;
     match args.command {
         Command::Suite(args) => suite::run(args),
+        Command::Filesystem(args) => filesystem::run(args),
+        Command::Shared(args) => shared::run(args),
         Command::Fixture(args) => fixture::run(args),
         Command::VerifyFixture { output } => fixture::verify(&output),
         Command::VerifySuite { output } => suite::verify(&output),
