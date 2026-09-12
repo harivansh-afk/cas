@@ -24,4 +24,5 @@ pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 
 mod encoding;
 pub mod manifest;
+pub mod space;
 pub mod store;
