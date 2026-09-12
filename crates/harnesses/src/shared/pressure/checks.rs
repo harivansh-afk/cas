@@ -487,9 +487,13 @@ pub(super) fn verify(output: &Path) -> io::Result<Value> {
         "shared/disjoint dataset digests differ from the workload contract",
     )?;
     // Validate every recorded sample, not only selected stage endpoints.
+    let mut staging_pressure = false;
     for line in BufReader::new(File::open(root.join("daemon/telemetry.jsonl"))?).lines() {
-        sample(&serde_json::from_str::<Value>(&line?)?)?;
+        let value: Value = serde_json::from_str(&line?)?;
+        sample(&value)?;
+        staging_pressure |= value["host"]["staging"]["stopped"] == true;
     }
+    require(staging_pressure, "no recorded staging backpressure")?;
     let memory = memory(&root.join("memory.jsonl"))?;
     Ok(
         serde_json::json!({"schema_version":1,"passed":true,"calibrated_bytes_per_second":calibration,
