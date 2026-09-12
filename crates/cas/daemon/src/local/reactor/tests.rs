@@ -92,14 +92,16 @@ fn append(shared: &Shared, id: u64, queue: u16, value: u8) -> Command {
             },
         )
         .unwrap();
+    let mut writes = reserved_vec(MAX_DESCRIPTORS, &shared.metadata).unwrap();
+    writes.push(Write {
+        id,
+        bytes: BLOCK_SIZE,
+        permit,
+    });
     Command::Append(Packing {
         builder,
         credits,
-        writes: vec![Write {
-            id,
-            bytes: BLOCK_SIZE,
-            permit,
-        }],
+        writes,
     })
 }
 

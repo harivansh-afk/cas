@@ -4,10 +4,11 @@ mod pools;
 mod reactor;
 mod state;
 mod window;
+use allocator_api2::vec::Vec as BudgetVec;
 use cas_core::budget::channel as mailbox;
+use cas_core::budget::{BudgetAllocator, Queue as BudgetQueue};
 use pools::Pools;
 pub use state::ImageState;
-use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
@@ -89,7 +90,7 @@ struct Packing {
     // Drop the buffer before releasing its byte credits.
     builder: Builder,
     credits: Credits,
-    writes: Vec<Write>,
+    writes: BudgetVec<Write, BudgetAllocator>,
 }
 
 enum Command {
@@ -110,7 +111,7 @@ enum Command {
 impl Command {
     // The frontend keeps ownership when the worker cannot accept a command.
     // Return a completion for every transferred request, including batch members.
-    fn reject(self, error: &str, output: &mut VecDeque<Completed>) {
+    fn reject(self, error: &str, output: &mut BudgetQueue<Completed>) {
         let mut complete = |id, data, permit| {
             output.push_back(Completed {
                 id,
@@ -143,6 +144,17 @@ impl Command {
             Self::Resume => (),
         }
     }
+}
+
+fn reserved_vec<T>(
+    capacity: usize,
+    metadata: &Arc<Budget>,
+) -> io::Result<BudgetVec<T, BudgetAllocator>> {
+    let mut values = BudgetVec::new_in(BudgetAllocator::new(Arc::clone(metadata)));
+    values
+        .try_reserve_exact(capacity)
+        .map_err(|_| io::ErrorKind::OutOfMemory)?;
+    Ok(values)
 }
 
 struct Io {
@@ -306,7 +318,7 @@ pub struct Local {
     execution: Execution,
     admitted: u64,
     packing: Option<Packing>,
-    rejected: VecDeque<Completed>,
+    rejected: BudgetQueue<Completed>,
     paused: bool,
     pub shared: Arc<Shared>,
     pub status: append::Status,
@@ -356,6 +368,10 @@ impl Local {
         shared: Arc<Shared>,
         port: Option<host::Port>,
     ) -> io::Result<Self> {
+        let rejected = BudgetQueue::with_capacity(
+            pools::IMAGE_REQUESTS + pools::IMAGE_CONTROL,
+            &shared.metadata,
+        )?;
         let status = log.status();
         *shared.final_status.lock().expect("status poisoned") = status;
         let (sender, input) = mailbox::bounded(
@@ -406,7 +422,7 @@ impl Local {
             execution,
             admitted: status.published,
             packing: None,
-            rejected: VecDeque::new(),
+            rejected,
             paused: false,
             shared,
             status,
@@ -465,7 +481,7 @@ impl Local {
                 self.packing = Some(Packing {
                     builder,
                     credits,
-                    writes: Vec::with_capacity(MAX_DESCRIPTORS),
+                    writes: reserved_vec(MAX_DESCRIPTORS, &self.shared.metadata)?,
                 });
             }
             let mut metrics = self.shared.metrics.lock().expect("metrics poisoned");

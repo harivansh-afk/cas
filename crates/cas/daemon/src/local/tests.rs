@@ -702,3 +702,41 @@ fn all_request_completions_fit_without_frontend_consumption() {
     drop(local);
     assert_eq!(metadata.usage().current, Amount::default());
 }
+
+#[test]
+fn descriptor_metadata_denial_precedes_mutation_and_refunds_partial_admission() {
+    let directory = tempfile::tempdir().unwrap();
+    let log = create_log(&directory.path().join("log"), MAX_REQUEST_BYTES as u64).unwrap();
+    let capacity = MAX_REQUEST_BYTES;
+    let metadata = Budget::new(Amount {
+        bytes: capacity,
+        requests: 0,
+    });
+    let mut shared = Shared::new(log.status());
+    Arc::get_mut(&mut shared).unwrap().metadata = Arc::clone(&metadata);
+    let event = EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK).unwrap();
+    let mut local = Local::from_log(log, &event, Execution::Concurrent, shared).unwrap();
+    let baseline = metadata.usage().current;
+    let held = metadata
+        .reserve(Amount {
+            bytes: capacity - baseline.bytes,
+            requests: 0,
+        })
+        .unwrap();
+    let denied = local.prepare(Kind::Write(BLOCK_SIZE));
+    assert!(matches!(denied, Err(error) if error.kind() == io::ErrorKind::OutOfMemory));
+    assert_eq!(local.admitted, 0);
+    assert!(local.packing.is_none());
+    assert_eq!(
+        local.shared.pools.requests.usage().current,
+        Amount::default()
+    );
+    assert_eq!(local.shared.pools.append.usage().current, Amount::default());
+    drop(held);
+    assert_eq!(metadata.usage().current, baseline);
+    write(&mut local, 0, 0, BLOCK_SIZE, 0x57);
+    let completion = local.receive(true).unwrap().unwrap();
+    assert!(completion.result.is_ok());
+    drop((completion, local));
+    assert_eq!(metadata.usage().current, Amount::default());
+}

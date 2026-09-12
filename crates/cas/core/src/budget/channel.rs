@@ -1,6 +1,5 @@
 //! Fixed storage and shared control state are charged before endpoints escape.
-use super::{Budget, BudgetAllocator, BudgetArc};
-use allocator_api2::vec::Vec;
+use super::{Budget, BudgetArc, Queue as Ring};
 use std::{
     io,
     sync::{Arc, Condvar, Mutex, MutexGuard},
@@ -18,29 +17,18 @@ struct State<T> {
 }
 
 struct Queue<T> {
-    slots: Vec<Option<T>, BudgetAllocator>,
-    head: usize,
-    len: usize,
+    messages: Ring<T>,
     senders: usize,
     closed: bool,
     failed: bool,
 }
 
 pub fn bounded<T>(capacity: usize, budget: &Arc<Budget>) -> io::Result<(Sender<T>, Receiver<T>)> {
-    if capacity == 0 {
-        return Err(io::ErrorKind::InvalidInput.into());
-    }
-    let mut slots = Vec::new_in(BudgetAllocator::new(Arc::clone(budget)));
-    slots
-        .try_reserve_exact(capacity)
-        .map_err(|_| io::ErrorKind::OutOfMemory)?;
-    slots.resize_with(capacity, || None);
+    let messages = Ring::with_capacity(capacity, budget)?;
     let state = BudgetArc::try_new(
         State {
             queue: Mutex::new(Queue {
-                slots,
-                head: 0,
-                len: 0,
+                messages,
                 senders: 1,
                 closed: false,
                 failed: false,
@@ -69,21 +57,11 @@ impl<T> State<T> {
 }
 
 impl<T> Queue<T> {
-    fn pop(&mut self) -> Option<T> {
-        if self.len == 0 {
-            return None;
-        }
-        let value = self.slots[self.head].take();
-        self.head = (self.head + 1) % self.slots.len();
-        self.len -= 1;
-        value
-    }
-
     fn receive(&mut self) -> Result<T, TryRecvError> {
         if self.failed {
             return Err(TryRecvError::Disconnected);
         }
-        if let Some(value) = self.pop() {
+        if let Some(value) = self.messages.pop_front() {
             return Ok(value);
         }
         Err(if self.closed || self.senders == 0 {
@@ -100,13 +78,10 @@ impl<T> Sender<T> {
         if queue.closed {
             return Err(TrySendError::Disconnected(value));
         }
-        if queue.len == queue.slots.len() {
-            return Err(TrySendError::Full(value));
-        }
-        let tail = (queue.head + queue.len) % queue.slots.len();
-        debug_assert!(queue.slots[tail].is_none());
-        queue.slots[tail] = Some(value);
-        queue.len += 1;
+        queue
+            .messages
+            .try_push_back(value)
+            .map_err(TrySendError::Full)?;
         drop(queue);
         self.0.ready.notify_one();
         Ok(())
@@ -190,7 +165,7 @@ impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         self.close();
         loop {
-            let value = self.0.lock().pop();
+            let value = self.0.lock().messages.pop_front();
             match value {
                 Some(value) => drop(value), // Message owners never drop under the queue lock.
                 None => break,

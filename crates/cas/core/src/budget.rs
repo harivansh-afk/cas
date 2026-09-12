@@ -9,6 +9,9 @@ pub use shared::BudgetArc;
 
 pub mod channel;
 
+mod queue;
+pub use queue::Queue;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Amount {
     pub bytes: usize,

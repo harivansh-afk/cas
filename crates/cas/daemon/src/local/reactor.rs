@@ -1,6 +1,5 @@
 //! One image's io_uring owner. Kernel completion and logical publication are
 //! distinct; every pending entry retains its allocation, file and credits.
-use std::collections::{BTreeMap, VecDeque};
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
@@ -12,6 +11,9 @@ use io_uring::{IoUring, opcode, squeue, types};
 
 use super::*;
 
+mod slots;
+use slots::Slots;
+
 const IDLE_SYNC: Duration = Duration::from_millis(50);
 
 #[cfg(test)]
@@ -21,7 +23,7 @@ struct Append {
     submission: Submission,
     allocation_address: usize,
     credits: Credits,
-    writes: Vec<Write>,
+    writes: BudgetVec<Write, BudgetAllocator>,
 }
 
 mod read;
@@ -30,7 +32,7 @@ use read::Read;
 struct Fence {
     submission: Submission,
     _credits: Credits,
-    waiters: Vec<Io>,
+    waiters: BudgetVec<Io, BudgetAllocator>,
     syncing: bool,
     rollover: bool,
 }
@@ -84,10 +86,12 @@ fn write_entry(submission: &Submission) -> squeue::Entry {
 pub(super) struct Reactor {
     // Drop drains the ring before these owners can be destroyed.
     ring: IoUring,
-    pending: BTreeMap<u64, Pending>,
-    appends: VecDeque<u64>,
-    commands: VecDeque<Command>,
-    reads: VecDeque<Io>,
+    pending: Slots<Pending>,
+    ready: BudgetVec<u64, BudgetAllocator>,
+    fence_waiters: Option<BudgetVec<Io, BudgetAllocator>>,
+    appends: BudgetQueue<u64>,
+    commands: BudgetQueue<Command>,
+    reads: BudgetQueue<Io>,
     worker: Worker,
     input: mailbox::Receiver<Command>,
     input_wake: EventFd,
@@ -115,12 +119,22 @@ impl Reactor {
         let ring = IoUring::new(256)?;
         let kernel_wake = EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK)?;
         ring.submitter().register_eventfd(kernel_wake.as_raw_fd())?;
+        let capacity = pools::IMAGE_REQUESTS + pools::IMAGE_CONTROL + 1;
+        let metadata = &worker.shared.metadata;
+        let pending = Slots::new(capacity, metadata)?;
+        let ready = reserved_vec(capacity, metadata)?;
+        let fence_waiters = Some(reserved_vec(pools::IMAGE_CONTROL, metadata)?);
+        let appends = BudgetQueue::with_capacity(capacity, metadata)?;
+        let commands = BudgetQueue::with_capacity(capacity, metadata)?;
+        let reads = BudgetQueue::with_capacity(capacity, metadata)?;
         Ok(Self {
             ring,
-            pending: BTreeMap::new(),
-            appends: VecDeque::new(),
-            commands: VecDeque::new(),
-            reads: VecDeque::new(),
+            pending,
+            ready,
+            fence_waiters,
+            appends,
+            commands,
+            reads,
             worker,
             input,
             input_wake,
@@ -253,12 +267,15 @@ impl Reactor {
     }
 
     fn enqueue(&mut self, work: Work) -> io::Result<Option<u64>> {
-        let Some(next) = self.next_token.checked_add(1) else {
-            self.fail(&io::Error::other("IO token exhausted"));
+        let Some((token, next)) = self
+            .pending
+            .next(self.next_token)
+            .and_then(|token| token.checked_add(1).map(|next| (token, next)))
+        else {
+            self.fail(&io::Error::other("IO token or slot capacity exhausted"));
             self.reject(work)?;
             return Ok(None);
         };
-        let token = self.next_token;
         self.next_token = next;
         self.pending.insert(
             token,
@@ -436,12 +453,15 @@ impl Reactor {
     }
 
     fn finish_ready(&mut self) -> io::Result<()> {
-        let ready: Vec<_> = self
-            .pending
-            .iter()
-            .filter_map(|(&token, pending)| pending.ready.map(|_| token))
-            .collect();
-        for token in ready {
+        self.ready.clear();
+        self.ready.extend(
+            self.pending
+                .iter()
+                .filter_map(|(&token, pending)| pending.ready.map(|_| token)),
+        );
+        self.ready.sort_unstable();
+        for index in 0..self.ready.len() {
+            let token = self.ready[index];
             let Some(mut pending) = self.pending.remove(&token) else {
                 continue;
             };
@@ -493,16 +513,17 @@ impl Reactor {
                     let Fence {
                         submission,
                         _credits,
-                        waiters,
+                        mut waiters,
                         rollover,
                         ..
                     } = fence;
                     drop(submission);
                     drop(_credits);
                     self.cohort = None;
-                    for waiter in waiters {
+                    for waiter in waiters.drain(..) {
                         self.send_io(waiter, Ok(()))?;
                     }
+                    self.fence_waiters = Some(waiters);
                     if rollover {
                         self.rotate(append::RotationKind::Rollover)?;
                     }
@@ -554,10 +575,12 @@ impl Reactor {
             }
             result => result.map_err(io::Error::other)?,
         };
+        let mut waiters = self.fence_waiters.take().expect("one active fence cohort");
+        waiters.extend(waiter);
         self.cohort = self.enqueue(Work::Fence(Fence {
             submission,
             _credits: credits,
-            waiters: waiter.into_iter().collect(),
+            waiters,
             syncing: false,
             rollover,
         }))?;
@@ -1002,7 +1025,7 @@ impl Drop for Reactor {
                     // Retain credits and file descriptions with every allocation
                     // whose kernel ownership cannot be disproved.
                     self.pending.retain(|_, pending| pending.ready.is_none());
-                    std::mem::forget(std::mem::take(&mut self.pending));
+                    self.pending.leak();
                     break;
                 }
             }

@@ -152,12 +152,13 @@ mod tests {
 
     #[test]
     fn timer_and_listener_wait_share_the_same_deadline() {
-        let deadline = Deadline::after(Duration::from_millis(30));
-        let mut timer = deadline.timer().unwrap();
+        let mut unarmed = timer().unwrap();
         assert_eq!(
-            io::Error::from(timer.wait().unwrap_err()).kind(),
+            io::Error::from(unarmed.wait().unwrap_err()).kind(),
             io::ErrorKind::WouldBlock
         );
+        let deadline = Deadline::after(Duration::from_millis(30));
+        let mut timer = deadline.timer().unwrap();
         let (reader, _writer) = std::os::unix::net::UnixStream::pair().unwrap();
         assert_eq!(
             deadline
@@ -166,7 +167,12 @@ mod tests {
                 .kind(),
             io::ErrorKind::TimedOut
         );
-        assert_eq!(timer.wait().unwrap(), 1);
         assert!(deadline.run(|| Ok(())).is_err());
+        // reset arms a relative timer after remaining() samples the deadline.
+        // Expiring the listener therefore need not make this FD ready yet.
+        Deadline::after(Duration::from_secs(1))
+            .wait_readable(timer.as_raw_fd())
+            .unwrap();
+        assert_eq!(timer.wait().unwrap(), 1);
     }
 }
