@@ -1,6 +1,6 @@
 //! Admission and reply lifetimes do not cancel the worker's physical IO.
 use super::*;
-use cas_core::{budget::Lease, manifest::file::ReclaimedPages, store::file::Collected};
+use cas_core::{manifest::file::ReclaimedPages, store::file::Collected};
 
 #[derive(Debug, Default, Clone, Copy, serde::Serialize)]
 pub struct CollectionReport {
@@ -37,82 +37,34 @@ impl SharedHost {
     }
 }
 
-pub struct CollectionHandle {
-    done: mailbox::Receiver<io::Result<CollectionReport>>,
-}
-
-impl CollectionHandle {
-    /// Timeout leaves the worker running. This handle may be waited on again.
-    pub fn wait(&self, timeout: Duration) -> io::Result<super::CollectionReport> {
-        self.done
-            .recv_timeout(timeout)
-            .map_err(|error| match error {
-                mailbox::RecvTimeoutError::Timeout => io::ErrorKind::TimedOut.into(),
-                mailbox::RecvTimeoutError::Disconnected => {
-                    io::Error::other("collection owner exited")
-                }
-            })?
-    }
-}
-
-pub(super) struct Control {
-    shared: Arc<SharedHost>,
-    _credit: Lease,
-}
-
-impl Control {
-    pub fn claim(shared: &Arc<SharedHost>) -> io::Result<Self> {
-        let credit = shared
-            .resources
-            .pools
-            .administrative()
-            .ok_or(io::ErrorKind::WouldBlock)?;
-        shared
-            .collecting
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| io::ErrorKind::WouldBlock)?;
-        Ok(Self {
-            shared: Arc::clone(shared),
-            _credit: credit,
-        })
-    }
-}
-
-impl Drop for Control {
-    fn drop(&mut self) {
-        self.shared.collecting.store(false, Ordering::Release);
-    }
-}
-
-pub(super) struct Request {
-    done: mailbox::Sender<io::Result<CollectionReport>>,
-    control: Control,
-}
-
-impl Request {
-    pub fn complete(self, result: io::Result<CollectionReport>) {
-        let Self { done, control } = self;
-        drop(control);
-        // The caller may have gone away; its cancellation cannot undo completed IO.
-        let _ = done.try_send(result);
-    }
-}
+pub type CollectionHandle = administration::Handle<CollectionReport>;
+pub(super) type Request = administration::Request<CollectionReport>;
 
 impl Host {
     pub fn collect(&self) -> io::Result<super::CollectionHandle> {
-        let control = Control::claim(&self.shared)?;
-        let (done, receiver) = mailbox::bounded(1, &self.shared.resources.metadata)?;
+        let (request, handle) = Request::new(&self.shared)?;
         self.ready
             .as_ref()
             .ok_or_else(|| io::Error::other("host is shutting down"))?
-            .try_send(Ready::Collect(Request { done, control }))
+            .try_send(Ready::Collect(request))
             .map_err(|_| io::Error::other("collection queue unavailable"))?;
-        Ok(CollectionHandle { done: receiver })
+        Ok(handle)
     }
 }
 
 impl worker::Owner {
     pub fn collect(&mut self) -> io::Result<CollectionReport> {
+        let started = Instant::now();
+        let mut report =
+            self.quiesced(|owner, generation, started| owner.collect_paused(generation, started))?;
+        report.pause_micros = started.elapsed().as_micros().try_into().unwrap_or(u64::MAX);
+        Ok(report)
+    }
+
+    pub(super) fn quiesced<T>(
+        &mut self,
+        operation: impl FnOnce(&mut Self, u64, Instant) -> io::Result<T>,
+    ) -> io::Result<T> {
         let started = Instant::now();
         let mut pause = admission::Admission::pause(&self.shared.admission)?;
         let generation = pause.generation();
@@ -144,64 +96,17 @@ impl worker::Owner {
             }
             self.drain_notifications()?;
             pause.begin()?;
-            #[cfg(test)]
-            {
-                let blocked = self.shared.control.lock().unwrap().collection.take();
-                if let Some(blocked) = blocked {
-                    blocked.wait();
-                }
-            }
-            let mut report = CollectionReport {
-                allocated_before: self.shared.physical.as_ref().map(|p| p.status().allocated),
-                ..CollectionReport::default()
-            };
-            loop {
-                if started.elapsed() >= IO_DEADLINE {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "collection deadline expired",
-                    ));
-                }
-                self.sweep(&mut report)?;
-                report.rounds += 1;
-                if !self.shared.collection_required() {
-                    break;
-                }
-                let mut advanced = false;
-                for endpoint in &mut self.endpoints {
-                    if endpoint.quiescent != Some(generation) {
-                        continue;
-                    }
-                    let before = endpoint.manifest.current();
-                    endpoint.compact(
-                        &mut self.store,
-                        self.shared.physical.as_ref(),
-                        Some(generation),
-                    )?;
-                    if endpoint.manifest.current() != before {
-                        report.compactions += 1;
-                        advanced = true;
-                        break; // One output, then sweep before another output.
-                    }
-                }
-                if !advanced {
-                    report.capacity_exhausted = true;
-                    break;
-                }
-            }
-            report.allocated_after = self.shared.physical.as_ref().map(|p| p.status().allocated);
-            Ok(report)
+            operation(self, generation, started)
         })();
         match result {
-            Ok(mut report) => {
+            Ok(value) => {
                 if let Err(error) = self.resume_collection(generation) {
                     self.shared.gate.fail(error.to_string());
                     pause.fail();
                     return Err(error);
                 }
                 pause.finish()?;
-                report.pause_micros = started.elapsed().as_micros().try_into().unwrap_or(u64::MAX);
-                Ok(report)
+                Ok(value)
             }
             Err(error) => {
                 if uncertain || self.shared.admission.status().running {
@@ -220,6 +125,60 @@ impl worker::Owner {
         }
     }
 
+    fn collect_paused(
+        &mut self,
+        generation: u64,
+        started: Instant,
+    ) -> io::Result<CollectionReport> {
+        #[cfg(test)]
+        {
+            let blocked = self.shared.control.lock().unwrap().collection.take();
+            if let Some(blocked) = blocked {
+                blocked.wait();
+            }
+        }
+        let mut report = CollectionReport {
+            allocated_before: self.shared.physical.as_ref().map(|p| p.status().allocated),
+            ..CollectionReport::default()
+        };
+        loop {
+            if started.elapsed() >= IO_DEADLINE {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "collection deadline expired",
+                ));
+            }
+            self.sweep(&mut report)?;
+            report.rounds += 1;
+            if !self.shared.collection_required() {
+                break;
+            }
+            let mut advanced = false;
+            for endpoint in &mut self.endpoints {
+                if endpoint.quiescent != Some(generation) {
+                    continue;
+                }
+                let before = endpoint.manifest.current();
+                endpoint.compact(
+                    &mut self.store,
+                    self.shared.physical.as_ref(),
+                    Some(generation),
+                )?;
+                if endpoint.manifest.current() != before {
+                    report.compactions += 1;
+                    advanced = true;
+                    break; // One output, then sweep before another output.
+                }
+            }
+            if !advanced {
+                report.capacity_exhausted = true;
+                break;
+            }
+        }
+        report.allocated_after = self.shared.physical.as_ref().map(|p| p.status().allocated);
+        Ok(report)
+    }
+
     fn drain_guests(&mut self, pause: &Quiescence, started: Instant) -> io::Result<()> {
         while !pause.drained() {
             if started.elapsed() >= IO_DEADLINE {
@@ -232,6 +191,9 @@ impl worker::Owner {
                 Ok(Ready::Image { index, .. }) => self.cancel_ready(index)?,
                 Ok(Ready::Collect(request)) => {
                     request.complete(Err(io::ErrorKind::WouldBlock.into()))
+                }
+                Ok(Ready::Snapshot(request)) => {
+                    request.done.complete(Err(io::ErrorKind::WouldBlock.into()))
                 }
                 Err(mailbox::RecvTimeoutError::Timeout) => (),
                 Err(mailbox::RecvTimeoutError::Disconnected) => {
@@ -261,6 +223,9 @@ impl worker::Owner {
                 }
                 Ready::Image { .. } => (), // Ack cancelled this unstarted turn.
                 Ready::Collect(request) => request.complete(Err(io::ErrorKind::WouldBlock.into())),
+                Ready::Snapshot(request) => {
+                    request.done.complete(Err(io::ErrorKind::WouldBlock.into()))
+                }
             }
         }
         Ok(())

@@ -2,7 +2,10 @@
 pub(super) mod admission;
 pub(super) mod capacity;
 pub use admission::Quiescence;
+mod administration;
 mod collection;
+mod snapshots;
+pub use snapshots::{SnapshotHandle, SnapshotReport};
 pub mod initialize;
 pub mod recovery;
 #[cfg(test)]
@@ -53,7 +56,7 @@ struct SharedHost {
     reader: Reader,
     resources: Arc<Resources>,
     attached: AtomicUsize,
-    collecting: AtomicBool,
+    administrating: AtomicBool,
     collection: Mutex<collection::Status>,
     staging: cas_core::budget::BudgetArc<cas_core::space::Staging>,
     physical: Option<Arc<cas_core::space::Governor>>,
@@ -210,7 +213,7 @@ impl Host {
             reader: store.reader()?,
             resources,
             attached: AtomicUsize::new(0),
-            collecting: AtomicBool::new(false),
+            administrating: AtomicBool::new(false),
             collection: Mutex::new(collection::Status::default()),
             staging,
             physical,
@@ -300,7 +303,7 @@ impl Host {
         let mut retained = reserved_vec(snapshots.as_ref().len(), &shared.resources.metadata)?;
         retained.extend(snapshots);
         let owner = worker::Owner {
-            _catalog: context.catalog,
+            catalog: context.catalog,
             snapshots: retained,
             store,
             endpoints,
@@ -480,6 +483,7 @@ enum Turn {
 enum Ready {
     Image { index: usize, turn: Turn },
     Collect(collection::Request),
+    Snapshot(snapshots::Request),
 }
 
 pub(super) struct Port {

@@ -10,6 +10,7 @@ mod initialization;
 mod quiescence;
 mod recovery;
 mod rotation;
+mod snapshots;
 
 const STORE: Config = Config {
     store: [1; 16],
@@ -62,6 +63,7 @@ pub(super) struct Control {
     pub compaction: Option<Pause>,
     pub rotation: Option<Pause>,
     pub collection: Option<Pause>,
+    pub snapshot: Option<Pause>,
     pub quiescence_error: bool,
 }
 

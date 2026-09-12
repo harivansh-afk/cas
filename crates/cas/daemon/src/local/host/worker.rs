@@ -171,7 +171,7 @@ impl Endpoint {
 }
 
 pub(super) struct Owner {
-    pub _catalog: Option<cas_core::catalog::Catalog>,
+    pub catalog: Option<cas_core::catalog::Catalog>,
     pub store: Store,
     pub snapshots: BudgetVec<Snapshot, BudgetAllocator>,
     pub endpoints: BudgetVec<Endpoint, BudgetAllocator>,
@@ -189,7 +189,7 @@ impl Owner {
         loop {
             if self.shared.collection_required()
                 && Instant::now() >= next_collection
-                && let Ok(control) = collection::Control::claim(&self.shared)
+                && let Ok(control) = administration::Control::claim(&self.shared)
             {
                 let result = self.collect();
                 self.shared.collected(&result);
@@ -201,15 +201,20 @@ impl Owner {
                 Err(mailbox::RecvTimeoutError::Timeout) => continue,
                 Err(mailbox::RecvTimeoutError::Disconnected) => break,
             };
-            let Ready::Image { index, turn } = ready else {
-                let Ready::Collect(request) = ready else {
-                    unreachable!()
-                };
-                let result = self.collect();
-                self.shared.collected(&result);
-                request.complete(result);
-                next_collection = Instant::now() + Duration::from_secs(1);
-                continue;
+            let (index, turn) = match ready {
+                Ready::Image { index, turn } => (index, turn),
+                Ready::Collect(request) => {
+                    let result = self.collect();
+                    self.shared.collected(&result);
+                    request.complete(result);
+                    next_collection = Instant::now() + Duration::from_secs(1);
+                    continue;
+                }
+                Ready::Snapshot(request) => {
+                    let result = self.snapshot(request.image, request.snapshot);
+                    request.done.complete(result);
+                    continue;
+                }
             };
             let Some(endpoint) = self.endpoints.get_mut(index) else {
                 self.shared

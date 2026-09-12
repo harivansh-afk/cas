@@ -7,13 +7,13 @@ mod frontend;
 mod live;
 mod service;
 
-enum SnapshotFixture {
+pub(super) enum SnapshotFixture {
     Absent,
     Missing,
     Present,
 }
 
-fn setup(root: &Path, resources: &Arc<Resources>, snapshot: SnapshotFixture) {
+pub(super) fn setup(root: &Path, resources: &Arc<Resources>, snapshot: SnapshotFixture) {
     let config = Config {
         segment_bytes: 2 * MAX_REQUEST_BYTES as u64,
         ..STORE
@@ -95,7 +95,7 @@ fn open(root: &Path, resources: &Arc<Resources>, prefixes: Prefixes<'_>) -> io::
     scan(root, resources)?.require(prefixes)
 }
 
-fn scan(root: &Path, resources: &Arc<Resources>) -> io::Result<Inspection> {
+pub(super) fn scan(root: &Path, resources: &Arc<Resources>) -> io::Result<Inspection> {
     Inspection::scan(
         root,
         OpenConfig {
@@ -109,7 +109,7 @@ fn scan(root: &Path, resources: &Arc<Resources>) -> io::Result<Inspection> {
     )
 }
 
-fn physical_limits(inspected: &Inspection) -> cas_core::space::Limits {
+pub(super) fn physical_limits(inspected: &Inspection) -> cas_core::space::Limits {
     cas_core::space::Limits::new(
         inspected.observation().unwrap().capacity(),
         2 * MAX_REQUEST_BYTES as u64,

@@ -15,7 +15,10 @@ mod local;
 mod request;
 pub mod service;
 pub mod storage;
-pub use local::host::{CollectionHandle, CollectionReport, Host, Quiescence, Resources, Roots};
+pub use local::host::{
+    CollectionHandle, CollectionReport, Host, Quiescence, Resources, Roots, SnapshotHandle,
+    SnapshotReport,
+};
 pub use local::host::{initialize, recovery};
 
 #[derive(Clone, Copy, clap::ValueEnum)]
