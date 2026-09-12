@@ -115,6 +115,21 @@
               source_path = toString self.outPath;
             };
           };
+          xfs-fixture = pkgs.callPackage ./nix/fixture {
+            guest = lib.nixosSystem {
+              specialArgs = {
+                cas = pkgs.cas;
+              };
+              modules = [
+                ./nix/fixture/guest.nix
+                { nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system; }
+              ];
+            };
+            provenance = {
+              source_revision = self.rev or self.dirtyRev or null;
+              source_path = toString self.outPath;
+            };
+          };
           dev-vm = smokeFor pkgs "staging" true;
           census-pilot = (pkgs.callPackage ./nix/census.nix { }).pilot;
           census-fleet = (pkgs.callPackage ./nix/census.nix { }).fleet;

@@ -4,6 +4,10 @@ use std::fs;
 use std::io;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
+
+use crate::process;
 
 use serde::{Deserialize, Serialize};
 
@@ -122,6 +126,42 @@ pub fn compare(expected: &Manifest, actual: &Manifest, label: &str) -> io::Resul
         )));
     }
     Ok(())
+}
+
+pub fn text_command(argv: &[&str], cwd: &Path, directory: &Path) -> io::Result<String> {
+    let mut command = Command::new(argv[0]);
+    command.args(&argv[1..]).current_dir(cwd);
+    let result = process::run_logged(&mut command, directory, Duration::from_secs(100))?;
+    if result.exit_code != Some(0) || result.error.is_some() {
+        return Err(io::Error::other(format!(
+            "{} failed; see {}",
+            argv[0],
+            directory.display()
+        )));
+    }
+    fs::read_to_string(directory.join("stdout.log"))
+}
+
+pub fn checkout_inputs(checkout: &Path, directory: &Path) -> io::Result<Manifest> {
+    let files = text_command(
+        &[
+            "git",
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
+        checkout,
+        directory,
+    )?;
+    from_paths(
+        checkout,
+        files
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from),
+    )
 }
 
 #[cfg(test)]

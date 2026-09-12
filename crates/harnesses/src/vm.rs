@@ -136,41 +136,6 @@ struct Summary {
     error: Option<String>,
 }
 
-fn valid_qemu_path(path: &Path) -> io::Result<()> {
-    let value = path
-        .to_str()
-        .ok_or_else(|| io::Error::other("QEMU paths must be UTF-8"))?;
-    if value.contains([',', '\n', '\r']) {
-        return Err(io::Error::other(
-            "QEMU paths cannot contain commas or line breaks",
-        ));
-    }
-    Ok(())
-}
-
-fn prepare_output(path: &Path) -> io::Result<PathBuf> {
-    let path = std::path::absolute(path)?;
-    valid_qemu_path(&path)?;
-    if path.symlink_metadata().is_ok() {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "output must be a new directory",
-        ));
-    }
-    let parent = path
-        .parent()
-        .ok_or_else(|| io::Error::other("output needs a parent directory"))?;
-    fs::create_dir_all(parent)?;
-    let parent = parent.canonicalize()?;
-    valid_qemu_path(&parent)?;
-    let path = parent.join(
-        path.file_name()
-            .ok_or_else(|| io::Error::other("invalid output path"))?,
-    );
-    fs::create_dir(&path)?;
-    Ok(path)
-}
-
 fn scratch_image(backend: Backend, directory: &Path) -> io::Result<PathBuf> {
     if matches!(
         backend,
@@ -241,49 +206,7 @@ fn record_qemu(args: &Args, guest: &mut ManagedChild, output: &Path) -> io::Resu
     if args.expect_source.is_none() {
         return Ok(());
     }
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let mut pids = vec![guest.pid()];
-        let mut cursor = 0;
-        while cursor < pids.len() && cursor < 64 {
-            let pid = pids[cursor];
-            cursor += 1;
-            let root = PathBuf::from(format!("/proc/{pid}"));
-            if let Ok(executable) = fs::read_link(root.join("exe"))
-                && executable
-                    .file_name()
-                    .is_some_and(|name| name.to_string_lossy().contains("qemu-system-"))
-            {
-                let bytes = fs::read(root.join("cmdline"))?;
-                let argv: Vec<_> = bytes
-                    .split(|byte| *byte == 0)
-                    .filter(|value| !value.is_empty())
-                    .map(|value| String::from_utf8_lossy(value).into_owned())
-                    .collect();
-                return evidence::write_json(
-                    &output.join("qemu.json"),
-                    &serde_json::json!({
-                        "pid":pid, "executable":executable, "argv":argv,
-                        "process_status":fs::read_to_string(root.join("status"))?,
-                    }),
-                );
-            }
-            if let Ok(children) = fs::read_to_string(root.join(format!("task/{pid}/children"))) {
-                pids.extend(
-                    children
-                        .split_whitespace()
-                        .filter_map(|pid| pid.parse::<u32>().ok()),
-                );
-            }
-        }
-        process::check_interrupt()?;
-        if guest.poll()?.is_some() || Instant::now() >= deadline {
-            return Err(io::Error::other(
-                "could not record the running QEMU invocation",
-            ));
-        }
-        thread::sleep(process::POLL);
-    }
+    crate::qemu::record(guest, output)
 }
 
 fn execute_guest(
@@ -551,7 +474,7 @@ fn execute(args: &mut Args, summary: &mut Summary) -> io::Result<()> {
         .as_ref()
         .unwrap_or(&args.output)
         .canonicalize()?;
-    valid_qemu_path(&disk_dir)?;
+    crate::qemu::valid_path(&disk_dir)?;
     if !disk_dir.is_dir() {
         return Err(io::Error::other("disk directory must exist"));
     }
@@ -595,7 +518,7 @@ fn execute(args: &mut Args, summary: &mut Summary) -> io::Result<()> {
 }
 
 pub fn run(mut args: Args) -> io::Result<()> {
-    args.output = prepare_output(&args.output)?;
+    args.output = crate::qemu::prepare_output(&args.output)?;
     let identity = host::identity()?;
     let mut summary = Summary {
         schema_version: 1,
@@ -641,17 +564,17 @@ mod tests {
     #[test]
     fn existing_results_and_symlinks_are_never_overwritten() {
         let dir = tempfile::tempdir().unwrap();
-        let output = prepare_output(&dir.path().join("results with spaces")).unwrap();
+        let output = crate::qemu::prepare_output(&dir.path().join("results with spaces")).unwrap();
         let marker = output.join("summary.json");
         fs::write(&marker, "previous result").unwrap();
-        assert!(prepare_output(&output).is_err());
-        assert!(prepare_output(&marker).is_err());
+        assert!(crate::qemu::prepare_output(&output).is_err());
+        assert!(crate::qemu::prepare_output(&marker).is_err());
         let alias = dir.path().join("alias");
         symlink(&output, &alias).unwrap();
-        assert!(prepare_output(&alias).is_err());
+        assert!(crate::qemu::prepare_output(&alias).is_err());
         let dangling = dir.path().join("dangling");
         symlink(dir.path().join("missing"), &dangling).unwrap();
-        assert!(prepare_output(&dangling).is_err());
+        assert!(crate::qemu::prepare_output(&dangling).is_err());
         assert_eq!(fs::read_to_string(marker).unwrap(), "previous result");
     }
 
@@ -660,14 +583,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         for name in ["a,b", "a\nb", "a\rb"] {
             let output = dir.path().join(name);
-            assert!(prepare_output(&output).is_err());
+            assert!(crate::qemu::prepare_output(&output).is_err());
             assert!(!output.exists());
         }
         let parent = dir.path().join("comma,parent");
         fs::create_dir(&parent).unwrap();
         let alias = dir.path().join("alias");
         symlink(&parent, &alias).unwrap();
-        assert!(prepare_output(&alias.join("results")).is_err());
+        assert!(crate::qemu::prepare_output(&alias.join("results")).is_err());
         assert!(!parent.join("results").exists());
     }
 

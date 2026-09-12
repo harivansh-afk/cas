@@ -1,9 +1,11 @@
 //! Development VM checks and host inventories. No paper gate is inferred here.
 mod evidence;
+mod fixture;
 mod fleet;
 mod host;
 mod persistence;
 mod process;
+mod qemu;
 mod source;
 mod suite;
 mod vm;
@@ -25,6 +27,13 @@ struct Args {
 enum Command {
     /// Run the source-bound development checkpoint suite from a Nix wrapper.
     Suite(suite::Args),
+    /// Run native storage IO and real reflink controls on a fresh XFS KVM guest.
+    Fixture(fixture::Args),
+    /// Verify every retained XFS fixture assertion and artifact.
+    VerifyFixture {
+        #[arg(long)]
+        output: PathBuf,
+    },
     /// Recheck a retained suite, including every evidence hash and required scenario.
     VerifySuite {
         #[arg(long)]
@@ -63,6 +72,8 @@ fn run() -> io::Result<()> {
     process::install_signal_handlers()?;
     match args.command {
         Command::Suite(args) => suite::run(args),
+        Command::Fixture(args) => fixture::run(args),
+        Command::VerifyFixture { output } => fixture::verify(&output),
         Command::VerifySuite { output } => suite::verify(&output),
         Command::Persistence(args) => persistence::run(args),
         Command::VerifyPersistence { output } => persistence::verify(&output),

@@ -61,42 +61,6 @@ struct Report {
     error: Option<String>,
 }
 
-fn text_command(argv: &[&str], cwd: &Path, directory: &Path) -> io::Result<String> {
-    let mut command = Command::new(argv[0]);
-    command.args(&argv[1..]).current_dir(cwd);
-    let result = process::run_logged(&mut command, directory, Duration::from_secs(100))?;
-    if result.exit_code != Some(0) || result.error.is_some() {
-        return Err(io::Error::other(format!(
-            "{} failed; see {}",
-            argv[0],
-            directory.display()
-        )));
-    }
-    fs::read_to_string(directory.join("stdout.log"))
-}
-
-fn checkout_inputs(checkout: &Path, directory: &Path) -> io::Result<source::Manifest> {
-    let files = text_command(
-        &[
-            "git",
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        ],
-        checkout,
-        directory,
-    )?;
-    source::from_paths(
-        checkout,
-        files
-            .split('\0')
-            .filter(|path| !path.is_empty())
-            .map(PathBuf::from),
-    )
-}
-
 fn require_wrapper<'a>(build: &'a Build, name: &str) -> io::Result<&'a Path> {
     build
         .wrappers
@@ -200,7 +164,7 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
             "suite is not running the harness from its Nix build",
         ));
     }
-    let inputs = checkout_inputs(&checkout, &output.join("inputs-before"))?;
+    let inputs = source::checkout_inputs(&checkout, &output.join("inputs-before"))?;
     source::copy(&checkout, &output.join("source"), &inputs)?;
     evidence::write_json(&output.join("source.json"), &inputs)?;
     source::compare(
@@ -208,7 +172,7 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
         &source::scan(&build.source_path)?,
         "Nix build source",
     )?;
-    let revision = text_command(
+    let revision = source::text_command(
         &["git", "rev-parse", "HEAD"],
         &checkout,
         &output.join("revision"),
@@ -218,17 +182,17 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
             "build revision differs from the expected checkout",
         ));
     }
-    text_command(
+    source::text_command(
         &["git", "diff", "HEAD", "--binary"],
         &checkout,
         &output.join("dirty-patch"),
     )?;
-    text_command(
+    source::text_command(
         &["git", "status", "--porcelain=v1", "--untracked-files=all"],
         &checkout,
         &output.join("worktree"),
     )?;
-    text_command(
+    source::text_command(
         &["cargo", "metadata", "--locked", "--format-version=1"],
         &checkout,
         &output.join("cargo-graph"),
@@ -332,7 +296,7 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
     }
     source::compare(
         &inputs,
-        &checkout_inputs(&checkout, &output.join("inputs-after"))?,
+        &source::checkout_inputs(&checkout, &output.join("inputs-after"))?,
         "source changed during suite",
     )?;
     validate_results(report)
