@@ -42,9 +42,20 @@ jobs:
       - name: Check Nix formatting
         run: nix fmt -- --ci
       - name: Evaluate both architectures
-        run: nix flake check --no-build --all-systems
+        run: |
+          for check_system in aarch64-linux x86_64-linux; do
+            nix flake check --no-build --system "$check_system"
+          done
       - name: Build and test on x86_64
-        run: nix flake check --print-build-logs
+        run: |
+          check_system=x86_64-linux
+          check_names=$(nix eval --raw ".#checks.$check_system" --apply 'checks: builtins.concatStringsSep "\n" (builtins.attrNames checks)')
+          test -n "$check_names"
+          check_targets=()
+          while IFS= read -r check_name; do
+            check_targets+=(".#checks.$check_system.$check_name")
+          done <<< "$check_names"
+          nix build "${check_targets[@]}" --no-link --print-build-logs
       - name: Build the guest and runner
         run: nix build .#vm-smoke --out-link result-vm --print-build-logs
       - name: Verify guest IO through KVM
