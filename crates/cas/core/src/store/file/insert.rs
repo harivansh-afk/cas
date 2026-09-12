@@ -20,14 +20,10 @@ impl Store {
             }
             state.index.reserve(missing.len())?;
             let bytes = ((missing.len() + 1) * BLOCK_SIZE) as u64;
-            let needs_segment = state
+            state
                 .segments
                 .last()
-                .is_none_or(|s| bytes > s.header.capacity - s.end);
-            if needs_segment && !missing.is_empty() {
-                reserve(&mut state.segments, 1)?;
-            }
-            needs_segment
+                .is_none_or(|s| s.sealed || bytes > s.header.capacity - s.end)
         };
         let mut inserted = Inserted {
             reused: chunks.len() - missing.len(),
@@ -43,7 +39,32 @@ impl Store {
         for &chunk in &missing {
             builder.push(chunk)?;
         }
-        if needs_segment {
+        let publications = missing
+            .iter()
+            .map(|chunk| Publication {
+                hash: chunk.hash(),
+                previous: None,
+            })
+            .collect::<ArrayVec<_, MAX_CHUNKS>>();
+        let (bytes, _) = self.append(builder, &publications, needs_segment)?;
+        inserted.written = missing.len();
+        inserted.encoded_bytes = bytes;
+        Ok(inserted)
+    }
+
+    /// One durable output path for insertion and quiescent relocation.
+    pub(super) fn append(
+        &mut self,
+        builder: Builder<BudgetAllocator>,
+        publications: &[Publication],
+        new_segment: bool,
+    ) -> io::Result<(usize, Builder<BudgetAllocator>)> {
+        require(
+            !publications.is_empty() && publications.len() == builder.len(),
+            "chunk publication count",
+        )?;
+        if new_segment {
+            reserve(&mut self.shared.lock().segments, 1)?;
             // This reserves the batch table and scratch before namespace IO.
             // Ticket failure includes an interrupted header creation.
             let mut guard = Output {
@@ -68,6 +89,12 @@ impl Store {
             let mut state = self.shared.lock();
             state.healthy()?;
             let segment = state.segments.last_mut().expect("insertion owns a segment");
+            require(
+                !segment.sealed
+                    && ((publications.len() + 1) * BLOCK_SIZE) as u64
+                        <= segment.header.capacity - segment.end,
+                "chunk destination capacity",
+            )?;
             reserve(&mut segment.batches, 1)?;
             let next_batch = segment
                 .next_batch
@@ -75,7 +102,7 @@ impl Store {
                 .ok_or_else(|| io::Error::other("chunk batch IDs exhausted"))?;
             let next_ordinal = segment
                 .next_ordinal
-                .checked_add(missing.len() as u64)
+                .checked_add(publications.len() as u64)
                 .ok_or_else(|| io::Error::other("chunk ordinals exhausted"))?;
             (
                 Arc::clone(&segment.file),
@@ -88,7 +115,7 @@ impl Store {
             )
         };
         let batch = builder.seal(number, batch_id, ordinal)?;
-        let addresses = missing
+        let addresses = publications
             .iter()
             .enumerate()
             .map(|(index, _)| Address::new(number, offset + ((index + 1) * BLOCK_SIZE) as u64))
@@ -106,14 +133,19 @@ impl Store {
         {
             let mut state = self.shared.lock();
             state.healthy()?;
-            for (chunk, address) in missing.iter().zip(addresses) {
-                state.index.insert_reserved(chunk.hash(), address);
+            for (publication, address) in publications.iter().zip(addresses) {
+                match publication.previous {
+                    Some(old) => state.index.relocate(&publication.hash, old, address)?,
+                    None => {
+                        state.index.insert_reserved(publication.hash, address);
+                    }
+                }
             }
             let segment = state.segments.last_mut().expect("insertion owns a segment");
             assert_eq!((segment.header.number, segment.end), (number, offset));
             segment.batches.push(BatchLocation {
                 offset: offset as u32,
-                chunks: missing.len() as u16,
+                chunks: publications.len() as u16,
             });
             segment.end += bytes;
             segment.file_bytes = segment.end;
@@ -121,10 +153,13 @@ impl Store {
             segment.next_ordinal = next_ordinal;
             guard.pending = false;
         }
-        inserted.written = missing.len();
-        inserted.encoded_bytes = bytes as usize;
-        Ok(inserted)
+        Ok((bytes as usize, batch.into_builder()))
     }
+}
+
+pub(super) struct Publication {
+    pub hash: Hash,
+    pub previous: Option<Address>,
 }
 
 /// Publish terminal failure before returning an output error, including unwind.

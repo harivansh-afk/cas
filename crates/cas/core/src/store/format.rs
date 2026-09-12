@@ -275,6 +275,15 @@ pub struct Batch<A: Allocator = Global> {
 }
 
 impl<A: Allocator> Batch<A> {
+    /// Reuse the owned output allocation for the next bounded batch.
+    pub(crate) fn into_builder(mut self) -> Builder<A> {
+        self.buffer.as_mut_slice()[..BLOCK_SIZE].fill(0);
+        Builder {
+            buffer: self.buffer,
+            count: 0,
+        }
+    }
+
     pub fn bytes(&self) -> &[u8] {
         &self.buffer.as_slice()[..(self.count + 1) * BLOCK_SIZE]
     }

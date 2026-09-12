@@ -154,6 +154,12 @@ impl Index {
             .map(|entry| (&entry.hash, entry.address, entry.marked))
     }
 
+    pub(crate) fn marked_at(&self, hash: &Hash, address: Address) -> bool {
+        self.table
+            .find(bucket(hash), |entry| &entry.hash == hash)
+            .is_some_and(|entry| entry.marked && entry.address == address)
+    }
+
     /// Only after the owning GC transaction has made its deletions durable.
     pub fn remove_unmarked(&mut self) {
         self.table.retain(|entry| entry.marked);

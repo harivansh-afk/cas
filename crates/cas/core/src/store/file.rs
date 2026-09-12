@@ -1,5 +1,6 @@
 //! Synchronous store owner used by the host's single compactor. Index publication
 //! follows sync; recovery inspection exposes no mutation or normal read path.
+mod collection;
 mod insert;
 mod read;
 mod recovery;
@@ -23,6 +24,7 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
+pub use collection::{Collected, Collection, Sweep, Victim};
 pub use read::{Payload, Read, Reader};
 pub use recovery::Inspection;
 
@@ -59,6 +61,7 @@ pub struct Status {
     pub index_bytes: usize,
     pub batch_table_bytes: usize,
     pub failed: bool,
+    pub collecting: bool,
 }
 
 pub struct Store {
@@ -78,6 +81,7 @@ struct State {
     index: Index,
     segments: Vec<Segment, BudgetAllocator>,
     failed: bool,
+    collecting: bool,
 }
 
 impl State {
@@ -113,6 +117,7 @@ impl Shared {
                 .map(|s| s.batches.capacity() * size_of::<BatchLocation>())
                 .sum(),
             failed: state.failed,
+            collecting: state.collecting,
         }
     }
 }
@@ -149,6 +154,7 @@ impl Store {
                     index: Index::new(Arc::clone(&metadata)),
                     segments: Vec::new_in(BudgetAllocator::new(Arc::clone(&metadata))),
                     failed: false,
+                    collecting: false,
                 }),
                 metadata,
             }),
@@ -197,6 +203,7 @@ struct Segment {
     file_bytes: u64,
     next_batch: u64,
     next_ordinal: u64,
+    sealed: bool,
 }
 
 impl Segment {
@@ -220,7 +227,7 @@ impl Segment {
             direct::Alignment::query(&file)?;
             direct::preallocate(&file, 0, config.segment_bytes)?;
             direct::write_bytes(&file, scratch.as_slice(), 0)?;
-            file.sync_all()?;
+            direct::sync_all(&file)?;
             directory.sync()?;
             Ok(Self {
                 file: Arc::new(file),
@@ -230,6 +237,7 @@ impl Segment {
                 file_bytes: BLOCK_SIZE as u64,
                 next_batch: 1,
                 next_ordinal: 1,
+                sealed: false,
             })
         })
     }

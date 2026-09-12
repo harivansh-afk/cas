@@ -132,6 +132,7 @@ impl Command {
             }
             Self::Io(io) => complete(io.id, io.operation.into(), io.permit),
             Self::Pause { done, _permit } | Self::NewAttachment { done, _permit, .. } => {
+                drop(_permit);
                 let _ = done.send(Err(io::Error::other(error.to_owned())));
             }
             Self::Resume => (),
@@ -734,6 +735,7 @@ impl Worker {
             } => {
                 let status = self.log.status();
                 *self.shared.final_status.lock().expect("status poisoned") = status;
+                drop(_permit);
                 done.send(if failed {
                     Err(io::Error::other("local image failed"))
                 } else {
@@ -746,6 +748,7 @@ impl Worker {
                 _permit,
                 rotated: false,
             } => {
+                drop(_permit);
                 let _ = done.send(Err(io::Error::other("attachment did not rotate")));
             }
             Command::Resume => (),

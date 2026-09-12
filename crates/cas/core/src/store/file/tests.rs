@@ -9,6 +9,7 @@ use crate::{
 };
 use std::{os::unix::fs::FileExt, path::Path, sync::Mutex};
 
+mod collection;
 mod readers;
 
 const CONFIG: Config = Config {

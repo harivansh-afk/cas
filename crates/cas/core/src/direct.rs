@@ -254,6 +254,7 @@ pub(crate) mod faults {
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     pub(crate) enum Fault {
+        Unlink,
         Truncate,
         Map,
         Rename,

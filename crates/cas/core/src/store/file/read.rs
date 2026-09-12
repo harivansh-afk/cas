@@ -20,6 +20,12 @@ impl Shared {
     pub(super) fn plan(&self, hash: Hash) -> io::Result<Option<Read>> {
         let state = self.lock();
         state.healthy()?;
+        if state.collecting {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "chunk collection in progress",
+            ));
+        }
         let Some(address) = state.index.get(&hash) else {
             return Ok(None);
         };

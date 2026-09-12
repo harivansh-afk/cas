@@ -129,6 +129,7 @@ impl Store {
                 file_bytes,
                 next_batch: 1,
                 next_ordinal: 1,
+                sealed: false,
             };
             inspect_batches(
                 &mut segment,

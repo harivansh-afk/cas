@@ -50,6 +50,14 @@ impl Directory {
         fs::rename(self.path.join(from), self.path.join(to))
     }
 
+    pub fn remove(&self, name: &str) -> io::Result<()> {
+        #[cfg(test)]
+        if crate::direct::faults::take(crate::direct::faults::Fault::Unlink) {
+            return Err(io::Error::from_raw_os_error(libc::EIO));
+        }
+        fs::remove_file(self.path.join(name))
+    }
+
     pub fn archive(&self, name: &str, file: &File, offset: u64) -> io::Result<PathBuf> {
         use std::io::Write;
         use std::os::unix::fs::FileExt;
