@@ -501,7 +501,7 @@ impl Reactor {
                         self.send_io(waiter, Ok(()))?;
                     }
                     if rollover {
-                        self.worker.log.rollover().map_err(io::Error::other)?;
+                        self.rotate(append::RotationKind::Rollover)?;
                     }
                 }
                 Work::Fence(fence) => {
@@ -538,7 +538,19 @@ impl Reactor {
                 requests: 0,
             })
             .ok_or_else(|| io::Error::other("internal fence control reserve exhausted"))?;
-        let submission = self.worker.log.prepare_fence().map_err(io::Error::other)?;
+        let submission = match self.worker.log.prepare_fence() {
+            Err(append::Error::Rollover) if self.worker.port.is_none() => {
+                self.rotate(append::RotationKind::Rollover)?;
+                self.worker.log.prepare_fence().map_err(io::Error::other)?
+            }
+            Err(append::Error::Rollover) => {
+                if let Some(waiter) = waiter {
+                    self.commands.push_front(Command::Io(waiter));
+                }
+                return self.rotate(append::RotationKind::Rollover);
+            }
+            result => result.map_err(io::Error::other)?,
+        };
         self.cohort = self.enqueue(Work::Fence(Fence {
             submission,
             _credits: credits,
@@ -549,8 +561,27 @@ impl Reactor {
         Ok(())
     }
 
+    fn rotate(&mut self, kind: append::RotationKind) -> io::Result<()> {
+        if let Some(port) = &mut self.worker.port {
+            port.rotate(kind)
+        } else {
+            let prepared = self
+                .worker
+                .log
+                .prepare_rotation(kind)
+                .map_err(io::Error::other)?;
+            self.worker
+                .log
+                .install_rotation(prepared.create()?)
+                .map_err(io::Error::other)
+        }
+    }
+
     fn dispatch(&mut self) -> io::Result<()> {
         while let Some(command) = self.commands.front_mut() {
+            if self.worker.port.as_ref().is_some_and(host::Port::rotating) {
+                break;
+            }
             match command {
                 Command::Pause { .. }
                     if !self.pending.is_empty()
@@ -583,9 +614,11 @@ impl Reactor {
                         break;
                     }
                     if !*rotated {
-                        self.worker.log.new_attachment().map_err(io::Error::other)?;
                         *rotated = true;
-                        self.start_fence(None, false)?;
+                        self.rotate(append::RotationKind::FreshAttachment)?;
+                        if self.worker.port.is_none() {
+                            self.start_fence(None, false)?;
+                        }
                         break;
                     }
                     let command = self.commands.pop_front().unwrap();
@@ -603,7 +636,7 @@ impl Reactor {
                     Err(append::Error::Rollover) => {
                         let status = self.worker.log.status();
                         if status.issued == status.published && status.durable == status.published {
-                            self.worker.log.rollover().map_err(io::Error::other)?;
+                            self.rotate(append::RotationKind::Rollover)?;
                         } else {
                             self.start_fence(None, true)?;
                         }
@@ -709,6 +742,7 @@ impl Reactor {
         }
         if !self.closed
             && !self.admission_paused
+            && !self.worker.port.as_ref().is_some_and(host::Port::rotating)
             && self.cohort.is_none()
             && self.commands.is_empty()
             && self.worker.log.status().durable < self.worker.log.status().issued
@@ -727,6 +761,13 @@ impl Reactor {
             self.send_io(io, Err(self.failure()))?;
         }
         Ok(())
+    }
+
+    fn stop(&mut self, error: &io::Error) {
+        self.fail(error);
+        // These commands never reached the kernel. Return their owned errors
+        // before closing the producer; Drop still drains actual pending IO.
+        let _ = self.reject_queued();
     }
 
     fn wait(&self) -> io::Result<()> {
@@ -823,7 +864,7 @@ impl Reactor {
                 Ok::<(), io::Error>(())
             })();
             if let Err(error) = result {
-                self.fail(&error);
+                self.stop(&error);
                 // Unexpected reactor failure ends this producer. Drop first
                 // drains kernel ownership; channel closure releases waiters.
                 break;
@@ -837,7 +878,7 @@ impl Reactor {
                 break;
             }
             if let Err(error) = self.wait() {
-                self.fail(&error);
+                self.stop(&error);
                 break;
             }
         }

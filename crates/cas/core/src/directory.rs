@@ -35,6 +35,10 @@ impl Directory {
     }
 
     pub fn sync(&self) -> io::Result<()> {
+        #[cfg(test)]
+        if crate::direct::faults::take(crate::direct::faults::Fault::DirectorySync) {
+            return Err(io::Error::from_raw_os_error(libc::EIO));
+        }
         self.file.sync_all()
     }
 

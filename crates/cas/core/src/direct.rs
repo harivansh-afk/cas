@@ -38,6 +38,14 @@ pub(crate) fn punch(file: &File, offset: u64, length: u64) -> io::Result<()> {
     )
 }
 
+pub(crate) fn sync_all(file: &File) -> io::Result<()> {
+    #[cfg(test)]
+    if faults::take(faults::Fault::FileSync) {
+        return Err(io::Error::from_raw_os_error(libc::EIO));
+    }
+    file.sync_all()
+}
+
 pub(crate) fn preallocate(file: &File, offset: u64, length: u64) -> io::Result<()> {
     #[cfg(test)]
     if faults::take(faults::Fault::Allocate) {
@@ -98,6 +106,10 @@ pub(crate) fn write(file: &File, buffer: &AlignedBuffer, offset: u64) -> io::Res
 
 pub(crate) fn write_bytes(file: &File, buffer: &[u8], offset: u64) -> io::Result<()> {
     aligned(buffer, offset)?;
+    #[cfg(test)]
+    if faults::take(faults::Fault::Write) {
+        return Err(io::Error::from_raw_os_error(libc::EIO));
+    }
     #[cfg(test)]
     if faults::take(faults::Fault::ShortWrite) {
         // Persist one aligned block, then report the short write through
@@ -213,6 +225,9 @@ pub(crate) mod faults {
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     pub(crate) enum Fault {
+        Write,
+        FileSync,
+        DirectorySync,
         Allocate,
         Punch,
         Read,
@@ -258,7 +273,7 @@ pub(crate) mod faults {
         NEXT.with(|next| assert!(next.replace(Some((fault, successful_calls))).is_none()));
     }
 
-    pub(super) fn take(fault: Fault) -> bool {
+    pub(crate) fn take(fault: Fault) -> bool {
         let pause = PAUSE.with(|pause| {
             let mut pause = pause.borrow_mut();
             if pause.as_ref().is_some_and(|pause| pause.fault == fault) {

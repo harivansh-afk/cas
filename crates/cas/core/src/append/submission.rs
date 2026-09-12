@@ -63,7 +63,7 @@ impl Log {
     /// an admitted builder queued while older IO or its finite cohort drains.
     pub fn check_append(&self, builder: &Builder) -> Result<()> {
         self.healthy()?;
-        if self.cohort.is_some() {
+        if self.cohort.is_some() || self.rotating {
             return Err(Error::Pending);
         }
         if builder.is_empty() || builder.image_bytes() != self.config.image_bytes {
@@ -152,12 +152,13 @@ impl Log {
     /// append IO. The caller reserves a control buffer before invoking this.
     pub fn prepare_fence(&mut self) -> Result<Submission> {
         self.healthy()?;
-        if self.cohort.is_some() {
+        if self.cohort.is_some() || self.rotating {
             return Err(Error::Pending);
         }
         if self.offset + BLOCK_SIZE as u64 > self.config.segment_bytes {
             // A previously completed fence consumed the final reserved slot.
-            self.rollover()?;
+            // Preparing an IO submission never performs allocation or sync.
+            return Err(Error::Rollover);
         }
         self.next_batch.checked_add(1).ok_or(Error::Exhausted)?;
         let fence = Batch::fence(self.current().header.number, self.next_batch, self.issued)?;
@@ -200,9 +201,10 @@ impl Log {
         self.rotate(None)
     }
 
-    fn drained(&self) -> Result<()> {
+    pub(super) fn drained(&self) -> Result<()> {
         self.healthy()?;
-        if self.cohort.is_some()
+        if self.rotating
+            || self.cohort.is_some()
             || self.pending_descriptors != 0
             || self.issued != self.published
             || self.durable != self.published

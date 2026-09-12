@@ -97,7 +97,7 @@ impl Segment {
         let alignment = direct::Alignment::query(&file)?;
         direct::preallocate(&file, 0, header.capacity)?;
         direct::write(&file, &buffer, 0)?;
-        file.sync_all()?;
+        direct::sync_all(&file)?;
         directory.sync()?;
         Ok(Arc::new(Self {
             file: Arc::new(file),

@@ -46,7 +46,7 @@ struct SharedHost {
     resources: Arc<Resources>,
     attached: AtomicUsize,
     #[cfg(test)]
-    pause: Arc<Mutex<Option<tests::Pause>>>,
+    control: Arc<Mutex<tests::Control>>,
 }
 
 struct Attachment {
@@ -60,7 +60,7 @@ struct Attachment {
 pub struct Host {
     shared: Arc<SharedHost>,
     images: BudgetVec<Option<Attachment>, BudgetAllocator>,
-    ready: Option<mpsc::SyncSender<usize>>,
+    ready: Option<mpsc::SyncSender<Ready>>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -79,7 +79,7 @@ impl Host {
             resources,
             attached: AtomicUsize::new(0),
             #[cfg(test)]
-            pause: Arc::new(Mutex::new(None)),
+            control: Arc::new(Mutex::new(tests::Control::default())),
         });
         let mut attachments =
             BudgetVec::new_in(BudgetAllocator::new(Arc::clone(&shared.resources.metadata)));
@@ -119,7 +119,7 @@ impl Host {
             endpoints.push(worker::Endpoint {
                 manifest,
                 #[cfg(test)]
-                pause: Arc::clone(&shared.pause),
+                control: Arc::clone(&shared.control),
                 health: Arc::clone(&health),
                 wake: wake.try_clone()?,
                 output,
@@ -142,6 +142,7 @@ impl Host {
                     retry: false,
                     last_reclaim: Instant::now(),
                     attached: false,
+                    rotation: None,
                 },
             }));
         }
@@ -240,23 +241,37 @@ impl Host {
 
 enum Event {
     Select,
+    Allocate,
     Published(append::Compacted),
     Reclaimed(append::Reclaimed),
+    Rotated(append::Rotated),
     Failed(String),
 }
 
 enum Reply {
     Selected(Option<append::Selection>),
+    Rotation(append::Rotation),
     Reclaim(append::Reclamation),
     Applied,
     Failed(String),
+}
+
+#[derive(Clone, Copy)]
+enum Turn {
+    Compact,
+    Rotate,
+}
+
+struct Ready {
+    index: usize,
+    turn: Turn,
 }
 
 pub(super) struct Port {
     index: usize,
     shared: Arc<SharedHost>,
     health: Health,
-    ready: mpsc::SyncSender<usize>,
+    ready: mpsc::SyncSender<Ready>,
     events: mpsc::Receiver<Event>,
     reply: mpsc::SyncSender<Reply>,
     pub wake: EventFd,
@@ -266,6 +281,7 @@ pub(super) struct Port {
     retry: bool,
     last_reclaim: Instant,
     attached: bool,
+    rotation: Option<append::RotationKind>,
 }
 
 impl Port {
@@ -276,6 +292,7 @@ impl Port {
         // The worker still owns its selection/output and will observe failure
         // before another publication. Closing this image must not await its IO.
         self.active = None;
+        self.rotation = None;
     }
 
     pub fn fail_shared(&self, error: &io::Error) {
@@ -289,7 +306,34 @@ impl Port {
         Arc::clone(&self.shared.resources.metadata)
     }
     pub fn pending(&self) -> bool {
-        self.active.is_some()
+        self.active.is_some() || self.rotation.is_some()
+    }
+
+    pub fn rotating(&self) -> bool {
+        self.rotation.is_some()
+    }
+
+    pub fn rotate(&mut self, kind: append::RotationKind) -> io::Result<()> {
+        if self.rotation.is_some_and(|old| old != kind) {
+            return Err(io::Error::other("conflicting WAL rotation requests"));
+        }
+        self.rotation = Some(kind);
+        if self.active.is_none() {
+            self.queue(Turn::Rotate)?;
+        }
+        Ok(())
+    }
+
+    fn queue(&mut self, turn: Turn) -> io::Result<()> {
+        self.ready
+            .try_send(Ready {
+                index: self.index,
+                turn,
+            })
+            .map_err(|_| io::Error::other("background ready queue unavailable"))?;
+        self.active = Some(Instant::now());
+        self.granted = false;
+        Ok(())
     }
 
     fn respond(&self, reply: Reply) -> io::Result<()> {
@@ -311,7 +355,7 @@ impl Port {
 
     pub fn poll(&mut self, log: &mut Log, last_write: Instant, paused: bool) -> io::Result<()> {
         while let Ok(event) = self.events.try_recv() {
-            if matches!(event, Event::Select) {
+            if matches!(event, Event::Select | Event::Allocate) {
                 self.active = Some(Instant::now());
                 self.granted = true;
             }
@@ -323,6 +367,20 @@ impl Port {
                 return Err(io::Error::other(error.clone()));
             }
             match event {
+                Event::Allocate => {
+                    let kind = self
+                        .rotation
+                        .ok_or_else(|| io::Error::other("unrequested WAL allocation grant"))?;
+                    self.respond(Reply::Rotation(
+                        log.prepare_rotation(kind).map_err(io::Error::other)?,
+                    ))?;
+                }
+                Event::Rotated(receipt) => {
+                    log.install_rotation(receipt).map_err(io::Error::other)?;
+                    self.respond(Reply::Applied)?;
+                    self.rotation = None;
+                    self.active = None;
+                }
                 Event::Select if log.status().durable > log.status().compacted => {
                     self.respond(Reply::Selected(
                         log.select_compaction(
@@ -380,18 +438,21 @@ impl Port {
             .oldest
             .is_some_and(|oldest| oldest.elapsed() >= Duration::from_secs(1));
         let retry = self.retry && self.last_reclaim.elapsed() >= Duration::from_millis(100);
-        if !paused && self.active.is_none() && ((dirty && (settled || forced)) || retry) {
-            self.ready
-                .try_send(self.index)
-                .map_err(|_| io::Error::other("background ready queue unavailable"))?;
-            self.active = Some(Instant::now());
-            self.granted = false;
+        let turn = if self.rotation.is_some() {
+            Some(Turn::Rotate)
+        } else if !paused && ((dirty && (settled || forced)) || retry) {
+            Some(Turn::Compact)
+        } else {
+            None
+        };
+        if let Some(turn) = turn.filter(|_| self.active.is_none()) {
+            self.queue(turn)?;
         }
         Ok(())
     }
 
     pub fn needs_wake(&self, log: &Log) -> bool {
-        self.active.is_some() || self.retry || log.status().durable > log.status().compacted
+        self.pending() || self.retry || log.status().durable > log.status().compacted
     }
 }
 

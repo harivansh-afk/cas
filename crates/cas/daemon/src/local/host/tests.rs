@@ -3,6 +3,7 @@ use cas_core::{
     aligned::AlignedBuffer, manifest::file::Identity, segments::Tickets, store::file::Config,
 };
 use std::{fs, path::Path};
+mod rotation;
 
 const STORE: Config = Config {
     store: [1; 16],
@@ -13,6 +14,12 @@ const IMAGE_BYTES: u64 = 64 * BLOCK_SIZE as u64;
 pub(super) struct Pause {
     entered: mpsc::Sender<()>,
     resume: mpsc::Receiver<()>,
+}
+
+#[derive(Default)]
+pub(super) struct Control {
+    pub compaction: Option<Pause>,
+    pub rotation: Option<Pause>,
 }
 
 impl Pause {
@@ -377,7 +384,7 @@ fn stalled_compactor_keeps_reads_live_and_retains_ownership_after_deadline() {
     drained(&mut second, 1);
     let (entered, observed) = mpsc::channel();
     let (release, resume) = mpsc::channel();
-    *host.shared.pause.lock().unwrap() = Some(Pause { entered, resume });
+    host.shared.control.lock().unwrap().compaction = Some(Pause { entered, resume });
     write(&mut first, 1, 0, &[9; BLOCK_SIZE]);
     observed.recv_timeout(Duration::from_secs(3)).unwrap();
     let held = resources.compaction.usage().current.bytes;

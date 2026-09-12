@@ -78,7 +78,9 @@ impl Log {
             directory,
             config,
             limits,
-            segments: Vec::new(),
+            segments: super::BudgetVec::new_in(crate::budget::BudgetAllocator::new(Arc::clone(
+                &metadata,
+            ))),
             index,
             metadata: Arc::clone(&metadata),
             offset: BLOCK_SIZE as u64,
@@ -96,7 +98,16 @@ impl Log {
             rejected_bytes: 0,
             failed: false,
             fenced: false,
+            rotating: false,
         };
+        log.segments
+            .try_reserve_exact(candidates.len())
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::OutOfMemory,
+                    "staging segment table exhausted",
+                )
+            })?;
         let mut rejected = None;
         for (index, (number, file)) in candidates.iter().enumerate() {
             let opened = if index == 0 {

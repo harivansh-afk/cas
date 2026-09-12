@@ -522,7 +522,7 @@ fn index_budget_denial_precedes_creation_or_recovery_and_publication_reuses_slot
     let segment_metadata = log.status().segment_metadata_bytes;
     assert_eq!(
         charged,
-        log.status().index_metadata_bytes + segment_metadata
+        log.status().index_metadata_bytes + segment_metadata + log.status().segment_table_bytes
     );
     let pins_denied = Budget::new(Amount {
         bytes: log.status().index_metadata_bytes,
@@ -546,7 +546,7 @@ fn index_budget_denial_precedes_creation_or_recovery_and_publication_reuses_slot
     log.flush().unwrap();
     assert_eq!(metadata.usage().current.bytes, charged);
     assert_eq!(metadata.usage().peak.bytes, charged);
-    assert_eq!(metadata.usage().admitted, 2);
+    assert_eq!(metadata.usage().admitted, 3);
     assert!(log.status().index_nodes_peak >= 3);
     drop(log);
     assert_eq!(metadata.usage().current.bytes, segment_metadata);

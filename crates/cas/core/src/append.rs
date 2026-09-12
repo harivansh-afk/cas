@@ -5,10 +5,12 @@ mod index;
 mod read;
 mod reclaim;
 mod recovery;
+mod rotation;
 mod segment;
 mod shared;
 mod submission;
 
+use allocator_api2::vec::Vec as BudgetVec;
 use std::fs::{self, File};
 use std::io;
 use std::path::Path;
@@ -17,7 +19,7 @@ use std::sync::Arc;
 use crate::{
     BLOCK_SIZE, MAX_REQUEST_BYTES,
     aligned::AlignedBuffer,
-    budget::{Amount, Budget},
+    budget::{Amount, Budget, BudgetAllocator},
     direct,
 };
 use format::{Batch, Builder, Header, Kind, SegmentHeader};
@@ -29,6 +31,7 @@ pub use compaction::{Compacted, Input, Selection};
 pub use read::{ReadPlan, ReadRange};
 pub use reclaim::{ReclaimStats, Reclaimed, Reclamation};
 pub use recovery::{LiveRecovery, Mutation, Recovery};
+pub use rotation::{Rotated, Rotation, RotationKind};
 pub use shared::SharedRecovery;
 pub use submission::Submission;
 
@@ -109,6 +112,7 @@ pub struct Status {
     pub intervals: usize,
     pub index_metadata_bytes: usize,
     pub segment_metadata_bytes: usize,
+    pub segment_table_bytes: usize,
     pub read_pins: u32,
     pub index_nodes: usize,
     pub index_nodes_peak: usize,
@@ -117,6 +121,7 @@ pub struct Status {
     pub rejected_bytes: u64,
     pub alignment: Alignment,
     pub failed: bool,
+    pub rotating: bool,
 }
 
 /// Ordered staging state. The actual IO file descriptions stay locked and are
@@ -125,7 +130,7 @@ pub struct Log {
     directory: Directory,
     config: Config,
     limits: Limits,
-    segments: Vec<Arc<Segment>>,
+    segments: BudgetVec<Arc<Segment>, BudgetAllocator>,
     index: Index,
     metadata: Arc<Budget>,
     offset: u64,
@@ -143,6 +148,7 @@ pub struct Log {
     rejected_bytes: u64,
     failed: bool,
     fenced: bool,
+    rotating: bool,
 }
 
 fn default_metadata() -> Arc<Budget> {
@@ -188,6 +194,13 @@ impl Log {
         }
         let index = Index::new(limits.intervals, Arc::clone(&metadata))?;
         let pins = segment::Pins::new(config.segment_bytes, Arc::clone(&metadata))?;
+        let mut segments = BudgetVec::new_in(BudgetAllocator::new(Arc::clone(&metadata)));
+        segments.try_reserve_exact(1).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                "staging segment table exhausted",
+            )
+        })?;
         fs::create_dir(path)?;
         File::open(
             path.parent()
@@ -202,11 +215,12 @@ impl Log {
         if allocated_bytes > limits.staging_bytes {
             return Err(Error::Capacity);
         }
+        segments.push(segment);
         Ok(Self {
             directory,
             config,
             limits,
-            segments: vec![segment],
+            segments,
             index,
             metadata,
             offset: BLOCK_SIZE as u64,
@@ -224,6 +238,7 @@ impl Log {
             rejected_bytes: 0,
             failed: false,
             fenced: false,
+            rotating: false,
         })
     }
 
@@ -264,6 +279,7 @@ impl Log {
             intervals: self.index.len(),
             index_metadata_bytes: self.index.allocated_bytes(),
             segment_metadata_bytes: self.segments.iter().map(|s| s.pins.bytes()).sum(),
+            segment_table_bytes: self.segments.capacity() * std::mem::size_of::<Arc<Segment>>(),
             read_pins: self.segments.iter().map(|s| s.pins.readers()).sum(),
             index_nodes,
             index_nodes_peak,
@@ -272,6 +288,7 @@ impl Log {
             rejected_bytes: self.rejected_bytes,
             alignment: self.current().alignment,
             failed: self.failed,
+            rotating: self.rotating,
         }
     }
 
@@ -280,35 +297,9 @@ impl Log {
     }
 
     fn rotate(&mut self, epoch: Option<u64>) -> Result<()> {
-        if self
-            .allocated_bytes
-            .checked_add(self.config.segment_bytes)
-            .is_none_or(|bytes| bytes > self.limits.staging_bytes)
-        {
-            return Err(Error::Capacity);
-        }
-        let created = segment::create(
-            &self.directory,
-            self.config,
-            self.tickets.as_deref(),
-            self.highest_segment,
-            epoch,
-            self.published,
-            segment::Pins::new(self.config.segment_bytes, Arc::clone(&self.metadata))?,
-        );
-        let segment = self.fail_on_io(created)?;
-        self.highest_segment = segment.header.number;
-        self.allocated_bytes += self.fail_on_io(segment.allocated_bytes())?;
-        if self.allocated_bytes > self.limits.staging_bytes {
-            self.failed = true;
-            return Err(Error::Capacity);
-        }
-        self.segments.push(segment);
-        self.offset = BLOCK_SIZE as u64;
-        self.next_batch = 1;
-        self.fenced = false;
-        self.encoded_bytes += BLOCK_SIZE as u64;
-        Ok(())
+        let prepared = self.rotation(epoch)?;
+        let created = self.fail_on_io(prepared.create())?;
+        self.install_rotation(created)
     }
 
     pub fn append(&mut self, builder: Builder) -> Result<Batch> {
@@ -334,7 +325,13 @@ impl Log {
         if self.covers_flush(self.published) {
             return Ok(self.durable);
         }
-        let fence = self.prepare_fence()?;
+        let fence = match self.prepare_fence() {
+            Err(Error::Rollover) => {
+                self.rollover()?;
+                self.prepare_fence()?
+            }
+            other => other?,
+        };
         let result = fence.write().and_then(|()| direct::sync_data(fence.file()));
         self.fail_on_io(result)?;
         self.complete_sync(&fence)

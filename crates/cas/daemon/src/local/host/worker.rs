@@ -3,7 +3,7 @@ use super::*;
 pub(super) struct Endpoint {
     pub manifest: Manifest,
     #[cfg(test)]
-    pub pause: Arc<Mutex<Option<tests::Pause>>>,
+    pub control: Arc<Mutex<tests::Control>>,
     pub health: Health,
     pub wake: EventFd,
     pub output: mpsc::SyncSender<Event>,
@@ -42,7 +42,7 @@ impl Endpoint {
             Reply::Selected(Some(selection)) => {
                 #[cfg(test)]
                 {
-                    let pause = self.pause.lock().unwrap().take();
+                    let pause = self.control.lock().unwrap().compaction.take();
                     if let Some(pause) = pause {
                         pause.wait();
                     }
@@ -64,13 +64,31 @@ impl Endpoint {
             _ => Err(io::Error::other("expected reclaimed-space acknowledgment")),
         }
     }
+
+    fn rotate(&mut self) -> io::Result<()> {
+        let Reply::Rotation(prepared) = self.exchange(Event::Allocate)? else {
+            return Err(io::Error::other("expected WAL rotation preparation"));
+        };
+        #[cfg(test)]
+        {
+            let pause = self.control.lock().unwrap().rotation.take();
+            if let Some(pause) = pause {
+                pause.wait();
+            }
+        }
+        self.healthy()?;
+        match self.exchange(Event::Rotated(prepared.create()?))? {
+            Reply::Applied => Ok(()),
+            _ => Err(io::Error::other("expected WAL installation acknowledgment")),
+        }
+    }
 }
 
 pub(super) struct Owner {
     pub store: Store,
     pub endpoints: BudgetVec<Endpoint, BudgetAllocator>,
     pub shared: Arc<SharedHost>,
-    pub input: mpsc::Receiver<usize>,
+    pub input: mpsc::Receiver<Ready>,
 }
 
 impl Owner {
@@ -79,14 +97,18 @@ impl Owner {
             shared: Arc::clone(&self.shared),
             normal: false,
         };
-        while let Ok(index) = self.input.recv() {
+        while let Ok(Ready { index, turn }) = self.input.recv() {
             let Some(endpoint) = self.endpoints.get_mut(index) else {
                 self.shared
                     .gate
                     .fail("unknown background image slot".into());
                 break;
             };
-            if let Err(error) = endpoint.compact(&mut self.store) {
+            let result = match turn {
+                Turn::Compact => endpoint.compact(&mut self.store),
+                Turn::Rotate => endpoint.rotate(),
+            };
+            if let Err(error) = result {
                 if self.store.status().failed {
                     self.shared.gate.fail(error.to_string());
                 }

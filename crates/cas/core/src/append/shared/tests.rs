@@ -1,4 +1,5 @@
 mod compaction;
+mod rotation;
 
 use super::*;
 use crate::{
