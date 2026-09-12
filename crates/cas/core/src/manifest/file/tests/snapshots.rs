@@ -203,7 +203,7 @@ fn reflink_snapshot_captures_exact_old_root_and_clone_gets_a_private_namespace()
     source.publish(prepared).unwrap();
     assert!(source.current().durable > captured.commit().durable);
     assert_ne!(source.current().root, captured.commit().root);
-    let snapshot = Snapshot::create(&captured, &snapshot_path, metadata()).unwrap();
+    let mut snapshot = Snapshot::create(&captured, &snapshot_path, metadata()).unwrap();
     assert_eq!(
         snapshot.key(),
         SnapshotKey {
@@ -221,6 +221,18 @@ fn reflink_snapshot_captures_exact_old_root_and_clone_gets_a_private_namespace()
         (1, 0)
     );
     assert_eq!(clone.current().root, snapshot.key().commit.root);
+    let source_key = source.view().unwrap().key();
+    let snapshot_key = snapshot.key();
+    let clone_key = clone.view().unwrap().key();
+    assert_eq!(
+        source.pinned_roots(metadata()).unwrap().keys(),
+        [captured.key(), source_key]
+    );
+    assert_eq!(
+        snapshot.pinned_roots(metadata()).unwrap().keys(),
+        [snapshot_key]
+    );
+    assert_eq!(clone.pinned_roots(metadata()).unwrap().keys(), [clone_key]);
     model(&clone.view().unwrap(), &[]);
     {
         use crate::{append, segments::Tickets};

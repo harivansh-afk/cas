@@ -20,6 +20,10 @@ const NAME: &str = "manifest.v2";
 mod snapshot;
 pub use snapshot::{Snapshot, SnapshotInspection, SnapshotKey};
 
+mod pins;
+use pins::Pin;
+pub use pins::Roots;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Identity {
     pub store: [u8; 16],
@@ -53,6 +57,7 @@ pub struct Manifest {
     end: u64,
     metadata: Arc<Budget>,
     failed: bool,
+    pin: Pin,
 }
 
 /// Immutable root/end with a pin on the actual locked IO file description.
@@ -63,6 +68,7 @@ pub struct View {
     commit: Commit,
     end: u64,
     metadata: Arc<Budget>,
+    pin: Pin,
 }
 
 impl View {
@@ -81,6 +87,12 @@ impl View {
     pub fn end(&self) -> u64 {
         self.end
     }
+    pub fn key(&self) -> SnapshotKey {
+        SnapshotKey {
+            commit: self.commit,
+            end: self.end,
+        }
+    }
     pub fn file(&self) -> &File {
         &self.file
     }
@@ -88,6 +100,7 @@ impl View {
         Ok(Read {
             lookup: Lookup::new(self.commit, self.end, block)?,
             file: Arc::clone(&self.file),
+            _pin: self.pin.clone(),
         })
     }
     pub fn tree(&self) -> io::Result<Tree<'_, File>> {
@@ -104,6 +117,7 @@ impl View {
 pub struct Read {
     lookup: Lookup,
     file: Arc<File>,
+    _pin: Pin,
 }
 
 impl Read {
@@ -126,6 +140,7 @@ impl Manifest {
             commit: self.current,
             end: self.end,
             metadata: Arc::clone(&self.metadata),
+            pin: self.pin.clone(),
         })
     }
 
@@ -134,6 +149,14 @@ impl Manifest {
     pub fn create(path: &Path, identity: Identity, metadata: Arc<Budget>) -> io::Result<Self> {
         let current = identity.initial();
         current.validate(BLOCK_SIZE as u64)?;
+        let end = (2 * BLOCK_SIZE) as u64;
+        let pin = Pin::new(
+            SnapshotKey {
+                commit: current,
+                end,
+            },
+            Arc::clone(&metadata),
+        )?;
         let mut buffer =
             AlignedBuffer::try_new_in(2 * BLOCK_SIZE, BudgetAllocator::new(Arc::clone(&metadata)))?;
         FileHeader {
@@ -153,9 +176,10 @@ impl Manifest {
             directory,
             file: Arc::new(file),
             current,
-            end: (2 * BLOCK_SIZE) as u64,
+            end,
             metadata,
             failed: false,
+            pin,
         })
     }
 
@@ -169,6 +193,11 @@ impl Manifest {
 
     pub fn failed(&self) -> bool {
         self.failed
+    }
+
+    pub fn pinned_roots(&mut self, metadata: Arc<Budget>) -> io::Result<Roots<'_>> {
+        self.healthy()?;
+        self.pin.capture(&self.file, metadata)
     }
 
     fn healthy(&self) -> io::Result<()> {
@@ -220,12 +249,18 @@ impl Manifest {
             prepared.previous() == self.current && prepared.offset() == self.end,
             "stale manifest transaction",
         )?;
+        let end = self.end + prepared.bytes().len() as u64; // Prepared checked this range.
+        let pin = self.pin.successor(SnapshotKey {
+            commit: prepared.commit(),
+            end,
+        })?;
         self.failed = true;
         direct::preallocate(&self.file, self.end, prepared.bytes().len() as u64)?;
         direct::write_bytes(&self.file, prepared.bytes(), self.end)?;
         direct::sync_data(&self.file)?;
-        self.end += prepared.bytes().len() as u64; // Prepared checked the full range.
+        self.end = end;
         self.current = prepared.commit();
+        self.pin = pin;
         self.failed = false;
         Ok(self.current)
     }
@@ -250,6 +285,13 @@ impl Manifest {
             }
             Ok(())
         })?;
+        let pin = Pin::new(
+            SnapshotKey {
+                commit: selected.commit,
+                end: selected.end,
+            },
+            Arc::clone(&metadata),
+        )?;
         Ok(Inspection {
             manifest: Self {
                 directory,
@@ -258,6 +300,7 @@ impl Manifest {
                 end: selected.end,
                 metadata,
                 failed: true, // Recovery sync precedes use or publication of D.
+                pin,
             },
             selected,
         })

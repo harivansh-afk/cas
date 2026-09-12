@@ -4,6 +4,9 @@ use std::sync::{Arc, Mutex};
 mod allocator;
 pub use allocator::BudgetAllocator;
 
+mod shared;
+pub use shared::BudgetArc;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Amount {
     pub bytes: usize,

@@ -47,19 +47,21 @@ pub struct Snapshot {
 
 impl Snapshot {
     pub fn key(&self) -> SnapshotKey {
-        SnapshotKey {
-            commit: self.view.commit,
-            end: self.view.end,
-        }
+        self.view.key()
     }
 
     pub fn view(&self) -> View {
         self.view.clone()
     }
 
+    pub fn pinned_roots(&mut self, metadata: Arc<Budget>) -> io::Result<Roots<'_>> {
+        self.view.pin.capture(&self.view.file, metadata)
+    }
+
     /// The destination directory already exists. The host has established its
     /// snapshot cut and reserved disk output; catalog publication follows sync.
     pub fn create(source: &View, path: &Path, metadata: Arc<Budget>) -> io::Result<Self> {
+        let pin = Pin::new(source.key(), Arc::clone(&metadata))?;
         let mut scratch =
             AlignedBuffer::try_new_in(BLOCK_SIZE, BudgetAllocator::new(Arc::clone(&metadata)))?;
         let copy = Reflink::create(source, path, scratch.as_mut_slice())?;
@@ -71,6 +73,7 @@ impl Snapshot {
                 commit: source.commit,
                 end: source.end,
                 metadata,
+                pin,
             },
         })
     }
@@ -97,11 +100,13 @@ impl Snapshot {
             }
             Ok(())
         })?;
+        let pin = Pin::new(key, Arc::clone(&metadata))?;
         Ok(SnapshotInspection {
             directory,
             file: Arc::new(file),
             key,
             metadata,
+            pin,
         })
     }
 }
@@ -111,6 +116,7 @@ pub struct SnapshotInspection {
     file: Arc<File>,
     key: SnapshotKey,
     metadata: Arc<Budget>,
+    pin: Pin,
 }
 
 impl SnapshotInspection {
@@ -128,6 +134,7 @@ impl SnapshotInspection {
                 commit: self.key.commit,
                 end: self.key.end,
                 metadata: self.metadata,
+                pin: self.pin,
             },
         })
     }
@@ -157,6 +164,13 @@ impl Manifest {
             .checked_add(BLOCK_SIZE as u64)
             .filter(|end| *end <= i64::MAX as u64)
             .ok_or_else(|| io::Error::other("clone manifest end exhausted"))?;
+        let pin = Pin::new(
+            SnapshotKey {
+                commit: current,
+                end,
+            },
+            Arc::clone(&metadata),
+        )?;
         let mut scratch =
             AlignedBuffer::try_new_in(BLOCK_SIZE, BudgetAllocator::new(Arc::clone(&metadata)))?;
         let copy = Reflink::create(&source.view, path, scratch.as_mut_slice())?;
@@ -171,6 +185,7 @@ impl Manifest {
             end,
             metadata,
             failed: false,
+            pin,
         })
     }
 }
@@ -182,10 +197,7 @@ struct Reflink {
 
 impl Reflink {
     fn create(source: &View, path: &Path, scratch: &mut [u8]) -> io::Result<Self> {
-        let key = SnapshotKey {
-            commit: source.commit,
-            end: source.end,
-        };
+        let key = source.key();
         key.validate()?;
         let directory = Directory::open(path)?;
         let file = direct::open(&path.join(NAME), true)?;

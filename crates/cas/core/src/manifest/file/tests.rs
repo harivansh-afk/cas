@@ -4,6 +4,7 @@ use crate::{
     direct::faults::{self, Fault},
 };
 use std::{fs, io::Write, os::unix::fs::FileExt};
+mod pins;
 mod snapshots;
 
 const ID: Identity = Identity {
@@ -356,11 +357,13 @@ fn file_locks_and_recovery_scratch_remain_bounded() {
     let inspection = Manifest::inspect(dir.path(), ID, 0, Arc::clone(&memory), |_| Ok(())).unwrap();
     assert_eq!(inspection.selected().scanned_pages, 1023);
     assert_eq!(memory.usage().peak.bytes, 2 * BLOCK_SIZE);
-    assert_eq!(memory.usage().current.bytes, 0);
+    assert!(memory.usage().current.bytes > 0);
+    assert!(memory.usage().current.bytes < BLOCK_SIZE); // Selected root registry.
     assert!(inspect(dir.path(), 0).is_err());
     let file = dir.path().join(NAME);
     assert!(direct::open(&file, false).is_err());
     drop(inspection);
+    assert_eq!(memory.usage().current.bytes, 0);
     assert!(direct::open(&file, false).is_ok());
     let short = budget(BLOCK_SIZE);
     let original = bytes(dir.path());
