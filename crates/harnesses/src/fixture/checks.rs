@@ -11,6 +11,7 @@ use crate::evidence;
 
 const SECTORS: u64 = 16 * 1024 * 1024 / 512;
 
+mod collection;
 mod space;
 
 fn require(ok: bool, message: &str) -> io::Result<()> {
@@ -213,6 +214,7 @@ pub(super) fn verify(output: &Path, build: &Build) -> io::Result<()> {
         )?;
     }
     space::verify(&guest)?;
+    collection::verify(&guest)?;
     Ok(())
 }
 

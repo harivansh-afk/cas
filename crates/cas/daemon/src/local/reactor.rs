@@ -608,6 +608,27 @@ impl Reactor {
     }
 
     fn dispatch(&mut self) -> io::Result<()> {
+        if self.worker.port.as_ref().is_some_and(host::Port::quiescing) {
+            // Guest owners have drained. Later lifecycle commands remain queued
+            // until the collector explicitly releases this generation.
+            if self.pending.is_empty() && self.reads.is_empty() && self.appends.is_empty() {
+                if !self
+                    .worker
+                    .log
+                    .covers_flush(self.worker.log.status().published)
+                {
+                    self.start_fence(None, false)?;
+                } else {
+                    self.worker
+                        .port
+                        .as_mut()
+                        .unwrap()
+                        .acknowledge_quiescence()?;
+                }
+            }
+            return Ok(());
+        }
+
         while let Some(command) = self.commands.front_mut() {
             if matches!(command, Command::Pause { .. })
                 && let Some(port) = &mut self.worker.port

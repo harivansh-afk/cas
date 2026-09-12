@@ -5,6 +5,7 @@ use cas_core::{
 use std::{fs, path::Path};
 mod admission;
 mod allocation;
+mod collection;
 mod quiescence;
 mod rotation;
 
@@ -58,6 +59,8 @@ pub(super) struct Pause {
 pub(super) struct Control {
     pub compaction: Option<Pause>,
     pub rotation: Option<Pause>,
+    pub collection: Option<Pause>,
+    pub quiescence_error: bool,
 }
 
 impl Pause {
@@ -162,6 +165,15 @@ fn create_images(
 }
 
 fn reopen(root: &Path, images: u8, resources: Arc<Resources>) -> Host {
+    let (store, images) = recovered_images(root, images, &resources);
+    start(resources, store, images)
+}
+
+fn recovered_images(
+    root: &Path,
+    images: u8,
+    resources: &Arc<Resources>,
+) -> (Store, Vec<(Log, Manifest)>) {
     let tickets = Tickets::open(root, Arc::clone(&resources.metadata)).unwrap();
     let store = Store::inspect(
         Arc::clone(&tickets),
@@ -206,7 +218,7 @@ fn reopen(root: &Path, images: u8, resources: Arc<Resources>) -> Host {
             (log, manifest)
         })
         .collect();
-    start(resources, store, images)
+    (store, images)
 }
 
 fn attach(host: &mut Host, image: u8) -> Local {

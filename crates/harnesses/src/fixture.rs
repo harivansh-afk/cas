@@ -36,6 +36,7 @@ struct Build {
     qemu: PathBuf,
     qemu_executable: PathBuf,
     guest_kernel: String,
+    service_deadline_seconds: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -105,6 +106,10 @@ fn execute(args: &Args) -> io::Result<()> {
     if result.exit_code != Some(0) || result.error.is_some() {
         return Err(io::Error::other("fixture closure capture failed"));
     }
+    let service_deadline = build.service_deadline_seconds;
+    let guest_deadline = service_deadline
+        .checked_add(15)
+        .ok_or_else(|| io::Error::other("fixture deadline overflow"))?;
     let guest = output.join("guest");
     let temporary = output.join("tmp");
     fs::create_dir(&guest)?;
@@ -122,8 +127,8 @@ fn execute(args: &Args) -> io::Result<()> {
             "guest_ram_bytes":2 * 1024_u64 * 1024 * 1024, "vcpus":4,
             "disk_bytes":2 * 1024_u64 * 1024 * 1024, "host_allocation":"sparse",
             "filesystem":"XFS", "payload_io":"O_DIRECT", "network":"none",
-            "acceleration":"KVM", "service_deadline_seconds":100,
-            "guest_deadline_seconds":115, "guest_cache_state":"fresh boot",
+            "acceleration":"KVM", "service_deadline_seconds":service_deadline,
+            "guest_deadline_seconds":guest_deadline, "guest_cache_state":"fresh boot",
             "host_cache_state":"uncontrolled; no performance acceptance",
         }),
     )?;
@@ -144,8 +149,8 @@ fn execute(args: &Args) -> io::Result<()> {
         .stdout(log.try_clone()?)
         .stderr(log);
     let mut child = process::ManagedChild::spawn(&mut command)?;
-    let outcome =
-        crate::qemu::record(&mut child, output).and_then(|()| child.wait(Duration::from_secs(115)));
+    let outcome = crate::qemu::record(&mut child, output)
+        .and_then(|()| child.wait(Duration::from_secs(guest_deadline)));
     let exit = outcome
         .as_ref()
         .ok()

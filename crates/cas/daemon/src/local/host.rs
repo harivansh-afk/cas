@@ -2,18 +2,20 @@
 pub(super) mod admission;
 pub(super) mod capacity;
 pub use admission::Quiescence;
+mod collection;
 #[cfg(test)]
 mod tests;
 mod worker;
+pub use collection::{CollectionHandle, CollectionReport};
 
 use super::*;
 use allocator_api2::vec::Vec as BudgetVec;
 use cas_core::{
     budget::BudgetAllocator,
-    manifest::file::Manifest,
+    manifest::file::{Manifest, Snapshot},
     store::file::{Reader, Store},
 };
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 pub struct Resources {
     pub metadata: Arc<Budget>,
@@ -49,6 +51,8 @@ struct SharedHost {
     reader: Reader,
     resources: Arc<Resources>,
     attached: AtomicUsize,
+    collecting: AtomicBool,
+    collection: Mutex<collection::Status>,
     staging: cas_core::budget::BudgetArc<cas_core::space::Staging>,
     physical: Option<Arc<cas_core::space::Governor>>,
     #[cfg(test)]
@@ -59,6 +63,12 @@ struct Attachment {
     image: [u8; 16],
     log: Log,
     port: Port,
+}
+
+/// Complete retained membership, stabilized together before starting the host.
+pub struct Roots {
+    pub images: Vec<(Log, Manifest)>,
+    pub snapshots: Vec<Snapshot>,
 }
 
 /// Embedding API for the catalog owner and the same native validation frontend.
@@ -79,7 +89,10 @@ impl Host {
         Self::build(
             resources,
             store,
-            images,
+            Roots {
+                images,
+                snapshots: Vec::new(),
+            },
             1024 * MAX_REQUEST_BYTES as u64,
             None,
         )
@@ -92,17 +105,47 @@ impl Host {
         physical: Arc<cas_core::space::Governor>,
         staging_bytes: u64,
     ) -> io::Result<Self> {
-        capacity::validate(&store, &images, &physical)?;
-        Self::build(resources, store, images, staging_bytes, Some(physical))
+        Self::build(
+            resources,
+            store,
+            Roots {
+                images,
+                snapshots: Vec::new(),
+            },
+            staging_bytes,
+            Some(physical),
+        )
+    }
+
+    pub fn from_roots(
+        resources: Arc<Resources>,
+        store: Store,
+        roots: Roots,
+        staging_bytes: u64,
+        physical: Option<Arc<cas_core::space::Governor>>,
+    ) -> io::Result<Self> {
+        Self::build(resources, store, roots, staging_bytes, physical)
     }
 
     fn build(
         resources: Arc<Resources>,
         store: Store,
-        images: Vec<(Log, Manifest)>,
+        roots: Roots,
         staging_bytes: u64,
         physical: Option<Arc<cas_core::space::Governor>>,
     ) -> io::Result<Self> {
+        let Roots { images, snapshots } = roots;
+        if let Some(physical) = &physical {
+            capacity::validate(&store, &images, physical)?;
+        }
+        for snapshot in &snapshots {
+            if snapshot.key().commit.store != store.config().store {
+                return Err(io::Error::other("snapshot belongs to another store"));
+            }
+            if let Some(physical) = &physical {
+                physical.validate_file(snapshot.view()?.file())?;
+            }
+        }
         if images.is_empty() {
             return Err(io::Error::other("host requires an image"));
         }
@@ -122,6 +165,8 @@ impl Host {
             reader: store.reader()?,
             resources,
             attached: AtomicUsize::new(0),
+            collecting: AtomicBool::new(false),
+            collection: Mutex::new(collection::Status::default()),
             staging,
             physical,
             #[cfg(test)]
@@ -137,7 +182,7 @@ impl Host {
         endpoints
             .try_reserve_exact(images.len())
             .map_err(|_| io::Error::other("host endpoint metadata exhausted"))?;
-        let (ready, input) = mailbox::bounded(images.len(), &shared.resources.metadata)?;
+        let (ready, input) = mailbox::bounded(images.len() + 1, &shared.resources.metadata)?;
         for (index, (log, manifest)) in images.into_iter().enumerate() {
             let admission = capacity::Admission {
                 staging: shared.staging.clone(),
@@ -171,6 +216,7 @@ impl Host {
             let (reply, replies) = mailbox::bounded(1, &shared.resources.metadata)?;
             endpoints.push(worker::Endpoint {
                 manifest,
+                quiescent: None,
                 #[cfg(test)]
                 control: Arc::clone(&shared.control),
                 health: Arc::clone(&health),
@@ -191,6 +237,7 @@ impl Host {
                     wake,
                     active: None,
                     granted: false,
+                    quiescence: None,
                     oldest: None,
                     retry: false,
                     last_reclaim: Instant::now(),
@@ -201,7 +248,10 @@ impl Host {
                 },
             }));
         }
+        let mut retained = reserved_vec(snapshots.len(), &shared.resources.metadata)?;
+        retained.extend(snapshots);
         let owner = worker::Owner {
+            snapshots: retained,
             store,
             endpoints,
             shared: Arc::clone(&shared),
@@ -271,6 +321,7 @@ impl Host {
     pub fn report(&self) -> serde_json::Value {
         serde_json::json!({ "failure": self.shared.gate.failure(), "store": self.store_status(),
             "admission": self.shared.admission.status(),
+            "collection": *self.shared.collection.lock().expect("collection status poisoned"),
             "pools": self.shared.resources.pools.report(), "metadata": self.shared.resources.metadata.usage(),
             "compaction_metadata": self.shared.resources.compaction.usage(),
             "attached": self.shared.attached.load(Ordering::Acquire),
@@ -310,6 +361,9 @@ impl Host {
 }
 
 enum Event {
+    Quiesce(u64),
+    Resume(u64),
+    CompactQuiescent(u64),
     Select,
     Allocate,
     Published(append::Compacted),
@@ -320,6 +374,7 @@ enum Event {
 }
 
 enum Reply {
+    Quiesced(u64),
     Selected(Option<append::Selection>),
     Rotation(append::Rotation, cas_core::space::StagingPermit),
     Deferred,
@@ -334,9 +389,9 @@ enum Turn {
     Rotate,
 }
 
-struct Ready {
-    index: usize,
-    turn: Turn,
+enum Ready {
+    Image { index: usize, turn: Turn },
+    Collect(collection::Request),
 }
 
 pub(super) struct Port {
@@ -349,6 +404,7 @@ pub(super) struct Port {
     pub wake: EventFd,
     active: Option<Instant>,
     granted: bool,
+    quiescence: Option<(u64, bool)>,
     oldest: Option<Instant>,
     retry: bool,
     last_reclaim: Instant,
@@ -360,7 +416,7 @@ pub(super) struct Port {
 
 impl Port {
     pub fn abort(&mut self, error: &io::Error) {
-        if self.active.is_some() && self.granted {
+        if (self.active.is_some() && self.granted) || self.quiescence.is_some_and(|(_, ack)| !ack) {
             let _ = self.respond(Reply::Failed(error.to_string()));
         }
         // The worker still owns its selection/output and will observe failure
@@ -399,7 +455,7 @@ impl Port {
         }
         self.rotation = Some(kind);
         self.window.close();
-        if self.active.is_none() {
+        if self.active.is_none() && !self.shared.admission.status().paused {
             self.queue(Turn::Rotate)?;
         }
         Ok(())
@@ -407,7 +463,7 @@ impl Port {
 
     fn queue(&mut self, turn: Turn) -> io::Result<()> {
         self.ready
-            .try_send(Ready {
+            .try_send(Ready::Image {
                 index: self.index,
                 turn,
             })
@@ -454,6 +510,47 @@ impl Port {
                 return Err(io::Error::other(error.clone()));
             }
             match event {
+                Event::Quiesce(generation) => {
+                    if self.rotation == Some(append::RotationKind::FreshAttachment) {
+                        self.respond(Reply::Deferred)?;
+                        continue;
+                    }
+                    self.cancel_future_rollover(log);
+                    self.active = None;
+                    self.granted = false;
+                    self.quiescence = Some((generation, false));
+                    #[cfg(test)]
+                    if self.shared.control.lock().unwrap().quiescence_error {
+                        return Err(io::Error::other(
+                            "injected quiescence acknowledgment failure",
+                        ));
+                    }
+                }
+                Event::Resume(generation) => {
+                    if self.quiescence != Some((generation, true)) {
+                        return Err(io::Error::other("collection resume generation differs"));
+                    }
+                    self.quiescence = None;
+                    self.respond(Reply::Applied)?;
+                }
+                Event::CompactQuiescent(generation) => {
+                    if self.quiescence != Some((generation, true)) {
+                        return Err(io::Error::other("collection compaction generation differs"));
+                    }
+                    self.active = Some(Instant::now());
+                    self.granted = true;
+                    let selection = log
+                        .select_compaction(
+                            Arc::clone(&self.shared.resources.compaction),
+                            self.shared.resources.read_memory(),
+                        )
+                        .map_err(io::Error::other)?;
+                    if selection.is_none() {
+                        self.active = None;
+                        self.granted = false;
+                    }
+                    self.respond(Reply::Selected(selection))?;
+                }
                 Event::Allocate => {
                     let Some(kind) = self.rotation else {
                         // A pause cancelled this future-only queued turn.
@@ -584,7 +681,11 @@ impl Port {
         } else {
             None
         };
-        if let Some(turn) = turn.filter(|_| self.active.is_none()) {
+        if let Some(turn) = turn.filter(|_| {
+            self.active.is_none()
+                && self.quiescence.is_none()
+                && !self.shared.admission.status().paused
+        }) {
             self.queue(turn)?;
         }
         Ok(())
@@ -601,9 +702,24 @@ impl Port {
     }
 }
 
+impl Port {
+    pub fn quiescing(&self) -> bool {
+        self.quiescence.is_some()
+    }
+
+    pub fn acknowledge_quiescence(&mut self) -> io::Result<()> {
+        if let Some((generation, false)) = self.quiescence {
+            self.respond(Reply::Quiesced(generation))?;
+            self.quiescence = Some((generation, true));
+        }
+        Ok(())
+    }
+}
+
 impl Drop for Port {
     fn drop(&mut self) {
         if self.attached {
+            self.shared.admission.detach(self.index);
             self.shared.attached.fetch_sub(1, Ordering::Release);
         }
     }

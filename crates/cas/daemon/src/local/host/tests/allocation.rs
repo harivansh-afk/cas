@@ -26,7 +26,19 @@ fn startup_rejects_staging_caps_that_cannot_reach_the_resume_watermark() {
             },
             STORE,
         );
-        assert!(Host::build(Arc::clone(&resources), store, images, host_cap, None).is_err());
+        assert!(
+            Host::build(
+                Arc::clone(&resources),
+                store,
+                Roots {
+                    images,
+                    snapshots: Vec::new()
+                },
+                host_cap,
+                None
+            )
+            .is_err()
+        );
         assert_eq!(resources.metadata.usage().current.bytes, 0);
     }
 }
@@ -43,7 +55,17 @@ fn staging_pressure_drains_a_continuous_writer_without_guest_flushes() {
         limits(),
         STORE,
     );
-    let mut host = Host::build(resources, store, images, 4 * SEGMENT, None).unwrap();
+    let mut host = Host::build(
+        resources,
+        store,
+        Roots {
+            images,
+            snapshots: Vec::new(),
+        },
+        4 * SEGMENT,
+        None,
+    )
+    .unwrap();
     let mut local = attach(&mut host, 2);
     let mut model = vec![0; MAX_REQUEST_BYTES];
     for sequence in 0..8 {
@@ -143,6 +165,9 @@ fn physical_promises_defer_rotation_and_real_reclamation_reopens_staging() {
         .unwrap();
         writeln!(file).unwrap();
     };
+    let (entered, observed) = mpsc::channel();
+    let (release_collection, resume) = mpsc::channel();
+    host.shared.control.lock().unwrap().collection = Some(Pause { entered, resume });
     phase("started", &host);
     write(&mut first, 0, 0, &old);
     phase("first-write", &host);
@@ -160,6 +185,7 @@ fn physical_promises_defer_rotation_and_real_reclamation_reopens_staging() {
         );
         thread::sleep(Duration::from_millis(1));
     }
+    observed.recv_timeout(Duration::from_secs(3)).unwrap();
     phase("physical-denial", &host);
     let denied = host.report();
     assert_eq!(physical.status().promised, 56 * MAX_REQUEST_BYTES as u64);
@@ -171,6 +197,20 @@ fn physical_promises_defer_rotation_and_real_reclamation_reopens_staging() {
             .is_none()
     );
     assert!(second.prepare(Kind::Write(BLOCK_SIZE)).unwrap().is_none());
+    assert_eq!(host.report()["admission"]["running"], true);
+    // Physical pressure now invokes host GC. Reads resume after that pause;
+    // the original accepted promise remains charged until its real release.
+    drop(held);
+    phase("released", &host);
+    release_collection.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while host.shared.admission.status().paused {
+        assert!(
+            Instant::now() < deadline,
+            "collection did not resume admission"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
     read_at(&mut first, 1, 0, &old);
     phase("old-read", &host);
     read_at(&mut second, 0, 0, &[0; BLOCK_SIZE]);
@@ -179,15 +219,13 @@ fn physical_promises_defer_rotation_and_real_reclamation_reopens_staging() {
     completed(&mut first);
     phase("covered-flush", &host);
     assert_eq!(first.status.durable, 1);
-    assert!(host.report()["collection_required"].as_bool().unwrap());
+    assert!(!host.report()["collection_required"].as_bool().unwrap());
     first
         .pause(Instant::now() + Duration::from_secs(3))
         .unwrap();
     phase("paused", &host);
     assert!(!first.status.rotating);
     first.resume().unwrap();
-    drop(held);
-    phase("released", &host);
     let mut expected = vec![0; 8 * MAX_REQUEST_BYTES];
     expected[..MAX_REQUEST_BYTES].copy_from_slice(&old);
     let mut samples = Vec::new();
@@ -257,7 +295,17 @@ fn disconnect_cancels_capacity_denied_future_rollover() {
         limits(),
         STORE,
     );
-    let mut host = Host::build(resources, store, images, 4 * SEGMENT, None).unwrap();
+    let mut host = Host::build(
+        resources,
+        store,
+        Roots {
+            images,
+            snapshots: Vec::new(),
+        },
+        4 * SEGMENT,
+        None,
+    )
+    .unwrap();
     let mut local = attach(&mut host, 2);
     write(&mut local, 0, 0, &vec![1; MAX_REQUEST_BYTES]);
     let held = cas_core::space::Staging::reserve(&host.shared.staging, 0, SEGMENT).unwrap();

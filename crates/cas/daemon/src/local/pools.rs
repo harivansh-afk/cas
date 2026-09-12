@@ -27,6 +27,13 @@ impl HostPools {
         }
     }
 
+    pub fn administrative(&self) -> Option<cas_core::budget::Lease> {
+        self.control.reserve(Amount {
+            bytes: BLOCK_SIZE,
+            requests: 1,
+        })
+    }
+
     pub fn image(&self) -> Pools {
         let share =
             |host, bytes, requests| Share::new(Arc::clone(host), Amount { bytes, requests });

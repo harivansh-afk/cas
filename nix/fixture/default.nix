@@ -25,6 +25,7 @@ let
         if guest.config.nixpkgs.hostPlatform.isAarch64 then "aarch64" else "x86_64"
       }-wrapped";
       guest_kernel = guest.config.boot.kernelPackages.kernel.version;
+      service_deadline_seconds = guest.config.systemd.services.cas-fixture.serviceConfig.TimeoutStartSec;
     }
   );
 in

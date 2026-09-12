@@ -14,6 +14,7 @@ pub struct Status {
 struct Wakes {
     frontend: EventFd,
     reactor: EventFd,
+    attached: std::sync::atomic::AtomicBool,
 }
 
 pub struct Admission {
@@ -51,9 +52,25 @@ impl Admission {
         self.wakes
             .get(index)
             .ok_or(io::ErrorKind::InvalidInput)?
-            .set(Wakes { frontend, reactor })
+            .set(Wakes {
+                frontend,
+                reactor,
+                attached: std::sync::atomic::AtomicBool::new(true),
+            })
             .map_err(|_| io::Error::other("duplicate image wake binding"))?;
         Ok(())
+    }
+
+    pub fn attached(&self, index: usize) -> bool {
+        self.wakes[index]
+            .get()
+            .is_some_and(|wake| wake.attached.load(Ordering::Acquire))
+    }
+
+    pub fn detach(&self, index: usize) {
+        if let Some(wake) = self.wakes[index].get() {
+            wake.attached.store(false, Ordering::Release);
+        }
     }
 
     fn wake(&self) -> io::Result<()> {
@@ -118,6 +135,12 @@ pub struct Quiescence {
 }
 
 impl Quiescence {
+    pub(super) fn fail(&mut self) {
+        let mut state = self.owner.lock();
+        state.failed = true;
+        state.paused = true;
+    }
+
     pub fn generation(&self) -> u64 {
         self.generation
     }

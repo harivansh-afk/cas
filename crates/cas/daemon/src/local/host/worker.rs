@@ -7,6 +7,7 @@ enum Grant {
 
 pub(super) struct Endpoint {
     pub manifest: Manifest,
+    pub quiescent: Option<u64>,
     #[cfg(test)]
     pub control: Arc<Mutex<tests::Control>>,
     pub health: Health,
@@ -16,14 +17,14 @@ pub(super) struct Endpoint {
 }
 
 impl Endpoint {
-    fn healthy(&self) -> io::Result<()> {
+    pub(super) fn healthy(&self) -> io::Result<()> {
         if let Some(error) = &self.health.lock()?.failure {
             return Err(io::Error::other(error.clone()));
         }
         Ok(())
     }
 
-    fn exchange(&self, event: Event) -> io::Result<Reply> {
+    pub(super) fn exchange(&self, event: Event) -> io::Result<Reply> {
         self.healthy()?;
         self.output
             .try_send(event)
@@ -41,12 +42,14 @@ impl Endpoint {
         Ok(reply)
     }
 
-    fn compact(
+    pub(super) fn compact(
         &mut self,
         store: &mut Store,
         physical: Option<&Arc<cas_core::space::Governor>>,
+        generation: Option<u64>,
     ) -> io::Result<()> {
-        match self.exchange(Event::Select)? {
+        let event = generation.map_or(Event::Select, Event::CompactQuiescent);
+        match self.exchange(event)? {
             Reply::Selected(None) => Ok(()),
             Reply::Selected(Some(selection)) => {
                 self.healthy()?;
@@ -157,7 +160,7 @@ impl Endpoint {
         }
     }
 
-    fn defer(&self, rotation: Option<append::Rotation>) -> io::Result<()> {
+    pub(super) fn defer(&self, rotation: Option<append::Rotation>) -> io::Result<()> {
         match self.exchange(Event::Deferred(rotation))? {
             Reply::Applied => Ok(()),
             _ => Err(io::Error::other(
@@ -169,6 +172,7 @@ impl Endpoint {
 
 pub(super) struct Owner {
     pub store: Store,
+    pub snapshots: BudgetVec<Snapshot, BudgetAllocator>,
     pub endpoints: BudgetVec<Endpoint, BudgetAllocator>,
     pub shared: Arc<SharedHost>,
     pub input: mailbox::Receiver<Ready>,
@@ -180,7 +184,32 @@ impl Owner {
             shared: Arc::clone(&self.shared),
             normal: false,
         };
-        while let Ok(Ready { index, turn }) = self.input.recv() {
+        let mut next_collection = Instant::now();
+        loop {
+            if self.shared.collection_required()
+                && Instant::now() >= next_collection
+                && let Ok(control) = collection::Control::claim(&self.shared)
+            {
+                let result = self.collect();
+                self.shared.collected(&result);
+                drop(control);
+                next_collection = Instant::now() + Duration::from_secs(1);
+            }
+            let ready = match self.input.recv_timeout(Duration::from_millis(50)) {
+                Ok(ready) => ready,
+                Err(mailbox::RecvTimeoutError::Timeout) => continue,
+                Err(mailbox::RecvTimeoutError::Disconnected) => break,
+            };
+            let Ready::Image { index, turn } = ready else {
+                let Ready::Collect(request) = ready else {
+                    unreachable!()
+                };
+                let result = self.collect();
+                self.shared.collected(&result);
+                request.complete(result);
+                next_collection = Instant::now() + Duration::from_secs(1);
+                continue;
+            };
             let Some(endpoint) = self.endpoints.get_mut(index) else {
                 self.shared
                     .gate
@@ -188,7 +217,9 @@ impl Owner {
                 break;
             };
             let result = match turn {
-                Turn::Compact => endpoint.compact(&mut self.store, self.shared.physical.as_ref()),
+                Turn::Compact => {
+                    endpoint.compact(&mut self.store, self.shared.physical.as_ref(), None)
+                }
                 Turn::Rotate => endpoint.rotate(self.shared.physical.as_ref()),
             };
             if let Err(error) = result {
