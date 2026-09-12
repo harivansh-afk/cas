@@ -203,10 +203,13 @@ pub(crate) fn sync_data(file: &File) -> io::Result<()> {
 }
 
 // One-shot, thread-local syscall faults keep concurrent tests independent.
-// This module and both injection sites are absent from production builds.
+// This module and its injection sites are absent from production builds.
 #[cfg(test)]
 pub(crate) mod faults {
-    use std::cell::Cell;
+    use std::{
+        cell::{Cell, RefCell},
+        sync::mpsc,
+    };
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     pub(crate) enum Fault {
@@ -219,6 +222,32 @@ pub(crate) mod faults {
 
     thread_local! {
         static NEXT: Cell<Option<(Fault, usize)>> = const { Cell::new(None) };
+        static PAUSE: RefCell<Option<Pause>> = const { RefCell::new(None) };
+    }
+
+    struct Pause {
+        fault: Fault,
+        entered: mpsc::Sender<()>,
+        resume: mpsc::Receiver<()>,
+    }
+
+    /// Stop at the actual syscall boundary, independently of one-shot failure.
+    pub(crate) fn pause_before(
+        fault: Fault,
+        entered: mpsc::Sender<()>,
+        resume: mpsc::Receiver<()>,
+    ) {
+        PAUSE.with(|pause| {
+            assert!(
+                pause
+                    .replace(Some(Pause {
+                        fault,
+                        entered,
+                        resume
+                    }))
+                    .is_none()
+            )
+        });
     }
 
     pub(crate) fn inject(fault: Fault) {
@@ -230,6 +259,21 @@ pub(crate) mod faults {
     }
 
     pub(super) fn take(fault: Fault) -> bool {
+        let pause = PAUSE.with(|pause| {
+            let mut pause = pause.borrow_mut();
+            if pause.as_ref().is_some_and(|pause| pause.fault == fault) {
+                pause.take()
+            } else {
+                None
+            }
+        });
+        if let Some(pause) = pause {
+            pause.entered.send(()).expect("pause observer");
+            pause
+                .resume
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("pause release");
+        }
         NEXT.with(|next| match next.get() {
             Some((expected, 0)) if expected == fault => {
                 next.set(None);

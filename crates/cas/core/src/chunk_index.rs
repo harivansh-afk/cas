@@ -98,6 +98,18 @@ impl Index {
             return Ok(existing);
         }
         self.reserve(1)?;
+        Ok(self.insert_reserved(hash, address))
+    }
+
+    /// Publication after output sync must use capacity reserved before that IO.
+    pub(crate) fn insert_reserved(&mut self, hash: Hash, address: Address) -> Address {
+        if let Some(existing) = self.get(&hash) {
+            return existing;
+        }
+        assert!(
+            self.table.len() < self.table.capacity(),
+            "unreserved chunk publication"
+        );
         self.table.insert_unique(
             bucket(&hash),
             Entry {
@@ -107,7 +119,7 @@ impl Index {
             },
             |entry| bucket(&entry.hash),
         );
-        Ok(address)
+        address
     }
 
     /// Replace a verified durable location under the quiescent GC owner.

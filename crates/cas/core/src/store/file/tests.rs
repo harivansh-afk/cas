@@ -9,6 +9,8 @@ use crate::{
 };
 use std::{os::unix::fs::FileExt, path::Path, sync::Mutex};
 
+mod readers;
+
 const CONFIG: Config = Config {
     store: [1; 16],
     segment_bytes: (MAX_BATCH_BYTES + BLOCK_SIZE) as u64,
@@ -74,7 +76,7 @@ fn packed_store_rotates_shared_tickets_and_rebuilds_inline_hashes() {
     }
     assert_eq!(store.status().chunks, 198);
     assert_eq!(store.status().segments, 4);
-    assert_eq!(store.tickets.status().highest, 4);
+    assert_eq!(store.shared.tickets.status().highest, 4);
     for block in &blocks {
         read(&store, block);
     }
@@ -211,12 +213,12 @@ fn failed_segment_allocation_retains_its_ticket_and_headerless_creation() {
     let mut store = create(root.path());
     faults::inject(Fault::Allocate);
     assert!(insert(&mut store, &[[1; BLOCK_SIZE]]).is_err());
-    assert!(store.status().failed && store.tickets.status().failed);
+    assert!(store.status().failed && store.shared.tickets.status().failed);
     drop(store);
     let inspection = inspect(root.path()).unwrap();
     assert_eq!(inspection.status().chunks, 0);
     let mut recovered = inspection.recover().unwrap();
-    assert_eq!(recovered.tickets.status().highest, 1);
+    assert_eq!(recovered.shared.tickets.status().highest, 1);
     insert(&mut recovered, &[[1; BLOCK_SIZE]]).unwrap();
     assert_eq!(
         recovered
@@ -476,8 +478,8 @@ fn exhausted_record_ids_fail_before_output_and_empty_insertion_allocates_nothing
     let file = root.path().join("chunks").join(segments::name(1));
     let original = fs::read(&file).unwrap();
     for (batch, ordinal) in [(u64::MAX, 2), (2, u64::MAX)] {
-        store.segments[0].next_batch = batch;
-        store.segments[0].next_ordinal = ordinal;
+        store.shared.lock().segments[0].next_batch = batch;
+        store.shared.lock().segments[0].next_ordinal = ordinal;
         assert!(insert(&mut store, &[[2; BLOCK_SIZE]]).is_err());
         assert_eq!(fs::read(&file).unwrap(), original);
         assert!(!store.status().failed);

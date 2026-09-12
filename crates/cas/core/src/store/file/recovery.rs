@@ -14,7 +14,7 @@ pub struct Inspection {
 
 impl Inspection {
     pub fn contains(&self, hash: &Hash) -> bool {
-        self.store.index.get(hash).is_some()
+        self.store.shared.lock().index.get(hash).is_some()
     }
 
     pub fn status(&self) -> Status {
@@ -22,8 +22,12 @@ impl Inspection {
     }
 
     pub fn recover(mut self) -> io::Result<Store> {
-        let directory = &self.store.directory;
-        for segment in &self.store.segments {
+        // Inspection has never exposed a reader: recovery owns the state
+        // exclusively and performs IO without holding a lookup mutex.
+        let shared = Arc::get_mut(&mut self.store.shared).expect("private inspection owner");
+        let directory = &shared.directory;
+        let state = shared.state.get_mut().expect("private inspection state");
+        for segment in &state.segments {
             if segment.file_bytes > segment.end {
                 directory.archive(
                     &segments::name(segment.header.number),
@@ -40,10 +44,10 @@ impl Inspection {
             fs::remove_file(directory.path.join(name))?;
             directory.sync()?;
         }
-        for segment in &mut self.store.segments {
+        for segment in &mut state.segments {
             segment.file_bytes = segment.end;
         }
-        self.store.failed = false;
+        state.failed = false;
         Ok(self.store)
     }
 }
@@ -85,9 +89,11 @@ impl Store {
             BudgetAllocator::new(Arc::clone(&io_memory)),
         )?;
         let mut store = Self::empty(directory, tickets, config, metadata, io_memory);
-        store.failed = true;
+        let shared = Arc::get_mut(&mut store.shared).expect("private inspection owner");
+        let state = shared.state.get_mut().expect("private inspection state");
+        state.failed = true;
         for number in numbers {
-            let file = direct::open(&store.directory.path.join(segments::name(number)), false)?;
+            let file = direct::open(&shared.directory.path.join(segments::name(number)), false)?;
             direct::Alignment::query(&file)?;
             let file_bytes = file.metadata()?.len();
             if file_bytes < BLOCK_SIZE as u64 {
@@ -118,7 +124,7 @@ impl Store {
             let mut segment = Segment {
                 file: Arc::new(file),
                 header,
-                batches: Vec::new_in(BudgetAllocator::new(Arc::clone(&store.metadata))),
+                batches: Vec::new_in(BudgetAllocator::new(Arc::clone(&shared.metadata))),
                 end: BLOCK_SIZE as u64,
                 file_bytes,
                 next_batch: 1,
@@ -126,12 +132,12 @@ impl Store {
             };
             inspect_batches(
                 &mut segment,
-                &mut store.index,
+                &mut state.index,
                 scratch.as_mut_slice(),
                 payload.as_mut_slice(),
             )?;
-            reserve(&mut store.segments, 1)?;
-            store.segments.push(segment);
+            reserve(&mut state.segments, 1)?;
+            state.segments.push(segment);
         }
         Ok(Inspection { store, rejected })
     }
