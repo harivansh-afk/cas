@@ -1118,7 +1118,7 @@ impl Reactor {
             if let Err(error) = result {
                 self.stop(&error);
                 // Unexpected reactor failure ends this producer. Drop first
-                // drains kernel ownership; channel closure releases waiters.
+                // drains kernel ownership and returns the accepted requests.
                 break;
             }
             if self.closed
@@ -1155,10 +1155,8 @@ impl Drop for Reactor {
                 Ok(_) => (),
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(_) => {
-                    // Retain credits and file descriptions with every allocation
-                    // whose kernel ownership cannot be disproved.
-                    self.pending.retain(|_, pending| pending.in_kernel());
-                    self.pending.leak();
+                    // Completed owners can still return below. Keep uncertain
+                    // buffers and file descriptions alive after a drain error.
                     break;
                 }
             }
@@ -1168,6 +1166,13 @@ impl Drop for Reactor {
                 }
             }
         }
+        // An unexpected loop exit may leave accepted requests in pending even
+        // after their CQEs arrive. Return their owned errors before the producer
+        // closes; never free a buffer still potentially referenced by the ring.
+        while let Some(pending) = self.pending.remove_first(|pending| !pending.in_kernel()) {
+            let _ = self.reject(pending.work);
+        }
+        self.pending.leak();
     }
 }
 

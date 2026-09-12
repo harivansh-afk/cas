@@ -6,6 +6,7 @@ use super::*;
 enum Case {
     Reorder { short: bool, pause: bool },
     Cohort { fail_sync: bool },
+    InvalidAttachment,
 }
 
 pub(super) struct Control {
@@ -184,6 +185,16 @@ impl Run {
             sender.try_send(append(&shared, 5, 0, 3)).unwrap();
             sender
                 .try_send(operation(&shared, 6, 3, Operation::Flush))
+                .unwrap();
+        }
+        if matches!(case, Case::InvalidAttachment) {
+            let (done, _result) = mailbox::bounded(1, &shared.metadata).unwrap();
+            sender
+                .try_send(Command::NewAttachment {
+                    done,
+                    _permit: shared.reserve(Kind::Control).unwrap(),
+                    rotated: false,
+                })
                 .unwrap();
         }
         let paused = matches!(case, Case::Reorder { pause: true, .. }).then(|| {
@@ -481,4 +492,26 @@ fn thirty_second_io_deadline_fails_before_releasing_the_withheld_owner() {
     assert_eq!(run.shared.pools.append.usage().current.bytes, 0);
     assert_eq!(run.shared.pools.requests.usage().current.requests, 0);
     contender.try_lock().unwrap();
+}
+
+#[test]
+fn unexpected_exit_completes_every_pending_append_after_kernel_drain() {
+    let mut run = Run::spawn(Case::InvalidAttachment);
+    run.release();
+    let mut ids = Vec::new();
+    while let Ok((completion, _)) = run.output.try_recv() {
+        assert!(completion.result.is_err());
+        ids.push(completion.id);
+    }
+    ids.sort_unstable();
+    assert_eq!(
+        ids,
+        [1, 2],
+        "accepted owners must return before channel closure"
+    );
+    assert!(run.shared.health.lock().unwrap().failure.is_some());
+    assert_eq!(run.shared.final_status.lock().unwrap().published, 0);
+    assert_eq!(run.shared.pools.append.usage().current, Amount::default());
+    assert_eq!(run.shared.pools.requests.usage().current, Amount::default());
+    assert_eq!(run.shared.pools.control.usage().current, Amount::default());
 }

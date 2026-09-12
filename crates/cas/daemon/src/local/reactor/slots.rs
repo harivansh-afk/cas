@@ -78,16 +78,12 @@ impl<T> Slots<T> {
         self.iter().map(|(_, value)| value)
     }
 
-    pub fn retain(&mut self, mut keep: impl FnMut(&u64, &mut T) -> bool) {
-        for entry in &mut self.entries {
-            if entry
-                .as_mut()
-                .is_some_and(|(token, value)| !keep(token, value))
-            {
-                *entry = None;
-                self.len -= 1;
-            }
-        }
+    /// Remove an owned entry without dropping it before its caller can respond.
+    pub fn remove_first(&mut self, mut matches: impl FnMut(&T) -> bool) -> Option<T> {
+        let token = self
+            .iter()
+            .find_map(|(token, value)| matches(value).then_some(*token))?;
+        self.remove(&token)
     }
 
     /// Keep uncertain kernel owners alive; their buffers and files own credits.
@@ -132,7 +128,7 @@ mod tests {
             previous = token;
             assert_eq!(metadata.usage().current, allocated);
         }
-        slots.retain(|token, _| *token == 1);
+        while slots.remove_first(|value| *value != 1).is_some() {}
         assert_eq!(slots.values().copied().collect::<Vec<_>>(), [1]);
         assert_eq!(slots.remove(&1), Some(1));
         assert!(slots.is_empty());
