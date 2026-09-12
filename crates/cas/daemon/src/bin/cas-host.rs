@@ -30,6 +30,12 @@ struct Serve {
     /// Existing directory on another filesystem; creates host.json and per-image reports.
     #[arg(long)]
     reports: PathBuf,
+    /// Clean chunk-cache bytes; bounded by the default host cap.
+    #[arg(long, default_value_t = cas_daemon::Resources::DEFAULT_CACHE_BYTES)]
+    cache_bytes: usize,
+    /// Sample every 500 ms; fail the run if telemetry exceeds 64 MiB or 4,096 samples.
+    #[arg(long)]
+    telemetry: bool,
     /// One-shot process pause for development crash controls.
     #[arg(long, value_enum, requires = "pause_image")]
     pause_compaction: Option<cas_daemon::CompactionPoint>,
@@ -96,6 +102,8 @@ fn main() -> std::io::Result<()> {
         staging_bytes: args.storage.staging_bytes,
         endpoints: args.endpoints,
         reports: args.reports,
+        cache_bytes: args.cache_bytes,
+        telemetry: args.telemetry,
         pause: args
             .pause_compaction
             .map(|point| cas_daemon::CompactionPause {

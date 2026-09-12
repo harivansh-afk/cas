@@ -7,6 +7,7 @@ mod administration;
 mod collection;
 pub mod fault;
 mod snapshots;
+mod statistics;
 pub use snapshots::{SnapshotHandle, SnapshotReport};
 pub mod initialize;
 pub mod recovery;
@@ -37,7 +38,7 @@ pub struct Resources {
 impl Default for Resources {
     fn default() -> Self {
         Self {
-            cache_bytes: 256 * MAX_REQUEST_BYTES,
+            cache_bytes: Self::DEFAULT_CACHE_BYTES,
             metadata_cache_bytes: 16 * MAX_REQUEST_BYTES,
             metadata: metadata_budget(),
             compaction: metadata_budget(),
@@ -48,6 +49,8 @@ impl Default for Resources {
 }
 
 impl Resources {
+    pub const DEFAULT_CACHE_BYTES: usize = 256 * MAX_REQUEST_BYTES;
+
     pub fn read_memory(&self) -> Arc<Budget> {
         Arc::clone(&self.pools.read)
     }
@@ -66,6 +69,7 @@ struct SharedHost {
     attached: AtomicUsize,
     administrating: AtomicBool,
     collection: Mutex<collection::Status>,
+    compaction: BudgetVec<BudgetArc<Mutex<statistics::Totals>>, BudgetAllocator>,
     staging: BudgetArc<cas_core::space::Staging>,
     physical: Option<Arc<cas_core::space::Governor>>,
     #[cfg(test)]
@@ -214,6 +218,13 @@ impl Host {
         let admission = admission::Admission::new(image_count, &resources.metadata)?;
         let metadata = Arc::clone(&resources.metadata);
         let fair = fair::Fair::new(image_count, admission.clone(), &metadata)?;
+        let mut compaction = reserved_vec(image_count, &metadata)?;
+        for _ in 0..image_count {
+            compaction.push(BudgetArc::try_new(
+                Mutex::new(statistics::Totals::default()),
+                &metadata,
+            )?);
+        }
         let gate = match &context.gates {
             Some(gates) => gates.host.clone(),
             None => state::HostGate::new(&metadata)?,
@@ -239,6 +250,7 @@ impl Host {
                 attached: AtomicUsize::new(0),
                 administrating: AtomicBool::new(false),
                 collection: Mutex::new(collection::Status::default()),
+                compaction,
                 staging,
                 physical,
                 #[cfg(test)]
@@ -293,6 +305,7 @@ impl Host {
             let (output, events) = mailbox::bounded(1, &shared.resources.metadata)?;
             let (reply, replies) = mailbox::bounded(1, &shared.resources.metadata)?;
             endpoints.push(worker::Endpoint {
+                statistics: shared.compaction[index].clone(),
                 resources: Arc::clone(&shared.resources),
                 manifest,
                 quiescent: None,
@@ -447,6 +460,7 @@ impl Host {
             "cache": self.shared.cache.status(), "metadata_cache": self.shared.pages.status(),
             "fetches": self.shared.fetches.status(), "admission_scheduler":self.shared.fair.report(), "io_scheduler":self.shared.io_scheduler.status(),
             "collection": *self.shared.collection.lock().expect("collection status poisoned"),
+            "compaction": self.shared.compaction.iter().map(|totals| *totals.lock().expect("compaction statistics poisoned")).collect::<Vec<_>>(),
             "pools": self.shared.resources.pools.report(), "metadata": self.shared.resources.metadata.usage(),
             "compaction_metadata": self.shared.resources.compaction.usage(),
             "attached": self.shared.attached.load(Ordering::Acquire),

@@ -7,6 +7,7 @@ use crate::{
     service::{Control, Service},
 };
 use allocator_api2::vec::Vec as BudgetVec;
+mod telemetry;
 use cas_core::budget::{Budget, BudgetAllocator};
 use std::{
     fs::{self, File, OpenOptions},
@@ -17,6 +18,7 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
+use telemetry::Telemetry;
 
 #[derive(Clone, Copy, clap::ValueEnum)]
 pub enum Mode {
@@ -63,6 +65,8 @@ pub struct Config {
     pub mode: Mode,
     pub endpoints: Vec<Endpoint>,
     pub reports: PathBuf,
+    pub cache_bytes: usize,
+    pub telemetry: bool,
     pub pause: Option<crate::CompactionPause>,
 }
 
@@ -164,7 +168,14 @@ fn outputs(
 }
 
 pub fn serve(mut config: Config) -> io::Result<()> {
+    if config.cache_bytes > Resources::DEFAULT_CACHE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "clean cache exceeds host cap",
+        ));
+    }
     let mut resources = Resources::default();
+    resources.cache_bytes = config.cache_bytes;
     let (outputs, report) = outputs(&mut config, &resources)?;
     if let Some(pause) = config.pause.take() {
         if !config
@@ -179,7 +190,11 @@ pub fn serve(mut config: Config) -> io::Result<()> {
         resources.pause_compaction(pause, config.reports.join("compaction-pause.json"))?;
     }
     let resources = Arc::new(resources);
-    let result = run(config, outputs, &resources);
+    let telemetry = config
+        .telemetry
+        .then(|| Telemetry::new(&config.reports.join("telemetry.jsonl"), &resources.metadata))
+        .transpose()?;
+    let result = run(config, outputs, &resources, telemetry);
     let value = match &result {
         Ok(outcome) => serde_json::json!({
             "services_ok": outcome.services.is_ok(),
@@ -204,6 +219,7 @@ fn run(
     config: Config,
     outputs: BudgetVec<Output, BudgetAllocator>,
     resources: &Arc<Resources>,
+    telemetry: Option<Telemetry>,
 ) -> io::Result<Outcome> {
     drop(config.endpoints);
     drop(config.reports);
@@ -253,10 +269,16 @@ fn run(
     let mut controls = table(outputs.len(), &resources.metadata)?;
     for output in outputs {
         let service = Service::new(runtime.attach(output.image, deadline)?, output.report)?;
-        controls.push(service.control()?);
+        controls.push((output.image, service.control()?));
         services.push((output.socket, service));
     }
-    let result = run_services(services, &controls, &mut runtime, &resources.metadata);
+    let result = run_services(
+        services,
+        &controls,
+        &mut runtime,
+        &resources.metadata,
+        telemetry,
+    );
     // Controls also retain backends; drop them before joining the shared owner.
     drop(controls);
     let until = Instant::now() + crate::local::IO_DEADLINE;
@@ -286,9 +308,10 @@ fn run(
 
 fn run_services(
     services: BudgetVec<(PathBuf, Service), BudgetAllocator>,
-    controls: &[Control],
+    controls: &[([u8; 16], Control)],
     runtime: &mut Runtime,
     metadata: &Arc<Budget>,
+    mut telemetry: Option<Telemetry>,
 ) -> io::Result<()> {
     let mut workers: BudgetVec<Option<JoinHandle<io::Result<()>>>, _> =
         table(services.len(), metadata)?;
@@ -307,6 +330,12 @@ fn run_services(
     }
     let mut canceled = false;
     loop {
+        if let Some(sampler) = &mut telemetry
+            && let Err(error) = sampler.sample(runtime, controls)
+        {
+            failure.get_or_insert(error);
+            telemetry = None;
+        }
         for slot in &mut workers {
             if slot.as_ref().is_some_and(|worker| worker.is_finished()) {
                 let result = slot
@@ -324,7 +353,7 @@ fn run_services(
         {
             let reason = error.to_string();
             runtime.fail(&reason);
-            for control in controls {
+            for (_, control) in controls {
                 let _ = control.cancel(&reason);
             }
             canceled = true;

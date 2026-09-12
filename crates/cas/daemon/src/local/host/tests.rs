@@ -350,6 +350,33 @@ pub(crate) fn shutdown(mut host: Host) {
 }
 
 #[test]
+fn completed_compaction_reports_input_and_active_time_after_acknowledgment() {
+    let root = tempfile::tempdir().unwrap();
+    let resources = Arc::new(Resources::default());
+    let mut host = create(root.path(), 1, Arc::clone(&resources));
+    let mut local = attach(&mut host, 2);
+    write(&mut local, 0, 0, &[7; BLOCK_SIZE]);
+    drained(&mut local, 1);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let totals = loop {
+        let totals = *host.shared.compaction[0].lock().unwrap();
+        if totals.batches > 0 {
+            break totals;
+        }
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(1));
+    };
+    assert_eq!(totals.input_bytes, BLOCK_SIZE as u64);
+    assert_eq!(totals.candidate_output_bytes, BLOCK_SIZE as u64);
+    assert!(totals.active_ns > 0);
+    assert_eq!((totals.failed, totals.deferred), (0, 0));
+    read(&mut local, 1, &[7; BLOCK_SIZE]);
+    drop(local);
+    shutdown(host);
+    assert_eq!(resources.metadata.usage().current, Amount::default());
+}
+
+#[test]
 fn multiple_reactors_compact_private_images_and_reopen_shared_chunks() {
     let root = tempfile::tempdir().unwrap();
     let resources = Arc::new(Resources::default());

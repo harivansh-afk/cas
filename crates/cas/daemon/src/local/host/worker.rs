@@ -6,6 +6,7 @@ enum Grant {
 }
 
 pub(super) struct Endpoint {
+    pub statistics: BudgetArc<Mutex<statistics::Totals>>,
     pub manifest: Manifest,
     pub resources: Arc<Resources>,
     pub quiescent: Option<u64>,
@@ -53,13 +54,19 @@ impl Endpoint {
         match self.exchange(event)? {
             Reply::Selected(None) => Ok(()),
             Reply::Selected(Some(selection)) => {
+                let attempt = statistics::Attempt::new(&self.statistics);
                 self.healthy()?;
                 let input = selection.load()?;
+                let input_bytes = input.payload_bytes() as u64;
                 let prepared = input.prepare(&self.manifest)?;
+                let output_bytes = (prepared.chunk_count() * BLOCK_SIZE) as u64;
                 let bytes = capacity::compaction_bytes(&prepared, store.config().segment_bytes);
                 let permit = match self.background(physical, bytes)? {
                     Grant::Ready(permit) => permit,
-                    Grant::Deferred => return Ok(()),
+                    Grant::Deferred => {
+                        attempt.deferred();
+                        return Ok(());
+                    }
                 };
                 #[cfg(test)]
                 {
@@ -114,7 +121,9 @@ impl Endpoint {
                 match permit {
                     Some(permit) => permit.run(output),
                     None => output(),
-                }
+                }?;
+                attempt.completed(input_bytes, output_bytes);
+                Ok(())
             }
             Reply::Reclaim(reclaim) => {
                 let permit = match self.background(physical, capacity::METADATA_MARGIN)? {

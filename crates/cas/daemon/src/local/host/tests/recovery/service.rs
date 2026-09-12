@@ -8,6 +8,8 @@ use vhost::{
 
 fn config(root: &Path, transport: &Path, mode: Mode) -> ServiceConfig {
     ServiceConfig {
+        cache_bytes: Resources::DEFAULT_CACHE_BYTES,
+        telemetry: false,
         root: root.to_owned(),
         store: STORE.store,
         segment_bytes: 2 * MAX_REQUEST_BYTES as u64,
@@ -93,7 +95,9 @@ fn cold_host_supervises_both_socket_services_and_drains_the_shared_owner() {
     let transport = tempfile::tempdir_in("/dev/shm").unwrap();
     let resources = Arc::new(Resources::default());
     setup(root.path(), &resources, SnapshotFixture::Present);
-    let config = config(root.path(), transport.path(), Mode::Cold);
+    let mut config = config(root.path(), transport.path(), Mode::Cold);
+    config.telemetry = true;
+    config.cache_bytes = 4 * MAX_REQUEST_BYTES;
     let (done, result) = mpsc::channel();
     let server = thread::spawn(move || done.send(host_service::serve(config)).unwrap());
     let mut frontends = Vec::new();
@@ -126,4 +130,11 @@ fn cold_host_supervises_both_socket_services_and_drains_the_shared_owner() {
     assert_eq!(report["services_ok"], true);
     assert!(report["shutdown_error"].is_null());
     assert_eq!(report["metadata"]["current"]["bytes"], 0);
+    let samples = fs::read_to_string(transport.path().join("telemetry.jsonl")).unwrap();
+    let first: serde_json::Value = serde_json::from_str(samples.lines().next().unwrap()).unwrap();
+    assert_eq!(first["phase"], "live");
+    assert_eq!(first["images"].as_array().unwrap().len(), 2);
+    assert_eq!(first["images"][0]["image"], "02".repeat(16));
+    assert!(first["images"][0]["report"].get("connection_ok").is_none());
+    assert!(first["images"][0]["report"].get("pending").is_some());
 }
