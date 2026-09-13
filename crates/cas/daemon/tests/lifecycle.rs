@@ -923,11 +923,22 @@ fn concurrent_retained_fd_replays_without_flush_and_ignores_consumed_available_s
             }
             daemon.child.kill().unwrap();
             daemon.child.wait().unwrap();
-            let inspected = cas_core::append::Log::inspect(
-                daemon.directory.path().join("image.raw"),
-                cas_core::append::Limits::default(),
-            )
-            .unwrap();
+            // Kernel IO can retain the log lock briefly after process exit.
+            let inspected = loop {
+                match cas_core::append::Log::inspect(
+                    daemon.directory.path().join("image.raw"),
+                    cas_core::append::Limits::default(),
+                ) {
+                    Ok(inspected) => break inspected,
+                    Err(cas_core::append::Error::Io(error))
+                        if error.kind() == io::ErrorKind::WouldBlock
+                            && Instant::now() < daemon.deadline =>
+                    {
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(error) => panic!("{point}, base {start}: log inspection failed: {error}"),
+                }
+            };
             assert!(inspected.status().published >= 1);
             let identity = cas_daemon::inflight::Identity {
                 store: inspected.config().store,
