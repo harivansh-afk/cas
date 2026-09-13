@@ -169,16 +169,19 @@ fn physical_promises_defer_rotation_and_real_reclamation_reopens_staging() {
     let (release_collection, resume) = mpsc::channel();
     host.shared.control.lock().unwrap().collection = Some(Pause { entered, resume });
     phase("started", &host);
+    let rejected = physical.status().rejected;
     write(&mut first, 0, 0, &old);
     phase("first-write", &host);
-    assert!(
-        first
-            .prepare(Kind::Write(MAX_REQUEST_BYTES))
-            .unwrap()
-            .is_none()
-    );
     let deadline = Instant::now() + Duration::from_secs(3);
-    while !physical.status().pressured {
+    // A background promise can cause transient pressure without refusing a
+    // successor. Keep the pending write alive until allocation really refuses.
+    while physical.status().rejected == rejected {
+        assert!(
+            first
+                .prepare(Kind::Write(MAX_REQUEST_BYTES))
+                .unwrap()
+                .is_none()
+        );
         assert!(
             Instant::now() < deadline,
             "rotation did not reach physical admission"
