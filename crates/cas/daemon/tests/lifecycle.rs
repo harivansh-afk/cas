@@ -408,6 +408,7 @@ fn frontend_disconnect_exits_cleanly() {
     assert_eq!(report["connection_ok"], true);
     assert!(report["fatal_error"].is_null());
     assert_eq!(report["pending_at_disconnect"], 0);
+    assert_eq!(report["pending_after_drain"], 0);
 }
 
 #[test]
@@ -535,6 +536,7 @@ fn serial_recovery_replays_in_order_across_write_boundaries_and_ring_wrap() {
             let (status, report) = daemon.wait();
             assert!(status.success(), "{}", daemon.stderr());
             assert_eq!(report["errors"], 0);
+            assert_eq!(report["pending_after_drain"], 0);
             assert_eq!(report["peak_inflight"], 1);
             assert_eq!(report["writes"], if point == "after-used" { 1 } else { 2 });
             assert_eq!(
@@ -607,6 +609,7 @@ fn write_flush_read_backend(kind: &str, fragmented: bool) {
     assert!(report["fatal_error"].is_null());
     assert_eq!(report["flush_negotiated"], true);
     assert_eq!(report["pending_at_disconnect"], 0);
+    assert_eq!(report["pending_after_drain"], 0);
     assert_eq!(report["errors"], 0);
     assert_eq!(report["writes"], 1);
     assert_eq!(report["reads"], 1);

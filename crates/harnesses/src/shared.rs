@@ -393,7 +393,7 @@ fn verify_phase(output: &Path, phase: &str, build: &Build, scenario: &Scenario) 
         if backend["connection_ok"] != true
             || !backend["fatal_error"].is_null()
             || backend["errors"] != 0
-            || backend["pending_at_disconnect"] != 0
+            || !evidence::DrainReport::deserialize(&backend)?.complete()
         {
             return Err(io::Error::other("image backend report failed"));
         }
