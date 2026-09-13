@@ -11,6 +11,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(flatten)]
+    Lab(cas_harness::lab::Command),
     /// Count fixed 4/16 KiB content in immutable raw images; first image is the base.
     /// Zero chunks are excluded. Normalize guest free space before scanning.
     Census {
@@ -22,8 +24,12 @@ enum Command {
     StagingCheck { path: PathBuf },
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     match Cli::parse().command {
+        Command::Lab(command) => {
+            cas_harness::lab::run(command)?;
+            Ok(())
+        }
         Command::Census { images } => {
             let results = cas_core::census::CHUNK_SIZES
                 .into_iter()
@@ -99,4 +105,14 @@ fn staging_check(path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(not(target_os = "linux"))]
 fn staging_check(_: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     Err("the O_DIRECT staging check requires Linux".into())
+}
+
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("casctl: {error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
 }

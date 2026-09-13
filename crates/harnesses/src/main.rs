@@ -1,17 +1,7 @@
 //! Development VM checks and host inventories. No paper gate is inferred here.
-mod evidence;
-mod filesystem;
-mod fixture;
-mod fleet;
-mod host;
-mod persistence;
-mod pressure;
-mod process;
-mod qemu;
-mod shared;
-mod source;
-mod suite;
-mod vm;
+use cas_harness::{
+    filesystem, fixture, fleet, host, persistence, pressure, process, shared, suite, vm,
+};
 
 use std::io;
 use std::path::PathBuf;

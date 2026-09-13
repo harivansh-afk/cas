@@ -67,6 +67,7 @@ pub struct Config {
     pub reports: PathBuf,
     pub cache_bytes: usize,
     pub telemetry: bool,
+    pub telemetry_rotate: bool,
     pub pause: Option<crate::CompactionPause>,
 }
 
@@ -192,7 +193,13 @@ pub fn serve(mut config: Config) -> io::Result<()> {
     let resources = Arc::new(resources);
     let telemetry = config
         .telemetry
-        .then(|| Telemetry::new(&config.reports.join("telemetry.jsonl"), &resources.metadata))
+        .then(|| {
+            Telemetry::new(
+                &config.reports.join("telemetry.jsonl"),
+                &resources.metadata,
+                config.telemetry_rotate,
+            )
+        })
         .transpose()?;
     let result = run(config, outputs, &resources, telemetry);
     let value = match &result {

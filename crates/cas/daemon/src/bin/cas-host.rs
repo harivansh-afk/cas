@@ -36,6 +36,9 @@ struct Serve {
     /// Sample every 500 ms; fail the run if telemetry exceeds 64 MiB or 4,096 samples.
     #[arg(long)]
     telemetry: bool,
+    /// Keep the current and previous telemetry files instead of ending a long session.
+    #[arg(long, requires = "telemetry")]
+    telemetry_rotate: bool,
     /// One-shot process pause for development crash controls.
     #[arg(long, value_enum, requires = "pause_image")]
     pause_compaction: Option<cas_daemon::CompactionPoint>,
@@ -104,6 +107,7 @@ fn main() -> std::io::Result<()> {
         reports: args.reports,
         cache_bytes: args.cache_bytes,
         telemetry: args.telemetry,
+        telemetry_rotate: args.telemetry_rotate,
         pause: args
             .pause_compaction
             .map(|point| cas_daemon::CompactionPause {

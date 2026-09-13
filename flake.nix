@@ -153,6 +153,13 @@
         {
           default = pkgs.cas;
           inherit (pkgs) cas;
+          casctl = import ./nix/lab {
+            inherit pkgs lib nixpkgs;
+            provenance = {
+              source_revision = self.rev or self.dirtyRev or "unversioned";
+              source_path = toString self.outPath;
+            };
+          };
           vm-smoke = raw;
           daemon-smoke = daemon;
           staging-smoke = staging;

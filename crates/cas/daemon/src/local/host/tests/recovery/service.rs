@@ -10,6 +10,7 @@ fn config(root: &Path, transport: &Path, mode: Mode) -> ServiceConfig {
     ServiceConfig {
         cache_bytes: Resources::DEFAULT_CACHE_BYTES,
         telemetry: false,
+        telemetry_rotate: false,
         root: root.to_owned(),
         store: STORE.store,
         segment_bytes: 2 * MAX_REQUEST_BYTES as u64,

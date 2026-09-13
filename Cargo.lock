@@ -118,6 +118,7 @@ name = "cas-cli"
 version = "0.1.0"
 dependencies = [
  "cas-core",
+ "cas-harness",
  "clap",
  "serde_json",
 ]

@@ -62,16 +62,31 @@ pub(super) struct Telemetry {
     journal: Journal<File>,
     started: Instant,
     next: Instant,
+    rotate: Option<PathBuf>,
 }
 
 impl Telemetry {
-    pub fn new(path: &Path, metadata: &Arc<Budget>) -> io::Result<Self> {
+    pub fn new(path: &Path, metadata: &Arc<Budget>, rotate: bool) -> io::Result<Self> {
         let now = Instant::now();
         Ok(Self {
             journal: Journal::new(create_report(path)?, metadata)?,
             started: now,
             next: now,
+            rotate: rotate.then(|| path.to_owned()),
         })
+    }
+
+    fn rotate_if_needed(&mut self) -> io::Result<()> {
+        if let Some(path) = &self.rotate
+            && (self.journal.samples == SAMPLES || self.journal.bytes > FILE_BYTES - RECORD_BYTES)
+        {
+            self.journal.writer.flush()?;
+            std::fs::rename(path, path.with_extension("previous.jsonl"))?;
+            self.journal.writer = create_report(path)?;
+            self.journal.samples = 0;
+            self.journal.bytes = 0;
+        }
+        Ok(())
     }
 
     pub fn sample(
@@ -82,6 +97,7 @@ impl Telemetry {
         if Instant::now() < self.next {
             return Ok(());
         }
+        self.rotate_if_needed()?;
         let elapsed = self.started.elapsed().as_nanos();
         self.journal.record(|buffer| {
             write!(
@@ -112,6 +128,34 @@ impl Telemetry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_session_rotates_and_strict_experiment_keeps_its_cap() {
+        let directory = tempfile::tempdir().unwrap();
+        let budget = crate::local::metadata_budget();
+        for rotate in [false, true] {
+            let path = directory.path().join(format!("{rotate}.jsonl"));
+            let mut telemetry = Telemetry::new(&path, &budget, rotate).unwrap();
+            telemetry.journal.record(|b| b.write_all(b"{}")).unwrap();
+            telemetry.journal.samples = SAMPLES;
+            telemetry.rotate_if_needed().unwrap();
+            assert_eq!(
+                telemetry
+                    .journal
+                    .record(|b| b.write_all(b"{\"next\":true}"))
+                    .is_ok(),
+                rotate
+            );
+            if rotate {
+                assert_eq!(
+                    std::fs::read(path.with_extension("previous.jsonl")).unwrap(),
+                    b"{}\n"
+                );
+                assert_eq!(telemetry.journal.samples, 1);
+            }
+        }
+        assert_eq!(budget.usage().current.bytes, 0);
+    }
 
     #[test]
     fn limits_reject_a_record_before_extending_the_output() {

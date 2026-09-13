@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 cas-core.workspace = true
+cas-harness.workspace = true
 clap.workspace = true
 serde_json.workspace = true
 
