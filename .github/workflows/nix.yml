@@ -2,6 +2,8 @@
 name: nix
 
 on:
+  # Explicit runs also execute the complete source-bound C5 inventory.
+  workflow_dispatch:
   push:
     paths:
       - 'flake.nix'
@@ -32,6 +34,7 @@ permissions:
 
 jobs:
   check:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -110,3 +113,37 @@ jobs:
             results/ci-ssh-smoke/session/known_hosts
             results/ci-ssh-smoke/session/guest/
           if-no-files-found: ignore
+
+  checkpoint:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Prepare native checkpoint checks
+        run: nix develop -c just check
+      - name: Build the checkpoint and verifier
+        run: |
+          nix build .#checkpoints --out-link result-checkpoints --print-build-logs
+          nix build .#cas --out-link result-cas --print-build-logs
+      - name: Validate the complete C5 inventory
+        run: nix develop -c result-checkpoints/bin/cas-checkpoints --checkpoint C5 --checkout . --output results/ci-c5
+      - name: Independently verify C5 evidence
+        run: result-cas/bin/cas-harness verify-suite --output results/ci-c5
+      - name: Keep small checkpoint evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c5-checkpoint
+          path: |
+            results/ci-c5/**/*.json
+            results/ci-c5/**/*.jsonl
+            results/ci-c5/**/*.log
+            results/ci-c5/**/*.fio
+            !results/ci-c5/**/image.log
+          if-no-files-found: warn
