@@ -46,11 +46,12 @@ fn populated(root: &Path, resources: &Resources) -> (Store, Vec<(Log, Manifest)>
             .prepare_with_metadata(batch, index as u64 + 1, Arc::clone(&resources.compaction))
             .unwrap();
         source.publish(prepared).unwrap();
-        source
-            .reclaim_pages(Arc::clone(&resources.compaction))
-            .unwrap();
     }
     drop(edits);
+    // Only the final seed root is needed when creating the snapshot.
+    source
+        .reclaim_pages(Arc::clone(&resources.compaction))
+        .unwrap();
     let snapshot = Snapshot::create(
         &source.view().unwrap(),
         &snapshot_path,
