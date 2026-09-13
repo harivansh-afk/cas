@@ -185,7 +185,16 @@ fn physical_promises_defer_rotation_and_real_reclamation_reopens_staging() {
         );
         thread::sleep(Duration::from_millis(1));
     }
-    observed.recv_timeout(Duration::from_secs(3)).unwrap();
+    observed
+        .recv_timeout(Duration::from_secs(3))
+        .unwrap_or_else(|error| {
+            phase("collection-timeout", &host);
+            panic!(
+                "collection pause: {error}; first={}; second={}",
+                first.report(),
+                second.report()
+            );
+        });
     phase("physical-denial", &host);
     let denied = host.report();
     assert_eq!(physical.status().promised, 56 * MAX_REQUEST_BYTES as u64);
