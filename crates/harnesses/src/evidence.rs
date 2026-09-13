@@ -149,7 +149,8 @@ pub struct DaemonReport {
     connection_ok: bool,
     flush_negotiated: bool,
     errors: u64,
-    pending_at_disconnect: u64,
+    #[serde(flatten)]
+    drain: DrainReport,
     queues: u64,
     #[serde(default)]
     queue_requests: Vec<u64>,
@@ -171,6 +172,22 @@ pub struct DaemonReport {
     #[serde(default)]
     restored_pending: u16,
 }
+
+#[derive(Deserialize)]
+pub(crate) struct DrainReport {
+    pending_at_disconnect: u64,
+    pending_after_drain: Option<u64>,
+}
+
+impl DrainReport {
+    pub(crate) fn complete(&self) -> bool {
+        // Historical reports can prove this only when they disconnected empty.
+        self.pending_after_drain
+            .unwrap_or(self.pending_at_disconnect)
+            == 0
+    }
+}
+
 #[derive(Deserialize)]
 struct StagingReport {
     image_bytes: u64,
@@ -336,7 +353,7 @@ impl DaemonReport {
                 || !self.flush_negotiated
                 || !self.restartable
                 || self.errors != 0
-                || self.pending_at_disconnect != 0
+                || !self.drain.complete()
                 || self.queues != 4
                 || self.queue_requests.len() != 4
                 || self.queue_requests.contains(&0)
@@ -368,7 +385,7 @@ impl DaemonReport {
             || !self.flush_negotiated
             || !self.restartable
             || self.errors != 0
-            || self.pending_at_disconnect != 0
+            || !self.drain.complete()
             || self.queues != 1
             || self.peak_inflight != 1
             || self.restored_used.is_none_or(|used| used == 0)
@@ -393,7 +410,7 @@ impl DaemonReport {
             || !self.connection_ok
             || !self.flush_negotiated
             || self.errors != 0
-            || self.pending_at_disconnect != 0
+            || !self.drain.complete()
             || self.queues != if backend == Backend::LocalAsync { 4 } else { 1 }
         {
             return Err(io::Error::other("daemon did not report a clean run"));
@@ -596,12 +613,12 @@ mod tests {
         value["local"]["metrics"]["io_queued"] = json!(1);
         value["local"]["metrics"]["io_completed"] = json!(1);
         value["local"]["metrics"]["peak_awaiting_cqe"] = json!(1);
-        let verify = |value| {
-            serde_json::from_value::<DaemonReport>(value)
-                .unwrap()
+        let verify = |value| -> io::Result<()> {
+            serde_json::from_value::<DaemonReport>(value)?
                 .verify_live(Backend::LocalAsync, "after-sync")
         };
         verify(value.clone()).unwrap();
+        assert_disconnect_drain(value.clone(), |value| verify(value).is_ok());
         let mut incomplete = value.clone();
         incomplete["inflight"]["saved_p"] = json!(prefix - 1);
         incomplete["inflight"]["recovered_p"] = json!(prefix - 1);
@@ -668,6 +685,42 @@ mod tests {
             .is_ok_and(|report| report.verify(backend, read_only, false).is_ok())
     }
 
+    fn assert_disconnect_drain(mut report: Value, valid: impl Fn(Value) -> bool) {
+        report["pending_at_disconnect"] = json!(1);
+        assert!(
+            !valid(report.clone()),
+            "legacy report must disconnect empty"
+        );
+        report["pending_after_drain"] = json!(0);
+        assert!(valid(report.clone()), "accepted IO completed during drain");
+        for (field, value) in [
+            ("pending_after_drain", json!(1)),
+            ("pending_after_drain", json!(null)),
+            ("pending_after_drain", json!("0")),
+            ("connection_ok", json!(false)),
+            ("errors", json!(1)),
+        ] {
+            let mut incomplete = report.clone();
+            incomplete[field] = value;
+            assert!(!valid(incomplete), "{field}");
+        }
+        report["pending_at_disconnect"] = json!(0);
+        report["pending_after_drain"] = json!(1);
+        assert!(!valid(report), "final count must not be ignored");
+    }
+
+    #[test]
+    fn shared_disconnect_report_uses_the_same_drain_contract() {
+        let valid =
+            |value: Value| DrainReport::deserialize(&value).is_ok_and(|report| report.complete());
+        assert!(valid(json!({"pending_at_disconnect":0})));
+        assert!(!valid(json!({"pending_after_drain":0})));
+        assert_disconnect_drain(
+            json!({"pending_at_disconnect":0,"connection_ok":true,"errors":0}),
+            |value| valid(value.clone()) && value["connection_ok"] == true && value["errors"] == 0,
+        );
+    }
+
     #[test]
     fn failed_or_incomplete_guest_service_cannot_pass() {
         assert!(valid_guest(completion()));
@@ -721,6 +774,7 @@ mod tests {
         for backend in [Backend::Daemon, Backend::Staging] {
             let base = daemon(backend, false);
             assert!(valid_daemon(base.clone(), backend, false));
+            assert_disconnect_drain(base.clone(), |value| valid_daemon(value, backend, false));
             for (field, value) in [
                 ("connection_ok", json!(false)),
                 ("errors", json!(1)),
@@ -810,6 +864,7 @@ mod tests {
                     .is_ok_and(|report| report.verify_live(Backend::Staging, point).is_ok())
             };
             assert!(valid(base.clone()));
+            assert_disconnect_drain(base.clone(), valid);
             for (field, value) in [
                 ("restartable", json!(false)),
                 ("restored_used", json!(null)),
