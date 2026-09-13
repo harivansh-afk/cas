@@ -35,7 +35,15 @@ fn allocation_case(timeout: bool) {
         assert!(promised >= 2 * MAX_REQUEST_BYTES as u64 + capacity::METADATA_MARGIN);
         promised
     });
-    assert_eq!(first.report()["status"]["rotating"], true);
+    // The worker can acknowledge its pause before the reactor publishes status.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while first.report()["status"]["rotating"] != true {
+        assert!(
+            Instant::now() < deadline,
+            "rotation status was not published"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
     assert_eq!(first.report()["status"]["published"], 7);
     // Deliver a previously accepted read while the next write waits BEFORE
     // mutation admission. Its captured boundary remains P=7.
