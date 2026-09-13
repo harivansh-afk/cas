@@ -38,8 +38,10 @@ in
 writeShellApplication {
   name = "cas-checkpoints";
   inherit runtimeInputs;
-  text = ''
-    exec ${lib.getExe' cas "cas-harness"} suite --build-info ${buildInfo} "$@"
-  '';
+  runtimeEnv = {
+    CAS_HARNESS = lib.getExe' cas "cas-harness";
+    CAS_BUILD_INFO = "${buildInfo}";
+  };
+  text = builtins.readFile ./run-checkpoints.sh;
   meta.description = "Run the source-bound CAS reference checkpoint suite";
 }

@@ -54,17 +54,17 @@ writeShellApplication {
     git
   ]
   ++ lib.optional interactive openssh;
-  text = ''
-    exec ${lib.getExe' cas "cas-harness"} vm \
-      --vm ${vm}/bin/run-cas-guest-vm \
-      --build-info ${buildInfo} \
-      --lock ${provenance.lock} \
-      "$@"
-  '';
-  derivationArgs.postCheck = ''
-    mkdir -p "$out/share/cas"
-    cp ${buildInfo} "$out/share/cas/build.json"
-  '';
+  runtimeEnv = {
+    CAS_HARNESS = lib.getExe' cas "cas-harness";
+    CAS_VM = "${vm}/bin/run-cas-guest-vm";
+    CAS_BUILD_INFO = "${buildInfo}";
+    CAS_LOCK = "${provenance.lock}";
+  };
+  text = builtins.readFile ./run-vm.sh;
+  derivationArgs = {
+    CAS_BUILD_INFO = "${buildInfo}";
+    postCheck = builtins.readFile ./install-build-info.sh;
+  };
   meta.description =
     if interactive then
       "Boot a CAS development guest with SSH"

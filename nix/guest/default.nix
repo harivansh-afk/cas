@@ -58,6 +58,16 @@ let
     ];
     text = builtins.readFile ./finish.sh;
   };
+
+  poweroff = pkgs.writeShellApplication {
+    name = "cas-poweroff";
+    runtimeInputs = with pkgs; [
+      util-linux
+      coreutils
+      systemd
+    ];
+    text = builtins.readFile ./poweroff.sh;
+  };
 in
 {
   imports = [ (modulesPath + "/virtualisation/qemu-vm.nix") ];
@@ -96,29 +106,12 @@ in
     };
     systemd.services.sshd = lib.mkIf cfg.interactive {
       unitConfig.RequiresMountsFor = [ "/results" ];
-      preStart = ''
-        install -Dm600 /results/authorized_keys /etc/ssh/authorized_keys.d/root
-      '';
-      postStart = ''
-        cp /etc/ssh/ssh_host_ed25519_key.pub /results/host-key.tmp
-        mv /results/host-key.tmp /results/host-key.pub
-      '';
+      preStart = builtins.readFile ./sshd-pre-start.sh;
+      postStart = builtins.readFile ./sshd-post-start.sh;
     };
     environment.systemPackages = lib.optionals cfg.interactive [
       pkgs.fio
-      (pkgs.writeShellApplication {
-        name = "cas-poweroff";
-        runtimeInputs = with pkgs; [
-          util-linux
-          coreutils
-          systemd
-        ];
-        text = ''
-          blockdev --flushbufs /dev/disk/by-id/virtio-cas-experiment
-          sync
-          systemctl --force --force poweroff
-        '';
-      })
+      poweroff
     ];
     services.timesyncd.enable = false;
 
