@@ -82,13 +82,12 @@ impl Service {
         let pending_at_disconnect = backend.pending_count();
         eprintln!("cas-daemon: draining {pending_at_disconnect} requests");
         let drain_result = backend.drain();
-        serde_json::to_writer_pretty(
-            self.report,
-            &backend.report(
-                pending_at_disconnect,
-                result.is_ok() && drain_result.is_ok() && backend.failure().is_none(),
-            ),
-        )?;
+        let mut report = backend.report(
+            pending_at_disconnect,
+            result.is_ok() && drain_result.is_ok() && backend.failure().is_none(),
+        );
+        report["pending_after_drain"] = backend.pending_count().into();
+        serde_json::to_writer_pretty(self.report, &report)?;
         if let Some(failure) = backend.failure() {
             return Err(io::Error::other(failure));
         }
@@ -214,6 +213,7 @@ mod tests {
             let report: serde_json::Value =
                 serde_json::from_reader(File::open(report).unwrap()).unwrap();
             assert_eq!(report["connection_ok"], false);
+            assert_eq!(report["pending_after_drain"], 0);
             assert!(!socket.exists());
             drop((frontend, control));
         }
@@ -239,6 +239,7 @@ mod tests {
         let report: serde_json::Value =
             serde_json::from_reader(File::open(report).unwrap()).unwrap();
         assert_eq!(report["connection_ok"], false);
+        assert_eq!(report["pending_after_drain"], 0);
         drop(listener);
     }
 }
