@@ -26,6 +26,7 @@ struct State {
     replenish: bool,
     next_id: u64,
     granted: Option<(usize, u64)>,
+    released_during_turn: bool,
 }
 
 pub(crate) struct Fair {
@@ -114,6 +115,7 @@ impl Fair {
                     replenish: true,
                     next_id: 1,
                     granted: None,
+                    released_during_turn: false,
                 }),
                 admission,
             },
@@ -207,6 +209,7 @@ impl Ticket {
         let selected = next == Some((self.port.image, self.id));
         if selected {
             state.granted = next;
+            state.released_during_turn = false;
         }
         drop(state);
         if selected {
@@ -255,9 +258,11 @@ impl Drop for Turn<'_> {
             .expect("admission scheduler poisoned");
         assert_eq!(state.granted.take(), Some((ticket.port.image, ticket.id)));
         if !self.committed {
+            let retry = state.released_during_turn;
             let image = &mut state.images[ticket.port.image];
             image.deferred += 1;
-            image.queue.first_mut().expect("granted head").ready = false;
+            // A release after reservation failed must survive this refusal.
+            image.queue.first_mut().expect("granted head").ready = retry;
             state.advance();
         }
         drop(state);
@@ -289,6 +294,9 @@ mod tests;
 impl Drop for Release {
     fn drop(&mut self) {
         let mut state = self.0.state.lock().expect("admission scheduler poisoned");
+        if state.granted.is_some() {
+            state.released_during_turn = true;
+        }
         for image in &mut state.images {
             for request in &mut image.queue {
                 request.ready = true;
