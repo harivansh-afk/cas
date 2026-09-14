@@ -57,7 +57,10 @@ fn deferred_bulk_retains_owners_and_other_image_flush_bypasses_its_turn() {
     assert!(host.shared.gate.failure().is_none());
     drop((held, first, second));
     shutdown(host);
-    assert_eq!(resources.pools.report()["append"]["current"]["bytes"], 0);
+    assert_eq!(
+        serde_json::to_value(resources.pools.report()).unwrap()["append"]["current"]["bytes"],
+        0
+    );
     assert_eq!(resources.read_memory().usage().current, Amount::default());
     assert_eq!(resources.metadata.usage().current, Amount::default());
 }
@@ -93,7 +96,10 @@ fn unsubmitted_bulk_waits_beyond_io_deadline_then_completes() {
     assert!(host.shared.gate.failure().is_none());
     drop((held, first, second));
     shutdown(host);
-    assert_eq!(resources.pools.report()["append"]["current"]["bytes"], 0);
+    assert_eq!(
+        serde_json::to_value(resources.pools.report()).unwrap()["append"]["current"]["bytes"],
+        0
+    );
     assert_eq!(resources.read_memory().usage().current, Amount::default());
     assert_eq!(resources.metadata.usage().current, Amount::default());
 }
@@ -132,6 +138,9 @@ fn terminal_close_cancels_unsubmitted_bulk_after_its_drain_deadline() {
     held.ready(false).unwrap();
     drop((health, held, first));
     shutdown(host);
-    assert_eq!(resources.pools.report()["append"]["current"]["bytes"], 0);
+    assert_eq!(
+        serde_json::to_value(resources.pools.report()).unwrap()["append"]["current"]["bytes"],
+        0
+    );
     assert_eq!(resources.metadata.usage().current.bytes, 0);
 }
