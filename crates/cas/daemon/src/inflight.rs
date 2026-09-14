@@ -171,6 +171,11 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// Backend request IDs count from zero; carrier serials count from one.
+    pub fn request_id(self) -> u64 {
+        self.serial - 1
+    }
+
     fn required_publication(self) -> u64 {
         if self.rejected {
             0

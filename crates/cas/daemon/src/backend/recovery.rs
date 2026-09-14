@@ -618,7 +618,7 @@ impl Backend {
                         queue,
                         Admitted {
                             queue: entry.request.queue,
-                            id: entry.serial - 1,
+                            id: entry.request_id(),
                             request: Request::Read(data),
                             permit: Permit::Local { credits: permit },
                             inflight: Some(entry),

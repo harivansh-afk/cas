@@ -998,12 +998,12 @@ impl Backend {
                 })
             })
             .transpose()?;
-        if inflight.is_some_and(|entry| entry.serial != next_id) {
+        let id = self.next_id;
+        if inflight.is_some_and(|entry| entry.request_id() != id) {
             return Err(io::Error::other(
                 "admission serial differs from retained carrier",
             ));
         }
-        let id = self.next_id;
         self.next_id = next_id;
         if !self.concurrent {
             state
