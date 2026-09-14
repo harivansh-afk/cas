@@ -2,7 +2,8 @@
 //! not physical filesystem free space. The host supplies quiescence and permits.
 use super::*;
 
-const WINDOW_PAGES: u64 = (BLOCK_SIZE * 8) as u64;
+/// Pages punched per window; each window spans 128 MiB of manifest file.
+const PUNCH_WINDOW_PAGES: u64 = 32 * 1024;
 
 #[derive(Debug, Default, Clone, Copy, serde::Serialize)]
 pub struct ReclaimedPages {
@@ -24,19 +25,16 @@ pub(super) struct Prepared<'a> {
 
 impl<'a> Prepared<'a> {
     pub(super) fn new(roots: Roots<'a>) -> io::Result<Self> {
-        let allocate = || {
-            AlignedBuffer::try_new_in(
-                BLOCK_SIZE,
-                BudgetAllocator::new(Arc::clone(&roots.metadata)),
-            )
-        };
         let mut live =
             allocator_api2::vec::Vec::new_in(BudgetAllocator::new(Arc::clone(&roots.metadata)));
         live.try_reserve_exact(BLOCK_SIZE / size_of::<u64>())
             .map_err(|_| io::ErrorKind::OutOfMemory)?;
         Ok(Self {
             live,
-            scratch: allocate()?,
+            scratch: AlignedBuffer::try_new_in(
+                BLOCK_SIZE,
+                BudgetAllocator::new(Arc::clone(&roots.metadata)),
+            )?,
             roots,
         })
     }
@@ -109,12 +107,12 @@ impl<'a> Prepared<'a> {
         result.retained_pages = live.len() as u64;
         // Preserve the historical logical-window counter for report readers;
         // windows no longer trigger repeated tree traversals.
-        result.windows = (end / BLOCK_SIZE as u64).div_ceil(WINDOW_PAGES);
+        result.windows = (end / BLOCK_SIZE as u64).div_ceil(PUNCH_WINDOW_PAGES);
         let mut first = 0;
         for &offset in &live {
             while first < offset {
                 // Keep the existing maximum punch size even across huge holes.
-                let next = offset.min(first + WINDOW_PAGES * BLOCK_SIZE as u64);
+                let next = offset.min(first + PUNCH_WINDOW_PAGES * BLOCK_SIZE as u64);
                 direct::punch(roots.file, first, next - first)?;
                 result.punch_calls += 1;
                 result.punched_logical_bytes += next - first;

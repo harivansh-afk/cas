@@ -366,7 +366,7 @@ pub struct Inspection {
 }
 
 impl Inspection {
-    pub(crate) fn pin(&self) -> Arc<File> {
+    pub(crate) fn file(&self) -> Arc<File> {
         Arc::clone(&self.manifest.file)
     }
 

@@ -182,7 +182,7 @@ fn stale_foreign_and_dropped_preparations_preserve_actual_directory_exclusion() 
         assert!(!catalog.failed());
         assert_eq!(files(root.path()), before);
     }
-    let tickets = Arc::clone(&catalog.owner._tickets);
+    let tickets = Arc::clone(&catalog.owner.tickets);
     assert!(Catalog::inspect(Arc::clone(&tickets), STORE, metadata()).is_err());
     let plan = catalog.prepare(Change::Insert(image(5))).unwrap();
     drop(catalog);
@@ -356,7 +356,7 @@ fn publication_retains_locks_and_returns_only_after_directory_sync() {
     for point in [Fault::FileSync, Fault::Rename, Fault::DirectorySync] {
         let root = tempfile::tempdir().unwrap();
         let mut catalog = create(root.path(), metadata());
-        let tickets = Arc::clone(&catalog.owner._tickets);
+        let tickets = Arc::clone(&catalog.owner.tickets);
         let plan = catalog.prepare(Change::Insert(image(2))).unwrap();
         let (entered_tx, entered_rx) = mpsc::channel();
         let (resume_tx, resume_rx) = mpsc::channel();

@@ -33,7 +33,7 @@ pub enum Change {
 }
 
 struct Owner {
-    _tickets: Arc<Tickets>,
+    tickets: Arc<Tickets>,
     directory: Directory,
 }
 
@@ -57,10 +57,7 @@ impl Catalog {
         fs::create_dir(&path)?;
         let directory = Directory::open(&path)?;
         direct::sync_all(tickets.root_file())?;
-        let owner = Arc::new(Owner {
-            _tickets: tickets,
-            directory,
-        });
+        let owner = Arc::new(Owner { tickets, directory });
         let file = write(&owner, &contents)?;
         Ok(Self {
             owner,
@@ -82,10 +79,7 @@ impl Catalog {
         direct::Alignment::query(&file)?;
         let contents = Contents::read(&file, store, metadata)?;
         Ok(Inspection {
-            owner: Arc::new(Owner {
-                _tickets: tickets,
-                directory,
-            }),
+            owner: Arc::new(Owner { tickets, directory }),
             file,
             contents,
         })
@@ -182,7 +176,7 @@ pub struct Inspection {
 
 impl Inspection {
     pub fn validate_recovery(&self, repair: crate::space::Recovery<'_>) -> io::Result<()> {
-        repair.validate_tickets(Some(&self.owner._tickets))?;
+        repair.validate_tickets(Some(&self.owner.tickets))?;
         repair.validate_file(&self.file)?;
         repair.validate_output(0)
     }
