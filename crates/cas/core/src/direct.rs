@@ -41,6 +41,7 @@ pub(crate) fn open(path: &Path, create: bool) -> io::Result<File> {
 
 /// Remove aligned payload extents without changing file length or framing.
 pub(crate) fn punch(file: &File, offset: u64, length: u64) -> io::Result<()> {
+    let _measurement = crate::io_metrics::measure(length, |c| &mut c.punch);
     #[cfg(test)]
     if faults::take(faults::Fault::Punch) {
         return Err(io::Error::from_raw_os_error(libc::EIO));
@@ -54,6 +55,7 @@ pub(crate) fn punch(file: &File, offset: u64, length: u64) -> io::Result<()> {
 }
 
 pub(crate) fn sync_all(file: &File) -> io::Result<()> {
+    let _measurement = crate::io_metrics::measure(0, |c| &mut c.sync);
     #[cfg(test)]
     if faults::take(faults::Fault::FileSync) {
         return Err(io::Error::from_raw_os_error(libc::EIO));
@@ -76,6 +78,7 @@ pub(crate) fn reflink(source: &File, destination: &File) -> io::Result<()> {
 }
 
 pub(crate) fn preallocate(file: &File, offset: u64, length: u64) -> io::Result<()> {
+    let _measurement = crate::io_metrics::measure(length, |c| &mut c.allocate);
     #[cfg(test)]
     if faults::take(faults::Fault::Allocate) {
         return Err(io::Error::from_raw_os_error(libc::ENOSPC));
@@ -116,6 +119,7 @@ pub(crate) fn read_bytes(file: &File, buffer: &mut [u8], offset: u64) -> io::Res
     }
     let read = loop {
         crate::scheduler::before_background_io(buffer.len())?;
+        let _measurement = crate::io_metrics::measure(buffer.len() as u64, |c| &mut c.read);
         match file.read_at(buffer, offset) {
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             result => break result?,
@@ -150,6 +154,7 @@ pub(crate) fn write_bytes(file: &File, buffer: &[u8], offset: u64) -> io::Result
     }
     let written = loop {
         crate::scheduler::before_background_io(buffer.len())?;
+        let _measurement = crate::io_metrics::measure(buffer.len() as u64, |c| &mut c.write);
         match file.write_at(buffer, offset) {
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             result => break result?,
@@ -239,6 +244,7 @@ fn check_write_length(written: usize, expected: usize) -> io::Result<()> {
 }
 
 pub(crate) fn sync_data(file: &File) -> io::Result<()> {
+    let _measurement = crate::io_metrics::measure(0, |c| &mut c.sync);
     #[cfg(test)]
     if faults::take(faults::Fault::Sync) {
         return Err(io::Error::from_raw_os_error(libc::EIO));

@@ -117,6 +117,7 @@ pub(super) struct Reactor {
     last_write: Instant,
     last_sync: Instant,
     closed: bool,
+    closed_since: Option<Instant>,
     failed: bool,
     admission_paused: bool,
     #[cfg(test)]
@@ -168,6 +169,7 @@ impl Reactor {
             last_write: Instant::now(),
             last_sync: Instant::now(),
             closed: false,
+            closed_since: None,
             failed: false,
             admission_paused: false,
             #[cfg(test)]
@@ -316,10 +318,21 @@ impl Reactor {
         // SAFETY: pending owns every referenced buffer and the locked file.
         // No owner is removed until its CQE. Drop drains or retains all owners.
         unsafe { self.ring.submission().push(&entry) }.map_err(io::Error::other)?;
-        pending.submitted = Some(Instant::now());
+        let now = Instant::now();
+        let bulk = self.scheduler.is_some() && pending.bulk();
+        let waited = if bulk {
+            now.duration_since(pending.queued)
+                .as_nanos()
+                .min(u64::MAX as u128) as u64
+        } else {
+            0
+        };
+        pending.submitted = Some(now);
         pending.ready = None;
         let mut metrics = self.worker.shared.metrics.lock().expect("metrics poisoned");
         metrics.io_queued += 1;
+        metrics.bulk_submission_wait_ns += waited;
+        metrics.bulk_submissions += u64::from(bulk);
         metrics.peak_awaiting_cqe = metrics
             .peak_awaiting_cqe
             .max(self.pending.values().filter(|p| p.in_kernel()).count());
@@ -375,6 +388,7 @@ impl Reactor {
                 Err(mailbox::TryRecvError::Empty) => break,
                 Err(mailbox::TryRecvError::Disconnected) => {
                     self.closed = true;
+                    self.closed_since.get_or_insert_with(Instant::now);
                     break;
                 }
             }
@@ -1064,9 +1078,21 @@ impl Reactor {
                     self.fail(&io::Error::other(error));
                 }
                 if !self.failed
+                    && self
+                        .closed_since
+                        .is_some_and(|since| since.elapsed() >= IO_DEADLINE)
+                {
+                    self.fail(&io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "terminal storage drain deadline expired",
+                    ));
+                }
+                if !self.failed
                     && self.pending.values().any(|pending| {
                         pending.ready.is_none()
-                            && pending.submitted.unwrap_or(pending.queued).elapsed() >= IO_DEADLINE
+                            && pending
+                                .submitted
+                                .is_some_and(|submitted| submitted.elapsed() >= IO_DEADLINE)
                     })
                 {
                     self.fail(&io::Error::new(

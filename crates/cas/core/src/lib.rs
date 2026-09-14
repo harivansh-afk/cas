@@ -5,6 +5,7 @@ pub mod cache;
 pub mod census;
 pub mod chunk;
 pub mod chunk_index;
+pub mod io_metrics;
 pub mod watermark;
 
 #[cfg(target_os = "linux")]

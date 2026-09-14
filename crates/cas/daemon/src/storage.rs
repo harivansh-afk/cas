@@ -171,13 +171,16 @@ impl Storage {
         }
     }
 
-    pub fn prepare(&mut self, kind: local::Kind) -> io::Result<Option<Permit>> {
+    pub(crate) fn prepare(
+        &mut self,
+        kind: local::Kind,
+    ) -> io::Result<Result<Permit, local::pressure::Reason>> {
         match self {
             Self::Opening(_) => Err(io::Error::other("IO before inflight recovery")),
             Self::Local(local) => local
-                .prepare(kind)
+                .prepare_reason(kind)
                 .map(|permit| permit.map(|credits| Permit::Local { _credits: credits })),
-            _ => Ok(Some(Permit::Reference)),
+            _ => Ok(Ok(Permit::Reference)),
         }
     }
 

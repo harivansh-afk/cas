@@ -45,6 +45,17 @@ impl Phases {
 
 #[derive(Default, Clone, Copy, serde::Serialize)]
 pub(super) struct Totals {
+    /// Normal image turns, including rotation, reclaim-only work and failures.
+    /// Excludes host collection/snapshot work and its quiescent compactions.
+    pub operations: cas_core::io_metrics::Counters,
+    pub manifest_changes: u64,
+    pub manifest_written_pages: u64,
+    pub manifest_old_page_reads: u64,
+    pub manifest_allocated_bytes: u64,
+    pub exchange_calls: u64,
+    pub exchange_ns: u64,
+    pub staging_reopens: u64,
+    pub reclaimed_bytes: u64,
     pub batches: u64,
     pub input_bytes: u64,
     pub candidate_output_bytes: u64,

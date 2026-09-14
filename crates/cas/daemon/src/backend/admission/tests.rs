@@ -28,7 +28,7 @@ fn shared(backend: &Backend) -> cas_core::budget::BudgetArc<local::Shared> {
 }
 
 #[test]
-fn expired_admission_wins_over_late_credits_and_control_keeps_its_reserve() {
+fn capacity_wait_survives_the_old_deadline_and_control_keeps_its_reserve() {
     let directory = tempfile::tempdir().unwrap();
     let mut backend = Backend::open_with_recovery(
         &directory.path().join("log"),
@@ -60,17 +60,23 @@ fn expired_admission_wins_over_late_credits_and_control_keeps_its_reserve() {
         backend.prepare_admission(1, 0, &flush, 136).unwrap(),
         Admission::Accepted(_)
     ));
-    backend.waiting[0].as_mut().unwrap().deadline = Instant::now() - Duration::from_nanos(1);
+    backend.waiting[0].as_mut().unwrap().started = Instant::now() - Duration::from_secs(6);
+    assert!(matches!(
+        backend
+            .prepare_admission(0, 0, &write_request(), 136)
+            .unwrap(),
+        Admission::Waiting
+    ));
     drop(permits);
     assert!(matches!(
         backend
             .prepare_admission(0, 0, &write_request(), 136)
             .unwrap(),
-        Admission::Rejected
+        Admission::Accepted(_)
     ));
     assert_eq!(
         backend.report(0, true)["local"]["requests"]["admitted"],
-        128
+        129
     );
     backend.clear_changed_waits(StateChange::QueueStop(0));
     assert!(matches!(
@@ -83,7 +89,7 @@ fn expired_admission_wins_over_late_credits_and_control_keeps_its_reserve() {
 }
 
 #[test]
-fn five_second_timer_rejects_before_mutation_and_later_io_keeps_dense_ids() {
+fn long_capacity_wait_keeps_the_descriptor_and_resumes_without_an_error_or_id_gap() {
     let directory = tempfile::tempdir().unwrap();
     let mut backend = Backend::open_with_recovery(
         &directory.path().join("log"),
@@ -118,26 +124,30 @@ fn five_second_timer_rejects_before_mutation_and_later_io_keeps_dense_ids() {
     mem.write_slice(&[0x61; BLOCK_SIZE], GuestAddress(0x5000))
         .unwrap();
     mem.write_obj(1u16, GuestAddress(0x2002)).unwrap();
-    let started = Instant::now();
     backend
         .handle_event(0, EventSet::IN, std::slice::from_ref(&vring), 0)
         .unwrap();
     assert_eq!(backend.next_id, 0);
     assert_eq!(vring.queue_next_avail(), 0);
     assert_eq!(mem.read_obj::<u8>(GuestAddress(0x6000)).unwrap(), 0xff);
-    let (fd, token) = backend.deadline_listener().unwrap();
-    Deadline::after(Duration::from_secs(7))
-        .wait_readable(fd)
-        .unwrap();
+    // Advance the recorded wait age deterministically; no sleep or guest timer.
+    backend.waiting[0].as_mut().unwrap().started = Instant::now() - Duration::from_secs(6);
     backend
-        .handle_event(token, EventSet::IN, std::slice::from_ref(&vring), 0)
+        .handle_event(
+            backend.completion_token(),
+            EventSet::IN,
+            std::slice::from_ref(&vring),
+            0,
+        )
         .unwrap();
-    assert!(started.elapsed() >= ADMISSION_TIMEOUT);
-    assert_eq!(
-        mem.read_obj::<u8>(GuestAddress(0x6000)).unwrap(),
-        Status::IoError as u8
-    );
-    assert_eq!(mem.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 1);
+    assert_eq!(mem.read_obj::<u8>(GuestAddress(0x6000)).unwrap(), 0xff);
+    assert_eq!(mem.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 0);
+    assert_eq!(vring.queue_next_avail(), 0);
+    assert_eq!(backend.next_id, 0);
+    let report = backend.admission_report();
+    assert_eq!(report["heads"][0]["reason"]["storage"], "request_credits");
+    assert!(report["heads"][0]["wait_ns"].as_u64().unwrap() >= 6_000_000_000);
+    assert_eq!(report["statistics"]["started"], 1);
     assert!(backend.failure.is_none());
     {
         let mut health = shared.health.lock().unwrap();
@@ -145,7 +155,7 @@ fn five_second_timer_rejects_before_mutation_and_later_io_keeps_dense_ids() {
             .carrier
             .as_mut()
             .unwrap()
-            .reconcile(&[Some(1)])
+            .reconcile(&[Some(0)])
             .unwrap();
         assert_eq!(
             (
@@ -153,7 +163,7 @@ fn five_second_timer_rejects_before_mutation_and_later_io_keeps_dense_ids() {
                 replay.highest_mutation,
                 replay.published
             ),
-            (1, 0, 0)
+            (0, 0, 0)
         );
     }
     assert_eq!(
@@ -161,9 +171,9 @@ fn five_second_timer_rejects_before_mutation_and_later_io_keeps_dense_ids() {
         0
     );
     drop(permits);
-    // Reuse the head for a new WRITE, followed by READ. The failed request did
-    // not spend mutation 1, and the image remains usable without recovery.
-    for (index, kind) in [(2, VIRTIO_BLK_T_OUT), (3, VIRTIO_BLK_T_IN)] {
+    // Resume the original WRITE on a capacity notification, then reuse its head
+    // for a READ. Waiting never created a rejected carrier entry or mutation.
+    for (index, kind) in [(1, VIRTIO_BLK_T_OUT), (2, VIRTIO_BLK_T_IN)] {
         crate::backend::tests::data_chain(&mem, kind);
         if kind == VIRTIO_BLK_T_IN {
             mem.write_slice(&[0; BLOCK_SIZE], GuestAddress(0x5000))
@@ -171,7 +181,12 @@ fn five_second_timer_rejects_before_mutation_and_later_io_keeps_dense_ids() {
         }
         mem.write_obj(index as u16, GuestAddress(0x2002)).unwrap();
         backend
-            .handle_event(0, EventSet::IN, std::slice::from_ref(&vring), 0)
+            .handle_event(
+                backend.completion_token(),
+                EventSet::IN,
+                std::slice::from_ref(&vring),
+                0,
+            )
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
         while backend.pending_count() != 0 {
@@ -196,7 +211,7 @@ fn five_second_timer_rejects_before_mutation_and_later_io_keeps_dense_ids() {
         .carrier
         .as_mut()
         .unwrap()
-        .reconcile(&[Some(3)])
+        .reconcile(&[Some(2)])
         .unwrap();
     assert_eq!(
         (
@@ -204,8 +219,11 @@ fn five_second_timer_rejects_before_mutation_and_later_io_keeps_dense_ids() {
             replay.highest_mutation,
             replay.published
         ),
-        (3, 1, 1)
+        (2, 1, 1)
     );
+    assert_eq!(backend.admission_report()["statistics"]["resumed"], 1);
+    assert_eq!(backend.admission_report()["statistics"]["canceled"], 0);
+    assert_eq!(backend.admission_report()["heads"], serde_json::json!([]));
     backend.drain().unwrap();
 }
 
@@ -312,6 +330,57 @@ fn shared_frontends_defer_full_images_keep_control_live_and_wake_on_credit_relea
     };
     first.waiting[0] = None;
     drop((retry, control, other, held, first, second));
+    local::host::tests::shutdown(host);
+    assert_eq!(resources.metadata.usage().current.bytes, 0);
+}
+
+#[test]
+fn queue_changes_and_failure_cancel_waiting_tickets_without_consuming_guest_ids() {
+    let root = tempfile::tempdir().unwrap();
+    let resources = Arc::new(local::host::Resources::default());
+    let mut host = local::host::tests::create(root.path(), 1, Arc::clone(&resources));
+    let mut backend = host.attach([2; 16], Fault::default()).unwrap();
+    let shared = shared(&backend);
+    let held: Vec<_> = (0..128)
+        .map(|_| shared.reserve(local::Kind::Write(BLOCK_SIZE)).unwrap())
+        .collect();
+    let changes = [
+        StateChange::Memory,
+        StateChange::Reset,
+        StateChange::Attachment,
+        StateChange::QueueConfiguration(0),
+        StateChange::QueueStop(0),
+        StateChange::QueueEnable {
+            index: 0,
+            enabled: false,
+        },
+    ];
+    for (index, change) in changes.into_iter().enumerate() {
+        assert!(matches!(
+            backend
+                .prepare_admission(0, index as u16, &write_request(), 136)
+                .unwrap(),
+            Admission::Waiting
+        ));
+        backend.clear_changed_waits(change);
+        assert!(backend.waiting.iter().all(Option::is_none));
+        assert_eq!(
+            backend.admission_report()["statistics"]["canceled"],
+            index + 1
+        );
+    }
+    assert!(matches!(
+        backend
+            .prepare_admission(0, 10, &write_request(), 136)
+            .unwrap(),
+        Admission::Waiting
+    ));
+    backend.fail("injected storage failure".into());
+    assert!(backend.waiting.iter().all(Option::is_none));
+    assert_eq!(backend.admission_report()["statistics"]["canceled"], 7);
+    assert_eq!(backend.admission_report()["statistics"]["resumed"], 0);
+    assert_eq!(backend.next_id, 0);
+    drop((held, shared, backend));
     local::host::tests::shutdown(host);
     assert_eq!(resources.metadata.usage().current.bytes, 0);
 }

@@ -1,7 +1,7 @@
 //! V2 adapters. The queue thread gathers into its final append allocation.
 pub(crate) mod host;
 mod pools;
-mod pressure;
+pub(crate) mod pressure;
 mod reactor;
 mod state;
 mod window;
@@ -85,6 +85,11 @@ struct Metrics {
     encoding_retained_peak: usize,
     completion_retained_peak: usize,
     io_queued: u64,
+    bulk_submission_wait_ns: u64,
+    bulk_submissions: u64,
+    append_buffer_allocations: u64,
+    append_buffer_bytes: u64,
+    append_buffer_ns: u64,
     io_completed: u64,
     peak_awaiting_cqe: usize,
     reordered_appends: u64,
@@ -277,10 +282,14 @@ impl Shared {
     }
 
     pub fn reserve(&self, kind: Kind) -> Option<Permit> {
+        self.reserve_reason(kind).ok()
+    }
+
+    fn reserve_reason(&self, kind: Kind) -> Result<Permit, pressure::Reason> {
         let entry = match &self.admission {
             Some(admission) => Some(
                 host::admission::Admission::enter(admission)
-                    .or_else(|| self.pressure.deny(pressure::Reason::HostAdmission))?,
+                    .ok_or_else(|| self.pressure.denied(pressure::Reason::HostAdmission))?,
             ),
             None => None,
         };
@@ -288,14 +297,14 @@ impl Shared {
     }
 
     fn reserve_control(&self) -> Option<Permit> {
-        self.reserve_with_entry(Kind::Control, None)
+        self.reserve_with_entry(Kind::Control, None).ok()
     }
 
     fn reserve_with_entry(
         &self,
         kind: Kind,
         entry: Option<host::admission::Entry>,
-    ) -> Option<Permit> {
+    ) -> Result<Permit, pressure::Reason> {
         let request = match kind {
             Kind::Control => self.pools.control.reserve(Amount {
                 bytes: BLOCK_SIZE,
@@ -306,7 +315,7 @@ impl Shared {
                 requests: 1,
             }),
         }
-        .or_else(|| self.pressure.deny(pressure::Reason::RequestCredits))?;
+        .ok_or_else(|| self.pressure.denied(pressure::Reason::RequestCredits))?;
         let read = if let Kind::Read(bytes) = kind {
             let credits = self
                 .pools
@@ -315,16 +324,15 @@ impl Shared {
                     bytes: bytes + MAX_REQUEST_BYTES,
                     requests: 0,
                 })
-                .or_else(|| self.pressure.deny(pressure::Reason::ReadCredits))?;
+                .ok_or_else(|| self.pressure.denied(pressure::Reason::ReadCredits))?;
             Some(
                 BudgetArc::try_new(credits, &self.metadata)
-                    .ok()
-                    .or_else(|| self.pressure.deny(pressure::Reason::ReadOwnerAllocation))?,
+                    .map_err(|_| self.pressure.denied(pressure::Reason::ReadOwnerAllocation))?,
             )
         } else {
             None
         };
-        Some(Permit {
+        Ok(Permit {
             _admission: entry,
             fair_release: None,
             _request: request,
@@ -332,8 +340,7 @@ impl Shared {
             window: match (kind, &self.window) {
                 (Kind::Write(bytes), Some(window)) => Some(
                     window::Window::reserve(window, bytes)
-                        .inspect_err(|reason| self.pressure.record(*reason))
-                        .ok()?,
+                        .inspect_err(|reason| self.pressure.record(*reason))?,
                 ),
                 _ => None,
             },
@@ -536,17 +543,27 @@ impl Local {
     }
 
     pub fn prepare(&mut self, kind: Kind) -> io::Result<Option<Permit>> {
+        self.prepare_reason(kind).map(Result::ok)
+    }
+
+    pub(crate) fn prepare_reason(
+        &mut self,
+        kind: Kind,
+    ) -> io::Result<Result<Permit, pressure::Reason>> {
         if self.paused {
             return Err(io::Error::other("local admission is paused"));
         }
         if !matches!(kind, Kind::Write(_)) {
             self.seal()?;
         }
-        let Some(permit) = self.shared.reserve(kind) else {
-            if self.shared.window.is_some() {
-                self.seal()?;
+        let permit = match self.shared.reserve_reason(kind) {
+            Ok(permit) => permit,
+            Err(reason) => {
+                if self.shared.window.is_some() {
+                    self.seal()?;
+                }
+                return Ok(Err(reason));
             }
-            return Ok(None);
         };
         if let Kind::Write(bytes) = kind {
             if self.packing.as_ref().is_some_and(|batch| {
@@ -564,10 +581,17 @@ impl Local {
                     requests: 0,
                 }) else {
                     self.shared.pressure.record(pressure::Reason::AppendCredits);
-                    return Ok(None);
+                    return Ok(Err(pressure::Reason::AppendCredits));
                 };
+                let started = Instant::now();
                 let builder = Builder::new(self.status.image_bytes, payload_capacity)
                     .map_err(io::Error::other)?;
+                let mut metrics = self.shared.metrics.lock().expect("metrics poisoned");
+                metrics.append_buffer_allocations += 1;
+                metrics.append_buffer_bytes += allocation_bytes as u64;
+                metrics.append_buffer_ns +=
+                    started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+                drop(metrics);
                 assert_eq!(builder.allocation_bytes(), allocation_bytes);
                 self.packing = Some(Packing {
                     builder,
@@ -580,7 +604,7 @@ impl Local {
                 .admission_retained_peak
                 .max(self.shared.pools.append.usage().current.bytes);
         }
-        Ok(Some(permit))
+        Ok(Ok(permit))
     }
 
     pub fn gather(
@@ -796,12 +820,18 @@ impl Local {
         self.execution.name()
     }
 
-    pub fn stop(&mut self) -> io::Result<()> {
+    /// Begin terminal drain without waiting for the worker to join.
+    pub(crate) fn close(&mut self) -> io::Result<()> {
         let sealed = self.seal();
         drop(self.sender.take());
         if let Some(wake) = &self.input_wake {
             let _ = wake.write(1);
         }
+        sealed
+    }
+
+    pub fn stop(&mut self) -> io::Result<()> {
+        let sealed = self.close();
         if let Some(worker) = self.worker.take() {
             worker
                 .join()

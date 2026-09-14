@@ -33,11 +33,12 @@ fn image_pressure_starts_at_75_stops_at_cap_and_resumes_strictly_below_60() {
     permit.start();
     permit.installed(1000).unwrap();
     assert_eq!(owner.status(0).unwrap().1.promised, 0);
-    owner.reclaimed(0, 600).unwrap();
+    assert!(!owner.reclaimed(0, 600).unwrap());
     assert!(!owner.admits(0));
-    owner.reclaimed(0, 599).unwrap();
+    assert!(owner.reclaimed(0, 599).unwrap());
     assert!(owner.admits(0));
     assert!(!owner.status(0).unwrap().1.compaction);
+    assert!(!owner.reclaimed(0, 598).unwrap());
 }
 
 #[test]
@@ -51,7 +52,7 @@ fn host_promises_stop_all_images_and_image_denial_does_not_stop_its_neighbor() {
     assert!(Staging::reserve(&owner, 1, 1).is_err());
     drop((first, second));
     assert!(!owner.admits(0));
-    owner.reclaimed(0, 299).unwrap();
+    assert!(owner.reclaimed(0, 299).unwrap());
     assert!(owner.admits(0) && owner.admits(1));
     assert_eq!(owner.status(0).unwrap().0.allocated, 599);
 

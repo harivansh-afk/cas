@@ -1,6 +1,62 @@
 use super::*;
 
 #[test]
+fn staging_reopen_wakes_a_blocked_frontend_without_an_io_credit_release() {
+    let root = tempfile::tempdir().unwrap();
+    let resources = Arc::new(Resources::default());
+    let mut host = create(root.path(), 1, Arc::clone(&resources));
+    let mut attachment = host.images[0].take().unwrap();
+    let frontend = EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK).unwrap();
+    host.shared
+        .admission
+        .bind(
+            0,
+            frontend.try_clone().unwrap(),
+            EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK).unwrap(),
+        )
+        .unwrap();
+    // A prospective reservation closes the gate without allocating any disk.
+    let capacity = host.shared.staging.status(0).unwrap().1.capacity;
+    assert!(cas_core::space::Staging::reserve(&host.shared.staging, 0, capacity).is_err());
+    assert!(host.shared.staging.status(0).unwrap().1.stopped);
+    let ticket = attachment
+        .port
+        .fair()
+        .ticket(Kind::Write(BLOCK_SIZE))
+        .unwrap()
+        .unwrap();
+    drop(ticket.turn().unwrap().unwrap());
+    assert_eq!(
+        frontend.read().unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+    // Deliver the actual reclamation receipt through the reactor's production
+    // handler, with no other worker, completion, queue kick or admission timer.
+    let receipt = attachment
+        .log
+        .select_reclamation(None, Arc::clone(&resources.compaction))
+        .unwrap()
+        .run()
+        .unwrap();
+    let (events, receiver) = mailbox::bounded(1, &resources.metadata).unwrap();
+    attachment.port.events = receiver;
+    let (reply, replies) = mailbox::bounded(1, &resources.metadata).unwrap();
+    attachment.port.reply = reply;
+    events.try_send(Event::Reclaimed(receipt)).unwrap();
+    attachment
+        .port
+        .poll(&mut attachment.log, Instant::now(), true)
+        .unwrap();
+    assert!(matches!(replies.try_recv().unwrap(), Reply::Applied));
+    assert!(!host.shared.staging.status(0).unwrap().1.stopped);
+    assert_eq!(frontend.read().unwrap(), 1);
+    ticket.turn().unwrap().unwrap().commit();
+    drop((ticket, attachment, events, replies));
+    shutdown(host);
+    assert_eq!(resources.metadata.usage().current.bytes, 0);
+}
+
+#[test]
 fn full_index_waits_for_compaction_without_rotating_or_assigning_mutations() {
     let root = tempfile::tempdir().unwrap();
     let resources = Arc::new(Resources::default());
@@ -52,5 +108,32 @@ fn full_index_waits_for_compaction_without_rotating_or_assigning_mutations() {
     read(&mut first, 128, &expected);
     drop((first, second));
     shutdown(host);
+    assert_eq!(resources.metadata.usage().current.bytes, 0);
+}
+
+#[test]
+fn background_metrics_observe_real_compaction_io_and_manifest_work() {
+    let root = tempfile::tempdir().unwrap();
+    let resources = Arc::new(Resources::default());
+    let mut host = create(root.path(), 1, Arc::clone(&resources));
+    let totals = host.shared.compaction[0].clone();
+    let mut local = attach(&mut host, 2);
+    write(&mut local, 0, 0, &[7; BLOCK_SIZE]);
+    drained(&mut local, 1);
+    drop(local);
+    shutdown(host); // The final worker turn has published its operation counters.
+    let measured = *totals.lock().unwrap();
+    assert_eq!(measured.manifest_changes, 1);
+    assert!(measured.manifest_written_pages > 0);
+    assert!(measured.manifest_allocated_bytes > 0);
+    assert!(measured.exchange_calls > 0);
+    assert!(measured.operations.read.calls > 0);
+    assert!(measured.operations.write.calls > 0);
+    assert!(measured.operations.sync.calls > 0);
+    assert!(measured.operations.punch.calls > 0);
+    assert_eq!(measured.operations.hash.requested_bytes, BLOCK_SIZE as u64);
+    assert!(measured.operations.buffer_zero.requested_bytes >= measured.manifest_allocated_bytes);
+    assert!(measured.operations.scheduler_wait.calls > 0);
+    drop(totals);
     assert_eq!(resources.metadata.usage().current.bytes, 0);
 }

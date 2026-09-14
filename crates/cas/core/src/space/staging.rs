@@ -163,7 +163,9 @@ impl Staging {
     }
 
     /// Apply only a completed reclamation after removed Log owners are dropped.
-    pub fn reclaimed(&self, image: usize, allocated: u64) -> io::Result<()> {
+    /// Return a gate reopening observed under the accounting lock, so a caller
+    /// can notify waiters without racing a new reservation between snapshots.
+    pub fn reclaimed(&self, image: usize, allocated: u64) -> io::Result<bool> {
         let mut state = self.lock();
         require(!state.failed, "staging account failed")?;
         let old = state
@@ -177,11 +179,16 @@ impl Staging {
                 "unreserved staging growth during reclamation",
             ));
         }
+        let host_stopped = state.host.stopped;
+        let image_stopped = state.images[image].stopped;
         state.host.allocated -= old - allocated;
         state.host.update();
         state.images[image].allocated = allocated;
         state.images[image].update();
-        Ok(())
+        Ok(
+            (host_stopped && !state.host.stopped)
+                || (image_stopped && !state.images[image].stopped),
+        )
     }
 }
 

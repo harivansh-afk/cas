@@ -1,8 +1,9 @@
 //! First refusing storage gate per reserve attempt, not unique requests or wait time.
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[derive(Clone, Copy)]
-pub(super) enum Reason {
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Reason {
     HostAdmission,
     RequestCredits,
     ReadCredits,
@@ -38,9 +39,9 @@ impl Counters {
         self.0[reason as usize].fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn deny<T>(&self, reason: Reason) -> Option<T> {
+    pub fn denied(&self, reason: Reason) -> Reason {
         self.record(reason);
-        None
+        reason
     }
 
     pub fn report(&self) -> serde_json::Value {

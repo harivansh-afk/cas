@@ -35,6 +35,7 @@ impl<A: Allocator> AlignedBuffer<A> {
                 "unaligned buffer length",
             ));
         }
+        let allocation = crate::io_metrics::measure(length as u64, |c| &mut c.buffer_allocate);
         let mut blocks = Box::<[Block], A>::try_new_uninit_slice_in(length / BLOCK_SIZE, allocator)
             .map_err(|_| {
                 io::Error::new(
@@ -42,6 +43,8 @@ impl<A: Allocator> AlignedBuffer<A> {
                     "aligned buffer allocation denied",
                 )
             })?;
+        drop(allocation);
+        let _zeroing = crate::io_metrics::measure(length as u64, |c| &mut c.buffer_zero);
         for block in blocks.iter_mut() {
             block.write(Block([0; BLOCK_SIZE]));
         }

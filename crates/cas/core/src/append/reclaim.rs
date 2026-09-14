@@ -217,11 +217,13 @@ impl Reclamation {
                 && Arc::strong_count(segment) == 2
                 && Arc::strong_count(&segment.file) == 1;
             let after = if removed {
+                let unlink = crate::io_metrics::measure(0, |c| &mut c.unlink);
                 fs::remove_file(
                     self.directory
                         .path
                         .join(segment::name(segment.header.number)),
                 )?;
+                drop(unlink);
                 observe(ReclaimOperation::Unlink {
                     segment: segment.header.number,
                 })?;

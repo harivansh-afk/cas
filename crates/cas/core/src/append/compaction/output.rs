@@ -48,6 +48,7 @@ impl Input {
                 continue;
             }
             let chunk = edit.payload.and_then(|offset| {
+                let _measurement = crate::io_metrics::measure(BLOCK_SIZE as u64, |c| &mut c.hash);
                 Chunk::new(
                     self.payload.as_slice()[offset..offset + BLOCK_SIZE]
                         .try_into()
@@ -82,6 +83,9 @@ impl Input {
 }
 
 impl Prepared<'_> {
+    pub fn manifest_stats(&self) -> crate::manifest::tree::Stats {
+        self.manifest.stats()
+    }
     pub fn chunk_count(&self) -> usize {
         self.chunks.len()
     }

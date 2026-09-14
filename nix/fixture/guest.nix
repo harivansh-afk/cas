@@ -75,7 +75,7 @@ in
     ];
     serviceConfig = {
       Type = "oneshot";
-      # Includes the additional real 30-second queued-IO timeout control.
+      # Includes real queued-IO waiting and terminal-drain deadline controls.
       TimeoutStartSec = 270;
       ExecStart = lib.getExe workload;
       ExecStopPost = lib.getExe finish;

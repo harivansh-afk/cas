@@ -35,6 +35,7 @@ impl Directory {
     }
 
     pub fn sync(&self) -> io::Result<()> {
+        let _measurement = crate::io_metrics::measure(0, |c| &mut c.sync);
         #[cfg(test)]
         if crate::direct::faults::take(crate::direct::faults::Fault::DirectorySync) {
             return Err(io::Error::from_raw_os_error(libc::EIO));
@@ -51,6 +52,7 @@ impl Directory {
     }
 
     pub fn remove(&self, name: &str) -> io::Result<()> {
+        let _measurement = crate::io_metrics::measure(0, |c| &mut c.unlink);
         #[cfg(test)]
         if crate::direct::faults::take(crate::direct::faults::Fault::Unlink) {
             return Err(io::Error::from_raw_os_error(libc::EIO));

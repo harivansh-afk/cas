@@ -135,6 +135,22 @@ impl Fair {
         Ok(())
     }
 
+    /// Capacity became available, including WAL space without an IO completion.
+    /// Preserve a release racing a refused turn just like a request-credit drop.
+    pub(super) fn resources_released(&self) -> io::Result<()> {
+        let mut state = self.state.lock().expect("admission scheduler poisoned");
+        if state.granted.is_some() {
+            state.released_during_turn = true;
+        }
+        for image in &mut state.images {
+            for request in &mut image.queue {
+                request.ready = true;
+            }
+        }
+        drop(state);
+        self.wake_next()
+    }
+
     pub fn report(&self) -> serde_json::Value {
         let state = self.state.lock().expect("admission scheduler poisoned");
         let images: Vec<_> = state
@@ -293,16 +309,6 @@ mod tests;
 
 impl Drop for Release {
     fn drop(&mut self) {
-        let mut state = self.0.state.lock().expect("admission scheduler poisoned");
-        if state.granted.is_some() {
-            state.released_during_turn = true;
-        }
-        for image in &mut state.images {
-            for request in &mut image.queue {
-                request.ready = true;
-            }
-        }
-        drop(state);
-        let _ = self.0.wake_next();
+        let _ = self.0.resources_released();
     }
 }

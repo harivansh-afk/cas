@@ -200,6 +200,7 @@ impl Scheduler {
     }
 
     fn wait_background(&self, bytes: usize) -> io::Result<()> {
+        let _measurement = crate::io_metrics::measure(bytes as u64, |c| &mut c.scheduler_wait);
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut state = self.state.lock().expect("IO scheduler poisoned");
         if state.background_ready {

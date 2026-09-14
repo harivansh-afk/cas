@@ -32,7 +32,17 @@ impl Endpoint {
             .try_send(event)
             .map_err(|_| io::Error::other("image compaction receiver unavailable"))?;
         notify(&self.wake)?;
-        let reply = self.replies.recv_timeout(IO_DEADLINE).map_err(|_| {
+        let started = Instant::now();
+        let reply = self.replies.recv_timeout(IO_DEADLINE);
+        {
+            let mut statistics = self
+                .statistics
+                .lock()
+                .expect("compaction statistics poisoned");
+            statistics.exchange_calls += 1;
+            statistics.exchange_ns += started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        }
+        let reply = reply.map_err(|_| {
             io::Error::new(
                 io::ErrorKind::TimedOut,
                 "image compaction acknowledgment unavailable",
@@ -60,6 +70,17 @@ impl Endpoint {
                 attempt.advance(statistics::Phase::Prepare);
                 let input_bytes = input.payload_bytes() as u64;
                 let prepared = input.prepare(&self.manifest)?;
+                {
+                    let stats = prepared.manifest_stats();
+                    let mut totals = self
+                        .statistics
+                        .lock()
+                        .expect("compaction statistics poisoned");
+                    totals.manifest_changes += stats.changes as u64;
+                    totals.manifest_written_pages += stats.written_pages as u64;
+                    totals.manifest_old_page_reads += stats.old_page_reads;
+                    totals.manifest_allocated_bytes += stats.allocated_bytes as u64;
+                }
                 attempt.advance(statistics::Phase::Reserve);
                 let output_bytes = (prepared.chunk_count() * BLOCK_SIZE) as u64;
                 let bytes = capacity::compaction_bytes(&prepared, store.config().segment_bytes);
@@ -298,12 +319,19 @@ impl Owner {
                     .fail("unknown background image slot".into());
                 break;
             };
+            let measurements = cas_core::io_metrics::Scope::enter();
             let result = match turn {
                 Turn::Compact => {
                     endpoint.compact(&mut self.store, self.shared.physical.as_ref(), None)
                 }
                 Turn::Rotate => endpoint.rotate(self.shared.physical.as_ref()),
             };
+            endpoint
+                .statistics
+                .lock()
+                .expect("compaction statistics poisoned")
+                .operations
+                .add(measurements.finish());
             if let Err(error) = result {
                 if self.store.status().failed || self.shared.account_failed() {
                     self.shared.gate.fail(error.to_string());

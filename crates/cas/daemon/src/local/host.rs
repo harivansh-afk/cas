@@ -755,6 +755,7 @@ impl Port {
                         health.fail_host(error.to_string());
                         return Err(error);
                     }
+                    self.shared.fair.resources_released()?;
                     self.respond(Reply::Applied)?;
                     self.rotation = None;
                     self.active = None;
@@ -764,6 +765,7 @@ impl Port {
                         log.cancel_rotation(rotation).map_err(io::Error::other)?;
                     }
                     self.defer();
+                    self.shared.fair.resources_released()?;
                     self.respond(Reply::Applied)?;
                 }
                 Event::Select
@@ -790,14 +792,29 @@ impl Port {
                     self.respond(Reply::Reclaim(self.reclaim(log, &health)?))?;
                 }
                 Event::Reclaimed(receipt) => {
+                    let before = self.shared.staging.status(self.index)?;
                     let stats = log.apply_reclamation(receipt).map_err(io::Error::other)?;
-                    if let Err(error) = self
+                    let reopened = match self
                         .shared
                         .staging
                         .reclaimed(self.index, log.status().allocated_bytes)
                     {
-                        health.fail_host(error.to_string());
-                        return Err(error);
+                        Ok(reopened) => reopened,
+                        Err(error) => {
+                            health.fail_host(error.to_string());
+                            return Err(error);
+                        }
+                    };
+                    let after = self.shared.staging.status(self.index)?;
+                    {
+                        let mut totals = self.shared.compaction[self.index]
+                            .lock()
+                            .expect("compaction statistics poisoned");
+                        totals.staging_reopens += u64::from(reopened);
+                        totals.reclaimed_bytes += before.1.allocated - after.1.allocated;
+                    }
+                    if reopened {
+                        self.shared.fair.resources_released()?;
                     }
                     self.retry = stats.pinned_batches != 0 || log.status().segments > 1;
                     self.last_reclaim = Instant::now();
