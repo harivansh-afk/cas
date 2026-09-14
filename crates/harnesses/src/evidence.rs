@@ -74,6 +74,57 @@ impl Backend {
     }
 }
 
+/// Daemon boundary at guest write 32 where live recovery kills the backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CrashPoint {
+    AfterPrepared,
+    AfterActive,
+    BeforeSubmit,
+    AfterAppendCqe,
+    BeforeSync,
+    AfterSync,
+    AfterStorage,
+    AfterStatus,
+    AfterUsed,
+}
+
+impl CrashPoint {
+    /// The `--pause-at` spelling shared with cas-daemon and the pause marker.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::AfterPrepared => "after-prepared",
+            Self::AfterActive => "after-active",
+            Self::BeforeSubmit => "before-submit",
+            Self::AfterAppendCqe => "after-append-cqe",
+            Self::BeforeSync => "before-sync",
+            Self::AfterSync => "after-sync",
+            Self::AfterStorage => "after-storage",
+            Self::AfterStatus => "after-status",
+            Self::AfterUsed => "after-used",
+        }
+    }
+}
+
+/// Replacement-daemon boundary where an interrupted replay is killed again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReplayPoint {
+    AfterReplayAppend,
+    BeforeRecoveryFence,
+    AfterRecoveryFence,
+}
+
+impl ReplayPoint {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::AfterReplayAppend => "after-replay-append",
+            Self::BeforeRecoveryFence => "before-recovery-fence",
+            Self::AfterRecoveryFence => "after-recovery-fence",
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct Build {
     pub system: String,
@@ -434,7 +485,7 @@ impl LocalReport {
 }
 
 impl DaemonReport {
-    pub fn verify_live(&self, backend: Backend, crash_at: &str) -> io::Result<()> {
+    pub fn verify_live(&self, backend: Backend, crash_at: CrashPoint) -> io::Result<()> {
         if backend == Backend::LocalAsync {
             self.verify_restarted(backend.storage(), 4)?;
             require(
@@ -467,7 +518,10 @@ impl DaemonReport {
         }
 
         let expected = LIVE_BYTES / BLOCK_SIZE as u64
-            + u64::from(matches!(crash_at, "after-storage" | "after-status"));
+            + u64::from(matches!(
+                crash_at,
+                CrashPoint::AfterStorage | CrashPoint::AfterStatus
+            ));
         self.verify_restarted("staging_sync", 1)?;
         require(
             self.peak_inflight == 1,
@@ -750,7 +804,7 @@ mod tests {
         value["local"]["metrics"]["peak_awaiting_cqe"] = json!(1);
         let verify = |value| -> io::Result<()> {
             serde_json::from_value::<DaemonReport>(value)?
-                .verify_live(Backend::LocalAsync, "after-sync")
+                .verify_live(Backend::LocalAsync, CrashPoint::AfterSync)
         };
         verify(value.clone()).unwrap();
         assert_disconnect_drain(value.clone(), |value| verify(value).is_ok());
@@ -980,10 +1034,10 @@ mod tests {
     #[test]
     fn live_recovery_requires_serial_replay_and_the_expected_durable_prefix() {
         for point in [
-            "before-submit",
-            "after-storage",
-            "after-status",
-            "after-used",
+            CrashPoint::BeforeSubmit,
+            CrashPoint::AfterStorage,
+            CrashPoint::AfterStatus,
+            CrashPoint::AfterUsed,
         ] {
             let mut base = daemon(Backend::Staging, false);
             base["restartable"] = json!(true);
@@ -991,7 +1045,10 @@ mod tests {
             base["restored_pending"] = json!(32);
             base["peak_inflight"] = json!(1);
             let blocks = LIVE_BYTES / BLOCK_SIZE as u64
-                + u64::from(matches!(point, "after-storage" | "after-status"));
+                + u64::from(matches!(
+                    point,
+                    CrashPoint::AfterStorage | CrashPoint::AfterStatus
+                ));
             base["staging"]["appended"] = json!(blocks);
             base["staging"]["durable"] = json!(blocks);
             let valid = |value| {
@@ -1012,13 +1069,26 @@ mod tests {
             ] {
                 let mut report = base.clone();
                 report[field] = value;
-                assert!(!valid(report), "{point}: {field}");
+                assert!(!valid(report), "{point:?}: {field}");
             }
             for field in ["appended", "durable"] {
                 let mut report = base.clone();
                 report["staging"][field] = json!(blocks - 1);
                 assert!(!valid(report));
             }
+        }
+    }
+
+    #[test]
+    fn crash_and_replay_points_spell_the_same_on_the_cli_in_json_and_to_the_daemon() {
+        use clap::ValueEnum;
+        for point in CrashPoint::value_variants() {
+            assert_eq!(point.to_possible_value().unwrap().get_name(), point.name());
+            assert_eq!(serde_json::to_value(point).unwrap(), json!(point.name()));
+        }
+        for point in ReplayPoint::value_variants() {
+            assert_eq!(point.to_possible_value().unwrap().get_name(), point.name());
+            assert_eq!(serde_json::to_value(point).unwrap(), json!(point.name()));
         }
     }
 

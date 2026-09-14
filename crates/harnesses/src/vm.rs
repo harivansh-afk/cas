@@ -14,8 +14,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::evidence::{
-    self, Backend, Build, DISK_BYTES, DaemonReport, Fio, FlushMarker, GuestCompletion, IO_BYTES,
-    read_json,
+    self, Backend, Build, CrashPoint, DISK_BYTES, DaemonReport, Fio, FlushMarker, GuestCompletion,
+    IO_BYTES, ReplayPoint, read_json,
 };
 use crate::{
     host,
@@ -54,11 +54,11 @@ pub struct Args {
     #[arg(long, default_value_t = 23479, requires = "ssh_key", value_parser = clap::value_parser!(u16).range(1024..))]
     ssh_port: u16,
     /// Descriptor boundary at write 32, or first IO/sync batch covering it.
-    #[arg(long, default_value = "after-storage", value_parser = ["after-prepared", "after-active", "before-submit", "after-append-cqe", "before-sync", "after-sync", "after-storage", "after-status", "after-used"])]
-    crash_at: String,
+    #[arg(long, value_enum, default_value_t = CrashPoint::AfterStorage)]
+    crash_at: CrashPoint,
     /// Interrupt a replacement before it resumes the same guest.
-    #[arg(long, requires = "live_recovery", value_parser = ["after-replay-append", "before-recovery-fence", "after-recovery-fence"])]
-    replay_crash_at: Option<String>,
+    #[arg(long, value_enum, requires = "live_recovery")]
+    replay_crash_at: Option<ReplayPoint>,
     /// Number of interrupted replacements; every attempt retains its own evidence.
     #[arg(long, default_value_t = 2, requires = "replay_crash_at", value_parser = clap::value_parser!(u8).range(1..=3))]
     replay_restarts: u8,
@@ -601,7 +601,7 @@ mod tests {
             device_reset: false,
             ssh_key: None,
             ssh_port: 23479,
-            crash_at: "after-storage".into(),
+            crash_at: CrashPoint::AfterStorage,
             replay_crash_at: None,
             replay_restarts: 2,
             timeout: 1,
