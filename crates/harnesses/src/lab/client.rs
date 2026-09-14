@@ -278,7 +278,7 @@ pub(super) fn configure_ssh(
     for i in 1..=config.count {
         text += &format!(
             "Host vm{i}\n HostName 127.0.0.1\n Port {}\n HostKeyAlias cas-vm{i}\n ProxyJump host\n",
-            23479 + u16::from(i)
+            crate::GUEST_SSH_PORT_BASE + u16::from(i)
         );
     }
     fs::write(run.join("ssh_config"), text)

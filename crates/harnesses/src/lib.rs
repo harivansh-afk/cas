@@ -1,4 +1,7 @@
 //! Shared experiment runners, process ownership and evidence readers.
+/// Loopback port guests forward SSH to; lab guest N listens on BASE + N.
+pub const GUEST_SSH_PORT_BASE: u16 = 23479;
+
 pub mod evidence;
 pub mod filesystem;
 pub mod fixture;

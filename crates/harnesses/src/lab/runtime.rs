@@ -193,7 +193,10 @@ fn serve(output: &Path, config: &Config, build: &HostBuild) -> io::Result<()> {
             .env("CAS_RESULTS_DIR", &directory)
             .env("CAS_VHOST_SOCKET", socket)
             .env("CAS_RAW_IMAGE", format!("/fixture/raw-{i}"))
-            .env("CAS_SSH_PORT", (23480 + i).to_string());
+            .env(
+                "CAS_SSH_PORT",
+                (crate::GUEST_SSH_PORT_BASE + 1 + i as u16).to_string(),
+            );
         let mut guest = spawn(&mut command, &directory.join("console.log"))?;
         crate::qemu::record(&mut guest, &directory)?;
         guests.push(guest);

@@ -51,7 +51,7 @@ pub struct Args {
     #[arg(long, conflicts_with_all = ["recovery", "live_recovery"])]
     ssh_key: Option<PathBuf>,
     /// Spark loopback port forwarded to guest SSH (dev-vm only).
-    #[arg(long, default_value_t = 23479, requires = "ssh_key", value_parser = clap::value_parser!(u16).range(1024..))]
+    #[arg(long, default_value_t = crate::GUEST_SSH_PORT_BASE, requires = "ssh_key", value_parser = clap::value_parser!(u16).range(1024..))]
     ssh_port: u16,
     /// Descriptor boundary at write 32, or first IO/sync batch covering it.
     #[arg(long, value_enum, default_value_t = CrashPoint::AfterStorage)]
@@ -601,7 +601,7 @@ mod tests {
             live_recovery: false,
             device_reset: false,
             ssh_key: None,
-            ssh_port: 23479,
+            ssh_port: crate::GUEST_SSH_PORT_BASE,
             crash_at: CrashPoint::AfterStorage,
             replay_crash_at: None,
             replay_restarts: 2,
