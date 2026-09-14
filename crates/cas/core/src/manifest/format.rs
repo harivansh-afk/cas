@@ -1,7 +1,8 @@
 //! Bounded 4 KiB tree and COMMIT pages; no payload scanning or native structs.
+#[cfg(test)]
+use crate::aligned::AlignedBuffer;
 use crate::{
     BLOCK_SIZE,
-    aligned::AlignedBuffer,
     chunk_index::Hash,
     encoding::{checksum, put16, put32, put64, require, u16_at, u32_at, u64_at},
 };
@@ -279,6 +280,7 @@ fn finish(bytes: &mut [u8], offset: u64, image_bytes: u64) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub fn leaf(offset: u64, image_bytes: u64, extents: &[Extent]) -> io::Result<AlignedBuffer> {
     let mut buffer = AlignedBuffer::new(BLOCK_SIZE);
     leaf_into(buffer.as_mut_slice(), offset, image_bytes, extents)?;
@@ -304,6 +306,7 @@ pub(crate) fn leaf_into(
     finish(bytes, offset, image_bytes)
 }
 
+#[cfg(test)]
 pub fn branch(
     offset: u64,
     image_bytes: u64,
@@ -335,6 +338,7 @@ pub(crate) fn branch_into(
 }
 
 impl FileHeader {
+    #[cfg(test)]
     pub fn encode(self) -> io::Result<AlignedBuffer> {
         let mut buffer = AlignedBuffer::new(BLOCK_SIZE);
         self.encode_into(buffer.as_mut_slice())?;
@@ -383,6 +387,7 @@ impl Commit {
         )
     }
 
+    #[cfg(test)]
     pub fn encode(self, offset: u64) -> io::Result<AlignedBuffer> {
         let mut buffer = AlignedBuffer::new(BLOCK_SIZE);
         self.encode_into(buffer.as_mut_slice(), offset)?;
