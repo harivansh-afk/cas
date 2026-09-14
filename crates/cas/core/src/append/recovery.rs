@@ -70,33 +70,17 @@ impl Log {
         if config.segment_bytes < (format::MAX_BATCH_BYTES + 2 * BLOCK_SIZE) as u64 {
             return Err(Error::Capacity);
         }
-        let mut log = Self {
+        let mut log = Self::empty(
             directory,
             config,
             limits,
-            segments: super::BudgetVec::new_in(crate::budget::BudgetAllocator::new(Arc::clone(
-                &metadata,
-            ))),
             index,
-            metadata: Arc::clone(&metadata),
-            offset: BLOCK_SIZE as u64,
-            next_batch: 1,
+            Arc::clone(&metadata),
             highest_segment,
             tickets,
-            base: None,
-            compaction_cursor: None,
-            published: h.preceding_sequence,
-            issued: 0,
-            pending_descriptors: 0,
-            cohort: None,
-            durable: 0,
-            encoded_bytes: 0,
-            allocated_bytes: 0,
-            rejected_bytes: 0,
-            failed: false,
-            fenced: false,
-            rotating: false,
-        };
+            None,
+            h.preceding_sequence,
+        );
         log.segments
             .try_reserve_exact(candidates.len())
             .map_err(|_| {
@@ -507,6 +491,14 @@ pub struct LiveRecovery {
     physical: Option<Arc<crate::space::Governor>>,
 }
 
+/// Replay borrows the physical owner captured at start, or runs ungoverned.
+fn repair(physical: &Option<Arc<crate::space::Governor>>) -> crate::space::Recovery<'_> {
+    physical.as_ref().map_or_else(
+        crate::space::Recovery::default,
+        crate::space::Recovery::governed,
+    )
+}
+
 impl LiveRecovery {
     pub fn next(&self) -> Option<Mutation> {
         self.remaining.get(self.next).copied()
@@ -536,10 +528,7 @@ impl LiveRecovery {
         if self.log.published.checked_add(1) != Some(mutation.sequence) {
             return Err(io::Error::other("replay is not the next original mutation").into());
         }
-        let repair = self.physical.as_ref().map_or_else(
-            crate::space::Recovery::default,
-            crate::space::Recovery::governed,
-        );
+        let repair = repair(&self.physical);
         repair.output(self.log.config.segment_bytes, || self.log.append(builder))?;
         self.next += 1;
         Ok(mutation)
@@ -549,10 +538,7 @@ impl LiveRecovery {
         if self.next != self.remaining.len() {
             return Err(io::Error::other("replay has unresolved mutations").into());
         }
-        let repair = self.physical.as_ref().map_or_else(
-            crate::space::Recovery::default,
-            crate::space::Recovery::governed,
-        );
+        let repair = repair(&self.physical);
         repair.output(self.log.config.segment_bytes, || self.log.flush())?;
         Ok(self.log)
     }

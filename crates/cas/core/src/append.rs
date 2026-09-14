@@ -221,12 +221,43 @@ impl Log {
         if allocated_bytes > limits.staging_bytes {
             return Err(Error::Capacity);
         }
-        segments.push(segment);
-        Ok(Self {
+        let mut log = Self::empty(
             directory,
             config,
             limits,
-            segments,
+            index,
+            metadata,
+            highest_segment,
+            tickets,
+            base,
+            0,
+        );
+        log.segments = segments;
+        log.segments.push(segment);
+        log.encoded_bytes = BLOCK_SIZE as u64;
+        log.allocated_bytes = allocated_bytes;
+        Ok(log)
+    }
+
+    /// A log with no segments, positioned at the first batch of an empty one.
+    /// Creation and inspection both start here and then attach segments.
+    #[allow(clippy::too_many_arguments)]
+    fn empty(
+        directory: Directory,
+        config: Config,
+        limits: Limits,
+        index: Index,
+        metadata: Arc<Budget>,
+        highest_segment: u64,
+        tickets: Option<Arc<crate::segments::Tickets>>,
+        base: Option<crate::manifest::file::View>,
+        published: u64,
+    ) -> Self {
+        Self {
+            directory,
+            config,
+            limits,
+            segments: BudgetVec::new_in(BudgetAllocator::new(Arc::clone(&metadata))),
             index,
             metadata,
             offset: BLOCK_SIZE as u64,
@@ -235,18 +266,18 @@ impl Log {
             tickets,
             base,
             compaction_cursor: None,
-            published: 0,
+            published,
             issued: 0,
             pending_descriptors: 0,
             cohort: None,
             durable: 0,
-            encoded_bytes: BLOCK_SIZE as u64,
-            allocated_bytes,
+            encoded_bytes: 0,
+            allocated_bytes: 0,
             rejected_bytes: 0,
             failed: false,
             fenced: false,
             rotating: false,
-        })
+        }
     }
 
     fn current(&self) -> &Arc<Segment> {
