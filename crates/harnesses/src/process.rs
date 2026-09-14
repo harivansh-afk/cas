@@ -1,6 +1,8 @@
 //! Child process groups with deadlines and cleanup on every return path.
+use std::fs::File;
 use std::io::{self, Read, Seek};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -46,6 +48,29 @@ pub fn exit_code(status: ExitStatus) -> i32 {
     status
         .code()
         .unwrap_or_else(|| -status.signal().unwrap_or(1))
+}
+
+/// Send stdout and stderr to a new log file; an existing log is never overwritten.
+pub fn log_to(command: &mut Command, log: &Path) -> io::Result<()> {
+    let file = File::options().write(true).create_new(true).open(log)?;
+    command.stdout(file.try_clone()?).stderr(file);
+    Ok(())
+}
+
+/// Spawn an owned child whose output lands in a new log file.
+pub fn spawn_logged(command: &mut Command, log: &Path) -> io::Result<ManagedChild> {
+    log_to(command, log)?;
+    ManagedChild::spawn(command)
+}
+
+/// One field of `/proc/PID/stat`, numbered as in proc(5). The parenthesised
+/// command name is skipped first, so spaces inside it cannot shift the fields.
+pub fn proc_stat_field(pid: u32, field: usize) -> io::Result<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    stat.rsplit_once(") ")
+        .and_then(|(_, rest)| rest.split_whitespace().nth(field.checked_sub(3)?))
+        .map(str::to_owned)
+        .ok_or_else(|| io::Error::other(format!("/proc/{pid}/stat lacks field {field}")))
 }
 
 pub struct ManagedChild {
@@ -184,6 +209,13 @@ pub struct CommandResult {
     pub error: Option<String>,
 }
 
+impl CommandResult {
+    /// The command spawned, met its deadline and exited zero.
+    pub fn succeeded(&self) -> bool {
+        self.exit_code == Some(0) && self.error.is_none()
+    }
+}
+
 /// Keep stdout/stderr even when spawning, waiting or the command itself fails.
 pub fn run_logged(
     command: &mut Command,
@@ -294,6 +326,17 @@ mod tests {
                 ])
                 .arg(&pid_file);
             let mut child = ManagedChild::spawn(&mut command).unwrap();
+            // The pid and command name precede ") " and are not addressable.
+            assert!(proc_stat_field(child.pid(), 2).is_err());
+            let state = proc_stat_field(child.pid(), 3).unwrap();
+            assert!(["R", "S", "D", "T"].contains(&state.as_str()), "{state}");
+            assert!(
+                proc_stat_field(child.pid(), 22)
+                    .unwrap()
+                    .parse::<u64>()
+                    .unwrap()
+                    > 0
+            );
             let deadline = Instant::now() + Duration::from_secs(2);
             let pid: i32 = loop {
                 if let Ok(text) = fs::read_to_string(&pid_file)

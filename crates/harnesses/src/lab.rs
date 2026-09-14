@@ -4,7 +4,10 @@ mod client;
 mod runtime;
 mod samples;
 
-use crate::{evidence, process::ManagedChild};
+use crate::{
+    evidence,
+    process::{ManagedChild, spawn_logged as spawn},
+};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -233,11 +236,6 @@ fn checked(command: &mut Process) -> io::Result<()> {
             command.get_program().to_string_lossy()
         )))
     }
-}
-fn spawn(command: &mut Process, log: &Path) -> io::Result<ManagedChild> {
-    let file = File::options().create_new(true).write(true).open(log)?;
-    command.stdout(file.try_clone()?).stderr(file);
-    ManagedChild::spawn(command)
 }
 fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))

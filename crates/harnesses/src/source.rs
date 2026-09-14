@@ -132,7 +132,7 @@ pub fn text_command(argv: &[&str], cwd: &Path, directory: &Path) -> io::Result<S
     let mut command = Command::new(argv[0]);
     command.args(&argv[1..]).current_dir(cwd);
     let result = process::run_logged(&mut command, directory, Duration::from_secs(100))?;
-    if result.exit_code != Some(0) || result.error.is_some() {
+    if !result.succeeded() {
         return Err(io::Error::other(format!(
             "{} failed; see {}",
             argv[0],

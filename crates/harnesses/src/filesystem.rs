@@ -51,7 +51,7 @@ fn sqlite(args: &Args, label: &str, sql: &str) -> io::Result<String> {
         .arg(args.root.join("application.db"))
         .arg(sql);
     let result = process::run_logged(&mut command, &output, Duration::from_secs(45))?;
-    if result.exit_code != Some(0) || result.error.is_some() {
+    if !result.succeeded() {
         return Err(io::Error::other(format!("SQLite {label} failed")));
     }
     fs::read_to_string(output.join("stdout.log"))

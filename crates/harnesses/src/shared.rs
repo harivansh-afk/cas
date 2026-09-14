@@ -1,7 +1,7 @@
 //! One host process and two ordinary filesystem guests on the XFS fixture.
 use crate::{
     evidence,
-    process::{self, ManagedChild},
+    process::{self, ManagedChild, spawn_logged as spawn},
     qemu,
 };
 use serde::{Deserialize, Serialize};
@@ -86,19 +86,13 @@ pub struct Build {
 
 fn checked(command: &mut Command, output: &Path, timeout: Duration) -> io::Result<()> {
     let result = process::run_logged(command, output, timeout)?;
-    if result.exit_code != Some(0) || result.error.is_some() {
+    if !result.succeeded() {
         return Err(io::Error::other(format!(
             "command failed: {}",
             output.display()
         )));
     }
     Ok(())
-}
-
-fn spawn(command: &mut Command, output: &Path) -> io::Result<ManagedChild> {
-    let log = File::options().write(true).create_new(true).open(output)?;
-    command.stdout(log.try_clone()?).stderr(log);
-    ManagedChild::spawn(command)
 }
 
 fn start_host(

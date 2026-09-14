@@ -157,7 +157,7 @@ fn fio(args: &Args, directory: &Path, data: &Path, stage: Stage) -> io::Result<C
         .arg(format!("--output={}", directory.join("fio.json").display()));
     let start = Instant::now();
     let result = process::run_logged(&mut command, &directory.join("command"), COMMAND_TIMEOUT)?;
-    if result.exit_code != Some(0) || result.error.is_some() {
+    if !result.succeeded() {
         return Err(io::Error::other("pressure fio command failed"));
     }
     evidence::read_json::<evidence::Fio>(&directory.join("fio.json"))?.verify(

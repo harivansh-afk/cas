@@ -176,7 +176,7 @@ fn scenario(
         _ => 115,
     };
     let command_result = process::run_logged(command, &directory, Duration::from_secs(deadline))?;
-    let validation = if command_result.exit_code != Some(0) || command_result.error.is_some() {
+    let validation = if !command_result.succeeded() {
         Err(io::Error::other(
             "scenario command failed; see retained logs",
         ))
@@ -285,7 +285,7 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
         &output.join("closure"),
         Duration::from_secs(100),
     )?;
-    if result.exit_code != Some(0) || result.error.is_some() {
+    if !result.succeeded() {
         return Err(io::Error::other("failed to capture Nix closure"));
     }
     let mut executables = BTreeMap::new();
@@ -419,8 +419,7 @@ fn validate_results(report: &Report) -> io::Result<()> {
             .get(id)
             .ok_or_else(|| io::Error::other(format!("missing scenario {id}")))?;
         if !result.passed
-            || result.command.exit_code != Some(0)
-            || result.command.error.is_some()
+            || !result.command.succeeded()
             || result.error.is_some()
             || result.assertions.is_empty()
         {

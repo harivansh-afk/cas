@@ -5,6 +5,7 @@ use std::path::Path;
 
 use cas_core::BLOCK_SIZE;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::Value;
 
 pub const IO_BYTES: u64 = 64 * 1024 * 1024;
 pub const DISK_BYTES: u64 = 128 * 1024 * 1024;
@@ -23,6 +24,23 @@ pub fn write_json(path: &Path, value: &impl Serialize) -> io::Result<()> {
 pub fn write_json_to(mut output: impl io::Write, value: &impl Serialize) -> io::Result<()> {
     serde_json::to_writer_pretty(&mut output, value)?;
     writeln!(output)
+}
+
+/// Turn one acceptance condition into an error whose message names what failed.
+pub fn require(ok: bool, message: &str) -> io::Result<()> {
+    if ok {
+        Ok(())
+    } else {
+        Err(io::Error::other(message))
+    }
+}
+
+/// Read an unsigned counter at a JSON pointer; an absent or non-integer value is an error, never zero.
+pub fn u64_at(value: &Value, pointer: &str) -> io::Result<u64> {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| io::Error::other(format!("missing unsigned counter: {pointer}")))
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]

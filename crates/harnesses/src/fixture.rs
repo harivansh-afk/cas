@@ -129,7 +129,7 @@ fn execute(args: &Args) -> io::Result<()> {
         &output.join("closure"),
         Duration::from_secs(100),
     )?;
-    if result.exit_code != Some(0) || result.error.is_some() {
+    if !result.succeeded() {
         return Err(io::Error::other("fixture closure capture failed"));
     }
     let service_deadline = build.service_deadline_seconds;

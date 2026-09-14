@@ -9,17 +9,11 @@ pub(super) fn verify(guest: &Path) -> io::Result<()> {
     )?)
 }
 
-fn number(value: &Value) -> io::Result<u64> {
-    value
-        .as_u64()
-        .ok_or_else(|| io::Error::other("missing host collection measurement"))
-}
-
 fn check(conditions: &Value, observations: &Value) -> io::Result<()> {
     let mib = 1024 * 1024;
-    let before = number(&conditions["initial"]["allocated"])?;
-    let capacity = number(&conditions["limits"]["capacity"])?;
-    let reserve = number(&conditions["limits"]["reserve"])?;
+    let before = u64_at(conditions, "/initial/allocated")?;
+    let capacity = u64_at(conditions, "/limits/capacity")?;
+    let reserve = u64_at(conditions, "/limits/reserve")?;
     require(
         conditions["payload_bytes"] == 96 * mib
             && conditions["headroom_bytes"] == 8 * mib
@@ -35,7 +29,7 @@ fn check(conditions: &Value, observations: &Value) -> io::Result<()> {
         "collection changed its declared conditions",
     )?;
     let after = &observations["after"];
-    let allocated = number(&after["allocated"])?;
+    let allocated = u64_at(after, "/allocated")?;
     require(
         before
             .checked_sub(allocated)
@@ -50,15 +44,15 @@ fn check(conditions: &Value, observations: &Value) -> io::Result<()> {
     let host = &observations["host"];
     let last = &host["collection"]["last"];
     require(
-        number(&host["collection"]["completed"])? > 0
+        u64_at(host, "/collection/completed")? > 0
             && host["collection"]["error"].is_null()
             && host["failure"].is_null()
             && host["admission"]["failed"] == false
             && host["admission"]["paused"] == false
             && last["capacity_exhausted"] == false
-            && number(&last["rounds"])? > 0
-            && number(&last["chunks"]["segments_removed"])? > 0
-            && number(&last["pause_micros"])? > 0
+            && u64_at(last, "/rounds")? > 0
+            && u64_at(last, "/chunks/segments_removed")? > 0
+            && u64_at(last, "/pause_micros")? > 0
             && observations["admitted_after"] == 1
             && observations["read_oracle"] == true,
         "collection did not prove automatic progress and the resumed read oracle",
@@ -67,25 +61,25 @@ fn check(conditions: &Value, observations: &Value) -> io::Result<()> {
 
 fn check_exhaustion(value: &Value) -> io::Result<()> {
     let mib = 1024 * 1024;
-    let initial = number(&value["initial"]["allocated"])?;
-    let capacity = number(&value["limits"]["capacity"])?;
-    let reserve = number(&value["limits"]["reserve"])?;
+    let initial = u64_at(value, "/initial/allocated")?;
+    let capacity = u64_at(value, "/limits/capacity")?;
+    let reserve = u64_at(value, "/limits/reserve")?;
     let after = &value["after"];
-    let allocated = number(&after["allocated"])?;
+    let allocated = u64_at(after, "/allocated")?;
     require(
         value["live_bytes"] == 256 * mib
             && value["read_bytes"] == value["live_bytes"]
             && value["admitted_mutations"] == 0
-            && number(&value["seed_micros"])? > 0
-            && number(&value["read_micros"])? > 0
+            && u64_at(value, "/seed_micros")? > 0
+            && u64_at(value, "/read_micros")? > 0
             && reserve == 150 * mib
             && initial.checked_add(reserve) == Some(capacity)
-            && capacity <= number(&value["initial"]["domain"]["capacity"])?
+            && capacity <= u64_at(value, "/initial/domain/capacity")?
             && capacity
                 .checked_sub(reserve)
                 .is_some_and(|limit| allocated <= limit)
             && u128::from(allocated) * 100 >= u128::from(capacity) * 60
-            && number(&after["peak_used"])? <= capacity
+            && u64_at(after, "/peak_used")? <= capacity
             && after["promised"] == 0
             && after["failed"] == false
             && after["pressured"] == true
@@ -99,10 +93,10 @@ fn check_exhaustion(value: &Value) -> io::Result<()> {
             && host["admission"]["failed"] == false
             && host["store"]["chunks"] == 65536
             && host["store"]["failed"] == false
-            && number(&collection["completed"])? > 0
+            && u64_at(collection, "/completed")? > 0
             && collection["error"].is_null()
             && collection["last"]["capacity_exhausted"] == true
-            && number(&collection["last"]["rounds"])? > 0,
+            && u64_at(collection, "/last/rounds")? > 0,
         "unique live collection did not establish healthy capacity exhaustion",
     )
 }

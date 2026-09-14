@@ -26,7 +26,7 @@ impl Samples {
         for (_, directory, _) in guests {
             let qemu: Value = evidence::read_json(&directory.join("qemu.json"))?;
             pids.push(
-                checks::number(&qemu, "/pid")?
+                evidence::u64_at(&qemu, "/pid")?
                     .try_into()
                     .map_err(io::Error::other)?,
             );
@@ -34,8 +34,11 @@ impl Samples {
         let identities = pids
             .into_iter()
             .map(|pid| {
-                let root = PathBuf::from(format!("/proc/{pid}"));
-                Ok((pid, fs::read_link(root.join("exe"))?, start_time(&root)?))
+                Ok((
+                    pid,
+                    fs::read_link(format!("/proc/{pid}/exe"))?,
+                    process::proc_stat_field(pid, 22)?,
+                ))
             })
             .collect::<io::Result<_>>()?;
         Ok(Self {
@@ -84,7 +87,9 @@ impl Samples {
         for (pid, executable, identity) in &self.identities {
             let root = PathBuf::from(format!("/proc/{pid}"));
             let rollup = fs::read_to_string(root.join("smaps_rollup"))?;
-            if fs::read_link(root.join("exe"))? != *executable || start_time(&root)? != *identity {
+            if fs::read_link(root.join("exe"))? != *executable
+                || process::proc_stat_field(*pid, 22)? != *identity
+            {
                 return Err(io::Error::other("memory sample process identity changed"));
             }
             let rss_bytes = checks::memory_bytes(&rollup, "Rss:")?;
@@ -135,13 +140,6 @@ impl Samples {
             .ok_or_else(|| io::Error::other("no live host telemetry"))
     }
 }
-fn start_time(root: &Path) -> io::Result<String> {
-    let stat = fs::read_to_string(root.join("stat"))?;
-    stat.rsplit_once(") ")
-        .and_then(|(_, rest)| rest.split_whitespace().nth(19))
-        .map(str::to_owned)
-        .ok_or_else(|| io::Error::other("process start time absent"))
-}
 fn drain(
     samples: &mut Samples,
     host: &mut ManagedChild,
@@ -157,7 +155,7 @@ fn drain(
     loop {
         samples.tick(host, guests, deadline)?;
         let latest = samples.snapshot()?;
-        if checks::number(&latest, "/elapsed_ns")? > previous && checks::drained(&latest)? {
+        if evidence::u64_at(&latest, "/elapsed_ns")? > previous && checks::drained(&latest)? {
             return Ok(latest);
         }
     }

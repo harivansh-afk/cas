@@ -187,17 +187,9 @@ fn logged_command(
     log: &str,
     env: &BTreeMap<OsString, OsString>,
 ) -> io::Result<Command> {
-    let file = File::options()
-        .write(true)
-        .create_new(true)
-        .open(output.join(log))?;
     let mut command = Command::new(program);
-    command
-        .current_dir(output)
-        .env_clear()
-        .envs(env)
-        .stdout(file.try_clone()?)
-        .stderr(file);
+    command.current_dir(output).env_clear().envs(env);
+    process::log_to(&mut command, &output.join(log))?;
     Ok(command)
 }
 

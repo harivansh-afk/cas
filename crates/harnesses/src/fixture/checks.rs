@@ -7,20 +7,12 @@ use std::path::Path;
 use serde_json::Value;
 
 use super::Build;
-use crate::evidence;
+use crate::evidence::{self, require, u64_at};
 
 const SECTORS: u64 = 16 * 1024 * 1024 / 512;
 
 mod collection;
 mod space;
-
-fn require(ok: bool, message: &str) -> io::Result<()> {
-    if ok {
-        Ok(())
-    } else {
-        Err(io::Error::other(message))
-    }
-}
 
 #[derive(Debug)]
 struct Extent {
