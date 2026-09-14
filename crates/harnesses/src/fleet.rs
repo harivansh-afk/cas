@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use clap::{Parser, ValueEnum};
+use clap::ValueEnum;
 use serde_json::json;
 
 use crate::process::ManagedChild;
@@ -22,7 +22,7 @@ enum Phase {
     September,
 }
 
-#[derive(Parser)]
+#[derive(clap::Args)]
 #[command(override_usage = "cas-census-fleet --image INPUT --output OUTPUT [--phase PHASE]")]
 pub struct Args {
     #[arg(long)]
@@ -224,12 +224,7 @@ pub fn run(mut args: Args) -> io::Result<()> {
     }
     args.output = fs::canonicalize(&args.output)?;
     for path in [&args.output, &args.firmware, &args.firmware_vars] {
-        if path.to_str().is_none_or(|text| text.contains([',', '\n'])) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "QEMU paths must be UTF-8 without commas or newlines",
-            ));
-        }
+        crate::qemu::valid_path(path)?;
     }
     let base = args.output.join("base");
     let base_root = base.join("root.root.raw");
@@ -270,6 +265,8 @@ pub fn run(mut args: Args) -> io::Result<()> {
                 .arg("8G"),
         )?;
         boot(&args, &base, "base", "base")?;
+        // T0 is the identical-clone control (docs/census.md): the base image is
+        // censused against three byte-identical copies of itself before any update.
         census(&args.output, "t0", &vec![base_root.clone(); 4])?;
     } else if fs::read(args.output.join("workload.sh"))? != fs::read(&args.workload)? {
         return Err(io::Error::other("workload changed between fleet phases"));

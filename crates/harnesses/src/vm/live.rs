@@ -15,14 +15,17 @@ struct Pause {
 
 pub(super) fn validate_options(args: &Args, backend: Backend) -> io::Result<()> {
     let reference_point = matches!(
-        args.crash_at.as_str(),
-        "before-submit" | "after-storage" | "after-status" | "after-used"
+        args.crash_at,
+        CrashPoint::BeforeSubmit
+            | CrashPoint::AfterStorage
+            | CrashPoint::AfterStatus
+            | CrashPoint::AfterUsed
     );
     if args.live_recovery && !reference_point && backend != Backend::LocalAsync {
         return Err(io::Error::other("this crash point requires local-async"));
     }
     if args.replay_crash_at.is_some()
-        && (backend != Backend::LocalAsync || args.crash_at != "before-submit")
+        && (backend != Backend::LocalAsync || args.crash_at != CrashPoint::BeforeSubmit)
     {
         return Err(io::Error::other(
             "interrupted replay requires local-async and --crash-at before-submit",
@@ -71,7 +74,7 @@ fn kill(daemon: &mut ManagedChild, guest: &mut ManagedChild, socket: &Path) -> i
 
 pub(super) fn execute(
     args: &Args,
-    build: &Build,
+    build: &VmBuild,
     image: &Path,
     evidence: &mut PhaseEvidence,
 ) -> io::Result<()> {
@@ -128,14 +131,18 @@ pub(super) fn execute(
             }
             Ok(child)
         };
-    let mut daemon = spawn("daemon-before", true, Some((&args.crash_at, 32, &marker)))?;
+    let mut daemon = spawn(
+        "daemon-before",
+        true,
+        Some((args.crash_at.name(), 32, &marker)),
+    )?;
     evidence.launcher = vec![args.vm.clone()];
     let mut guest =
         ManagedChild::spawn(&mut logged_command(&args.vm, output, "console.log", &env)?)?;
     record_qemu(args, &mut guest, output)?;
     let pause = wait_pause(
         &marker,
-        &args.crash_at,
+        args.crash_at.name(),
         32,
         &mut guest,
         &mut daemon,
@@ -146,8 +153,12 @@ pub(super) fn execute(
             return Err(io::Error::other("missing pre-crash P/E evidence"));
         };
         let published_cut = matches!(
-            args.crash_at.as_str(),
-            "after-storage" | "after-status" | "after-used" | "before-sync" | "after-sync"
+            args.crash_at,
+            CrashPoint::AfterStorage
+                | CrashPoint::AfterStatus
+                | CrashPoint::AfterUsed
+                | CrashPoint::BeforeSync
+                | CrashPoint::AfterSync
         );
         if e > p || (published_cut && (p < 32 || p == e)) {
             return Err(io::Error::other(
@@ -158,10 +169,10 @@ pub(super) fn execute(
     let killed = kill(&mut daemon, &mut guest, &socket)?;
     let mut interrupted = Vec::new();
     let mut previous_p = pause.published.unwrap_or(0);
-    if let Some(point) = &args.replay_crash_at {
+    if let Some(point) = args.replay_crash_at {
         for attempt in 1..=args.replay_restarts {
             let marker = output.join(format!("pause-replay-{attempt}.json"));
-            let after = if point == "after-replay-append" {
+            let after = if point == ReplayPoint::AfterReplayAppend {
                 1
             } else {
                 32
@@ -169,17 +180,23 @@ pub(super) fn execute(
             daemon = spawn(
                 &format!("daemon-replay-{attempt}"),
                 false,
-                Some((point, after, &marker)),
+                Some((point.name(), after, &marker)),
             )?;
-            let replay_pause =
-                wait_pause(&marker, point, after, &mut guest, &mut daemon, deadline)?;
+            let replay_pause = wait_pause(
+                &marker,
+                point.name(),
+                after,
+                &mut guest,
+                &mut daemon,
+                deadline,
+            )?;
             let (Some(p), Some(e)) = (replay_pause.published, replay_pause.durable) else {
                 return Err(io::Error::other("missing interrupted-replay P/E evidence"));
             };
             if p < previous_p
                 || e > p
-                || (point == "after-replay-append" && p == previous_p)
-                || (point == "after-recovery-fence" && e != p)
+                || (point == ReplayPoint::AfterReplayAppend && p == previous_p)
+                || (point == ReplayPoint::AfterRecoveryFence && e != p)
             {
                 return Err(io::Error::other(
                     "interrupted replay violated its prefix boundary",
@@ -226,7 +243,7 @@ pub(super) fn execute(
     }
     let value: Value = read_json(&output.join("daemon-after.json"))?;
     evidence.daemon = Some(value.clone());
-    serde_json::from_value::<DaemonReport>(value)?.verify_live(build.backend, &args.crash_at)?;
+    serde_json::from_value::<DaemonReport>(value)?.verify_live(build.backend, args.crash_at)?;
     evidence.verified_bytes = Some(LIVE_BYTES);
     evidence.written_bytes = Some(LIVE_BYTES);
     evidence.live_recovery = Some(serde_json::json!({

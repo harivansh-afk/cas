@@ -1,6 +1,8 @@
 //! Child process groups with deadlines and cleanup on every return path.
+use std::fs::File;
 use std::io::{self, Read, Seek};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -46,6 +48,29 @@ pub fn exit_code(status: ExitStatus) -> i32 {
     status
         .code()
         .unwrap_or_else(|| -status.signal().unwrap_or(1))
+}
+
+/// Send stdout and stderr to a new log file; an existing log is never overwritten.
+pub fn log_to(command: &mut Command, log: &Path) -> io::Result<()> {
+    let file = File::options().write(true).create_new(true).open(log)?;
+    command.stdout(file.try_clone()?).stderr(file);
+    Ok(())
+}
+
+/// Spawn an owned child whose output lands in a new log file.
+pub fn spawn_logged(command: &mut Command, log: &Path) -> io::Result<ManagedChild> {
+    log_to(command, log)?;
+    ManagedChild::spawn(command)
+}
+
+/// One field of `/proc/PID/stat`, numbered as in proc(5). The parenthesised
+/// command name is skipped first, so spaces inside it cannot shift the fields.
+pub fn proc_stat_field(pid: u32, field: usize) -> io::Result<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    stat.rsplit_once(") ")
+        .and_then(|(_, rest)| rest.split_whitespace().nth(field.checked_sub(3)?))
+        .map(str::to_owned)
+        .ok_or_else(|| io::Error::other(format!("/proc/{pid}/stat lacks field {field}")))
 }
 
 pub struct ManagedChild {
@@ -158,10 +183,20 @@ impl Drop for ManagedChild {
     }
 }
 
+/// How a captured command ended; serialized as the lowercase word in reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CaptureStatus {
+    Ok,
+    Error,
+    Missing,
+    Timeout,
+}
+
 #[derive(Serialize)]
 pub struct Capture {
     argv: Vec<String>,
-    status: &'static str,
+    status: CaptureStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     returncode: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -182,6 +217,13 @@ pub struct CommandResult {
     pub elapsed_seconds: f64,
     pub exit_code: Option<i32>,
     pub error: Option<String>,
+}
+
+impl CommandResult {
+    /// The command spawned, met its deadline and exited zero.
+    pub fn succeeded(&self) -> bool {
+        self.exit_code == Some(0) && self.error.is_none()
+    }
 }
 
 /// Keep stdout/stderr even when spawning, waiting or the command itself fails.
@@ -221,7 +263,7 @@ pub fn run_logged(
 pub fn capture(argv: &[&str], cwd: &std::path::Path) -> Capture {
     let mut report = Capture {
         argv: argv.iter().map(|s| (*s).into()).collect(),
-        status: "error",
+        status: CaptureStatus::Error,
         returncode: None,
         stdout: None,
         stderr: None,
@@ -247,14 +289,18 @@ pub fn capture(argv: &[&str], cwd: &std::path::Path) -> Capture {
         report.returncode = Some(exit_code(status));
         report.stdout = Some(read(&mut stdout)?);
         report.stderr = Some(read(&mut stderr)?);
-        report.status = if status.success() { "ok" } else { "error" };
+        report.status = if status.success() {
+            CaptureStatus::Ok
+        } else {
+            CaptureStatus::Error
+        };
         Ok(())
     })();
     if let Err(error) = result {
         report.status = match error.kind() {
-            io::ErrorKind::NotFound => "missing",
-            io::ErrorKind::TimedOut => "timeout",
-            _ => "error",
+            io::ErrorKind::NotFound => CaptureStatus::Missing,
+            io::ErrorKind::TimedOut => CaptureStatus::Timeout,
+            _ => CaptureStatus::Error,
         };
         report.error = Some(error.to_string());
     }
@@ -294,6 +340,17 @@ mod tests {
                 ])
                 .arg(&pid_file);
             let mut child = ManagedChild::spawn(&mut command).unwrap();
+            // The pid and command name precede ") " and are not addressable.
+            assert!(proc_stat_field(child.pid(), 2).is_err());
+            let state = proc_stat_field(child.pid(), 3).unwrap();
+            assert!(["R", "S", "D", "T"].contains(&state.as_str()), "{state}");
+            assert!(
+                proc_stat_field(child.pid(), 22)
+                    .unwrap()
+                    .parse::<u64>()
+                    .unwrap()
+                    > 0
+            );
             let deadline = Instant::now() + Duration::from_secs(2);
             let pid: i32 = loop {
                 if let Ok(text) = fs::read_to_string(&pid_file)
@@ -325,13 +382,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let failed = capture(&["sh", "-c", "printf failed >&2; exit 7"], dir.path());
         assert_eq!(failed.returncode, Some(7));
-        assert_eq!(failed.status, "error");
+        assert_eq!(failed.status, CaptureStatus::Error);
         assert_eq!(failed.stderr.as_deref(), Some("failed"));
         let large = capture(&["sh", "-c", "head -c 262144 /dev/zero"], dir.path());
-        assert_eq!(large.status, "ok");
+        assert_eq!(large.status, CaptureStatus::Ok);
         assert_eq!(large.stdout.unwrap().len(), 262144);
         let missing = capture(&["/nonexistent/cas-harness-test"], dir.path());
-        assert_eq!(missing.status, "missing");
+        assert_eq!(missing.status, CaptureStatus::Missing);
         assert!(missing.error.is_some());
+        assert_eq!(
+            serde_json::to_value(&missing).unwrap()["status"],
+            serde_json::json!("missing")
+        );
+        for (status, word) in [
+            (CaptureStatus::Ok, "ok"),
+            (CaptureStatus::Error, "error"),
+            (CaptureStatus::Timeout, "timeout"),
+        ] {
+            assert_eq!(serde_json::to_value(status).unwrap(), word);
+        }
     }
 }

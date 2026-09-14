@@ -37,7 +37,7 @@ enum Workload {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Build {
+struct FixtureBuild {
     #[serde(default)]
     workload: Workload,
     #[serde(default)]
@@ -74,7 +74,7 @@ struct Report {
 fn execute(args: &Args) -> io::Result<()> {
     let output = &args.output;
     let checkout = args.checkout.canonicalize()?;
-    let build: Build = evidence::read_json(&args.build_info)?;
+    let build: FixtureBuild = evidence::read_json(&args.build_info)?;
     fs::copy(&args.build_info, output.join("build.json"))?;
     if args.crash_at.is_some() && (build.workload != Workload::Shared || !build.live_recovery) {
         return Err(io::Error::other(
@@ -118,18 +118,25 @@ fn execute(args: &Args) -> io::Result<()> {
         executables.insert(path.clone(), source::entry(path)?);
     }
     evidence::write_json(&output.join("executables.json"), &executables)?;
+    // Every executable sits at <store path>/bin/<name>; its closure root is two levels up.
+    let roots = executables
+        .keys()
+        .map(|path| {
+            path.parent()
+                .and_then(Path::parent)
+                .ok_or_else(|| io::Error::other(format!("no store root above {}", path.display())))
+        })
+        .collect::<io::Result<Vec<_>>>()?;
     let mut closure = Command::new("nix");
-    closure.args(["path-info", "--recursive", "--json"]).args(
-        executables
-            .keys()
-            .map(|path| path.parent().unwrap().parent().unwrap()),
-    );
+    closure
+        .args(["path-info", "--recursive", "--json"])
+        .args(roots);
     let result = process::run_logged(
         &mut closure,
         &output.join("closure"),
         Duration::from_secs(100),
     )?;
-    if result.exit_code != Some(0) || result.error.is_some() {
+    if !result.succeeded() {
         return Err(io::Error::other("fixture closure capture failed"));
     }
     let service_deadline = build.service_deadline_seconds;
@@ -236,6 +243,6 @@ pub fn verify(output: &Path) -> io::Result<()> {
         &source::scan(&output.join("source"))?,
         "archived fixture source",
     )?;
-    let build: Build = evidence::read_json(&output.join("build.json"))?;
+    let build: FixtureBuild = evidence::read_json(&output.join("build.json"))?;
     checks::verify(output, &build)
 }

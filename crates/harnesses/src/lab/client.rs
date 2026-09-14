@@ -17,8 +17,8 @@ fn lock() -> io::Result<File> {
         .map_err(|_| io::Error::other("another casctl lifecycle operation is running"))?;
     Ok(file)
 }
-fn user_command(program: &str) -> Process {
-    let mut command = Process::new(program);
+fn user_command(program: &str) -> Command {
+    let mut command = Command::new(program);
     // SAFETY: getuid has no preconditions and does not retain memory.
     let runtime = format!("/run/user/{}", unsafe { libc::getuid() });
     command.env("XDG_RUNTIME_DIR", &runtime).env(
@@ -46,7 +46,7 @@ fn running(config: &Config) -> io::Result<bool> {
     }
     unit_busy(String::from_utf8_lossy(&output.stdout).trim())
 }
-fn build() -> io::Result<Build> {
+fn build() -> io::Result<LabBuild> {
     let path = std::env::var_os("CAS_LAB_BUILD").ok_or_else(|| {
         io::Error::other("use the packaged CLI: nix build .#casctl; ./result/bin/casctl new NAME")
     })?;
@@ -143,7 +143,7 @@ pub(super) fn new(name: Option<String>, count: u8, backend: Backend, json: bool)
         .and_then(Path::parent)
         .ok_or_else(|| io::Error::other("invalid pinned VM path"))?;
     checked(
-        Process::new("nix-store")
+        Command::new("nix-store")
             .arg("--add-root")
             .arg(directory.join("build"))
             .args(["--indirect", "--realise"])
@@ -156,7 +156,7 @@ pub(super) fn new(name: Option<String>, count: u8, backend: Backend, json: bool)
         .open(directory.join("disk.raw"))?
         .set_len(config.disk_bytes)?;
     checked(
-        Process::new("ssh-keygen")
+        Command::new("ssh-keygen")
             .args(["-q", "-t", "ed25519", "-N", "", "-C", "casctl-local"])
             .arg("-f")
             .arg(directory.join("key")),
@@ -197,7 +197,7 @@ fn boot(directory: &Path, config: &Config) -> io::Result<()> {
     // Reserve a loopback-only candidate. A race is reported by QEMU, never worked around by stealing a port.
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let port = listener.local_addr()?.port();
-    publish(
+    replace_atomically(
         &directory.join("active.json"),
         &Active {
             run: run.clone(),
@@ -278,14 +278,14 @@ pub(super) fn configure_ssh(
     for i in 1..=config.count {
         text += &format!(
             "Host vm{i}\n HostName 127.0.0.1\n Port {}\n HostKeyAlias cas-vm{i}\n ProxyJump host\n",
-            23479 + u16::from(i)
+            crate::GUEST_SSH_PORT_BASE + u16::from(i)
         );
     }
     fs::write(run.join("ssh_config"), text)
 }
-fn ssh_target(directory: &Path, target: &str, command: &[String]) -> io::Result<Process> {
+fn ssh_target(directory: &Path, target: &str, command: &[String]) -> io::Result<Command> {
     let active: Active = evidence::read_json(&directory.join("active.json"))?;
-    let mut ssh = Process::new("ssh");
+    let mut ssh = Command::new("ssh");
     ssh.arg("-F").arg(active.run.join("ssh_config"));
     if command.is_empty() {
         ssh.arg("-t");
@@ -302,7 +302,7 @@ fn ssh_target(directory: &Path, target: &str, command: &[String]) -> io::Result<
     }
     Ok(ssh)
 }
-pub(super) fn ssh(name: &str, command: &[String]) -> io::Result<Process> {
+pub(super) fn ssh(name: &str, command: &[String]) -> io::Result<Command> {
     let (name, peer) = name.split_once('/').unwrap_or((name, "1"));
     let (directory, config) = load(name)?;
     let peer: u8 = peer
@@ -504,7 +504,7 @@ pub(super) fn remove(name: &str) -> io::Result<()> {
     for path in &bulk {
         inventory(path, &mut deleted)?;
     }
-    publish(
+    replace_atomically(
         &directory.join("cleanup-plan.json"),
         &serde_json::json!({"files":deleted,"recorded_at":crate::host::utc_now()?}),
     )?;

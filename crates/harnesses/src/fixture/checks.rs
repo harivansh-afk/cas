@@ -6,21 +6,16 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::Build;
-use crate::evidence;
+use super::FixtureBuild;
+use crate::evidence::{self, require, u64_at};
 
 const SECTORS: u64 = 16 * 1024 * 1024 / 512;
+// Extent flags from linux/fiemap.h as printed by `xfs_io -c fiemap`.
+const FIEMAP_EXTENT_LAST: u32 = 0x0000_0001;
+const FIEMAP_EXTENT_SHARED: u32 = 0x0000_2000;
 
 mod collection;
 mod space;
-
-fn require(ok: bool, message: &str) -> io::Result<()> {
-    if ok {
-        Ok(())
-    } else {
-        Err(io::Error::other(message))
-    }
-}
 
 #[derive(Debug)]
 struct Extent {
@@ -59,13 +54,13 @@ fn extents(text: &str) -> io::Result<Vec<Extent>> {
         let flags = u32::from_str_radix(fields[4].trim_start_matches("0x"), 16)
             .map_err(io::Error::other)?;
         require(
-            flags & !0x2001 == 0,
+            flags & !(FIEMAP_EXTENT_LAST | FIEMAP_EXTENT_SHARED) == 0,
             "FIEMAP has unresolved or unsupported extents",
         )?;
         result.push(Extent {
             physical,
             sectors,
-            shared: flags & 0x2000 != 0,
+            shared: flags & FIEMAP_EXTENT_SHARED != 0,
         });
         next += sectors;
     }
@@ -128,7 +123,7 @@ fn tests(module: &str, list: &str, log: &str) -> io::Result<()> {
     )
 }
 
-pub(super) fn verify(output: &Path, build: &Build) -> io::Result<()> {
+pub(super) fn verify(output: &Path, build: &FixtureBuild) -> io::Result<()> {
     let guest = output.join("guest");
     let exit: Value = evidence::read_json(&output.join("guest-exit.json"))?;
     require(

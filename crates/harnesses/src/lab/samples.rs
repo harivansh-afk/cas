@@ -57,9 +57,9 @@ impl Samples {
         self.file.write_all(&bytes)?;
         self.file.flush()?;
         self.bytes += bytes.len() as u64;
-        publish(&self.output.join("memory.json"), &value)?;
+        replace_atomically(&self.output.join("memory.json"), &value)?;
         if let Some(value) = last_record(&self.output.join("daemon/telemetry.jsonl"))? {
-            publish(&self.output.join("storage.json"), &value)?;
+            replace_atomically(&self.output.join("storage.json"), &value)?;
         }
         Ok(())
     }

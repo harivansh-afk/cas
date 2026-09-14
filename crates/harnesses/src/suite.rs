@@ -13,11 +13,41 @@ use crate::{evidence, host, persistence, process, source};
 
 mod scenarios;
 
+/// Development checkpoints; each later checkpoint runs every earlier scenario too.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum, Serialize, Deserialize,
+)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum Checkpoint {
+    #[value(name = "C1")]
+    C1,
+    #[value(name = "C2")]
+    C2,
+    #[value(name = "C3")]
+    C3,
+    #[value(name = "C4")]
+    C4,
+    #[value(name = "C5")]
+    C5,
+}
+
+impl Checkpoint {
+    fn name(self) -> &'static str {
+        match self {
+            Self::C1 => "C1",
+            Self::C2 => "C2",
+            Self::C3 => "C3",
+            Self::C4 => "C4",
+            Self::C5 => "C5",
+        }
+    }
+}
+
 #[derive(clap::Args)]
 pub struct Args {
     /// Run source-bound reference, ordering, recovery and store checkpoint checks.
-    #[arg(long, default_value = "C2", value_parser = ["C1", "C2", "C3", "C4", "C5"])]
-    checkpoint: String,
+    #[arg(long, value_enum, default_value_t = Checkpoint::C2)]
+    checkpoint: Checkpoint,
     /// Checkout whose exact contents must match the Nix build.
     #[arg(long, default_value = ".")]
     checkout: PathBuf,
@@ -30,7 +60,7 @@ pub struct Args {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Build {
+struct SuiteBuild {
     source_revision: String,
     source_path: PathBuf,
     harness: PathBuf,
@@ -54,7 +84,7 @@ struct Scenario {
 #[serde(deny_unknown_fields)]
 struct Report {
     schema_version: u32,
-    checkpoint: String,
+    checkpoint: Checkpoint,
     passed: bool,
     started_at_utc: String,
     ended_at_utc: String,
@@ -63,7 +93,7 @@ struct Report {
     error: Option<String>,
 }
 
-fn require_wrapper<'a>(build: &'a Build, name: &str) -> io::Result<&'a Path> {
+fn require_wrapper<'a>(build: &'a SuiteBuild, name: &str) -> io::Result<&'a Path> {
     build
         .wrappers
         .get(name)
@@ -100,7 +130,7 @@ fn validate_vm(directory: &Path, source: &Path) -> io::Result<Vec<String>> {
 fn fixture_identity(
     info: &Value,
     scenario: &Value,
-    build: &Build,
+    build: &SuiteBuild,
     case: scenarios::Fixture,
 ) -> io::Result<()> {
     let shared = case.wrapper == "shared";
@@ -124,7 +154,7 @@ fn fixture_identity(
 
 fn validate_fixture(
     directory: &Path,
-    build: &Build,
+    build: &SuiteBuild,
     case: scenarios::Fixture,
 ) -> io::Result<Vec<String>> {
     let run = directory.join("run");
@@ -142,7 +172,7 @@ enum Validation<'a> {
     Command,
     Guest(&'a Path),
     Persistence(&'a Path),
-    Fixture(&'a Build, scenarios::Fixture),
+    Fixture(&'a SuiteBuild, scenarios::Fixture),
 }
 
 fn validate_model(directory: &Path, executable: &Path) -> io::Result<Vec<String>> {
@@ -169,14 +199,14 @@ fn scenario(
     report: &mut Report,
 ) -> io::Result<()> {
     process::check_interrupt()?;
-    eprintln!("checkpoint {}: {id}", report.checkpoint);
+    eprintln!("checkpoint {}: {id}", report.checkpoint.name());
     let directory = output.join("scenarios").join(id);
     let deadline = match &validation {
         Validation::Fixture(_, case) => case.deadline_seconds(),
         _ => 115,
     };
     let command_result = process::run_logged(command, &directory, Duration::from_secs(deadline))?;
-    let validation = if command_result.exit_code != Some(0) || command_result.error.is_some() {
+    let validation = if !command_result.succeeded() {
         Err(io::Error::other(
             "scenario command failed; see retained logs",
         ))
@@ -206,7 +236,7 @@ fn scenario(
 fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
     let checkout = args.checkout.canonicalize()?;
     let output = &args.output;
-    let build: Build = evidence::read_json(&args.build_info)?;
+    let build: SuiteBuild = evidence::read_json(&args.build_info)?;
     fs::copy(&args.build_info, output.join("build.json"))?;
     if std::env::current_exe()?.canonicalize()? != build.harness.canonicalize()? {
         return Err(io::Error::other(
@@ -247,7 +277,7 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
         &output.join("cargo-graph"),
     )?;
     host::preflight(
-        &format!("{} development suite", args.checkpoint),
+        &format!("{} development suite", args.checkpoint.name()),
         &output.join("host.json"),
         &checkout,
     )?;
@@ -257,7 +287,7 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
             "profile": "development", "host_cpu_affinity": host::cpu_affinity()?,
             "host_cache_state": "uncontrolled; no paper measurement",
             "guest_state": "fresh boot and new scratch image per scenario; live recovery retains one guest",
-            "guest_io": if matches!(args.checkpoint.as_str(), "C4" | "C5") {
+            "guest_io": if args.checkpoint >= Checkpoint::C4 {
                 "direct fio references plus buffered ext4 and SQLite in two private filesystem guests; C5 also requires the declared competing-workload matrix"
             } else {
                 "direct fio; workload contents and seeds retained under source/crates/harnesses/fio"
@@ -265,8 +295,8 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
             "host_payload_io": "O_DIRECT", "durability": "local; serial live reference flushes every write",
             "host_buffer_alignment_bytes":4096, "logical_block_bytes":4096, "virtio_sector_bytes":512,
             "reference_queues":{"count":1, "entries":128},
-            "concurrent_queues":(matches!(args.checkpoint.as_str(), "C3" | "C4" | "C5")).then(|| json!({"count":4, "entries":256})),
-            "fixture_inventory":scenarios::fixtures(&args.checkpoint).iter().map(|case| json!({"id":case.id,"crash_at":case.cut,"deadline_seconds":case.deadline_seconds()})).collect::<Vec<_>>(),
+            "concurrent_queues":(args.checkpoint >= Checkpoint::C3).then(|| json!({"count":4, "entries":256})),
+            "fixture_inventory":scenarios::fixtures(args.checkpoint).iter().map(|case| json!({"id":case.id,"crash_at":case.cut,"deadline_seconds":case.deadline_seconds()})).collect::<Vec<_>>(),
             "scenario_deadline_seconds":115, "guest_boot_deadline_seconds":90,
             "cargo_features":"workspace defaults; resolved features in cargo-graph/stdout.log",
             "paper_gates":[],
@@ -285,7 +315,7 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
         &output.join("closure"),
         Duration::from_secs(100),
     )?;
-    if result.exit_code != Some(0) || result.error.is_some() {
+    if !result.succeeded() {
         return Err(io::Error::other("failed to capture Nix closure"));
     }
     let mut executables = BTreeMap::new();
@@ -310,7 +340,7 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
         }
         fs::copy(info_path, output.join(format!("build-{name}.json")))?;
     }
-    for case in scenarios::fixtures(&args.checkpoint) {
+    for case in scenarios::fixtures(args.checkpoint) {
         let wrapper = build
             .fixtures
             .get(case.wrapper)
@@ -340,7 +370,7 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
         command.args(&argv[1..]).current_dir(&checkout);
         scenario(id, &mut command, output, Validation::Command, report)?;
     }
-    for (id, wrapper, extra) in scenarios::vms(&args.checkpoint) {
+    for (id, wrapper, extra) in scenarios::vms(args.checkpoint) {
         let mut command = Command::new(require_wrapper(&build, wrapper)?.join("bin/cas-vm-smoke"));
         command
             .args(extra)
@@ -357,7 +387,7 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
             report,
         )?;
     }
-    if matches!(args.checkpoint.as_str(), "C3" | "C4" | "C5") {
+    if args.checkpoint >= Checkpoint::C3 {
         let mut command = Command::new(&build.harness);
         command
             .arg("persistence")
@@ -372,7 +402,7 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
             report,
         )?;
     }
-    for case in scenarios::fixtures(&args.checkpoint) {
+    for case in scenarios::fixtures(args.checkpoint) {
         let wrapper = build
             .fixtures
             .get(case.wrapper)
@@ -404,11 +434,8 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
 }
 
 fn validate_results(report: &Report) -> io::Result<()> {
-    let required = scenarios::required(&report.checkpoint);
-    if report.schema_version != 1
-        || !matches!(report.checkpoint.as_str(), "C1" | "C2" | "C3" | "C4" | "C5")
-        || report.scenarios.len() != required.len()
-    {
+    let required = scenarios::required(report.checkpoint);
+    if report.schema_version != 1 || report.scenarios.len() != required.len() {
         return Err(io::Error::other(
             "incomplete or unsupported checkpoint suite",
         ));
@@ -419,8 +446,7 @@ fn validate_results(report: &Report) -> io::Result<()> {
             .get(id)
             .ok_or_else(|| io::Error::other(format!("missing scenario {id}")))?;
         if !result.passed
-            || result.command.exit_code != Some(0)
-            || result.command.error.is_some()
+            || !result.command.succeeded()
             || result.error.is_some()
             || result.assertions.is_empty()
         {
@@ -440,7 +466,7 @@ pub fn run(mut args: Args) -> io::Result<()> {
     fs::create_dir(&args.output)?;
     let mut report = Report {
         schema_version: 1,
-        checkpoint: args.checkpoint.clone(),
+        checkpoint: args.checkpoint,
         passed: false,
         started_at_utc: host::utc_now()?,
         ended_at_utc: String::new(),
@@ -486,12 +512,12 @@ pub fn verify(output: &Path) -> io::Result<()> {
             )));
         }
     }
-    if matches!(report.checkpoint.as_str(), "C3" | "C4" | "C5") {
+    if report.checkpoint >= Checkpoint::C3 {
         persistence::verify(&output.join("scenarios/persistence-model/run"))?;
     }
-    if !scenarios::fixtures(&report.checkpoint).is_empty() {
-        let build: Build = evidence::read_json(&output.join("build.json"))?;
-        for case in scenarios::fixtures(&report.checkpoint) {
+    if !scenarios::fixtures(report.checkpoint).is_empty() {
+        let build: SuiteBuild = evidence::read_json(&output.join("build.json"))?;
+        for case in scenarios::fixtures(report.checkpoint) {
             validate_fixture(&output.join("scenarios").join(case.id), &build, case)?;
         }
     }
@@ -505,9 +531,9 @@ mod tests {
     #[test]
     fn c3_requires_every_concurrent_and_persistence_case() {
         let mut report = passing_report();
-        report.checkpoint = "C3".into();
+        report.checkpoint = Checkpoint::C3;
         assert!(validate_results(&report).is_err());
-        for id in scenarios::required("C3") {
+        for id in scenarios::required(Checkpoint::C3) {
             let scenario =
                 serde_json::from_value(serde_json::to_value(&report.scenarios["staging"]).unwrap())
                     .unwrap();
@@ -515,7 +541,7 @@ mod tests {
         }
         assert_eq!(report.scenarios.len(), 32);
         validate_results(&report).unwrap();
-        for id in scenarios::required("C3") {
+        for id in scenarios::required(Checkpoint::C3) {
             let scenario = report.scenarios.remove(id).unwrap();
             assert!(validate_results(&report).is_err(), "missing {id}");
             report.scenarios.insert(id.into(), scenario);
@@ -524,9 +550,9 @@ mod tests {
 
     #[test]
     fn c4_and_c5_require_all_cases_and_exact_fixture_identity() {
-        for (checkpoint, count) in [("C4", 40), ("C5", 41)] {
+        for (checkpoint, count) in [(Checkpoint::C4, 40), (Checkpoint::C5, 41)] {
             let mut report = passing_report();
-            report.checkpoint = checkpoint.into();
+            report.checkpoint = checkpoint;
             for id in scenarios::required(checkpoint) {
                 let scenario = serde_json::from_value(
                     serde_json::to_value(&report.scenarios["staging"]).unwrap(),
@@ -541,7 +567,7 @@ mod tests {
                 assert!(validate_results(&report).is_err(), "missing {}", case.id);
                 report.scenarios.insert(case.id.into(), removed);
             }
-            let build = Build {
+            let build = SuiteBuild {
                 source_revision: "revision".into(),
                 source_path: "source".into(),
                 harness: "harness".into(),
@@ -583,9 +609,28 @@ mod tests {
     }
 
     #[test]
+    fn checkpoints_order_and_spell_the_same_on_the_cli_and_in_reports() {
+        use clap::ValueEnum;
+        let mut previous = None;
+        for checkpoint in Checkpoint::value_variants() {
+            assert_eq!(
+                checkpoint.to_possible_value().unwrap().get_name(),
+                checkpoint.name()
+            );
+            assert_eq!(
+                serde_json::to_value(checkpoint).unwrap(),
+                json!(checkpoint.name())
+            );
+            assert!(previous.is_none_or(|earlier| earlier < *checkpoint));
+            previous = Some(*checkpoint);
+        }
+        assert!(serde_json::from_value::<Checkpoint>(json!("C6")).is_err());
+    }
+
+    #[test]
     fn c2_requires_both_local_guest_scenarios() {
         let mut report = passing_report();
-        report.checkpoint = "C2".into();
+        report.checkpoint = Checkpoint::C2;
         assert!(validate_results(&report).is_err());
         for id in ["local-sync", "local-fresh-recovery"] {
             let scenario =
@@ -601,13 +646,13 @@ mod tests {
     fn passing_report() -> Report {
         Report {
             schema_version: 1,
-            checkpoint: "C1".into(),
+            checkpoint: Checkpoint::C1,
             passed: true,
             started_at_utc: String::new(),
             ended_at_utc: String::new(),
             artifacts: BTreeMap::new(),
             error: None,
-            scenarios: scenarios::required("C1")
+            scenarios: scenarios::required(Checkpoint::C1)
                 .into_iter()
                 .map(|id| {
                     (
@@ -655,7 +700,7 @@ mod tests {
     fn retained_evidence_cannot_disappear_after_success() {
         let directory = tempfile::tempdir().unwrap();
         let mut report = passing_report();
-        for id in scenarios::required("C1") {
+        for id in scenarios::required(Checkpoint::C1) {
             let scenario = directory.path().join("scenarios").join(id);
             fs::create_dir_all(&scenario).unwrap();
             for file in ["stdout.log", "stderr.log"] {

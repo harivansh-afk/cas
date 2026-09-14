@@ -1,20 +1,8 @@
 //! Recompute acceptance from mandatory per-stage records and original observations.
 use super::*;
+use crate::evidence::{require, u64_at};
 use std::collections::BTreeSet;
 
-fn require(ok: bool, message: &str) -> io::Result<()> {
-    if ok {
-        Ok(())
-    } else {
-        Err(io::Error::other(message))
-    }
-}
-pub(super) fn number(value: &Value, path: &str) -> io::Result<u64> {
-    value
-        .pointer(path)
-        .and_then(Value::as_u64)
-        .ok_or_else(|| io::Error::other(format!("missing unsigned counter: {path}")))
-}
 fn array<'a>(value: &'a Value, path: &str) -> io::Result<&'a Vec<Value>> {
     value
         .pointer(path)
@@ -23,8 +11,8 @@ fn array<'a>(value: &'a Value, path: &str) -> io::Result<&'a Vec<Value>> {
 }
 fn budget(value: &Value, bytes: u64, requests: u64) -> io::Result<()> {
     for (name, limit) in [("bytes", bytes), ("requests", requests)] {
-        let current = number(value, &format!("/current/{name}"))?;
-        let peak = number(value, &format!("/peak/{name}"))?;
+        let current = u64_at(value, &format!("/current/{name}"))?;
+        let peak = u64_at(value, &format!("/peak/{name}"))?;
         require(
             current <= peak && peak <= limit,
             "reported budget exceeds its configured cap",
@@ -61,23 +49,23 @@ pub(super) fn sample(value: &Value) -> io::Result<()> {
         ("metadata_cache", 16 * 1024 * 1024),
     ] {
         require(
-            number(&host[name], "/capacity_bytes")? == bytes,
+            u64_at(&host[name], "/capacity_bytes")? == bytes,
             "cache configuration differs",
         )?;
         budget(&host[name]["payload"], bytes, 0)?;
         require(
-            number(&host[name], "/resident_bytes")? + number(&host[name], "/reader_held_bytes")?
-                <= number(&host[name], "/payload/current/bytes")?,
+            u64_at(&host[name], "/resident_bytes")? + u64_at(&host[name], "/reader_held_bytes")?
+                <= u64_at(&host[name], "/payload/current/bytes")?,
             "cache owners exceed charged payload",
         )?;
         for key in ["hits", "misses", "fills", "evictions", "refused"] {
-            number(&host[name], &format!("/counters/{key}"))?;
+            u64_at(&host[name], &format!("/counters/{key}"))?;
         }
     }
     let staging = &host["staging"];
     require(
-        number(staging, "/capacity")? == 32 * 1024 * 1024
-            && number(staging, "/allocated")? + number(staging, "/promised")? <= 32 * 1024 * 1024,
+        u64_at(staging, "/capacity")? == 32 * 1024 * 1024
+            && u64_at(staging, "/allocated")? + u64_at(staging, "/promised")? <= 32 * 1024 * 1024,
         "staging exceeds fixture cap",
     )?;
     for key in [
@@ -86,13 +74,13 @@ pub(super) fn sample(value: &Value) -> io::Result<()> {
         "background_requested_bytes",
         "demand_requested_bytes",
     ] {
-        number(host, &format!("/io_scheduler/counters/{key}"))?;
+        u64_at(host, &format!("/io_scheduler/counters/{key}"))?;
     }
     for key in ["started", "joined", "completed", "failed"] {
-        number(host, &format!("/fetches/counters/{key}"))?;
+        u64_at(host, &format!("/fetches/counters/{key}"))?;
     }
     require(
-        number(host, "/admission_scheduler/quantum_bytes")? == 1024 * 1024,
+        u64_at(host, "/admission_scheduler/quantum_bytes")? == 1024 * 1024,
         "admission quantum differs",
     )?;
     require(
@@ -112,7 +100,7 @@ pub(super) fn sample(value: &Value) -> io::Result<()> {
             "failed",
             "failed_ns",
         ] {
-            number(totals, &format!("/{field}"))?;
+            u64_at(totals, &format!("/{field}"))?;
         }
         require(
             totals["failed"] == 0,
@@ -131,16 +119,16 @@ pub(super) fn sample(value: &Value) -> io::Result<()> {
             report["errors"] == 0 && report.get("fatal_error") == Some(&Value::Null),
             "image error or missing health",
         )?;
-        number(report, "/pending")?;
+        u64_at(report, "/pending")?;
         pools(&report["local"], false)?;
         let status = &report["local"]["status"];
         require(status["failed"] == false, "local image failed")?;
-        let d = number(status, "/compacted")?;
-        let e = number(status, "/durable")?;
+        let d = u64_at(status, "/compacted")?;
+        let e = u64_at(status, "/durable")?;
         require(
             d <= e
-                && e <= number(status, "/published")?
-                && number(status, "/published")? <= number(status, "/issued")?,
+                && e <= u64_at(status, "/published")?
+                && u64_at(status, "/published")? <= u64_at(status, "/issued")?,
             "image prefix order differs",
         )?;
     }
@@ -149,22 +137,22 @@ pub(super) fn sample(value: &Value) -> io::Result<()> {
 pub(super) fn drained(value: &Value) -> io::Result<bool> {
     for image in array(value, "/images")? {
         let status = &image["report"]["local"]["status"];
-        let issued = number(status, "/issued")?;
-        if number(status, "/compacted")? != issued
-            || number(status, "/durable")? != issued
-            || number(&image["report"], "/pending")? != 0
+        let issued = u64_at(status, "/issued")?;
+        if u64_at(status, "/compacted")? != issued
+            || u64_at(status, "/durable")? != issued
+            || u64_at(&image["report"], "/pending")? != 0
         {
             return Ok(false);
         }
     }
-    Ok(number(value, "/host/compaction_metadata/current/bytes")? == 0)
+    Ok(u64_at(value, "/host/compaction_metadata/current/bytes")? == 0)
 }
 pub(super) fn drain_rate(before: &Value, after: &Value) -> io::Result<f64> {
     let totals = |value: &Value, field: &str| -> io::Result<u64> {
         array(value, "/host/compaction")?
             .iter()
             .try_fold(0u64, |sum, v| {
-                sum.checked_add(number(v, &format!("/{field}"))?)
+                sum.checked_add(u64_at(v, &format!("/{field}"))?)
                     .ok_or_else(|| io::Error::other("compaction counter overflow"))
             })
     };
@@ -246,7 +234,7 @@ fn memory(path: &Path) -> io::Result<Value> {
     let mut peak_pss = 0;
     for line in BufReader::new(File::open(path)?).lines() {
         let value: Value = serde_json::from_str(&line?)?;
-        let time = number(&value, "/elapsed_ns")?;
+        let time = u64_at(&value, "/elapsed_ns")?;
         require(
             previous.is_none_or(|last| time > last),
             "memory timestamps are not increasing",
@@ -284,14 +272,14 @@ fn memory(path: &Path) -> io::Result<Value> {
             let pss = memory_bytes(raw, "Pss:")?;
             require(
                 rss >= pss
-                    && rss == number(process, "/rss_bytes")?
-                    && pss == number(process, "/pss_bytes")?,
+                    && rss == u64_at(process, "/rss_bytes")?
+                    && pss == u64_at(process, "/pss_bytes")?,
                 "memory summary differs from raw smaps",
             )?;
             total += pss;
         }
         require(
-            total == number(&value, "/cohort_pss_bytes")?,
+            total == u64_at(&value, "/cohort_pss_bytes")?,
             "PSS cohort sum differs",
         )?;
         peak_pss = peak_pss.max(total);
@@ -332,7 +320,7 @@ fn file_inventory(report: &Value) -> io::Result<(String, String)> {
             .ok_or_else(|| io::Error::other("file digest absent"))?;
         require(
             names.insert(name)
-                && number(file, "/bytes")? == bytes
+                && u64_at(file, "/bytes")? == bytes
                 && hash.len() == 64
                 && hash.bytes().all(|b| b.is_ascii_hexdigit()),
             "duplicate file, wrong length or invalid digest",
@@ -363,7 +351,7 @@ pub(super) fn verify(output: &Path) -> io::Result<Value> {
             "stage boundary did not drain",
         )?;
         require(
-            number(&after, "/elapsed_ns")? > number(&before, "/elapsed_ns")?,
+            u64_at(&after, "/elapsed_ns")? > u64_at(&before, "/elapsed_ns")?,
             "stage telemetry is stale",
         )?;
         let request: Request = evidence::read_json(&directory.join("request.json"))?;
@@ -391,10 +379,7 @@ pub(super) fn verify(output: &Path) -> io::Result<Value> {
             if let Some(control) = stage.fio() {
                 let command: process::CommandResult =
                     evidence::read_json(&guest.join("command/command.json"))?;
-                require(
-                    command.exit_code == Some(0) && command.error.is_none(),
-                    "fio process failed",
-                )?;
+                require(command.succeeded(), "fio process failed")?;
                 for flag in [
                     format!("--bs={}", control.block_bytes),
                     format!("--iodepth={}", control.depth),
@@ -421,13 +406,13 @@ pub(super) fn verify(output: &Path) -> io::Result<Value> {
             calibration = drain_rate(&before, &after)?;
         }
         let timing: Value = evidence::read_json(&directory.join("timing.json"))?;
-        let elapsed = number(&timing, "/guest_elapsed_ns")?;
+        let elapsed = u64_at(&timing, "/guest_elapsed_ns")?;
         require(
-            elapsed > 0 && number(&timing, "/through_drain_elapsed_ns")? >= elapsed,
+            elapsed > 0 && u64_at(&timing, "/through_drain_elapsed_ns")? >= elapsed,
             "stage elapsed times differ",
         )?;
-        let joined = number(&after, "/host/fetches/counters/joined")?
-            .checked_sub(number(&before, "/host/fetches/counters/joined")?)
+        let joined = u64_at(&after, "/host/fetches/counters/joined")?
+            .checked_sub(u64_at(&before, "/host/fetches/counters/joined")?)
             .ok_or_else(|| io::Error::other("fetch counter decreased"))?;
         if stage == Stage::Burst {
             let plan: Value = evidence::read_json(&stages.join("burst-plan.json"))?;
@@ -526,7 +511,7 @@ mod tests {
     }
     #[test]
     fn missing_counters_and_forged_memory_never_default_to_zero() {
-        assert!(number(&serde_json::json!({}), "/host/compaction/input_bytes").is_err());
+        assert!(u64_at(&serde_json::json!({}), "/host/compaction/input_bytes").is_err());
         assert!(sample(&serde_json::json!({"schema_version":1,"phase":"live"})).is_err());
         assert_eq!(
             memory_bytes("Rss: 16 kB\nPss: 8 kB\n", "Pss:").unwrap(),

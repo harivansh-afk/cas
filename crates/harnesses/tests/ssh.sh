@@ -5,6 +5,7 @@ runner=$(realpath "$1")
 mkdir -p "$(dirname "$2")"
 mkdir "$2"
 output=$(realpath "$2")
+# Default matches GUEST_SSH_PORT_BASE in crates/harnesses/src/lib.rs.
 port=${3:-23479}
 keys=$(mktemp -d)
 pid=

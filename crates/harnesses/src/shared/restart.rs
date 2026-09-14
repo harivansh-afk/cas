@@ -14,12 +14,9 @@ impl Identity {
             .as_u64()
             .and_then(|pid| u32::try_from(pid).ok())
             .ok_or_else(|| io::Error::other("QEMU PID is absent"))?;
-        let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
-        let start_ticks = stat
-            .rsplit_once(") ")
-            .and_then(|(_, fields)| fields.split_whitespace().nth(19))
-            .and_then(|value| value.parse().ok())
-            .ok_or_else(|| io::Error::other("QEMU process start time is absent"))?;
+        let start_ticks = process::proc_stat_field(pid, 22)?
+            .parse()
+            .map_err(|_| io::Error::other("QEMU process start time is absent"))?;
         Ok(Self { pid, start_ticks })
     }
 }
@@ -43,7 +40,7 @@ pub(super) struct Boundary {
 
 pub(super) fn restart(
     args: &Args,
-    build: &Build,
+    build: &SharedBuild,
     output: &Path,
     sockets: &[PathBuf; 2],
     host: &mut ManagedChild,
@@ -214,24 +211,16 @@ pub(super) fn verify_restart(output: &Path, cut: Option<Cut>) -> io::Result<()> 
 }
 
 fn stopped(pid: u32) -> io::Result<bool> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
-    Ok(stat
-        .rsplit_once(") ")
-        .is_some_and(|(_, fields)| fields.starts_with("T ")))
+    Ok(process::proc_stat_field(pid, 3)? == "T")
 }
 
 fn verify_cut(path: &Path, cut: Cut) -> io::Result<()> {
     let marker: serde_json::Value = evidence::read_json(path)?;
-    let number = |field: &str| {
-        marker[field]
-            .as_u64()
-            .ok_or_else(|| io::Error::other(format!("cut lacks {field}")))
-    };
     let (p, e, d, through) = (
-        number("published")?,
-        number("durable")?,
-        number("manifest_durable")?,
-        number("selected_through")?,
+        evidence::u64_at(&marker, "/published")?,
+        evidence::u64_at(&marker, "/durable")?,
+        evidence::u64_at(&marker, "/manifest_durable")?,
+        evidence::u64_at(&marker, "/selected_through")?,
     );
     if marker["schema_version"] != 1
         || marker["point"] != cut.name()
@@ -246,7 +235,9 @@ fn verify_cut(path: &Path, cut: Cut) -> io::Result<()> {
         ));
     }
     let before = matches!(cut, Cut::BeforeChunks | Cut::AfterChunks);
-    if (before && (d >= through || number("chunks")? == 0)) || (!before && d != through) {
+    if (before && (d >= through || evidence::u64_at(&marker, "/chunks")? == 0))
+        || (!before && d != through)
+    {
         return Err(io::Error::other(
             "manifest publication differs at selected cut",
         ));

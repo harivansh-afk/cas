@@ -14,11 +14,16 @@
   };
 
   # Layout:
-  #   nix/package.nix   the Rust workspace, exposed as pkgs.cas via the overlay
-  #   nix/smoke.nix     cas-vm-smoke, one runner per block backend
-  #   nix/guest/        the NixOS guest those runners boot
-  #   nix/modules/      NixOS modules for dedicated test hosts
-  #   nix/checks/       evaluation-only checks for `nix flake check`
+  #   nix/package.nix      the Rust workspace, exposed as pkgs.cas via the overlay
+  #   nix/smoke.nix        cas-vm-smoke, one runner per block backend (dev-vm adds SSH)
+  #   nix/guest/           the NixOS guest those runners boot
+  #   nix/fixture/         the XFS KVM fixture; also wraps the shared and pressure guests
+  #   nix/shared/          the outer host and inner filesystem guests those fixtures nest
+  #   nix/lab/             casctl, named local VM labs with their host and guest systems
+  #   nix/checkpoints.nix  the source-bound checkpoint suite wrapper
+  #   nix/census.nix       the census pilot and the dated ARM64 clone fleet
+  #   nix/modules/         NixOS modules for dedicated test hosts
+  #   nix/checks/          evaluation-only checks for `nix flake check`
   outputs =
     {
       self,
@@ -49,6 +54,16 @@
           )
         );
 
+      # Flake-level facts the package set cannot see. `fallback` is the
+      # source_revision recorded when neither self.rev nor self.dirtyRev exists.
+      provenanceWith = fallback: {
+        source_revision = self.rev or self.dirtyRev or fallback;
+        source_path = toString self.outPath;
+      };
+      provenance = provenanceWith null;
+      # casctl's build record spells that case out instead of leaving it null.
+      labProvenance = provenanceWith "unversioned";
+
       # The guest as a NixOS system, configured for one block backend.
       guestFor =
         pkgs: backend: interactive:
@@ -68,9 +83,7 @@
         pkgs.callPackage ./nix/smoke.nix {
           inherit backend;
           guest = guestFor pkgs backend interactive;
-          provenance = {
-            source_revision = self.rev or self.dirtyRev or null;
-            source_path = toString self.outPath;
+          provenance = provenance // {
             nixpkgs_revision = nixpkgs.rev;
             lock = ./flake.lock;
           };
@@ -111,10 +124,7 @@
               { nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system; }
             ];
           };
-          provenance = {
-            source_revision = self.rev or self.dirtyRev or null;
-            source_path = toString self.outPath;
-          };
+          inherit provenance;
         };
     in
     {
@@ -142,10 +152,7 @@
                 { nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system; }
               ];
             };
-            provenance = {
-              source_revision = self.rev or self.dirtyRev or null;
-              source_path = toString self.outPath;
-            };
+            inherit provenance;
           };
           sharedRecovery = sharedFor pkgs { liveRecovery = true; };
           pressure = sharedFor pkgs { pressure = true; };
@@ -155,28 +162,19 @@
           inherit (pkgs) cas;
           casctl = import ./nix/lab {
             inherit pkgs lib nixpkgs;
-            provenance = {
-              source_revision = self.rev or self.dirtyRev or "unversioned";
-              source_path = toString self.outPath;
-            };
+            provenance = labProvenance;
           };
           casctl-read-probe = import ./nix/lab {
             inherit pkgs lib nixpkgs;
             guestCores = 2;
             traceReads = true;
-            provenance = {
-              source_revision = self.rev or self.dirtyRev or "unversioned";
-              source_path = toString self.outPath;
-            };
+            provenance = labProvenance;
           };
           casctl-read-control = import ./nix/lab {
             inherit pkgs lib nixpkgs;
             guestCores = 2;
             probeTools = true;
-            provenance = {
-              source_revision = self.rev or self.dirtyRev or "unversioned";
-              source_path = toString self.outPath;
-            };
+            provenance = labProvenance;
           };
           vm-smoke = raw;
           daemon-smoke = daemon;
@@ -197,10 +195,7 @@
                 async
                 ;
             };
-            provenance = {
-              source_revision = self.rev or self.dirtyRev or null;
-              source_path = toString self.outPath;
-            };
+            inherit provenance;
           };
           xfs-fixture = xfs;
           shared-fixture = sharedFor pkgs { };

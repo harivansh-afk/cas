@@ -9,7 +9,7 @@ pub(super) fn supervise(directory: &Path, run: &Path) -> io::Result<()> {
     }
     let started = crate::host::utc_now()?;
     let result = (|| {
-        let mut command = Process::new(&config.build.vm);
+        let mut command = Command::new(&config.build.vm);
         command
             .current_dir(run.join("tmp"))
             .env("TMPDIR", run.join("tmp"))
@@ -27,7 +27,7 @@ pub(super) fn supervise(directory: &Path, run: &Path) -> io::Result<()> {
                 if host["success"] != true {
                     return Err(io::Error::other("storage/guest shutdown failed"));
                 }
-                publish(&run.join("spark-memory.json"), &samples::outer()?)?;
+                replace_atomically(&run.join("spark-memory.json"), &samples::outer()?)?;
                 break;
             }
             if run.join("ready.json").exists() && !run.join("ssh_config").exists() {
@@ -39,12 +39,12 @@ pub(super) fn supervise(directory: &Path, run: &Path) -> io::Result<()> {
                     "lab aborted to preserve 25 GiB of host disk headroom",
                 ));
             }
-            publish(&run.join("spark-memory.json"), &samples::outer()?)?;
+            replace_atomically(&run.join("spark-memory.json"), &samples::outer()?)?;
             thread::sleep(Duration::from_secs(1));
         }
         Ok(())
     })();
-    publish(
+    replace_atomically(
         &run.join("outcome.json"),
         &serde_json::json!({"success":result.is_ok(),"error":result.as_ref().err().map(ToString::to_string),"started":started,"finished":crate::host::utc_now()?}),
     )?;
@@ -65,7 +65,7 @@ pub(super) fn host(build: &Path) -> io::Result<()> {
     let root = Path::new("/results");
     let config: Config = evidence::read_json(&root.join("config.json"))?;
     let result = serve(root, &config, &build);
-    publish(
+    replace_atomically(
         &root.join("host-outcome.json"),
         &serde_json::json!({"success":result.is_ok(),"error":result.as_ref().err().map(ToString::to_string)}),
     )?;
@@ -83,7 +83,7 @@ fn serve(output: &Path, config: &Config, build: &HostBuild) -> io::Result<()> {
     if first {
         if matches!(config.backend, Backend::Cas) {
             fs::create_dir(storage)?;
-            let mut init = Process::new(&build.host);
+            let mut init = Command::new(&build.host);
             init.arg("init").arg("--root").arg(storage).args([
                 "--store",
                 STORE,
@@ -116,7 +116,7 @@ fn serve(output: &Path, config: &Config, build: &HostBuild) -> io::Result<()> {
         Backend::Cas => {
             let reports = output.join("daemon");
             fs::create_dir(&reports)?;
-            let mut command = Process::new(&build.host);
+            let mut command = Command::new(&build.host);
             command
                 .args([
                     "--root",
@@ -142,7 +142,7 @@ fn serve(output: &Path, config: &Config, build: &HostBuild) -> io::Result<()> {
         }
         Backend::Daemon => {
             for (i, socket) in paths.iter().enumerate() {
-                let mut command = Process::new(&build.daemon);
+                let mut command = Command::new(&build.daemon);
                 command
                     .arg("--socket")
                     .arg(socket)
@@ -182,7 +182,7 @@ fn serve(output: &Path, config: &Config, build: &HostBuild) -> io::Result<()> {
         if first {
             fs::write(directory.join("format"), b"new disk\n")?;
         }
-        let mut command = Process::new(match config.backend {
+        let mut command = Command::new(match config.backend {
             Backend::Raw => &build.raw_guest,
             Backend::Daemon => &build.daemon_guest,
             Backend::Cas => &build.guest,
@@ -193,7 +193,10 @@ fn serve(output: &Path, config: &Config, build: &HostBuild) -> io::Result<()> {
             .env("CAS_RESULTS_DIR", &directory)
             .env("CAS_VHOST_SOCKET", socket)
             .env("CAS_RAW_IMAGE", format!("/fixture/raw-{i}"))
-            .env("CAS_SSH_PORT", (23480 + i).to_string());
+            .env(
+                "CAS_SSH_PORT",
+                (crate::GUEST_SSH_PORT_BASE + 1 + i as u16).to_string(),
+            );
         let mut guest = spawn(&mut command, &directory.join("console.log"))?;
         crate::qemu::record(&mut guest, &directory)?;
         guests.push(guest);
@@ -230,7 +233,7 @@ fn serve(output: &Path, config: &Config, build: &HostBuild) -> io::Result<()> {
                     && output.join(format!("guest-{i}/host-key.pub")).exists()
             })
         {
-            publish(
+            replace_atomically(
                 &output.join("ready.json"),
                 &serde_json::json!({"guests":config.count,"backend":config.backend.name(),"ready_at":crate::host::utc_now()?}),
             )?;

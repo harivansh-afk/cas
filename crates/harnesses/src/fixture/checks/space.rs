@@ -6,19 +6,13 @@ pub(super) fn verify(guest: &Path) -> io::Result<()> {
     check(&conditions, &observations)
 }
 
-fn number(value: &Value) -> io::Result<u64> {
-    value
-        .as_u64()
-        .ok_or_else(|| io::Error::other("missing physical-space measurement"))
-}
-
 fn check(conditions: &Value, observations: &Value) -> io::Result<()> {
     let mib = 1024 * 1024;
     let domain = &conditions["initial"]["domain"];
-    let capacity = number(&domain["capacity"])?;
-    let unit = number(&domain["unit"])?;
-    number(&domain["device"])?;
-    number(&domain["filesystem"])?;
+    let capacity = u64_at(domain, "/capacity")?;
+    let unit = u64_at(domain, "/unit")?;
+    u64_at(domain, "/device")?;
+    u64_at(domain, "/filesystem")?;
     require(
         unit > 0 && capacity > 36 * mib,
         "invalid physical allocation domain",
@@ -41,7 +35,7 @@ fn check(conditions: &Value, observations: &Value) -> io::Result<()> {
     let mut allocated = Vec::new();
     for phase in ["initial", "allocated", "partial", "unlinked"] {
         let sample = &observations[phase];
-        let bytes = number(&sample["allocated"])?;
+        let bytes = u64_at(sample, "/allocated")?;
         require(
             sample["domain"] == *domain && bytes <= capacity && bytes.is_multiple_of(unit),
             "physical observation changed domain or exceeded capacity",
@@ -60,7 +54,7 @@ fn check(conditions: &Value, observations: &Value) -> io::Result<()> {
             && status["promised"] == 0
             && status["failed"] == false
             && status["background_active"] == false
-            && number(&status["peak_used"])? >= allocated[2],
+            && u64_at(status, "/peak_used")? >= allocated[2],
         "physical account did not reconcile completed transactions",
     )
 }

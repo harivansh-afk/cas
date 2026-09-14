@@ -14,16 +14,17 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::evidence::{
-    self, Backend, Build, DISK_BYTES, DaemonReport, Fio, FlushMarker, GuestCompletion, IO_BYTES,
-    read_json,
+    self, Backend, CrashPoint, DISK_BYTES, DaemonReport, Fio, FlushMarker, GuestCompletion,
+    IO_BYTES, ReplayPoint, VmBuild, read_json,
 };
 use crate::{
     host,
     process::{self, ManagedChild},
 };
 
-// Linux 6.17.13 can delay io_uring worker exit for five seconds. See the
-// daemon-lifetime review; this is a shutdown limit, not an IO timing metric.
+// The kernel can delay io_uring worker exit for about five seconds (observed on
+// Linux 6.17.13; see the daemon-lifetime review). This bounds shutdown only; it
+// is not an IO timing metric.
 const DAEMON_SHUTDOWN: Duration = Duration::from_secs(10);
 
 mod interactive;
@@ -51,14 +52,14 @@ pub struct Args {
     #[arg(long, conflicts_with_all = ["recovery", "live_recovery"])]
     ssh_key: Option<PathBuf>,
     /// Spark loopback port forwarded to guest SSH (dev-vm only).
-    #[arg(long, default_value_t = 23479, requires = "ssh_key", value_parser = clap::value_parser!(u16).range(1024..))]
+    #[arg(long, default_value_t = crate::GUEST_SSH_PORT_BASE, requires = "ssh_key", value_parser = clap::value_parser!(u16).range(1024..))]
     ssh_port: u16,
     /// Descriptor boundary at write 32, or first IO/sync batch covering it.
-    #[arg(long, default_value = "after-storage", value_parser = ["after-prepared", "after-active", "before-submit", "after-append-cqe", "before-sync", "after-sync", "after-storage", "after-status", "after-used"])]
-    crash_at: String,
+    #[arg(long, value_enum, default_value_t = CrashPoint::AfterStorage)]
+    crash_at: CrashPoint,
     /// Interrupt a replacement before it resumes the same guest.
-    #[arg(long, requires = "live_recovery", value_parser = ["after-replay-append", "before-recovery-fence", "after-recovery-fence"])]
-    replay_crash_at: Option<String>,
+    #[arg(long, value_enum, requires = "live_recovery")]
+    replay_crash_at: Option<ReplayPoint>,
     /// Number of interrupted replacements; every attempt retains its own evidence.
     #[arg(long, default_value_t = 2, requires = "replay_crash_at", value_parser = clap::value_parser!(u8).range(1..=3))]
     replay_restarts: u8,
@@ -187,17 +188,9 @@ fn logged_command(
     log: &str,
     env: &BTreeMap<OsString, OsString>,
 ) -> io::Result<Command> {
-    let file = File::options()
-        .write(true)
-        .create_new(true)
-        .open(output.join(log))?;
     let mut command = Command::new(program);
-    command
-        .current_dir(output)
-        .env_clear()
-        .envs(env)
-        .stdout(file.try_clone()?)
-        .stderr(file);
+    command.current_dir(output).env_clear().envs(env);
+    process::log_to(&mut command, &output.join(log))?;
     Ok(command)
 }
 
@@ -211,7 +204,7 @@ fn record_qemu(args: &Args, guest: &mut ManagedChild, output: &Path) -> io::Resu
 
 fn execute_guest(
     args: &Args,
-    build: &Build,
+    build: &VmBuild,
     output: &Path,
     image: &Path,
     phase: Phase,
@@ -412,18 +405,19 @@ fn verify_io(
 }
 
 fn execute(args: &mut Args, summary: &mut Summary) -> io::Result<()> {
+    // summary.json retains the complete build record, not only the decoded fields.
     let value: Value = read_json(&args.build_info)?;
+    let build: VmBuild = serde_json::from_value(value.clone())?;
     if let Some(expected) = &args.expect_source
-        && (value["source_path"].as_str() != expected.to_str()
-            || value["harness"].as_str().map(Path::new) != Some(std::env::current_exe()?.as_path()))
+        && (build.source_path.as_deref() != Some(expected.as_path())
+            || build.harness.as_deref() != Some(std::env::current_exe()?.as_path()))
     {
         return Err(io::Error::other(
             "VM wrapper does not match the expected build",
         ));
     }
     File::options().read(true).write(true).open("/dev/kvm")?;
-    summary.build = Some(value.clone());
-    let build: Build = serde_json::from_value(value)?;
+    summary.build = Some(value);
     if build.interactive != args.ssh_key.is_some() {
         return Err(io::Error::other(
             "dev-vm requires --ssh-key; smoke runners do not support SSH",
@@ -608,8 +602,8 @@ mod tests {
             live_recovery: false,
             device_reset: false,
             ssh_key: None,
-            ssh_port: 23479,
-            crash_at: "after-storage".into(),
+            ssh_port: crate::GUEST_SSH_PORT_BASE,
+            crash_at: CrashPoint::AfterStorage,
             replay_crash_at: None,
             replay_restarts: 2,
             timeout: 1,
@@ -618,11 +612,13 @@ mod tests {
             lock: PathBuf::new(),
             expect_source: None,
         };
-        let build = Build {
+        let build = VmBuild {
             system: "test".into(),
             interactive: false,
             backend: Backend::Raw,
             daemon: None,
+            source_path: None,
+            harness: None,
         };
         let mut evidence = PhaseEvidence::default();
         let result = execute_guest(

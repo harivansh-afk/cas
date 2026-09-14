@@ -1,7 +1,8 @@
 # Guest-side workload for cas-vm-smoke. Runs once at boot as a systemd oneshot.
 #
-# $1 is the block backend under test: raw, daemon, or staging. Everything under
-# /results is a host directory shared over 9p; the host reads it after poweroff.
+# $1 is the block backend under test: raw, daemon, staging, local or local-async.
+# Everything under /results is a host directory shared over 9p; the host reads it
+# after poweroff.
 
 backend=$1
 disk=/dev/disk/by-id/virtio-cas-experiment
