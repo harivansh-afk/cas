@@ -265,6 +265,8 @@ pub fn run(mut args: Args) -> io::Result<()> {
                 .arg("8G"),
         )?;
         boot(&args, &base, "base", "base")?;
+        // T0 is the identical-clone control (docs/census.md): the base image is
+        // censused against three byte-identical copies of itself before any update.
         census(&args.output, "t0", &vec![base_root.clone(); 4])?;
     } else if fs::read(args.output.join("workload.sh"))? != fs::read(&args.workload)? {
         return Err(io::Error::other("workload changed between fleet phases"));
