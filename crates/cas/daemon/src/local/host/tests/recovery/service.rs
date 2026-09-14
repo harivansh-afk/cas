@@ -150,14 +150,11 @@ fn failed_cold_image_protocol_leaves_the_other_socket_usable() {
     let config = config(root.path(), transport.path(), Mode::Cold);
     let (done, result) = mpsc::channel();
     let server = thread::spawn(move || done.send(host_service::serve(config)).unwrap());
-    let mut bad = super::frontend::connect(&transport.path().join("2.sock"));
+    // GET_INFLIGHT_FD normalizes geometry; use an invalid wire header instead.
+    let mut bad = super::frontend::connect_stream(&transport.path().join("2.sock"));
     let mut good = super::frontend::connect(&transport.path().join("3.sock"));
     good.get_features().unwrap();
-    let invalid = VhostUserInflight {
-        num_queues: 3,
-        ..inflight()
-    };
-    assert!(bad.get_inflight_fd(&invalid).is_err());
+    std::io::Write::write_all(&mut bad, &[0xff; 12]).unwrap();
     // Wait for the failed service to finish reporting, not merely disconnect.
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -172,7 +169,10 @@ fn failed_cold_image_protocol_leaves_the_other_socket_usable() {
         assert!(Instant::now() < deadline, "failed image did not finish");
         thread::sleep(Duration::from_millis(10));
     }
-    assert!(result.try_recv().is_err());
+    assert!(matches!(
+        result.recv_timeout(Duration::from_millis(100)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
     good.get_features().unwrap();
     let (message, file) = good.get_inflight_fd(&inflight()).unwrap();
     good.set_inflight_fd(&message, file.as_raw_fd()).unwrap();

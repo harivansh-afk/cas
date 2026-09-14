@@ -278,7 +278,7 @@ fn retained_captured_queue_changes_fail_before_repair() {
     assert_eq!(files(root.path()), before);
 }
 
-pub(super) fn connect(socket: &Path) -> Frontend {
+pub(super) fn connect_stream(socket: &Path) -> UnixStream {
     let deadline = Instant::now() + Duration::from_secs(5);
     let stream = loop {
         match UnixStream::connect(socket) {
@@ -301,7 +301,11 @@ pub(super) fn connect(socket: &Path) -> Frontend {
     stream
         .set_write_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    let mut frontend = Frontend::from_stream(stream, 4);
+    stream
+}
+
+pub(super) fn connect(socket: &Path) -> Frontend {
+    let mut frontend = Frontend::from_stream(connect_stream(socket), 4);
     frontend.set_owner().unwrap();
     let features = frontend.get_features().unwrap();
     frontend.set_features(features).unwrap();
