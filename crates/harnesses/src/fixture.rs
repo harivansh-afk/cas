@@ -118,12 +118,19 @@ fn execute(args: &Args) -> io::Result<()> {
         executables.insert(path.clone(), source::entry(path)?);
     }
     evidence::write_json(&output.join("executables.json"), &executables)?;
+    // Every executable sits at <store path>/bin/<name>; its closure root is two levels up.
+    let roots = executables
+        .keys()
+        .map(|path| {
+            path.parent()
+                .and_then(Path::parent)
+                .ok_or_else(|| io::Error::other(format!("no store root above {}", path.display())))
+        })
+        .collect::<io::Result<Vec<_>>>()?;
     let mut closure = Command::new("nix");
-    closure.args(["path-info", "--recursive", "--json"]).args(
-        executables
-            .keys()
-            .map(|path| path.parent().unwrap().parent().unwrap()),
-    );
+    closure
+        .args(["path-info", "--recursive", "--json"])
+        .args(roots);
     let result = process::run_logged(
         &mut closure,
         &output.join("closure"),

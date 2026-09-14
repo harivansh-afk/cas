@@ -44,6 +44,15 @@ pub fn prepare_output(path: &Path) -> io::Result<PathBuf> {
     Ok(path)
 }
 
+/// A procfs read that may vanish while a launcher execs; only NotFound is transient.
+fn transient<T>(result: io::Result<T>) -> io::Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// Retain the actual QEMU executable and expanded arguments from its live process.
 pub fn record(guest: &mut ManagedChild, output: &Path) -> io::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -59,22 +68,32 @@ pub fn record(guest: &mut ManagedChild, output: &Path) -> io::Result<()> {
                     .file_name()
                     .is_some_and(|name| name.to_string_lossy().contains("qemu-system-"))
             {
-                let bytes = fs::read(root.join("cmdline"))?;
+                // A Nix launcher can exec QEMU between these procfs reads, and a
+                // short-lived helper can exit between them. Retry that transition
+                // on the next pass (still bounded by the deadline below) instead
+                // of retaining incomplete argv or failing on a vanished entry.
+                let Some(bytes) = transient(fs::read(root.join("cmdline")))? else {
+                    continue;
+                };
                 let argv: Vec<_> = bytes
                     .split(|byte| *byte == 0)
                     .filter(|value| !value.is_empty())
                     .map(|value| String::from_utf8_lossy(value).into_owned())
                     .collect();
-                // A Nix launcher can exec QEMU between these procfs reads.
-                // Retry that transition instead of retaining incomplete argv.
-                if argv.len() < 2 || fs::read_link(root.join("exe"))? != executable {
+                let Some(current) = transient(fs::read_link(root.join("exe")))? else {
+                    continue;
+                };
+                if argv.len() < 2 || current != executable {
                     continue;
                 }
+                let Some(status) = transient(fs::read_to_string(root.join("status")))? else {
+                    continue;
+                };
                 return evidence::write_json(
                     &output.join("qemu.json"),
                     &serde_json::json!({
                         "pid":pid, "executable":executable, "argv":argv,
-                        "process_status":fs::read_to_string(root.join("status"))?,
+                        "process_status":status,
                     }),
                 );
             }
