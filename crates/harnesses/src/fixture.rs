@@ -37,7 +37,7 @@ enum Workload {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Build {
+struct FixtureBuild {
     #[serde(default)]
     workload: Workload,
     #[serde(default)]
@@ -74,7 +74,7 @@ struct Report {
 fn execute(args: &Args) -> io::Result<()> {
     let output = &args.output;
     let checkout = args.checkout.canonicalize()?;
-    let build: Build = evidence::read_json(&args.build_info)?;
+    let build: FixtureBuild = evidence::read_json(&args.build_info)?;
     fs::copy(&args.build_info, output.join("build.json"))?;
     if args.crash_at.is_some() && (build.workload != Workload::Shared || !build.live_recovery) {
         return Err(io::Error::other(
@@ -236,6 +236,6 @@ pub fn verify(output: &Path) -> io::Result<()> {
         &source::scan(&output.join("source"))?,
         "archived fixture source",
     )?;
-    let build: Build = evidence::read_json(&output.join("build.json"))?;
+    let build: FixtureBuild = evidence::read_json(&output.join("build.json"))?;
     checks::verify(output, &build)
 }

@@ -46,7 +46,7 @@ fn running(config: &Config) -> io::Result<bool> {
     }
     unit_busy(String::from_utf8_lossy(&output.stdout).trim())
 }
-fn build() -> io::Result<Build> {
+fn build() -> io::Result<LabBuild> {
     let path = std::env::var_os("CAS_LAB_BUILD").ok_or_else(|| {
         io::Error::other("use the packaged CLI: nix build .#casctl; ./result/bin/casctl new NAME")
     })?;

@@ -72,7 +72,7 @@ pub struct Args {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct Build {
+pub struct SharedBuild {
     pub host: PathBuf,
     pub guest: PathBuf,
     pub qemu: PathBuf,
@@ -97,7 +97,7 @@ fn checked(command: &mut Command, output: &Path, timeout: Duration) -> io::Resul
 
 fn start_host(
     args: &Args,
-    build: &Build,
+    build: &SharedBuild,
     output: &Path,
     paths: &[PathBuf; 2],
     mode: &str,
@@ -156,7 +156,7 @@ fn start_host(
     Ok(host)
 }
 
-fn phase(args: &Args, build: &Build, scenario: &Scenario, name: &str) -> io::Result<()> {
+fn phase(args: &Args, build: &SharedBuild, scenario: &Scenario, name: &str) -> io::Result<()> {
     let output = args.output.join(name);
     fs::create_dir(&output)?;
     let sockets = tempfile::Builder::new()
@@ -262,7 +262,12 @@ fn phase(args: &Args, build: &Build, scenario: &Scenario, name: &str) -> io::Res
     verify_phase(&output, name, build, scenario)
 }
 
-fn verify_phase(output: &Path, phase: &str, build: &Build, scenario: &Scenario) -> io::Result<()> {
+fn verify_phase(
+    output: &Path,
+    phase: &str,
+    build: &SharedBuild,
+    scenario: &Scenario,
+) -> io::Result<()> {
     let live = build.live_recovery && phase == "write";
     let completed = if live {
         verify_restart(output, scenario.crash_at)?;
@@ -397,7 +402,7 @@ fn verify_phase(output: &Path, phase: &str, build: &Build, scenario: &Scenario) 
 
 pub fn run(args: Args) -> io::Result<()> {
     fs::create_dir(&args.output)?;
-    let build: Build = evidence::read_json(&args.build_info)?;
+    let build: SharedBuild = evidence::read_json(&args.build_info)?;
     let scenario: Scenario = evidence::read_json(&args.scenario)?;
     if scenario.crash_at.is_some() && !build.live_recovery {
         return Err(io::Error::other(
@@ -458,7 +463,7 @@ pub fn verify(
     if report["passed"] != true {
         return Err(io::Error::other("shared fixture did not pass"));
     }
-    let build: Build = evidence::read_json(&output.join("build.json"))?;
+    let build: SharedBuild = evidence::read_json(&output.join("build.json"))?;
     let scenario: Scenario = evidence::read_json(&output.join("scenario.json"))?;
     if scenario != *expected
         || build.live_recovery != live_recovery

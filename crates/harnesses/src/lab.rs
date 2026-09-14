@@ -103,7 +103,7 @@ pub enum Command {
 }
 
 #[derive(Clone, Deserialize, Serialize)]
-struct Build {
+struct LabBuild {
     vm: PathBuf,
     source_revision: String,
     source_path: PathBuf,
@@ -117,7 +117,7 @@ struct Config {
     count: u8,
     backend: Backend,
     disk_bytes: u64,
-    build: Build,
+    build: LabBuild,
     unit: String,
 }
 #[derive(Deserialize, Serialize)]

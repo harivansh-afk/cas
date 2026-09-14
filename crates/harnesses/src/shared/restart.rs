@@ -40,7 +40,7 @@ pub(super) struct Boundary {
 
 pub(super) fn restart(
     args: &Args,
-    build: &Build,
+    build: &SharedBuild,
     output: &Path,
     sockets: &[PathBuf; 2],
     host: &mut ManagedChild,

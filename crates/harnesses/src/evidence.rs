@@ -126,7 +126,7 @@ impl ReplayPoint {
 }
 
 #[derive(Deserialize)]
-pub struct Build {
+pub struct VmBuild {
     pub system: String,
     #[serde(default)]
     pub interactive: bool,

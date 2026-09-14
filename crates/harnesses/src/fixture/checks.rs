@@ -6,7 +6,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::Build;
+use super::FixtureBuild;
 use crate::evidence::{self, require, u64_at};
 
 const SECTORS: u64 = 16 * 1024 * 1024 / 512;
@@ -120,7 +120,7 @@ fn tests(module: &str, list: &str, log: &str) -> io::Result<()> {
     )
 }
 
-pub(super) fn verify(output: &Path, build: &Build) -> io::Result<()> {
+pub(super) fn verify(output: &Path, build: &FixtureBuild) -> io::Result<()> {
     let guest = output.join("guest");
     let exit: Value = evidence::read_json(&output.join("guest-exit.json"))?;
     require(

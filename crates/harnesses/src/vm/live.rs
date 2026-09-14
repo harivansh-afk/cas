@@ -74,7 +74,7 @@ fn kill(daemon: &mut ManagedChild, guest: &mut ManagedChild, socket: &Path) -> i
 
 pub(super) fn execute(
     args: &Args,
-    build: &Build,
+    build: &VmBuild,
     image: &Path,
     evidence: &mut PhaseEvidence,
 ) -> io::Result<()> {

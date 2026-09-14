@@ -60,7 +60,7 @@ pub struct Args {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Build {
+struct SuiteBuild {
     source_revision: String,
     source_path: PathBuf,
     harness: PathBuf,
@@ -93,7 +93,7 @@ struct Report {
     error: Option<String>,
 }
 
-fn require_wrapper<'a>(build: &'a Build, name: &str) -> io::Result<&'a Path> {
+fn require_wrapper<'a>(build: &'a SuiteBuild, name: &str) -> io::Result<&'a Path> {
     build
         .wrappers
         .get(name)
@@ -130,7 +130,7 @@ fn validate_vm(directory: &Path, source: &Path) -> io::Result<Vec<String>> {
 fn fixture_identity(
     info: &Value,
     scenario: &Value,
-    build: &Build,
+    build: &SuiteBuild,
     case: scenarios::Fixture,
 ) -> io::Result<()> {
     let shared = case.wrapper == "shared";
@@ -154,7 +154,7 @@ fn fixture_identity(
 
 fn validate_fixture(
     directory: &Path,
-    build: &Build,
+    build: &SuiteBuild,
     case: scenarios::Fixture,
 ) -> io::Result<Vec<String>> {
     let run = directory.join("run");
@@ -172,7 +172,7 @@ enum Validation<'a> {
     Command,
     Guest(&'a Path),
     Persistence(&'a Path),
-    Fixture(&'a Build, scenarios::Fixture),
+    Fixture(&'a SuiteBuild, scenarios::Fixture),
 }
 
 fn validate_model(directory: &Path, executable: &Path) -> io::Result<Vec<String>> {
@@ -236,7 +236,7 @@ fn scenario(
 fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
     let checkout = args.checkout.canonicalize()?;
     let output = &args.output;
-    let build: Build = evidence::read_json(&args.build_info)?;
+    let build: SuiteBuild = evidence::read_json(&args.build_info)?;
     fs::copy(&args.build_info, output.join("build.json"))?;
     if std::env::current_exe()?.canonicalize()? != build.harness.canonicalize()? {
         return Err(io::Error::other(
@@ -516,7 +516,7 @@ pub fn verify(output: &Path) -> io::Result<()> {
         persistence::verify(&output.join("scenarios/persistence-model/run"))?;
     }
     if !scenarios::fixtures(report.checkpoint).is_empty() {
-        let build: Build = evidence::read_json(&output.join("build.json"))?;
+        let build: SuiteBuild = evidence::read_json(&output.join("build.json"))?;
         for case in scenarios::fixtures(report.checkpoint) {
             validate_fixture(&output.join("scenarios").join(case.id), &build, case)?;
         }
@@ -567,7 +567,7 @@ mod tests {
                 assert!(validate_results(&report).is_err(), "missing {}", case.id);
                 report.scenarios.insert(case.id.into(), removed);
             }
-            let build = Build {
+            let build = SuiteBuild {
                 source_revision: "revision".into(),
                 source_path: "source".into(),
                 harness: "harness".into(),

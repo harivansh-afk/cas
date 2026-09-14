@@ -14,8 +14,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::evidence::{
-    self, Backend, Build, CrashPoint, DISK_BYTES, DaemonReport, Fio, FlushMarker, GuestCompletion,
-    IO_BYTES, ReplayPoint, read_json,
+    self, Backend, CrashPoint, DISK_BYTES, DaemonReport, Fio, FlushMarker, GuestCompletion,
+    IO_BYTES, ReplayPoint, VmBuild, read_json,
 };
 use crate::{
     host,
@@ -203,7 +203,7 @@ fn record_qemu(args: &Args, guest: &mut ManagedChild, output: &Path) -> io::Resu
 
 fn execute_guest(
     args: &Args,
-    build: &Build,
+    build: &VmBuild,
     output: &Path,
     image: &Path,
     phase: Phase,
@@ -415,7 +415,7 @@ fn execute(args: &mut Args, summary: &mut Summary) -> io::Result<()> {
     }
     File::options().read(true).write(true).open("/dev/kvm")?;
     summary.build = Some(value.clone());
-    let build: Build = serde_json::from_value(value)?;
+    let build: VmBuild = serde_json::from_value(value)?;
     if build.interactive != args.ssh_key.is_some() {
         return Err(io::Error::other(
             "dev-vm requires --ssh-key; smoke runners do not support SSH",
@@ -610,7 +610,7 @@ mod tests {
             lock: PathBuf::new(),
             expect_source: None,
         };
-        let build = Build {
+        let build = VmBuild {
             system: "test".into(),
             interactive: false,
             backend: Backend::Raw,
