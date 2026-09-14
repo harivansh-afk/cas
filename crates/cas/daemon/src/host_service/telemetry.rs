@@ -102,35 +102,66 @@ impl Telemetry {
             return Ok(());
         }
         self.rotate_if_needed()?;
-        let sampling = Instant::now();
-        let elapsed = self.started.elapsed().as_nanos();
-        self.journal.record(|buffer| {
-            write!(
-                buffer,
-                "{{\"schema_version\":1,\"phase\":\"live\",\"elapsed_ns\":{elapsed},\"host\":"
-            )?;
-            serde_json::to_writer(&mut *buffer, &runtime.host()?.map(|host| host.report()))?;
-            buffer.write_all(b",\"images\":[")?;
-            for (index, (image, control)) in controls.iter().enumerate() {
-                if index != 0 {
-                    buffer.write_all(b",")?;
-                }
-                write!(
-                    buffer,
-                    "{{\"image\":\"{:032x}\",\"report\":",
-                    u128::from_be_bytes(*image)
-                )?;
-                serde_json::to_writer(&mut *buffer, &control.snapshot()?)?;
-                buffer.write_all(b"}")?;
-            }
-            write!(
-                buffer,
-                "] ,\"sampling_ns\":{}}}",
-                sampling.elapsed().as_nanos()
-            )
-        })?;
+        let record = Record {
+            schema_version: 1,
+            phase: "live",
+            elapsed_ns: self.started.elapsed().as_nanos(),
+            host: runtime.host()?.map(|host| host.report()),
+            images: Images(controls),
+            sampling_ns: Sampling(Instant::now()),
+        };
+        self.journal
+            .record(|buffer| serde_json::to_writer(buffer, &record).map_err(io::Error::from))?;
         self.next = Instant::now() + INTERVAL;
         Ok(())
+    }
+}
+
+/// One line of the journal. Image snapshots are taken while the line is
+/// serialized, so `sampling_ns` covers them and their encoding.
+#[derive(serde::Serialize)]
+struct Record<'a> {
+    schema_version: u32,
+    phase: &'static str,
+    elapsed_ns: u128,
+    host: Option<serde_json::Value>,
+    images: Images<'a>,
+    sampling_ns: Sampling,
+}
+
+struct Images<'a>(&'a [([u8; 16], Control)]);
+impl serde::Serialize for Images<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{Error, SerializeSeq};
+        let mut images = serializer.serialize_seq(Some(self.0.len()))?;
+        for (image, control) in self.0 {
+            images.serialize_element(&Image {
+                image: ImageId(*image),
+                report: control.snapshot().map_err(S::Error::custom)?,
+            })?;
+        }
+        images.end()
+    }
+}
+
+#[derive(serde::Serialize)]
+struct Image {
+    image: ImageId,
+    report: serde_json::Value,
+}
+
+struct ImageId([u8; 16]);
+impl serde::Serialize for ImageId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(&format_args!("{:032x}", u128::from_be_bytes(self.0)))
+    }
+}
+
+/// Elapsed time measured when the field is written, after the fields before it.
+struct Sampling(Instant);
+impl serde::Serialize for Sampling {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u128(self.0.elapsed().as_nanos())
     }
 }
 
@@ -172,6 +203,58 @@ mod tests {
             crate::local::host::tests::shutdown(host);
             assert_eq!(resources.metadata.usage().current.bytes, 0);
         }
+    }
+
+    #[test]
+    fn sample_writes_one_json_line_with_the_journal_schema() {
+        let root = tempfile::tempdir().unwrap();
+        let report = tempfile::tempdir().unwrap();
+        let resources = Arc::new(Resources::default());
+        let host = crate::local::host::tests::create(root.path(), 1, Arc::clone(&resources));
+        let mut runtime = Runtime::Cold(host);
+        let image = report.path().join("image.raw");
+        File::create(&image).unwrap().set_len(4096).unwrap();
+        let service = Service::new(
+            Backend::new(&image).unwrap(),
+            File::create(report.path().join("image.json")).unwrap(),
+        )
+        .unwrap();
+        let controls = [([0xab; 16], service.control().unwrap())];
+        let path = report.path().join("live.jsonl");
+        let mut telemetry = Telemetry::new(&path, &resources.metadata, false).unwrap();
+        telemetry.sample(&mut runtime, &controls).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let (line, rest) = text.split_once('\n').unwrap();
+        assert!(rest.is_empty());
+        let record: serde_json::Value = serde_json::from_str(line).unwrap();
+        let keys: Vec<&str> = record
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "elapsed_ns",
+                "host",
+                "images",
+                "phase",
+                "sampling_ns",
+                "schema_version"
+            ]
+        );
+        assert_eq!(record["schema_version"], 1);
+        assert_eq!(record["phase"], "live");
+        assert!(record["host"]["failure"].is_null());
+        assert_eq!(record["images"][0]["image"], "ab".repeat(16));
+        assert_eq!(record["images"][0]["report"]["backend"], "raw_io_uring");
+        assert!(record["sampling_ns"].is_u64());
+        drop((controls, service));
+        let Runtime::Cold(host) = runtime else {
+            unreachable!()
+        };
+        crate::local::host::tests::shutdown(host);
     }
 
     #[test]
