@@ -69,6 +69,15 @@ impl Gate {
         }
         Ok(Guard { image, _host: host })
     }
+
+    /// Lock, then refuse further work once the image has recorded a failure.
+    pub fn lock_checked(&self) -> io::Result<Guard<'_>> {
+        let guard = self.lock()?;
+        if let Some(error) = &guard.failure {
+            return Err(io::Error::other(error.clone()));
+        }
+        Ok(guard)
+    }
 }
 
 /// Drop image state before releasing the host's failure/publication boundary.

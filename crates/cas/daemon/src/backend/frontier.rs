@@ -160,10 +160,7 @@ impl Backend {
                     .checked_add(1)
                     .ok_or_else(|| io::Error::other("discovery IDs exhausted"))?;
                 let gate = self.storage.completion_gate();
-                let mut guard = gate.as_ref().map(|gate| gate.lock()).transpose()?;
-                if let Some(error) = guard.as_ref().and_then(|state| state.failure.as_ref()) {
-                    return Err(io::Error::other(error.clone()));
-                }
+                let mut guard = gate.as_ref().map(|gate| gate.lock_checked()).transpose()?;
                 if let Some(carrier) = guard
                     .as_deref_mut()
                     .and_then(|state| state.carrier.as_mut())
@@ -192,10 +189,7 @@ impl Backend {
                 break;
             }
             let gate = self.storage.completion_gate();
-            let mut guard = gate.as_ref().map(|gate| gate.lock()).transpose()?;
-            if let Some(error) = guard.as_ref().and_then(|state| state.failure.as_ref()) {
-                return Err(io::Error::other(error.clone()));
-            }
+            let mut guard = gate.as_ref().map(|gate| gate.lock_checked()).transpose()?;
             let mut selected = None;
             for candidate in 0..frontier.queues[index].len() {
                 if !frontier.eligible(index, candidate) {

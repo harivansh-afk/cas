@@ -433,8 +433,9 @@ impl Backend {
         if let Some(frontier) = &mut self.frontier {
             frontier.reads.cancel_all();
         }
-        if let Some(gate) = self.storage.completion_gate() {
-            let mut failed = gate.lock().expect("completion gate poisoned");
+        if let Some(gate) = self.storage.completion_gate()
+            && let Ok(mut failed) = gate.lock()
+        {
             failed.fail(message.clone());
         }
         if self.failure.is_none() {
@@ -693,13 +694,7 @@ impl Backend {
             let state = &mut *queue;
             let gate = self.storage.completion_gate();
             let locking = trace.as_ref().map(|_| Instant::now());
-            let mut guard = gate
-                .as_ref()
-                .map(|gate| {
-                    gate.lock()
-                        .map_err(|_| io::Error::other("completion gate poisoned"))
-                })
-                .transpose()?;
+            let mut guard = gate.as_ref().map(|gate| gate.lock()).transpose()?;
             if let (Some(trace), Some(locking)) = (&mut trace, locking) {
                 trace.completion_lock_ns += read_trace::ns(locking.elapsed());
             }
@@ -795,14 +790,8 @@ impl Backend {
         if self.paused {
             return Ok(());
         }
-        if let Some(gate) = self.storage.completion_gate()
-            && let Some(error) = gate
-                .lock()
-                .expect("completion gate poisoned")
-                .failure
-                .as_ref()
-        {
-            return Err(io::Error::other(error.clone()));
+        if let Some(gate) = self.storage.completion_gate() {
+            gate.lock_checked()?;
         }
         if self.negotiated_features & REQUIRED_FEATURES != REQUIRED_FEATURES {
             return Err(io::Error::other("IO before required feature negotiation"));
@@ -909,16 +898,7 @@ impl Backend {
             let request = decode_chain(mem, chain, self.capacity_bytes, &self.metadata)?
                 .negotiated(self.negotiated_features & self.features());
             let gate = self.storage.completion_gate();
-            let mut guard = gate
-                .as_ref()
-                .map(|gate| {
-                    gate.lock()
-                        .map_err(|_| io::Error::other("completion gate poisoned"))
-                })
-                .transpose()?;
-            if let Some(error) = guard.as_ref().and_then(|guard| guard.failure.as_ref()) {
-                return Err(io::Error::other(error.clone()));
-            }
+            let mut guard = gate.as_ref().map(|gate| gate.lock_checked()).transpose()?;
             let admission =
                 self.prepare_admission(queue, next_avail.wrapping_sub(1), &request, limit)?;
             if matches!(admission, Admission::Waiting) {
@@ -1093,7 +1073,9 @@ impl Backend {
         let Some(gate) = self.storage.completion_gate() else {
             return;
         };
-        let mut guard = gate.lock().expect("completion gate poisoned");
+        let Ok(mut guard) = gate.lock() else {
+            return;
+        };
         if guard.failure.is_none() {
             return;
         }
