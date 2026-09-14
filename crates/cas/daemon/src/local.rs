@@ -836,7 +836,7 @@ impl Local {
             "append":self.shared.pools.append.usage(),
             "read":self.shared.pools.read.usage(), "control":self.shared.pools.control.usage(),
             "host_append":self.shared.pools.append.host_usage(), "host_read":self.shared.pools.read.host_usage(),
-            "admission_denials": self.shared.pressure.report(),
+            "admission_denials": &self.shared.pressure,
             "staging_quota": self.shared.window.as_ref().and_then(|window| window.quota()),
             "wal_window": self.shared.window.as_ref().map(|window| window.status()) })
     }
