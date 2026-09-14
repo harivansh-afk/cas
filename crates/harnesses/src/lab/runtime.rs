@@ -27,7 +27,7 @@ pub(super) fn supervise(directory: &Path, run: &Path) -> io::Result<()> {
                 if host["success"] != true {
                     return Err(io::Error::other("storage/guest shutdown failed"));
                 }
-                publish(&run.join("spark-memory.json"), &samples::outer()?)?;
+                replace_atomically(&run.join("spark-memory.json"), &samples::outer()?)?;
                 break;
             }
             if run.join("ready.json").exists() && !run.join("ssh_config").exists() {
@@ -39,12 +39,12 @@ pub(super) fn supervise(directory: &Path, run: &Path) -> io::Result<()> {
                     "lab aborted to preserve 25 GiB of host disk headroom",
                 ));
             }
-            publish(&run.join("spark-memory.json"), &samples::outer()?)?;
+            replace_atomically(&run.join("spark-memory.json"), &samples::outer()?)?;
             thread::sleep(Duration::from_secs(1));
         }
         Ok(())
     })();
-    publish(
+    replace_atomically(
         &run.join("outcome.json"),
         &serde_json::json!({"success":result.is_ok(),"error":result.as_ref().err().map(ToString::to_string),"started":started,"finished":crate::host::utc_now()?}),
     )?;
@@ -65,7 +65,7 @@ pub(super) fn host(build: &Path) -> io::Result<()> {
     let root = Path::new("/results");
     let config: Config = evidence::read_json(&root.join("config.json"))?;
     let result = serve(root, &config, &build);
-    publish(
+    replace_atomically(
         &root.join("host-outcome.json"),
         &serde_json::json!({"success":result.is_ok(),"error":result.as_ref().err().map(ToString::to_string)}),
     )?;
@@ -233,7 +233,7 @@ fn serve(output: &Path, config: &Config, build: &HostBuild) -> io::Result<()> {
                     && output.join(format!("guest-{i}/host-key.pub")).exists()
             })
         {
-            publish(
+            replace_atomically(
                 &output.join("ready.json"),
                 &serde_json::json!({"guests":config.count,"backend":config.backend.name(),"ready_at":crate::host::utc_now()?}),
             )?;

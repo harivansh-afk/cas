@@ -197,7 +197,7 @@ fn boot(directory: &Path, config: &Config) -> io::Result<()> {
     // Reserve a loopback-only candidate. A race is reported by QEMU, never worked around by stealing a port.
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let port = listener.local_addr()?.port();
-    publish(
+    replace_atomically(
         &directory.join("active.json"),
         &Active {
             run: run.clone(),
@@ -504,7 +504,7 @@ pub(super) fn remove(name: &str) -> io::Result<()> {
     for path in &bulk {
         inventory(path, &mut deleted)?;
     }
-    publish(
+    replace_atomically(
         &directory.join("cleanup-plan.json"),
         &serde_json::json!({"files":deleted,"recorded_at":crate::host::utc_now()?}),
     )?;

@@ -214,7 +214,7 @@ fn load(name: &str) -> io::Result<(PathBuf, Config)> {
     let config = evidence::read_json(&dir.join("config.json"))?;
     Ok((dir, config))
 }
-fn publish(path: &Path, value: &impl Serialize) -> io::Result<()> {
+fn replace_atomically(path: &Path, value: &impl Serialize) -> io::Result<()> {
     let tmp = path.with_extension("tmp");
     let mut file = File::create(&tmp)?;
     evidence::write_json_to(&mut file, value)?;
