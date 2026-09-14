@@ -87,6 +87,7 @@ pub(crate) struct Observer {
     pub missing_observations: u64,
     pub dropped_traces: u64,
     pub invalid_observations: u64,
+    pub peek_observations: u64,
     pub queue_lock_wait_ns: u64,
     pub max_queue_lock_wait_ns: u64,
     // All reads, including those not retained among the slowest records.
@@ -112,6 +113,7 @@ impl Observer {
                 missing_observations: 0,
                 dropped_traces: 0,
                 invalid_observations: 0,
+                peek_observations: 0,
                 queue_lock_wait_ns: 0,
                 max_queue_lock_wait_ns: 0,
                 total_ns: 0,
@@ -192,11 +194,22 @@ impl Observer {
 
     pub fn head(&mut self, queue: u16, available: u16, now: Instant) {
         self.account(queue, now);
-        if let Some(seen) = &mut self.slots[Self::slot(queue, available)]
-            && seen.available == available
-        {
-            seen.head.get_or_insert(now);
+        let slot = &mut self.slots[Self::slot(queue, available)];
+        if slot.is_none_or(|seen| seen.available != available) {
+            // The guest may publish between observe's cursor load and peek.
+            // Peek has now proved this head exists. Start its lower-bound
+            // observation here rather than losing the trace at consumption.
+            self.peek_observations += 1;
+            *slot = Some(Seen {
+                available,
+                observed: now,
+                head: Some(now),
+                ahead: 0,
+                behind_write_ns: 0,
+                head_stall_ns: 0,
+            });
         }
+        slot.as_mut().unwrap().head.get_or_insert(now);
     }
 
     pub fn waiting(&mut self, queue: u16, available: u16, write: bool, now: Instant) {
@@ -317,6 +330,21 @@ mod tests {
         observer.reset(None);
         assert!(observer.consume(0, 1, Some((3, 0, 4096)), end).is_none());
         assert_eq!(observer.missing_observations, 1);
+    }
+
+    #[test]
+    fn publication_between_cursor_observation_and_peek_starts_at_the_head() {
+        let mut observer = Observer::new(&crate::local::metadata_budget()).unwrap();
+        let start = Instant::now();
+        observer.observe(0, 0, Some(0), 256, start);
+        let peeked = start + Duration::from_millis(1);
+        observer.head(0, 0, peeked);
+        let trace = observer.consume(0, 0, Some((1, 0, 4096)), peeked).unwrap();
+        assert_eq!(trace.observed, peeked);
+        assert_eq!(trace.head_ns, 0);
+        assert_eq!(trace.behind_write_ns, 0);
+        assert_eq!(observer.peek_observations, 1);
+        assert_eq!(observer.missing_observations, 0);
     }
 
     #[test]
