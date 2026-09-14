@@ -27,8 +27,11 @@ const NAMES: [&str; 9] = [
     "append_credits",
 ];
 
+/// Storage refusal reasons; the read trace reserves two indices ahead of these.
+pub(crate) const COUNT: usize = NAMES.len();
+
 #[derive(Default)]
-pub(super) struct Counters([AtomicU64; NAMES.len()]);
+pub(super) struct Counters([AtomicU64; COUNT]);
 
 impl Counters {
     pub fn record(&self, reason: Reason) {

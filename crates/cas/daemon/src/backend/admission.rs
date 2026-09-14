@@ -88,7 +88,7 @@ impl QueueAdmission {
         {
             Some(Reason::Fairness) => 0,
             Some(Reason::Pending) => 1,
-            Some(Reason::Storage(reason)) => 2 + reason as usize,
+            Some(Reason::Storage(reason)) => read_trace::SCHEDULER_REASONS + reason as usize,
             None => unreachable!("waiting admission must have a reason"),
         }
     }

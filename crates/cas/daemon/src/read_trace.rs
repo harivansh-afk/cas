@@ -9,7 +9,9 @@ const SLOTS: usize = 256;
 const RETAIN: usize = 32;
 const RECENT_RETAIN: usize = 16;
 const RECENT_NS: u64 = 2_000_000_000;
-pub(crate) const REASONS: usize = 11;
+/// Fairness and pending waits precede the storage refusal reasons.
+pub(crate) const SCHEDULER_REASONS: usize = 2;
+pub(crate) const REASONS: usize = SCHEDULER_REASONS + crate::local::pressure::COUNT;
 
 /// Fixed log2 nanosecond buckets. Quantiles are intervals, not exact values.
 #[derive(Clone, Copy, serde::Serialize)]
