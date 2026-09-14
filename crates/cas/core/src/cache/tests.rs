@@ -137,3 +137,30 @@ fn large_working_set_churn_reuses_the_reserved_membership_table() {
     drop(cache);
     assert_eq!(metadata.usage().current, Amount::default());
 }
+
+#[test]
+fn scoped_cache_timings_separate_acquisition_from_work() {
+    let metadata = crate::budget::Budget::new(crate::budget::Amount {
+        bytes: 1024 * 1024,
+        requests: 0,
+    });
+    let cache = Cache::new(BLOCK_SIZE, &metadata).unwrap();
+    let bytes = [42; BLOCK_SIZE];
+    let hash = *blake3::hash(&bytes).as_bytes();
+    let scope = crate::io_metrics::Scope::enter();
+    cache.fill(hash, &bytes).unwrap().unwrap();
+    assert!(cache.get(&hash).is_some());
+    assert!(cache.peek(&hash).is_some());
+    let counters = scope.finish();
+    assert_eq!(counters.chunk_cache_wait.calls, 3);
+    assert_eq!(counters.chunk_cache_hold.calls, 3);
+    assert_eq!(counters.page_cache_wait.calls, 0);
+    assert!(cache.get(&hash).is_some());
+    assert_eq!(
+        crate::io_metrics::Scope::enter()
+            .finish()
+            .chunk_cache_wait
+            .calls,
+        0
+    );
+}

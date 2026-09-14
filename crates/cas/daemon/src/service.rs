@@ -25,16 +25,23 @@ pub struct Control {
 }
 impl Control {
     pub(crate) fn snapshot(&self) -> io::Result<serde_json::Value> {
+        let requested = std::time::Instant::now();
         let backend = self
             .backend
             .lock()
             .map_err(|_| io::Error::other("backend worker panicked"))?;
+        let acquired = std::time::Instant::now();
         let pending = backend.pending_count();
         let mut report = backend.report(pending, false);
         let fields = report.as_object_mut().expect("backend report object");
         fields.remove("connection_ok");
         fields.remove("pending_at_disconnect");
         fields.insert("pending".into(), pending.into());
+        fields.insert("snapshot_timing".into(), serde_json::json!({
+            "backend_lock_ns": crate::read_trace::ns(acquired.duration_since(requested)),
+            "report_ns": crate::read_trace::ns(acquired.elapsed()),
+            "completed_unix_ns": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(io::Error::other)?.as_nanos().min(u128::from(u64::MAX)) as u64
+        }));
         Ok(report)
     }
 

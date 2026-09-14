@@ -388,6 +388,8 @@ impl Reactor {
                 Ok(Command::Io(mut io)) if matches!(io.operation, Operation::Read { .. }) => {
                     if let Some(trace) = &mut io.permit.trace {
                         trace.received_ns = trace.at();
+                        trace.boundary = io.boundary;
+                        trace.published_at_receive = self.worker.log.status().published;
                     }
                     self.reads.push_back(io)
                 }
@@ -920,6 +922,7 @@ impl Reactor {
             trace.started_ns = trace.at();
         }
         let preparing = io.permit.trace.as_ref().map(|_| Instant::now());
+        let scope = preparing.map(|_| cas_core::io_metrics::Scope::enter());
         let Operation::Read { offset, buffer } = &mut io.operation else {
             unreachable!()
         };
@@ -948,6 +951,9 @@ impl Reactor {
         // no fallible preparation occurs until this owner is fully initialized.
         let mut read = unsafe { allocation.assume_init() };
         let prepared = read.prepare(self.worker.port.as_ref());
+        if let Some(scope) = scope {
+            read.trace().unwrap().synchronous.add(scope.finish());
+        }
         if let (Some(trace), Some(preparing)) = (read.trace(), preparing) {
             trace.prepare_ns += nanos(preparing.elapsed());
         }
@@ -1123,9 +1129,21 @@ impl Reactor {
         Ok(())
     }
 
+    fn observe_read_dependencies(&mut self) {
+        let published = self.worker.log.status().published;
+        for io in self.reads.iter_mut() {
+            if io.boundary > published
+                && let Some(trace) = &mut io.permit.trace
+            {
+                trace.dependency_observed_ns = trace.at().saturating_sub(trace.received_ns);
+            }
+        }
+    }
+
     pub fn run(mut self) {
         loop {
             self.receive();
+            self.observe_read_dependencies();
             let result = (|| {
                 self.reap()?;
                 let failure = self

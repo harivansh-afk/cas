@@ -109,6 +109,15 @@ impl<T> Queue<T> {
         }
     }
 
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        let (before, after) = self.slots.split_at_mut(self.head);
+        after
+            .iter_mut()
+            .chain(before.iter_mut())
+            .take(self.len)
+            .map(|slot| slot.as_mut().expect("occupied queue slot"))
+    }
+
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &T> {
         (0..self.len).map(|index| {
             self.slots[(self.head + index) % self.capacity()]

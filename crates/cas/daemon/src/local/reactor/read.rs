@@ -287,7 +287,12 @@ impl Read {
 
     pub fn advance(&mut self) -> io::Result<bool> {
         let started = self.trace().map(|_| Instant::now());
+        let scope = started.map(|_| cas_core::io_metrics::Scope::enter());
         let result = self.advance_inner();
+        if let Some(scope) = scope {
+            let counters = scope.finish();
+            self.trace().unwrap().synchronous.add(counters);
+        }
         if let (Some(trace), Some(started)) = (self.trace(), started) {
             trace.advance_ns += nanos(started.elapsed());
         }

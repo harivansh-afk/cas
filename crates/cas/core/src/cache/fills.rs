@@ -131,7 +131,9 @@ impl<T> Registry<T> {
     }
 
     pub fn lookup(owner: &BudgetArc<Self>, hash: Hash) -> io::Result<Option<Lookup<T>>> {
+        let wait = crate::io_metrics::measure(0, |c| &mut c.fetch_registry_wait);
         let mut state = owner.state.lock().expect("fetch registry poisoned");
+        drop(wait);
         if let Some(entry) = state
             .entries
             .find(bucket(&hash), |entry| entry.hash == hash)
@@ -141,7 +143,9 @@ impl<T> Registry<T> {
             };
             let cell = entry.cell.clone();
             let signal = Signal::new(&owner.metadata)?;
+            let wait = crate::io_metrics::measure(0, |c| &mut c.fetch_registry_wait);
             let mut completion = cell.completion.lock().expect("fetch cell poisoned");
+            drop(wait);
             let id = completion.next_id;
             let next = id
                 .checked_add(1)
@@ -197,7 +201,9 @@ impl<T> Registry<T> {
     }
 
     pub fn status(&self) -> Status {
+        let wait = crate::io_metrics::measure(0, |c| &mut c.fetch_registry_wait);
         let state = self.state.lock().expect("fetch registry poisoned");
+        drop(wait);
         Status {
             pending_keys: state.entries.len(),
             leaders: self.leaders.usage(),
@@ -218,7 +224,9 @@ impl<T> Leader<T> {
 
     fn finish(&mut self, result: Phase<T>) -> io::Result<()> {
         assert!(!self.finished, "one fetch publication");
+        let wait = crate::io_metrics::measure(0, |c| &mut c.fetch_registry_wait);
         let mut state = self.registry.state.lock().expect("fetch registry poisoned");
+        drop(wait);
         let entry = state
             .entries
             .find_entry(bucket(&self.hash), |entry| {
@@ -234,7 +242,9 @@ impl<T> Leader<T> {
         }
         self.finished = true;
         drop((entry, state));
+        let wait = crate::io_metrics::measure(0, |c| &mut c.fetch_registry_wait);
         let mut completion = self.cell.completion.lock().expect("fetch cell poisoned");
+        drop(wait);
         completion.phase = result;
         let mut notified = Ok(());
         for (_, signal) in completion.signals.drain(..) {
@@ -261,7 +271,9 @@ impl<T> Waiter<T> {
     }
 
     pub fn poll(&self) -> io::Result<Option<BudgetArc<T>>> {
+        let wait = crate::io_metrics::measure(0, |c| &mut c.fetch_registry_wait);
         let completion = self.cell.completion.lock().expect("fetch cell poisoned");
+        drop(wait);
         match &completion.phase {
             Phase::Pending => Ok(None),
             Phase::Ready(value) => Ok(Some(value.clone())),
@@ -272,7 +284,9 @@ impl<T> Waiter<T> {
 
 impl<T> Drop for Waiter<T> {
     fn drop(&mut self) {
+        let wait = crate::io_metrics::measure(0, |c| &mut c.fetch_registry_wait);
         let mut completion = self.cell.completion.lock().expect("fetch cell poisoned");
+        drop(wait);
         if let Some(index) = completion.signals.iter().position(|(id, _)| *id == self.id) {
             completion.signals.swap_remove(index);
         }

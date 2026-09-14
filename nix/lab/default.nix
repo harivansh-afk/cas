@@ -5,12 +5,13 @@
   provenance,
   guestCores ? 1,
   traceReads ? false,
+  probeTools ? traceReads,
 }:
 let
   guests = lib.genAttrs [ "cas" "raw" "daemon" ] (
     backend:
     lib.nixosSystem {
-      specialArgs = { inherit backend guestCores; };
+      specialArgs = { inherit backend guestCores probeTools; };
       modules = [
         ./guest.nix
         { nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system; }

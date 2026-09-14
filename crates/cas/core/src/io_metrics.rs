@@ -21,6 +21,11 @@ pub struct Counters {
     pub buffer_zero: Operation,
     pub scheduler_wait: Operation,
     pub hash: Operation,
+    pub chunk_cache_wait: Operation,
+    pub chunk_cache_hold: Operation,
+    pub page_cache_wait: Operation,
+    pub page_cache_hold: Operation,
+    pub fetch_registry_wait: Operation,
 }
 
 impl Counters {
@@ -36,6 +41,11 @@ impl Counters {
             (&mut self.buffer_zero, other.buffer_zero),
             (&mut self.scheduler_wait, other.scheduler_wait),
             (&mut self.hash, other.hash),
+            (&mut self.chunk_cache_wait, other.chunk_cache_wait),
+            (&mut self.chunk_cache_hold, other.chunk_cache_hold),
+            (&mut self.page_cache_wait, other.page_cache_wait),
+            (&mut self.page_cache_hold, other.page_cache_hold),
+            (&mut self.fetch_registry_wait, other.fetch_registry_wait),
         ] {
             value.calls += delta.calls;
             value.requested_bytes += delta.requested_bytes;

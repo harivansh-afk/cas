@@ -56,12 +56,19 @@ impl PageCache {
     }
 
     pub(super) fn get(&self, key: &PageKey) -> Option<BudgetArc<CachedPage>> {
-        self.state.lock().expect("page cache poisoned").get(key)
+        let wait = crate::io_metrics::measure(0, |c| &mut c.page_cache_wait);
+        let mut state = self.state.lock().expect("page cache poisoned");
+        drop(wait);
+        let _hold = crate::io_metrics::measure(0, |c| &mut c.page_cache_hold);
+        state.get(key)
     }
 
     /// Only the checked manifest descent may publish a page.
     pub(super) fn fill(&self, key: PageKey, bytes: &[u8]) -> io::Result<()> {
+        let wait = crate::io_metrics::measure(0, |c| &mut c.page_cache_wait);
         let mut state = self.state.lock().expect("page cache poisoned");
+        drop(wait);
+        let _hold = crate::io_metrics::measure(0, |c| &mut c.page_cache_hold);
         if state.buffer(&key).is_some() {
             state.promote(key);
             return Ok(());
@@ -94,7 +101,10 @@ impl PageCache {
 
     /// Payload usage is included in foreground metadata, not an extra allocation.
     pub fn status(&self) -> Status {
+        let wait = crate::io_metrics::measure(0, |c| &mut c.page_cache_wait);
         let state = self.state.lock().expect("page cache poisoned");
+        drop(wait);
+        let _hold = crate::io_metrics::measure(0, |c| &mut c.page_cache_hold);
         let payload = self.pages.usage();
         let resident_bytes = state.len() * BLOCK_SIZE;
         Status {

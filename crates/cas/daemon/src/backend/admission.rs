@@ -72,6 +72,18 @@ pub(super) struct Report {
 }
 
 impl QueueAdmission {
+    pub(super) fn reason_index(&self, queue: u16) -> usize {
+        match self.heads[usize::from(queue)]
+            .as_ref()
+            .and_then(|h| h.reason)
+        {
+            Some(Reason::Fairness) => 0,
+            Some(Reason::Pending) => 1,
+            Some(Reason::Storage(reason)) => 2 + reason as usize,
+            None => unreachable!("waiting admission must have a reason"),
+        }
+    }
+
     pub(super) fn prepare_admission(
         &mut self,
         queue: u16,

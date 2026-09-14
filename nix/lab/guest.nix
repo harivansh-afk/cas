@@ -4,6 +4,7 @@
   modulesPath,
   backend ? "cas",
   guestCores ? 1,
+  probeTools ? false,
   ...
 }:
 {
@@ -12,12 +13,15 @@
   system.stateVersion = "26.05";
   documentation.enable = false;
   services.timesyncd.enable = false;
-  environment.systemPackages = with pkgs; [
-    fio
-    sqlite
-    util-linux
-    e2fsprogs
-  ];
+  environment.systemPackages =
+    with pkgs;
+    [
+      fio
+      sqlite
+      util-linux
+      e2fsprogs
+    ]
+    ++ lib.optionals probeTools [ bpftrace ];
   services.openssh = {
     enable = true;
     hostKeys = [
@@ -39,7 +43,7 @@
   };
   virtualisation = {
     diskImage = null;
-    memorySize = 512;
+    memorySize = if probeTools then 1024 else 512;
     cores = guestCores;
     graphics = false;
     writableStore = false;

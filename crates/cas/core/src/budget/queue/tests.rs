@@ -49,6 +49,12 @@ fn wraparound_and_both_ends_match_reference_without_growth() {
                 }
             }
         }
+        for (index, item) in queue.iter_mut().enumerate() {
+            *item += index;
+        }
+        for (index, item) in reference.iter_mut().enumerate() {
+            *item += index;
+        }
         assert!(queue.iter().eq(reference.iter()));
         assert_eq!(queue.front(), reference.front());
         assert_eq!(queue.len(), reference.len());

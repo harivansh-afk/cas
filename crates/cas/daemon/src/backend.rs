@@ -910,7 +910,13 @@ impl Backend {
                     observer.waiting(
                         queue,
                         next_avail.wrapping_sub(1),
-                        matches!(request, Request::Write(_)),
+                        match &request {
+                            Request::Write(data) => {
+                                Some((data.offset, data.offset + data.len as u64))
+                            }
+                            _ => None,
+                        },
+                        self.admission.reason_index(queue),
                         Instant::now(),
                     );
                 }
@@ -957,7 +963,10 @@ impl Backend {
                 };
                 let trace =
                     observer.consume(queue, next_avail.wrapping_sub(1), read, Instant::now());
-                trace.and_then(|trace| observer.own(trace))
+                trace.and_then(|mut trace| {
+                    trace.descriptor = request.completion().head;
+                    observer.own(trace)
+                })
             });
             if let Admission::Accepted(mut permit) = admission {
                 if let Permit::Local { _credits } = &mut permit {

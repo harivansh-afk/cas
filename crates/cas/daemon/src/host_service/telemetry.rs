@@ -102,6 +102,7 @@ impl Telemetry {
             return Ok(());
         }
         self.rotate_if_needed()?;
+        let sampling = Instant::now();
         let elapsed = self.started.elapsed().as_nanos();
         self.journal.record(|buffer| {
             write!(
@@ -122,7 +123,11 @@ impl Telemetry {
                 serde_json::to_writer(&mut *buffer, &control.snapshot()?)?;
                 buffer.write_all(b"}")?;
             }
-            buffer.write_all(b"]}")
+            write!(
+                buffer,
+                "] ,\"sampling_ns\":{}}}",
+                sampling.elapsed().as_nanos()
+            )
         })?;
         self.next = Instant::now() + INTERVAL;
         Ok(())

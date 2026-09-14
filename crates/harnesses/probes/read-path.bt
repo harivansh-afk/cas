@@ -1,0 +1,97 @@
+#!/usr/bin/env bpftrace
+// Lab only: Linux BTF, virtio-blk split rings, one vda device. Never run on Spark.
+// Pair the completed request with CAS by queue + available + descriptor + range.
+// Timestamps below all use the guest monotonic clock; never subtract host clocks.
+config = { max_map_keys = 4096; perf_rb_pages = 64; }
+
+BEGIN { printf("READY\n"); }
+
+kprobe:submit_bio_noacct
+{
+    $bio = (struct bio *)arg0;
+    if (str($bio->bi_bdev->bd_disk->disk_name) == "vda") {
+        if (@bio[(uint64)$bio].0 == 0) {
+            @bio[(uint64)$bio] = (nsecs(monotonic), comm,
+                (uint64)$bio->bi_iter.bi_sector * 512, (uint64)$bio->bi_iter.bi_size);
+        }
+    }
+}
+
+rawtracepoint:block_bio_complete
+{
+    $key = (uint64)arg1;
+    if (@bio[$key].0 != 0) {
+        $b = @bio[$key];
+        printf("B,%llu,%llu,%llu,%llu,%s\n", $b.0, nsecs(monotonic), $b.2, $b.3, $b.1);
+        let $deleted = delete(@bio, $key);
+    }
+}
+
+rawtracepoint:block_rq_issue
+{
+    $rq = (struct request *)arg0;
+    if (str($rq->q->disk->disk_name) == "vda") {
+        @issue[(uint64)$rq] = nsecs(monotonic);
+        @issued = count();
+    }
+}
+
+kprobe:virtqueue_add_sgs
+{
+    $vq = (struct vring_virtqueue *)arg0;
+    if ($vq->vq.vdev->id.device == 2) {
+        $rq = (struct request *)(arg4 - sizeof(struct request));
+        if (str($rq->q->disk->disk_name) == "vda") {
+            if ($vq->packed_ring) { @unsupported = count(); }
+            else {
+                if (@adding[tid].0 != 0) { @nested = count(); }
+                @adding[tid] = ((uint64)$rq, (uint64)$vq,
+                    (uint64)$vq->split.avail_idx_shadow, (uint64)$vq->free_head,
+                    nsecs(monotonic), comm);
+            }
+        }
+    }
+}
+
+kretprobe:virtqueue_add_sgs /@adding[tid].0 != 0/
+{
+    $a = @adding[tid];
+    $rq = (struct request *)$a.0;
+    $vq = (struct vring_virtqueue *)$a.1;
+    if (retval == 0) {
+        $now = nsecs(monotonic);
+        @request[$a.0] = ((uint64)$vq->vq.index, $a.2, $a.3,
+            (uint64)$rq->__sector * 512, (uint64)$rq->__data_len,
+            (uint64)($rq->cmd_flags & 255), (uint64)$rq->start_time_ns,
+            @issue[$a.0], $a.4, $now, $a.5, @bio[(uint64)$rq->bio]);
+        @published = count();
+    } else { @add_refused[retval] = count(); }
+    let $deleted = delete(@adding, tid);
+}
+
+rawtracepoint:block_rq_complete
+{
+    $key = (uint64)arg0;
+    if (@request[$key].9 != 0) {
+        $r = @request[$key];
+        $now = nsecs(monotonic);
+        // Do not silently pair partial completions with the whole request.
+        if ((uint64)arg2 != $r.4) { @partial = count(); }
+        printf("R,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%s,%llu,%llu,%s,%llu,%llu\n",
+            $r.0, $r.1, $r.2, $r.3, $r.4, $r.5, $r.6, $r.7,
+            $r.8, $r.9, $now, $r.10, (uint64)arg1, $r.11.0, $r.11.1, $r.11.2, $r.11.3);
+        @completed = count();
+        let $deleted = delete(@request, $key);
+        let $deleted_issue = delete(@issue, $key);
+    }
+}
+
+END {
+    printf("END\n");
+    print(@issued); print(@published); print(@completed); print(@add_refused);
+    print(@unsupported); print(@nested); print(@partial);
+    print(@request); print(@issue); print(@adding); print(@bio);
+    clear(@issued); clear(@published); clear(@completed); clear(@add_refused);
+    clear(@unsupported); clear(@nested); clear(@partial);
+    clear(@request); clear(@issue); clear(@adding); clear(@bio);
+}

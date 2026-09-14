@@ -7,6 +7,32 @@ use std::{io, sync::Arc, time::Instant};
 const QUEUES: usize = 4;
 const SLOTS: usize = 256;
 const RETAIN: usize = 32;
+pub(crate) const REASONS: usize = 11;
+
+/// Fixed log2 nanosecond buckets. Quantiles are intervals, not exact values.
+#[derive(Clone, Copy, serde::Serialize)]
+pub(crate) struct Histogram {
+    pub buckets: [[u64; 32]; 2],
+    pub count: u64,
+    pub total_ns: u64,
+    pub max_ns: u64,
+}
+
+impl Histogram {
+    const EMPTY: Self = Self {
+        buckets: [[0; 32]; 2],
+        count: 0,
+        total_ns: 0,
+        max_ns: 0,
+    };
+    fn add(&mut self, value: u64) {
+        let bucket = (64 - value.leading_zeros() as usize).min(63);
+        self.buckets[bucket / 32][bucket % 32] += 1;
+        self.count += 1;
+        self.total_ns = self.total_ns.saturating_add(value);
+        self.max_ns = self.max_ns.max(value);
+    }
+}
 
 pub(crate) type OwnedTrace = BudgetBox<ReadTrace, BudgetAllocator>;
 
@@ -22,6 +48,9 @@ struct Seen {
     ahead: u16,
     behind_write_ns: u64,
     head_stall_ns: u64,
+    behind_reason_ns: [u64; REASONS],
+    head_reason_ns: [u64; REASONS],
+    blocker_range: Option<(u64, u64)>,
 }
 
 #[derive(Clone, Copy)]
@@ -29,6 +58,8 @@ struct Stall {
     available: u16,
     since: Instant,
     write: bool,
+    reason: usize,
+    range: Option<(u64, u64)>,
 }
 
 /// Milestones are nanoseconds since `observed`; nested durations are labelled.
@@ -40,6 +71,7 @@ pub(crate) struct ReadTrace {
     pub id: u64,
     pub queue: u16,
     pub available: u16,
+    pub descriptor: u16,
     pub offset: u64,
     pub bytes: usize,
     pub observed_ns: u64,
@@ -55,6 +87,15 @@ pub(crate) struct ReadTrace {
     // Subsets of observed -> head and head -> admitted, not extra wall time.
     pub behind_write_ns: u64,
     pub head_stall_ns: u64,
+    pub behind_reason_ns: [u64; REASONS],
+    pub head_reason_ns: [u64; REASONS],
+    // Envelope of admission-blocked writes encountered before this read.
+    // Outside the envelope proves disjointness; inside does not prove overlap.
+    pub blocker_range: Option<(u64, u64)>,
+    pub synchronous: cas_core::io_metrics::Counters,
+    pub boundary: u64,
+    pub published_at_receive: u64,
+    pub dependency_observed_ns: u64,
     pub prepare_ns: u64,
     pub advance_ns: u64,
     pub submission_wait_ns: u64,
@@ -95,6 +136,15 @@ pub(crate) struct Observer {
     pub before_head_ns: u64,
     pub behind_write_ns: u64,
     pub after_admission_ns: u64,
+    // Total, before head, at head, dispatch, command channel, reactor,
+    // execution, response channel, frontend completion, after admission.
+    pub phases: [Histogram; 10],
+    pub synchronous: cas_core::io_metrics::Counters,
+    pub io_ns: [u64; 5],
+    pub behind_reason_ns: [u64; REASONS],
+    pub head_reason_ns: [u64; REASONS],
+    pub disjoint_blocked_reads: u64,
+    pub disjoint_blocked_ns: u64,
     pub slowest: [Option<ReadTrace>; RETAIN],
 }
 
@@ -120,6 +170,13 @@ impl Observer {
                 before_head_ns: 0,
                 behind_write_ns: 0,
                 after_admission_ns: 0,
+                phases: [Histogram::EMPTY; 10],
+                synchronous: Default::default(),
+                io_ns: [0; 5],
+                behind_reason_ns: [0; REASONS],
+                head_reason_ns: [0; REASONS],
+                disjoint_blocked_reads: 0,
+                disjoint_blocked_ns: 0,
                 slowest: [None; RETAIN],
             },
             BudgetAllocator::new(metadata.clone()),
@@ -151,8 +208,18 @@ impl Observer {
             let distance = seen.available.wrapping_sub(stall.available);
             if distance == 0 {
                 seen.head_stall_ns += elapsed;
+                seen.head_reason_ns[stall.reason] += elapsed;
             } else if distance < SLOTS as u16 && stall.write {
                 seen.behind_write_ns += elapsed;
+                seen.behind_reason_ns[stall.reason] += elapsed;
+                if elapsed != 0
+                    && let Some((start, end)) = stall.range
+                {
+                    seen.blocker_range = Some(
+                        seen.blocker_range
+                            .map_or((start, end), |(a, b)| (a.min(start), b.max(end))),
+                    );
+                }
             }
         }
         stall.since = now;
@@ -187,6 +254,9 @@ impl Observer {
                     ahead,
                     behind_write_ns: 0,
                     head_stall_ns: 0,
+                    behind_reason_ns: [0; REASONS],
+                    head_reason_ns: [0; REASONS],
+                    blocker_range: None,
                 });
             }
         }
@@ -207,17 +277,29 @@ impl Observer {
                 ahead: 0,
                 behind_write_ns: 0,
                 head_stall_ns: 0,
+                behind_reason_ns: [0; REASONS],
+                head_reason_ns: [0; REASONS],
+                blocker_range: None,
             });
         }
         slot.as_mut().unwrap().head.get_or_insert(now);
     }
 
-    pub fn waiting(&mut self, queue: u16, available: u16, write: bool, now: Instant) {
+    pub fn waiting(
+        &mut self,
+        queue: u16,
+        available: u16,
+        range: Option<(u64, u64)>,
+        reason: usize,
+        now: Instant,
+    ) {
         self.account(queue, now);
         self.stalled[usize::from(queue)] = Some(Stall {
             available,
             since: now,
-            write,
+            write: range.is_some(),
+            range,
+            reason,
         });
     }
 
@@ -242,6 +324,7 @@ impl Observer {
             id,
             queue,
             available,
+            descriptor: 0,
             offset,
             bytes,
             observed_ns: ns(seen.observed.duration_since(self.origin)),
@@ -256,6 +339,13 @@ impl Observer {
             finished_ns: 0,
             behind_write_ns: seen.behind_write_ns,
             head_stall_ns: seen.head_stall_ns,
+            behind_reason_ns: seen.behind_reason_ns,
+            head_reason_ns: seen.head_reason_ns,
+            blocker_range: seen.blocker_range,
+            synchronous: Default::default(),
+            boundary: 0,
+            published_at_receive: 0,
+            dependency_observed_ns: 0,
             prepare_ns: 0,
             advance_ns: 0,
             submission_wait_ns: 0,
@@ -274,6 +364,39 @@ impl Observer {
         self.before_head_ns += trace.head_ns;
         self.behind_write_ns += trace.behind_write_ns;
         self.after_admission_ns += trace.finished_ns.saturating_sub(trace.admitted_ns);
+        let times = [
+            trace.finished_ns,
+            trace.head_ns,
+            trace.admitted_ns.saturating_sub(trace.head_ns),
+            trace.enqueued_ns.saturating_sub(trace.admitted_ns),
+            trace.received_ns.saturating_sub(trace.enqueued_ns),
+            trace.started_ns.saturating_sub(trace.received_ns),
+            trace.responded_ns.saturating_sub(trace.started_ns),
+            trace
+                .frontend_received_ns
+                .saturating_sub(trace.responded_ns),
+            trace.finished_ns.saturating_sub(trace.frontend_received_ns),
+            trace.finished_ns.saturating_sub(trace.admitted_ns),
+        ];
+        for (histogram, value) in self.phases.iter_mut().zip(times) {
+            histogram.add(value);
+        }
+        self.synchronous.add(trace.synchronous);
+        for (total, value) in self.io_ns.iter_mut().zip(trace.io_ns) {
+            *total += value;
+        }
+        for (total, value) in self.behind_reason_ns.iter_mut().zip(trace.behind_reason_ns) {
+            *total += value;
+        }
+        for (total, value) in self.head_reason_ns.iter_mut().zip(trace.head_reason_ns) {
+            *total += value;
+        }
+        if let Some((start, end)) = trace.blocker_range
+            && (trace.offset >= end || trace.offset.saturating_add(trace.bytes as u64) <= start)
+        {
+            self.disjoint_blocked_reads += 1;
+            self.disjoint_blocked_ns += trace.behind_write_ns;
+        }
         let slot = self
             .slowest
             .iter_mut()
@@ -291,12 +414,51 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn histogram_covers_zero_boundaries_and_saturates_the_last_bucket() {
+        let mut histogram = Histogram::EMPTY;
+        for value in [0, 1, 2, 3, 4, u64::MAX] {
+            histogram.add(value);
+        }
+        assert_eq!(histogram.count, 6);
+        assert_eq!(&histogram.buckets[0][..4], &[1, 1, 2, 1]);
+        assert_eq!(histogram.buckets[1][31], 1);
+        assert_eq!(histogram.total_ns, u64::MAX);
+    }
+
+    #[test]
+    fn reason_transitions_partition_wait_and_disjointness_is_conservative() {
+        let mut observer = Observer::new(&crate::local::metadata_budget()).unwrap();
+        let start = Instant::now();
+        observer.observe(0, 0, Some(2), 256, start);
+        observer.waiting(0, 0, Some((8192, 12288)), 6, start);
+        observer.waiting(0, 0, Some((8192, 12288)), 0, start + Duration::from_secs(2));
+        let end = start + Duration::from_secs(3);
+        observer.consume(0, 0, None, end);
+        observer.head(0, 1, end);
+        let mut trace = observer.consume(0, 1, Some((1, 0, 4096)), end).unwrap();
+        assert_eq!(trace.behind_reason_ns[6], 2_000_000_000);
+        assert_eq!(trace.behind_reason_ns[0], 1_000_000_000);
+        assert_eq!(
+            trace.behind_reason_ns.iter().sum::<u64>(),
+            trace.behind_write_ns
+        );
+        trace.finished_ns = trace.admitted_ns;
+        observer.complete(trace);
+        assert_eq!(observer.disjoint_blocked_reads, 1);
+        assert_eq!(observer.disjoint_blocked_ns, 3_000_000_000);
+        trace.offset = 8192;
+        observer.complete(trace);
+        assert_eq!(observer.disjoint_blocked_reads, 1);
+        assert_eq!(observer.phases[0].count, 2);
+    }
+
+    #[test]
     fn observes_behind_a_blocked_write_without_admitting_the_read() {
         let mut observer = Observer::new(&crate::local::metadata_budget()).unwrap();
         let start = Instant::now();
         observer.observe(0, 65535, Some(1), 256, start); // wrap: write, then read
         observer.head(0, 65535, start);
-        observer.waiting(0, 65535, true, start);
+        observer.waiting(0, 65535, Some((8192, 12288)), 6, start);
         let resumed = start + Duration::from_secs(9);
         assert!(observer.consume(0, 65535, None, resumed).is_none());
         observer.head(0, 0, resumed);
@@ -315,7 +477,7 @@ mod tests {
         let mut observer = Observer::new(&crate::local::metadata_budget()).unwrap();
         let start = Instant::now();
         observer.observe(0, 0, Some(1), 256, start);
-        observer.waiting(0, 0, true, start);
+        observer.waiting(0, 0, Some((8192, 12288)), 6, start);
         let later = start + Duration::from_secs(8);
         observer.observe(0, 0, Some(2), 256, later);
         observer.observe(1, 0, Some(1), 256, later);
