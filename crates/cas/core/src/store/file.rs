@@ -185,6 +185,17 @@ impl Store {
     }
 }
 
+/// A segment is block 0 (its header) followed by contiguous batches, each one
+/// header block and then one block per chunk, with chunk ordinals counted from
+/// 1 across the whole segment. The header of batch `batch` at block
+/// `offset / BLOCK_SIZE` therefore opens at ordinal `block - batch + 1`.
+fn batch_identity(header: &Header, segment: u64, batch: u64, offset: u64, chunks: u16) -> bool {
+    header.segment() == segment
+        && header.batch() == batch
+        && header.first() == offset / BLOCK_SIZE as u64 - batch + 1
+        && header.descriptors().len() == usize::from(chunks)
+}
+
 #[derive(Clone, Copy)]
 struct BatchLocation {
     offset: u32,

@@ -122,10 +122,7 @@ impl Collection<'_> {
         let header = Header::decode(self.header.as_slice())?;
         let batch_id = index as u64 + 1;
         require(
-            header.segment() == ticket
-                && header.batch() == batch_id
-                && header.first() == offset / BLOCK_SIZE as u64 - batch_id + 1
-                && header.descriptors().len() == usize::from(location.chunks),
+            batch_identity(&header, ticket, batch_id, offset, location.chunks),
             "chunk collection batch identity",
         )?;
         let payload = &mut self.payload.as_mut_slice()[..header.payload_bytes()];
