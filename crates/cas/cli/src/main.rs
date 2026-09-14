@@ -12,7 +12,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     #[command(flatten)]
-    Lab(cas_harness::lab::Command),
+    Lab(cas_harness::lab::LabCommand),
     /// Count fixed 4/16 KiB content in immutable raw images; first image is the base.
     /// Zero chunks are excluded. Normalize guest free space before scanning.
     Census {

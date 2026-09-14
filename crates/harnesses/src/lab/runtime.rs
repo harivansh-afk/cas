@@ -9,7 +9,7 @@ pub(super) fn supervise(directory: &Path, run: &Path) -> io::Result<()> {
     }
     let started = crate::host::utc_now()?;
     let result = (|| {
-        let mut command = Process::new(&config.build.vm);
+        let mut command = Command::new(&config.build.vm);
         command
             .current_dir(run.join("tmp"))
             .env("TMPDIR", run.join("tmp"))
@@ -83,7 +83,7 @@ fn serve(output: &Path, config: &Config, build: &HostBuild) -> io::Result<()> {
     if first {
         if matches!(config.backend, Backend::Cas) {
             fs::create_dir(storage)?;
-            let mut init = Process::new(&build.host);
+            let mut init = Command::new(&build.host);
             init.arg("init").arg("--root").arg(storage).args([
                 "--store",
                 STORE,
@@ -116,7 +116,7 @@ fn serve(output: &Path, config: &Config, build: &HostBuild) -> io::Result<()> {
         Backend::Cas => {
             let reports = output.join("daemon");
             fs::create_dir(&reports)?;
-            let mut command = Process::new(&build.host);
+            let mut command = Command::new(&build.host);
             command
                 .args([
                     "--root",
@@ -142,7 +142,7 @@ fn serve(output: &Path, config: &Config, build: &HostBuild) -> io::Result<()> {
         }
         Backend::Daemon => {
             for (i, socket) in paths.iter().enumerate() {
-                let mut command = Process::new(&build.daemon);
+                let mut command = Command::new(&build.daemon);
                 command
                     .arg("--socket")
                     .arg(socket)
@@ -182,7 +182,7 @@ fn serve(output: &Path, config: &Config, build: &HostBuild) -> io::Result<()> {
         if first {
             fs::write(directory.join("format"), b"new disk\n")?;
         }
-        let mut command = Process::new(match config.backend {
+        let mut command = Command::new(match config.backend {
             Backend::Raw => &build.raw_guest,
             Backend::Daemon => &build.daemon_guest,
             Backend::Cas => &build.guest,

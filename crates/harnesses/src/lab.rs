@@ -14,7 +14,7 @@ use std::{
     fs::File,
     io,
     path::{Path, PathBuf},
-    process::{Command as Process, Stdio},
+    process::{Command, Stdio},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -42,7 +42,7 @@ impl Backend {
 }
 
 #[derive(clap::Subcommand)]
-pub enum Command {
+pub enum LabCommand {
     /// Create and boot a named CAS VM. --count creates peers in the same store.
     New {
         name: Option<String>,
@@ -126,16 +126,16 @@ struct Active {
     port: u16,
 }
 
-pub fn run(command: Command) -> io::Result<()> {
+pub fn run(command: LabCommand) -> io::Result<()> {
     match command {
-        Command::New {
+        LabCommand::New {
             name,
             count,
             backend,
             json,
         } => client::new(name, count, backend, json),
-        Command::Ls { json } => client::list(json),
-        Command::Shell { name, command } => {
+        LabCommand::Ls { json } => client::list(json),
+        LabCommand::Shell { name, command } => {
             let status = client::ssh(&name, &command)?.status()?;
             if status.success() {
                 Ok(())
@@ -143,20 +143,20 @@ pub fn run(command: Command) -> io::Result<()> {
                 Err(io::Error::other(format!("SSH exited with {status}")))
             }
         }
-        Command::Start { name } => client::start(&name),
-        Command::Stop { name, force } => client::stop(&name, force),
-        Command::Rm { name } => client::remove(&name),
-        Command::Status { name, json } => client::status(&name, json),
-        Command::Logs { name } => client::logs(&name),
-        Command::Doctor => client::doctor(),
-        Command::Bench {
+        LabCommand::Start { name } => client::start(&name),
+        LabCommand::Stop { name, force } => client::stop(&name, force),
+        LabCommand::Rm { name } => client::remove(&name),
+        LabCommand::Status { name, json } => client::status(&name, json),
+        LabCommand::Logs { name } => client::logs(&name),
+        LabCommand::Doctor => client::doctor(),
+        LabCommand::Bench {
             name,
             repeats,
             seconds,
             case,
         } => bench::run(&name, repeats, seconds, case),
-        Command::LabSupervise { directory, run } => runtime::supervise(&directory, &run),
-        Command::LabHost { build } => runtime::host(&build),
+        LabCommand::LabSupervise { directory, run } => runtime::supervise(&directory, &run),
+        LabCommand::LabHost { build } => runtime::host(&build),
     }
 }
 
@@ -226,7 +226,7 @@ fn replace_atomically(path: &Path, value: &impl Serialize) -> io::Result<()> {
     )?
     .sync_all()
 }
-fn checked(command: &mut Process) -> io::Result<()> {
+fn checked(command: &mut Command) -> io::Result<()> {
     let status = command.status()?;
     if status.success() {
         Ok(())
