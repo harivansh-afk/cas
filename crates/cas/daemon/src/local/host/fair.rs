@@ -2,7 +2,8 @@
 use super::*;
 
 const QUANTUM: usize = MAX_REQUEST_BYTES;
-const HEADS: usize = 4;
+// An ordinary head and one independent read candidate per virtqueue.
+const HEADS: usize = 8;
 
 #[derive(Clone, Copy)]
 struct Request {

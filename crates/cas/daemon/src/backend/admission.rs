@@ -72,6 +72,15 @@ pub(super) struct Report {
 }
 
 impl QueueAdmission {
+    pub(super) fn cancel_matching(&mut self, queue: u16, available: u16, head: u16) {
+        if self.heads[usize::from(queue)]
+            .as_ref()
+            .is_some_and(|waiting| waiting.available == available && waiting.head == head)
+        {
+            self.finish_wait(queue, false);
+        }
+    }
+
     pub(super) fn reason_index(&self, queue: u16) -> usize {
         match self.heads[usize::from(queue)]
             .as_ref()
@@ -194,7 +203,7 @@ impl QueueAdmission {
         }
     }
 
-    fn retry_at(&self) -> Option<Instant> {
+    pub(super) fn retry_at(&self) -> Option<Instant> {
         self.heads
             .iter()
             .flatten()
@@ -248,7 +257,16 @@ impl Backend {
     pub(super) fn rearm_deadline_timer(&mut self) -> io::Result<()> {
         // Some shared metadata owners release without a frontend notification.
         // Retry the bounded queue heads, never turn elapsed pressure into IOERR.
-        let retry = self.admission.retry_at();
+        let retry = self
+            .admission
+            .retry_at()
+            .into_iter()
+            .chain(
+                self.frontier
+                    .as_ref()
+                    .and_then(|frontier| frontier.retry_at()),
+            )
+            .min();
         let next = self
             .recovery_deadline
             .map(Deadline::instant)

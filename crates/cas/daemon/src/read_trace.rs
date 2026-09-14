@@ -45,6 +45,7 @@ pub(crate) fn ns(duration: std::time::Duration) -> u64 {
 #[derive(Clone, Copy)]
 struct Seen {
     available: u16,
+    order: Option<u64>,
     observed: Instant,
     head: Option<Instant>,
     ahead: u16,
@@ -58,6 +59,7 @@ struct Seen {
 #[derive(Clone, Copy)]
 struct Stall {
     available: u16,
+    order: Option<u64>,
     since: Instant,
     write: bool,
     reason: usize,
@@ -209,11 +211,17 @@ impl Observer {
         let start = usize::from(queue) * SLOTS;
         for seen in self.slots[start..start + SLOTS].iter_mut().flatten() {
             let elapsed = ns(now.saturating_duration_since(stall.since.max(seen.observed)));
-            let distance = seen.available.wrapping_sub(stall.available);
-            if distance == 0 {
+            let (same, behind) = match (seen.order, stall.order) {
+                (Some(seen), Some(stall)) => (seen == stall, seen > stall),
+                _ => {
+                    let distance = seen.available.wrapping_sub(stall.available);
+                    (distance == 0, distance != 0 && distance < SLOTS as u16)
+                }
+            };
+            if same {
                 seen.head_stall_ns += elapsed;
                 seen.head_reason_ns[stall.reason] += elapsed;
-            } else if distance < SLOTS as u16 && stall.write {
+            } else if behind && stall.write {
                 seen.behind_write_ns += elapsed;
                 seen.behind_reason_ns[stall.reason] += elapsed;
                 if elapsed != 0
@@ -253,6 +261,7 @@ impl Observer {
             if slot.is_none_or(|seen| seen.available != available) {
                 *slot = Some(Seen {
                     available,
+                    order: None,
                     observed: now,
                     head: None,
                     ahead,
@@ -266,6 +275,44 @@ impl Observer {
         }
     }
 
+    /// Discovery owns a descriptor until admission, even after avail slots wrap.
+    pub fn discover(
+        &mut self,
+        queue: u16,
+        head: u16,
+        available: u16,
+        order: u64,
+        ahead: u16,
+        now: Instant,
+    ) {
+        self.account(queue, now);
+        self.slots[Self::slot(queue, head)] = Some(Seen {
+            available,
+            order: Some(order),
+            observed: now,
+            head: None,
+            ahead,
+            behind_write_ns: 0,
+            head_stall_ns: 0,
+            behind_reason_ns: [0; REASONS],
+            head_reason_ns: [0; REASONS],
+            blocker_range: None,
+        });
+    }
+
+    pub fn discovered_head(&mut self, queue: u16, head: u16, now: Instant) {
+        self.account(queue, now);
+        if let Some(seen) = &mut self.slots[Self::slot(queue, head)] {
+            seen.head.get_or_insert(now);
+        }
+    }
+
+    pub fn discovered_wait(&mut self, queue: u16, order: u64) {
+        if let Some(stall) = &mut self.stalled[usize::from(queue)] {
+            stall.order = Some(order);
+        }
+    }
+
     pub fn head(&mut self, queue: u16, available: u16, now: Instant) {
         self.account(queue, now);
         let slot = &mut self.slots[Self::slot(queue, available)];
@@ -276,6 +323,7 @@ impl Observer {
             self.peek_observations += 1;
             *slot = Some(Seen {
                 available,
+                order: None,
                 observed: now,
                 head: Some(now),
                 ahead: 0,
@@ -300,6 +348,7 @@ impl Observer {
         self.account(queue, now);
         self.stalled[usize::from(queue)] = Some(Stall {
             available,
+            order: None,
             since: now,
             write: range.is_some(),
             range,
@@ -307,6 +356,7 @@ impl Observer {
         });
     }
 
+    #[cfg(test)]
     pub fn consume(
         &mut self,
         queue: u16,
@@ -314,9 +364,41 @@ impl Observer {
         read: Option<(u64, u64, usize)>,
         now: Instant,
     ) -> Option<ReadTrace> {
+        self.consume_slot(queue, available, available, read, now)
+    }
+
+    pub fn consume_discovered(
+        &mut self,
+        queue: u16,
+        head: u16,
+        available: u16,
+        read: Option<(u64, u64, usize)>,
+        now: Instant,
+    ) -> Option<ReadTrace> {
+        self.consume_slot(queue, head, available, read, now)
+    }
+
+    fn consume_slot(
+        &mut self,
+        queue: u16,
+        slot: u16,
+        available: u16,
+        read: Option<(u64, u64, usize)>,
+        now: Instant,
+    ) -> Option<ReadTrace> {
         self.account(queue, now);
-        self.stalled[usize::from(queue)] = None;
-        let seen = self.slots[Self::slot(queue, available)].take();
+        let seen = self.slots[Self::slot(queue, slot)].take();
+        if self.stalled[usize::from(queue)]
+            .as_ref()
+            .is_some_and(
+                |stall| match (stall.order, seen.as_ref().and_then(|seen| seen.order)) {
+                    (Some(stall), Some(seen)) => stall == seen,
+                    _ => stall.available == available,
+                },
+            )
+        {
+            self.stalled[usize::from(queue)] = None;
+        }
         let (id, offset, bytes) = read?;
         let Some(seen) = seen.filter(|seen| seen.available == available) else {
             self.missing_observations += 1;

@@ -102,6 +102,15 @@ impl Backend {
         message: &VhostUserInflight,
     ) -> io::Result<(VhostUserInflight, File)> {
         let geometry = geometry(message)?;
+        if self
+            .frontier
+            .as_ref()
+            .is_some_and(|frontier| !frontier.is_empty())
+        {
+            return Err(io::Error::other(
+                "fresh attachment has undispatched descriptors",
+            ));
+        }
         let phase = self.live.as_ref().map(|session| session.phase);
         let (shared, mut identity, status) = match (&mut self.storage, phase) {
             (Storage::Local(local), Some(Phase::AwaitingFd)) => {
@@ -185,6 +194,8 @@ impl Backend {
             .map_err(|_| io::Error::other("completion gate poisoned"))?
             .carrier = Some(carrier);
         self.next_id = 0;
+        let frontier = self.frontier.as_mut().expect("concurrent frontier");
+        frontier.next_order = 0;
         self.blocked_queues.fill(true);
         self.rebase_queues.fill(false);
         self.live.as_mut().unwrap().phase = Phase::Fresh;
@@ -343,6 +354,35 @@ impl Backend {
                 .map(|(used, initialized)| if *initialized { *used } else { None }),
         );
         let replay = carrier.reconcile(&saved_used)?;
+        let frontier = self.frontier.as_mut().expect("concurrent frontier");
+        frontier.next_order = replay.highest_discovery;
+        for &(order, identity) in &replay.discovered {
+            let queue = &queues[usize::from(identity.queue)];
+            let chain = virtio_queue::DescriptorChain::new(
+                mem.clone(),
+                vm_memory::GuestAddress(queue.get_queue().desc_table()),
+                queue.get_queue().size(),
+                identity.head,
+            );
+            let request = decode_chain(mem, chain, self.capacity_bytes, &frontier.spans)?
+                .negotiated(self.negotiated_features);
+            if request.inflight(identity.queue, identity.available) != identity {
+                return Err(io::Error::other(
+                    "discovered guest descriptor identity or range differs",
+                ));
+            }
+            if let Some(observer) = &mut self.read_trace {
+                observer.discover(
+                    identity.queue,
+                    identity.head,
+                    identity.available,
+                    order,
+                    0,
+                    Instant::now(),
+                );
+            }
+            frontier.restore(order, identity, request)?;
+        }
         // Decode all original heads before allowing any WAL repair. Never read
         // heads from old available slots: they can already have wrapped.
         let mut requests = local::reserved_vec(replay.entries.len(), &self.metadata)?;

@@ -358,7 +358,8 @@ impl DaemonReport {
                 || self.queue_requests.len() != 4
                 || self.queue_requests.contains(&0)
                 || self.restored_used.is_none()
-                || self.restored_pending > 136
+                // 128 write, eight read and eight control request owners.
+                || self.restored_pending > 144
                 || self.read_bytes < LIVE_BYTES
                 || self.flushes == 0
             {

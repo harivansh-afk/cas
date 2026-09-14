@@ -419,13 +419,13 @@ fn returned_read_keeps_request_and_byte_credits_after_worker_shutdown() {
     let completion = local.receive(true).unwrap().unwrap();
     assert!(completion.result.is_ok());
     drop(local);
-    assert_eq!(pools.requests.usage().current.requests, 1);
+    assert_eq!(pools.read_requests.usage().current.requests, 1);
     assert_eq!(
         pools.read.usage().current.bytes,
         BLOCK_SIZE + MAX_REQUEST_BYTES
     );
     drop(completion);
-    assert_eq!(pools.requests.usage().current.requests, 0);
+    assert_eq!(pools.read_requests.usage().current.requests, 0);
     assert_eq!(pools.read.usage().current.bytes, 0);
 }
 
@@ -475,7 +475,8 @@ fn rejected_batch_and_following_read_return_each_owner_until_credits_are_release
         );
         let report = local.report();
         assert_eq!(report["append"]["current"]["bytes"], 0); // Rejected final batch is gone.
-        assert_eq!(report["requests"]["current"]["requests"], 3);
+        assert_eq!(report["requests"]["current"]["requests"], 2);
+        assert_eq!(report["read_requests"]["current"]["requests"], 1);
         assert_eq!(
             report["read"]["current"]["bytes"],
             BLOCK_SIZE + MAX_REQUEST_BYTES
@@ -487,9 +488,11 @@ fn rejected_batch_and_following_read_return_each_owner_until_credits_are_release
             assert!(item.result.is_err());
             completed.push(item);
         }
-        assert_eq!(local.report()["requests"]["current"]["requests"], 3);
+        assert_eq!(local.report()["requests"]["current"]["requests"], 2);
+        assert_eq!(local.report()["read_requests"]["current"]["requests"], 1);
         drop(completed);
         assert_eq!(local.report()["requests"]["current"]["requests"], 0);
+        assert_eq!(local.report()["read_requests"]["current"]["requests"], 0);
         assert_eq!(local.report()["read"]["current"]["bytes"], 0);
         drop(receiver);
         local.stop().unwrap();
@@ -795,7 +798,7 @@ fn read_preparation_errors_return_every_owner_before_credit_release() {
             );
             thread::sleep(Duration::from_millis(1));
         }
-        assert_eq!(shared.pools.requests.usage().current.requests, 2);
+        assert_eq!(shared.pools.read_requests.usage().current.requests, 2);
         assert_eq!(
             shared.pools.read.usage().current.bytes,
             2 * (BLOCK_SIZE + MAX_REQUEST_BYTES)
@@ -803,7 +806,10 @@ fn read_preparation_errors_return_every_owner_before_credit_release() {
         assert_eq!(local.report()["metrics"]["io_queued"], 0);
         assert_eq!(local.status.published, 0);
         drop(responses);
-        assert_eq!(shared.pools.requests.usage().current, Amount::default());
+        assert_eq!(
+            shared.pools.read_requests.usage().current,
+            Amount::default()
+        );
         assert_eq!(shared.pools.read.usage().current, Amount::default());
         drop((held, local));
         let metadata = shared.metadata();

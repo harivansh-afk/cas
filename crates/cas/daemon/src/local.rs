@@ -200,7 +200,8 @@ struct Io {
 type Response = (Completed, append::Status);
 pub type Health = BudgetArc<state::Gate>;
 
-pub(crate) const IMAGE_REQUEST_LIMIT: usize = pools::IMAGE_REQUESTS + pools::IMAGE_CONTROL;
+pub(crate) const IMAGE_REQUEST_LIMIT: usize =
+    pools::IMAGE_REQUESTS + pools::IMAGE_READ_REQUESTS + pools::IMAGE_CONTROL;
 
 pub(crate) fn metadata_budget() -> Arc<Budget> {
     Budget::new(Amount {
@@ -320,7 +321,11 @@ impl Shared {
                 bytes: BLOCK_SIZE,
                 requests: 1,
             }),
-            _ => self.pools.requests.reserve(Amount {
+            Kind::Read(_) => self.pools.read_requests.reserve(Amount {
+                bytes: 0,
+                requests: 1,
+            }),
+            Kind::Write(_) => self.pools.requests.reserve(Amount {
                 bytes: 0,
                 requests: 1,
             }),
@@ -826,7 +831,8 @@ impl Local {
     pub fn report(&self) -> serde_json::Value {
         let status = *self.shared.final_status.lock().expect("status poisoned");
         serde_json::json!({ "status":status, "metrics":*self.shared.metrics.lock().expect("metrics poisoned"),
-            "requests":self.shared.pools.requests.usage(), "append":self.shared.pools.append.usage(),
+            "requests":self.shared.pools.requests.usage(), "read_requests":self.shared.pools.read_requests.usage(),
+            "append":self.shared.pools.append.usage(),
             "read":self.shared.pools.read.usage(), "control":self.shared.pools.control.usage(),
             "host_append":self.shared.pools.append.host_usage(), "host_read":self.shared.pools.read.host_usage(),
             "admission_denials": self.shared.pressure.report(),

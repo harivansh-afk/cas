@@ -4,13 +4,15 @@ use std::io;
 use std::sync::atomic::Ordering::{Acquire, Release};
 
 use super::{
-    ACTIVE, Carrier, EMPTY, Entry, Kind, MAGIC, PAGE, PREPARED, REJECTED, Request, Slot, VERSION,
-    invalid,
+    ACTIVE, Carrier, DISCOVERED, EMPTY, Entry, Kind, MAGIC, PAGE, PREPARED, REJECTED, Request,
+    Slot, VERSION, invalid,
 };
 
 pub struct Replay {
     /// Original admission order across all queues, including protocol requests.
     pub entries: BudgetVec<Entry, BudgetAllocator>,
+    pub discovered: BudgetVec<(u64, Request), BudgetAllocator>,
+    pub highest_discovery: u64,
     pub highest_serial: u64,
     pub highest_mutation: u64,
     pub published: u64,
@@ -69,7 +71,7 @@ impl Carrier {
         if state == EMPTY {
             return Ok(None);
         }
-        if state != PREPARED && state != ACTIVE {
+        if state != PREPARED && state != ACTIVE && state != DISCOVERED {
             return Err(invalid("unknown inflight slot state"));
         }
         let request = Request {
@@ -81,6 +83,30 @@ impl Carrier {
             length: slot.length.load(Acquire),
         };
         request.validate(self.image_bytes)?;
+        let discovery = slot.discovery.load(Acquire);
+        if state == DISCOVERED {
+            if request.queue != queue
+                || request.head != head
+                || slot.attachment.load(Acquire) != self.identity.attachment
+                || discovery == 0
+            {
+                return Err(invalid("discovered descriptor identity differs"));
+            }
+            // Admission may have been interrupted while preparing its fields.
+            // DISCOVERED owns only this immutable header, never those counters.
+            return Ok(Some((
+                state,
+                Entry {
+                    request,
+                    serial: 0,
+                    mutation: 0,
+                    boundary: 0,
+                    attachment: self.identity.attachment,
+                    rejected: false,
+                    discovery,
+                },
+            )));
+        }
         let entry = Entry {
             request,
             serial: slot.serial.load(Acquire),
@@ -88,6 +114,7 @@ impl Carrier {
             boundary: slot.boundary.load(Acquire),
             attachment: slot.attachment.load(Acquire),
             rejected: flags & REJECTED != 0,
+            discovery,
         };
         let expected_mutation = if request.mutates() && !entry.rejected {
             entry.boundary.checked_add(1)
@@ -98,6 +125,7 @@ impl Carrier {
             || request.head != head
             || entry.attachment != self.identity.attachment
             || entry.serial == 0
+            || discovery == 0
             || Some(entry.mutation) != expected_mutation
         {
             return Err(invalid("inflight slot identity or mutation differs"));
@@ -139,6 +167,9 @@ impl Carrier {
                     None => return Err(invalid("standard inflight head has no private identity")),
                     Some((state, entry)) => {
                         if version != 1
+                            || entry.discovery
+                                > self.header().discovery.load(Acquire).saturating_add(1)
+                            || (state == DISCOVERED && inflight != 0)
                             || entry.serial > serial.saturating_add(1)
                             || entry.mutation > mutation.saturating_add(1)
                             || entry.boundary > mutation
@@ -162,9 +193,19 @@ impl Carrier {
         saved.sort_unstable_by_key(|saved| saved.entry.serial);
         if saved
             .windows(2)
-            .any(|pair| pair[0].entry.serial == pair[1].entry.serial)
+            .any(|pair| pair[0].entry.serial != 0 && pair[0].entry.serial == pair[1].entry.serial)
         {
             return Err(invalid("duplicate inflight operation serial"));
+        }
+        let mut discoveries = crate::local::reserved_vec(saved.len(), &self.metadata)?;
+        discoveries.extend(
+            saved
+                .iter()
+                .filter_map(|saved| (saved.entry.discovery != 0).then_some(saved.entry.discovery)),
+        );
+        discoveries.sort_unstable();
+        if discoveries.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(invalid("duplicate discovery identity"));
         }
         let mut mutations = crate::local::reserved_vec(saved.len(), &self.metadata)?;
         mutations.extend(
@@ -191,6 +232,7 @@ impl Carrier {
         }
         let mut completed = crate::local::reserved_vec(guest_used.len(), &self.metadata)?;
         let mut entries = crate::local::reserved_vec(saved.len(), &self.metadata)?;
+        let mut discovered = crate::local::reserved_vec(saved.len(), &self.metadata)?;
         for (queue, guest) in guest_used.iter().enumerate() {
             let standard = self.queue(queue as u16)?;
             if standard.version.load(Acquire) == 0 && guest.is_none() {
@@ -231,16 +273,19 @@ impl Carrier {
 
         let header = self.header();
         let issued_serial = header.serial.load(Acquire);
-        let newest = saved
-            .last()
-            .filter(|saved| saved.entry.serial >= issued_serial);
-        if let Some(newest) = newest {
+        let newest_discovery = saved
+            .iter()
+            .filter(|saved| saved.entry.discovery != 0)
+            .max_by_key(|saved| saved.entry.discovery)
+            .filter(|saved| saved.entry.discovery >= header.discovery.load(Acquire));
+        let highest_discovery = newest_discovery.map_or(header.discovery.load(Acquire), |saved| {
+            saved.entry.discovery
+        });
+        if let Some(newest) = newest_discovery {
             let request = newest.entry.request;
             let cursor = self.available(request.queue)?;
             if cursor != request.available && cursor != request.available.wrapping_add(1) {
-                return Err(invalid(
-                    "newest admission cannot repair saved available cursor",
-                ));
+                return Err(invalid("newest discovery cannot repair available cursor"));
             }
         }
         let highest_serial = saved
@@ -261,7 +306,9 @@ impl Carrier {
             if completed.contains(&record.entry) {
                 continue;
             }
-            if record.state == ACTIVE && !record.inflight {
+            if record.state == DISCOVERED {
+                discovered.push((record.entry.discovery, record.entry.request));
+            } else if record.state == ACTIVE && !record.inflight {
                 self.slot(record.entry.request.queue, record.entry.request.head)?
                     .state
                     .store(EMPTY, Release);
@@ -270,17 +317,17 @@ impl Carrier {
                 entries.push(record.entry);
             }
         }
-        // Only the newest admission may have lagging counters/cursor. An old
-        // inflight request can share today's u16 cursor after ring wrap.
-        if let Some(newest) = newest {
-            let request = newest.entry.request;
-            header.available[usize::from(request.queue)]
-                .store(u32::from(request.available.wrapping_add(1)), Release);
+        // Discovery owns the available cursor; storage admission owns serials.
+        if let Some(newest) = newest_discovery {
+            self.finish_discovery(newest.entry.request, newest.entry.discovery);
         }
+        discovered.sort_unstable_by_key(|(order, _)| *order);
         header.serial.store(highest_serial, Release);
         header.mutation.store(highest_mutation, Release);
         Ok(Replay {
             entries,
+            discovered,
+            highest_discovery,
             highest_serial,
             highest_mutation,
             published: self.published(),

@@ -1,6 +1,7 @@
 // Queue execution: retain owned IO until completion and publish against one memory snapshot.
 
 mod admission;
+mod frontier;
 mod lifecycle;
 mod pending;
 pub(crate) mod recovery;
@@ -59,6 +60,13 @@ struct GuestCompletion {
     write_number: Option<u64>,
 }
 
+struct Prepared {
+    queue: u16,
+    available: u16,
+    request: Request,
+    permit: Permit,
+}
+
 struct Admitted {
     queue: u16,
     id: u64,
@@ -113,6 +121,7 @@ pub struct Backend {
     change_deadline: Option<std::time::Instant>,
     recovery_deadline: Option<Deadline>,
     admission: admission::QueueAdmission,
+    frontier: Option<frontier::Frontier>,
     read_trace: Option<allocator_api2::boxed::Box<Observer, cas_core::budget::BudgetAllocator>>,
     deadline_timer: Option<vmm_sys_util::timerfd::TimerFd>,
     blocked_queues: [bool; CONCURRENT_QUEUES],
@@ -372,6 +381,9 @@ impl Backend {
         } else {
             None
         };
+        let frontier = matches!(kind, BackendKind::LocalAsync)
+            .then(|| frontier::Frontier::new(&metadata))
+            .transpose()?;
         let capacity_bytes = storage.image_bytes();
         let zeroes_supported = storage.shared_host();
         let exit = vmm_sys_util::event::new_event_consumer_and_notifier(
@@ -400,6 +412,7 @@ impl Backend {
             change_deadline: None,
             recovery_deadline,
             admission: admission::QueueAdmission::default(),
+            frontier,
             read_trace,
             deadline_timer,
             blocked_queues: [false; CONCURRENT_QUEUES],
@@ -417,6 +430,9 @@ impl Backend {
     }
     pub(crate) fn fail(&mut self, message: String) {
         self.admission.cancel_all();
+        if let Some(frontier) = &mut self.frontier {
+            frontier.reads.cancel_all();
+        }
         if let Some(gate) = self.storage.completion_gate() {
             let mut failed = gate.lock().expect("completion gate poisoned");
             failed.fail(message.clone());
@@ -460,6 +476,7 @@ impl Backend {
             "local":self.storage.local_report(),
             "admission":self.admission.snapshot(),
             "read_trace":self.read_trace.as_deref(),
+            "read_progress": self.frontier.as_ref().map(frontier::Frontier::report),
             "metadata":self.metadata.usage(),
             "staging":self.storage.status().map(|s| serde_json::json!({
                 "image_bytes":s.image_bytes, "appended":s.appended, "durable":s.durable,
@@ -816,6 +833,9 @@ impl Backend {
         queue: u16,
         vring: &VringMutex,
     ) -> io::Result<()> {
+        if self.concurrent {
+            return self.progress_queue(mem, queue, vring, true);
+        }
         if self.blocked_queues[usize::from(queue)] {
             return Ok(());
         }
@@ -888,10 +908,6 @@ impl Backend {
             }
             let request = decode_chain(mem, chain, self.capacity_bytes, &self.metadata)?
                 .negotiated(self.negotiated_features & self.features());
-            let next_id = self
-                .next_id
-                .checked_add(1)
-                .ok_or_else(|| io::Error::other("request IDs exhausted"))?;
             let gate = self.storage.completion_gate();
             let mut guard = gate
                 .as_ref()
@@ -923,68 +939,20 @@ impl Backend {
                 break;
             }
             self.admission.finish_wait(queue, true);
-            let observed_write =
-                matches!(&request, Request::Write(_)).then(|| self.fault.upcoming_write());
-            self.fault
-                .set_snapshot(guard.as_ref().and_then(|state| state.snapshot()));
-            let inflight = guard
-                .as_deref_mut()
-                .and_then(|state| state.carrier.as_mut())
-                .map(|carrier| {
-                    let request = request.inflight(queue, next_avail.wrapping_sub(1));
-                    carrier.admit_observed(request, false, |phase| {
-                        use crate::inflight::AdmissionPhase;
-                        let point = match phase {
-                            AdmissionPhase::Prepared => Point::AfterPrepared,
-                            AdmissionPhase::Active => Point::AfterActive,
-                        };
-                        self.fault.hit(point, observed_write)
-                    })
-                })
-                .transpose()?;
-            if inflight.is_some_and(|entry| entry.serial != next_id) {
-                return Err(io::Error::other(
-                    "admission serial differs from retained carrier",
-                ));
-            }
-            let id = self.next_id;
-            self.next_id = next_id;
-            state.get_queue_mut().set_next_avail(next_avail);
-            if matches!(
-                &request,
-                Request::Read(_) | Request::Write(_) | Request::Flush(_)
-            ) {
-                self.queue_requests[usize::from(queue)] += 1;
-            }
-            let trace = self.read_trace.as_mut().and_then(|observer| {
-                let read = match &request {
-                    Request::Read(data) => Some((id, data.offset, data.len)),
-                    _ => None,
-                };
-                let trace =
-                    observer.consume(queue, next_avail.wrapping_sub(1), read, Instant::now());
-                trace.and_then(|mut trace| {
-                    trace.descriptor = request.completion().head;
-                    observer.own(trace)
-                })
-            });
-            if let Admission::Accepted(mut permit) = admission {
-                if let Permit::Local { _credits } = &mut permit {
-                    _credits.trace = trace;
-                }
-                self.enqueue(
-                    mem,
-                    &mut state,
-                    Admitted {
-                        queue,
-                        id,
-                        request,
-                        permit,
-                        inflight,
-                    },
-                    guard.as_deref_mut(),
-                )?;
-            }
+            let Admission::Accepted(permit) = admission else {
+                unreachable!()
+            };
+            self.accept(
+                mem,
+                &mut state,
+                Prepared {
+                    queue,
+                    available: next_avail.wrapping_sub(1),
+                    request,
+                    permit,
+                },
+                guard.as_deref_mut(),
+            )?;
             consumed += 1;
         }
         if consumed == queue_size {
@@ -994,9 +962,103 @@ impl Backend {
         }
         Ok(())
     }
+    fn accept(
+        &mut self,
+        mem: &GuestMemoryLoadGuard<GuestMemoryMmap>,
+        state: &mut VringState,
+        prepared: Prepared,
+        mut health: Option<&mut local::ImageState>,
+    ) -> io::Result<()> {
+        let Prepared {
+            queue,
+            available,
+            request,
+            mut permit,
+        } = prepared;
+        let next_id = self
+            .next_id
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("request IDs exhausted"))?;
+        let observed_write =
+            matches!(&request, Request::Write(_)).then(|| self.fault.upcoming_write());
+        self.fault
+            .set_snapshot(health.as_deref().and_then(|state| state.snapshot()));
+        let inflight = health
+            .as_deref_mut()
+            .and_then(|state| state.carrier.as_mut())
+            .map(|carrier| {
+                let request = request.inflight(queue, available);
+                carrier.admit_observed(request, false, |phase| {
+                    use crate::inflight::AdmissionPhase;
+                    let point = match phase {
+                        AdmissionPhase::Prepared => Point::AfterPrepared,
+                        AdmissionPhase::Active => Point::AfterActive,
+                    };
+                    self.fault.hit(point, observed_write)
+                })
+            })
+            .transpose()?;
+        if inflight.is_some_and(|entry| entry.serial != next_id) {
+            return Err(io::Error::other(
+                "admission serial differs from retained carrier",
+            ));
+        }
+        let id = self.next_id;
+        self.next_id = next_id;
+        if !self.concurrent {
+            state
+                .get_queue_mut()
+                .set_next_avail(available.wrapping_add(1));
+        }
+        if matches!(
+            &request,
+            Request::Read(_) | Request::Write(_) | Request::Flush(_)
+        ) {
+            self.queue_requests[usize::from(queue)] += 1;
+        }
+        let trace = self.read_trace.as_mut().and_then(|observer| {
+            let read = match &request {
+                Request::Read(data) => Some((id, data.offset, data.len)),
+                _ => None,
+            };
+            let trace = observer.consume_discovered(
+                queue,
+                request.completion().head,
+                available,
+                read,
+                Instant::now(),
+            );
+            trace.and_then(|mut trace| {
+                trace.descriptor = request.completion().head;
+                observer.own(trace)
+            })
+        });
+        {
+            if let Permit::Local { _credits } = &mut permit {
+                _credits.trace = trace;
+            }
+            self.enqueue(
+                mem,
+                state,
+                Admitted {
+                    queue,
+                    id,
+                    request,
+                    permit,
+                    inflight,
+                },
+                health,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Reap IO after disconnect without touching guest queues or memory.
     pub fn drain(&mut self) -> io::Result<()> {
         self.admission.cancel_all();
+        if let Some(frontier) = &mut self.frontier {
+            frontier.reads.cancel_all();
+        }
         // An earlier gather may still own an unsealed batch when admission fails.
         if let Err(error) = self.storage.submit() {
             self.fail(error.to_string());
@@ -1159,7 +1221,12 @@ impl VhostUserBackendMut for Backend {
         config.get(start..end).unwrap_or(&[]).to_vec()
     }
     fn update_memory(&mut self, memory: GuestMemoryAtomic<GuestMemoryMmap>) -> io::Result<()> {
-        if !self.pending.is_empty() {
+        if !self.pending.is_empty()
+            || self
+                .frontier
+                .as_ref()
+                .is_some_and(|frontier| !frontier.is_empty())
+        {
             return Err(io::Error::other("memory replacement with IO in flight"));
         }
         self.memory = Some(memory.memory());

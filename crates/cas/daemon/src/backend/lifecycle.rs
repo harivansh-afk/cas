@@ -42,14 +42,33 @@ impl Backend {
                 return Err(io::Error::other(error.clone()));
             }
             self.storage.submit()?;
-            if !self.pending.is_empty() {
+            if !self.pending.is_empty()
+                || self
+                    .frontier
+                    .as_ref()
+                    .is_some_and(|frontier| !frontier.is_empty())
+            {
                 let memory = self
                     .memory
                     .clone()
                     .ok_or_else(|| io::Error::other("pending IO has no accepted memory"))?;
-                while !self.pending.is_empty() {
+                while !self.pending.is_empty()
+                    || self
+                        .frontier
+                        .as_ref()
+                        .is_some_and(|frontier| !frontier.is_empty())
+                {
                     self.complete(&memory, vrings)?;
-                    if !self.pending.is_empty() {
+                    for (index, vring) in vrings.iter().enumerate() {
+                        self.progress_queue(&memory, index as u16, vring, false)?;
+                    }
+                    self.storage.submit()?;
+                    if !self.pending.is_empty()
+                        || self
+                            .frontier
+                            .as_ref()
+                            .is_some_and(|frontier| !frontier.is_empty())
+                    {
                         self.wait_for_completion(deadline)?;
                     }
                 }

@@ -134,7 +134,7 @@ fn fd_survives_creator_and_has_bounded_standard_and_private_regions() {
     assert_eq!(original.geometry.bytes(), 155648);
     let wire = bytes(&original);
     let trailer = original.geometry.trailer();
-    assert_eq!(&wire[trailer..trailer + 8], b"CASIFL02");
+    assert_eq!(&wire[trailer..trailer + 8], b"CASIFL03");
     assert_eq!(&wire[trailer + 16..trailer + 32], &[0x21; 16]);
     let mut replacement = reopen(original);
     let replay = replacement.reconcile(&[Some(0); 4]).unwrap();
@@ -667,4 +667,130 @@ fn rejected_outcomes_survive_admission_and_used_cuts_without_spending_mutations(
             );
         }
     }
+}
+
+#[test]
+fn discovery_cuts_retain_unadmitted_writes_without_issuing_mutations() {
+    for cut in 0..3 {
+        let mut carrier = fresh(1);
+        let write = request(Kind::Write, 0, 7, 0);
+        let order = carrier.prepare_discovery(write).unwrap();
+        if cut >= 1 {
+            carrier.header().discovery.store(order, Release);
+        }
+        if cut >= 2 {
+            carrier.header().available[0].store(1, Release);
+        }
+        for _ in 0..2 {
+            carrier = reopen(carrier);
+            let replay = carrier.reconcile(&[Some(0)]).unwrap();
+            assert_eq!(replay.discovered.as_slice(), &[(order, write)]);
+            assert!(replay.entries.is_empty());
+            assert_eq!(
+                (
+                    replay.highest_serial,
+                    replay.highest_mutation,
+                    replay.highest_discovery
+                ),
+                (0, 0, 1)
+            );
+            assert_eq!(carrier.available(0).unwrap(), 1);
+        }
+        let entry = carrier.admit(write).unwrap();
+        assert_eq!((entry.serial, entry.mutation, entry.discovery), (1, 1, 1));
+        assert_eq!(carrier.available(0).unwrap(), 1);
+    }
+}
+
+#[test]
+fn completed_bypass_read_and_reused_ring_slot_cannot_erase_a_waiting_write() {
+    let mut carrier = fresh(1);
+    let write = request(Kind::Write, 0, 7, 0);
+    carrier.discover(write).unwrap();
+    // A stalled head survives more than one full u16 avail wrap while another
+    // descriptor repeatedly completes and is reused by the guest.
+    for index in 1..=u32::from(u16::MAX) + 3 {
+        let read = request(Kind::Read, 0, 8, index as u16);
+        carrier.discover(read).unwrap();
+        let entry = carrier.admit(read).unwrap();
+        assert_eq!((entry.mutation, entry.boundary), (0, 0));
+        carrier
+            .complete(entry, (index - 1) as u16, || Ok(()))
+            .unwrap();
+    }
+    let cursor = carrier.available(0).unwrap();
+    let mut carrier = reopen(carrier);
+    let replay = carrier.reconcile(&[Some(2)]).unwrap();
+    assert_eq!(replay.discovered.as_slice(), &[(1, write)]);
+    assert!(replay.entries.is_empty());
+    assert_eq!(carrier.available(0).unwrap(), cursor);
+    let write = carrier.admit(write).unwrap();
+    assert_eq!(write.mutation, 1);
+    assert_eq!(carrier.available(0).unwrap(), cursor);
+}
+
+#[test]
+fn discovered_admission_and_completion_cuts_keep_both_ownership_classes() {
+    for cut in 0..9 {
+        let mut carrier = fresh(1);
+        let write = request(Kind::Write, 0, 7, 0);
+        let read = request(Kind::Read, 0, 8, 1);
+        carrier.discover(write).unwrap();
+        carrier.discover(read).unwrap();
+        let entry = carrier.prepare(read, false).unwrap();
+        if cut >= 1 {
+            carrier.activate(entry).unwrap();
+        }
+        if cut >= 2 {
+            carrier.finish_admission(entry);
+        }
+        if cut >= 3 {
+            carrier.begin_completion(entry, 0).unwrap();
+        }
+        let used = u16::from(cut >= 4);
+        if cut >= 5 {
+            carrier.descriptor(0, 8).unwrap().inflight.store(0, Release);
+        }
+        if cut >= 6 {
+            carrier.queue(0).unwrap().used.store(1, Release);
+        }
+        if cut >= 7 {
+            carrier.slot(0, 8).unwrap().state.store(EMPTY, Release);
+        }
+        for _ in 0..2 {
+            carrier = reopen(carrier);
+            let replay = carrier.reconcile(&[Some(used)]).unwrap();
+            assert_eq!(replay.discovered.as_slice(), &[(1, write)], "cut {cut}");
+            assert_eq!(
+                replay.entries.as_slice(),
+                if cut < 4 {
+                    std::slice::from_ref(&entry)
+                } else {
+                    &[]
+                },
+                "cut {cut}"
+            );
+            assert_eq!(carrier.available(0).unwrap(), 2);
+        }
+    }
+}
+
+#[test]
+fn partial_admission_fields_do_not_turn_a_discovery_into_an_issued_mutation() {
+    let mut carrier = fresh(1);
+    let write = request(Kind::Write, 0, 7, 0);
+    carrier.discover(write).unwrap();
+    let slot = carrier.slot(0, 7).unwrap();
+    slot.flags.store(REJECTED, Relaxed);
+    slot.serial.store(77, Relaxed);
+    slot.mutation.store(99, Relaxed);
+    slot.boundary.store(98, Relaxed);
+    let mut replacement = reopen(carrier);
+    let replay = replacement.reconcile(&[Some(0)]).unwrap();
+    assert_eq!(replay.discovered.as_slice(), &[(1, write)]);
+    assert!(replay.entries.is_empty());
+    assert_eq!((replay.highest_serial, replay.highest_mutation), (0, 0));
+    let admitted = replacement.admit(write).unwrap();
+    assert_eq!((admitted.serial, admitted.mutation), (1, 1));
+    assert!(!admitted.rejected);
 }

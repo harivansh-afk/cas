@@ -1,12 +1,13 @@
 use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64};
 
 pub(super) const PAGE: usize = 4096;
-pub(super) const MAGIC: u64 = u64::from_le_bytes(*b"CASIFL02");
-pub(super) const VERSION: u32 = 2;
+pub(super) const MAGIC: u64 = u64::from_le_bytes(*b"CASIFL03");
+pub(super) const VERSION: u32 = 3;
 pub(super) const REJECTED: u32 = 1;
 pub(super) const EMPTY: u32 = 0;
 pub(super) const PREPARED: u32 = 1;
 pub(super) const ACTIVE: u32 = 2;
+pub(super) const DISCOVERED: u32 = 3;
 
 #[repr(C)]
 pub(super) struct Queue {
@@ -42,7 +43,8 @@ pub(super) struct Header {
     pub mutation: AtomicU64,
     pub published: AtomicU64,
     pub available: [AtomicU32; 4],
-    pub reserved: [AtomicU8; PAGE - 120],
+    pub discovery: AtomicU64,
+    pub reserved: [AtomicU8; PAGE - 128],
 }
 
 #[repr(C, align(64))]
@@ -59,7 +61,8 @@ pub(super) struct Slot {
     pub offset: AtomicU64,
     pub length: AtomicU64,
     pub attachment: AtomicU64,
-    pub tail: [AtomicU8; 64],
+    pub discovery: AtomicU64,
+    pub tail: [AtomicU8; 56],
 }
 
 const _: () = {

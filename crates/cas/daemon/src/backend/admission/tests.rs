@@ -259,7 +259,7 @@ fn long_capacity_wait_keeps_the_descriptor_and_resumes_without_an_error_or_id_ga
         .handle_event(0, EventSet::IN, std::slice::from_ref(&vring), 0)
         .unwrap();
     assert_eq!(backend.next_id, 0);
-    assert_eq!(vring.queue_next_avail(), 0);
+    assert_eq!(vring.queue_next_avail(), 1); // Discovery owns the head; storage admission still waits.
     assert_eq!(mem.read_obj::<u8>(GuestAddress(0x6000)).unwrap(), 0xff);
     // Advance the recorded wait age deterministically; no sleep or guest timer.
     backend.admission.heads[0].as_mut().unwrap().started = Instant::now() - Duration::from_secs(6);
@@ -273,7 +273,7 @@ fn long_capacity_wait_keeps_the_descriptor_and_resumes_without_an_error_or_id_ga
         .unwrap();
     assert_eq!(mem.read_obj::<u8>(GuestAddress(0x6000)).unwrap(), 0xff);
     assert_eq!(mem.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 0);
-    assert_eq!(vring.queue_next_avail(), 0);
+    assert_eq!(vring.queue_next_avail(), 1); // Discovery owns the head; storage admission still waits.
     assert_eq!(backend.next_id, 0);
     let report = backend.admission_report();
     assert_eq!(report["heads"][0]["reason"]["storage"], "request_credits");
@@ -288,6 +288,8 @@ fn long_capacity_wait_keeps_the_descriptor_and_resumes_without_an_error_or_id_ga
             .unwrap()
             .reconcile(&[Some(0)])
             .unwrap();
+        assert_eq!(replay.discovered.len(), 1);
+        assert!(replay.entries.is_empty());
         assert_eq!(
             (
                 replay.highest_serial,

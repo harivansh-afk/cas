@@ -21,7 +21,8 @@ use cas_core::{BLOCK_SIZE, MAX_REQUEST_BYTES};
 use vhost::vhost_user::message::VhostUserInflight;
 
 use layout::{
-    ACTIVE, Descriptor, EMPTY, Header, MAGIC, PAGE, PREPARED, Queue, REJECTED, Slot, VERSION,
+    ACTIVE, DISCOVERED, Descriptor, EMPTY, Header, MAGIC, PAGE, PREPARED, Queue, REJECTED, Slot,
+    VERSION,
 };
 use mapping::Mapping;
 
@@ -166,6 +167,7 @@ pub struct Entry {
     pub boundary: u64,
     pub attachment: u64,
     pub rejected: bool,
+    pub discovery: u64,
 }
 
 impl Entry {
@@ -420,6 +422,56 @@ impl Carrier {
         Ok(())
     }
 
+    /// Retain a descriptor before advancing avail, without assigning storage IDs.
+    pub fn discover(&mut self, request: Request) -> io::Result<u64> {
+        let discovery = self.prepare_discovery(request)?;
+        self.finish_discovery(request, discovery);
+        Ok(discovery)
+    }
+
+    fn prepare_discovery(&mut self, request: Request) -> io::Result<u64> {
+        self.healthy()?;
+        request.validate(self.image_bytes)?;
+        if self.queue(request.queue)?.version.load(Acquire) != 1
+            || self.available(request.queue)? != request.available
+        {
+            return Err(invalid("discovery does not match saved available cursor"));
+        }
+        let slot = self.slot(request.queue, request.head)?;
+        if slot.state.load(Acquire) != EMPTY
+            || self
+                .descriptor(request.queue, request.head)?
+                .inflight
+                .load(Acquire)
+                != 0
+        {
+            return Err(invalid("discovery reused an owned descriptor"));
+        }
+        let discovery = self
+            .header()
+            .discovery
+            .load(Acquire)
+            .checked_add(1)
+            .ok_or_else(|| invalid("discovery IDs exhausted"))?;
+        slot.kind.store(request.kind as u16, Relaxed);
+        slot.queue.store(request.queue, Relaxed);
+        slot.head.store(request.head, Relaxed);
+        slot.available.store(request.available, Relaxed);
+        slot.offset.store(request.offset, Relaxed);
+        slot.length.store(request.length, Relaxed);
+        slot.attachment.store(self.identity.attachment, Relaxed);
+        slot.flags.store(0, Relaxed);
+        slot.discovery.store(discovery, Relaxed);
+        slot.state.store(DISCOVERED, Release);
+        Ok(discovery)
+    }
+
+    fn finish_discovery(&self, request: Request, discovery: u64) {
+        self.header().discovery.store(discovery, Release);
+        self.header().available[usize::from(request.queue)]
+            .store(u32::from(request.available.wrapping_add(1)), Release);
+    }
+
     pub fn admit(&mut self, request: Request) -> io::Result<Entry> {
         self.admit_outcome(request, false)
     }
@@ -452,21 +504,6 @@ impl Carrier {
     fn prepare(&mut self, request: Request, rejected: bool) -> io::Result<Entry> {
         self.healthy()?;
         request.validate(self.image_bytes)?;
-        if self.queue(request.queue)?.version.load(Acquire) != 1
-            || self.available(request.queue)? != request.available
-        {
-            return Err(invalid("request does not match saved admission cursor"));
-        }
-        let slot = self.slot(request.queue, request.head)?;
-        if slot.state.load(Acquire) != EMPTY
-            || self
-                .descriptor(request.queue, request.head)?
-                .inflight
-                .load(Acquire)
-                != 0
-        {
-            return Err(invalid("inflight head reused before retirement"));
-        }
         let serial = self
             .header()
             .serial
@@ -481,6 +518,24 @@ impl Carrier {
         } else {
             0
         };
+        if self.slot(request.queue, request.head)?.state.load(Acquire) == EMPTY {
+            self.discover(request)?;
+        }
+        let slot = self.slot(request.queue, request.head)?;
+        let (state, discovered) = self
+            .read_slot(request.queue, request.head)?
+            .ok_or_else(|| invalid("admission has no discovered descriptor"))?;
+        if state != DISCOVERED
+            || discovered.request != request
+            || self
+                .descriptor(request.queue, request.head)?
+                .inflight
+                .load(Acquire)
+                != 0
+        {
+            return Err(invalid("admission differs from discovered request"));
+        }
+        let discovery = discovered.discovery;
         let entry = Entry {
             request,
             serial,
@@ -488,19 +543,13 @@ impl Carrier {
             boundary,
             attachment: self.identity.attachment,
             rejected,
+            discovery,
         };
         slot.flags
             .store(if rejected { REJECTED } else { 0 }, Relaxed);
-        slot.kind.store(request.kind as u16, Relaxed);
-        slot.queue.store(request.queue, Relaxed);
-        slot.head.store(request.head, Relaxed);
-        slot.available.store(request.available, Relaxed);
         slot.serial.store(serial, Relaxed);
         slot.mutation.store(mutation, Relaxed);
         slot.boundary.store(boundary, Relaxed);
-        slot.offset.store(request.offset, Relaxed);
-        slot.length.store(request.length, Relaxed);
-        slot.attachment.store(entry.attachment, Relaxed);
         slot.state.store(PREPARED, Release);
         Ok(entry)
     }
@@ -520,8 +569,6 @@ impl Carrier {
         self.header()
             .mutation
             .store(entry.mutation.max(entry.boundary), Release);
-        self.header().available[usize::from(entry.request.queue)]
-            .store(u32::from(entry.request.available.wrapping_add(1)), Release);
     }
 
     /// `publish_used` writes guest status, used element and used.idx in order.

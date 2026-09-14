@@ -733,7 +733,7 @@ fn read_page_metadata_denial_returns_ioerr_without_failing_the_shared_store() {
     assert_eq!(error.to_string(), "aligned buffer allocation denied");
     assert!(shared.health.lock().unwrap().failure.is_some());
     assert!(host.shared.gate.failure().is_none());
-    assert_eq!(shared.pools.requests.usage().current.requests, 1);
+    assert_eq!(shared.pools.read_requests.usage().current.requests, 1);
     assert_eq!(
         shared.pools.read.usage().current.bytes,
         BLOCK_SIZE + MAX_REQUEST_BYTES
