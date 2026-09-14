@@ -87,7 +87,7 @@ impl Store {
         io_memory: Arc<Budget>,
     ) -> io::Result<Inspection> {
         config.validate()?;
-        let directory = Directory::open(&tickets.root().join("chunks"))?;
+        let directory = Directory::open(&tickets.root().join(DIRECTORY))?;
         let mut numbers = Vec::new_in(BudgetAllocator::new(Arc::clone(&metadata)));
         for entry in fs::read_dir(directory.path())? {
             let entry = entry?;

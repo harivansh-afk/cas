@@ -28,6 +28,9 @@ pub use collection::{Collected, Collection, Sweep, Victim};
 pub use read::{Payload, Read, Reader};
 pub use recovery::Inspection;
 
+/// Chunk segments live under this directory of the store root.
+pub(crate) const DIRECTORY: &str = "chunks";
+
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
     pub store: [u8; 16],
@@ -130,7 +133,7 @@ impl Store {
         io_memory: Arc<Budget>,
     ) -> io::Result<Self> {
         config.validate()?;
-        let path = tickets.root().join("chunks");
+        let path = tickets.root().join(DIRECTORY);
         fs::create_dir(&path)?;
         File::open(tickets.root())?.sync_all()?;
         let directory = Directory::open(&path)?;
