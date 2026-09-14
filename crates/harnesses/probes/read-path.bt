@@ -10,10 +10,10 @@ kprobe:submit_bio_noacct
 {
     $bio = (struct bio *)arg0;
     if (str($bio->bi_bdev->bd_disk->disk_name) == "vda") {
-        if (@bio[(uint64)$bio].0 == 0) {
-            @bio[(uint64)$bio] = (nsecs(monotonic), comm,
-                (uint64)$bio->bi_iter.bi_sector * 512, (uint64)$bio->bi_iter.bi_size);
-        }
+        if (@bio[(uint64)$bio].0 != 0) { @bio_replaced = count(); }
+        @bio_started = count();
+        @bio[(uint64)$bio] = (nsecs(monotonic), comm,
+            (uint64)$bio->bi_iter.bi_sector * 512, (uint64)$bio->bi_iter.bi_size);
     }
 }
 
@@ -21,6 +21,7 @@ rawtracepoint:block_bio_complete
 {
     $key = (uint64)arg1;
     if (@bio[$key].0 != 0) {
+        @bio_completed = count();
         $b = @bio[$key];
         printf("B,%llu,%llu,%llu,%llu,%s\n", $b.0, nsecs(monotonic), $b.2, $b.3, $b.1);
         let $deleted = delete(@bio, $key);
@@ -44,6 +45,7 @@ kprobe:virtqueue_add_sgs
         if (str($rq->q->disk->disk_name) == "vda") {
             if ($vq->packed_ring) { @unsupported = count(); }
             else {
+                @min_free[$vq->vq.index] = min((uint64)$vq->vq.num_free);
                 if (@adding[tid].0 != 0) { @nested = count(); }
                 @adding[tid] = ((uint64)$rq, (uint64)$vq,
                     (uint64)$vq->split.avail_idx_shadow, (uint64)$vq->free_head,
@@ -88,10 +90,12 @@ rawtracepoint:block_rq_complete
 
 END {
     printf("END\n");
+    print(@bio_started); print(@bio_completed); print(@bio_replaced);
     print(@issued); print(@published); print(@completed); print(@add_refused);
-    print(@unsupported); print(@nested); print(@partial);
+    print(@unsupported); print(@nested); print(@partial); print(@min_free);
     print(@request); print(@issue); print(@adding); print(@bio);
+    clear(@bio_started); clear(@bio_completed); clear(@bio_replaced);
     clear(@issued); clear(@published); clear(@completed); clear(@add_refused);
-    clear(@unsupported); clear(@nested); clear(@partial);
+    clear(@unsupported); clear(@nested); clear(@partial); clear(@min_free);
     clear(@request); clear(@issue); clear(@adding); clear(@bio);
 }

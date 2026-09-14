@@ -7,6 +7,8 @@ use std::{io, sync::Arc, time::Instant};
 const QUEUES: usize = 4;
 const SLOTS: usize = 256;
 const RETAIN: usize = 32;
+const RECENT_RETAIN: usize = 16;
+const RECENT_NS: u64 = 2_000_000_000;
 pub(crate) const REASONS: usize = 11;
 
 /// Fixed log2 nanosecond buckets. Quantiles are intervals, not exact values.
@@ -146,6 +148,7 @@ pub(crate) struct Observer {
     pub disjoint_blocked_reads: u64,
     pub disjoint_blocked_ns: u64,
     pub slowest: [Option<ReadTrace>; RETAIN],
+    pub recent: [Option<ReadTrace>; RECENT_RETAIN],
 }
 
 impl Observer {
@@ -178,6 +181,7 @@ impl Observer {
                 disjoint_blocked_reads: 0,
                 disjoint_blocked_ns: 0,
                 slowest: [None; RETAIN],
+                recent: [None; RECENT_RETAIN],
             },
             BudgetAllocator::new(metadata.clone()),
         )
@@ -397,13 +401,23 @@ impl Observer {
             self.disjoint_blocked_reads += 1;
             self.disjoint_blocked_ns += trace.behind_write_ns;
         }
-        let slot = self
-            .slowest
-            .iter_mut()
-            .min_by_key(|slot| slot.map_or(0, |trace| trace.finished_ns))
-            .unwrap();
-        if slot.is_none_or(|old| trace.finished_ns > old.finished_ns) {
-            *slot = Some(trace);
+        let cutoff = trace
+            .observed_ns
+            .saturating_add(trace.finished_ns)
+            .saturating_sub(RECENT_NS);
+        for slot in &mut self.recent {
+            if slot.is_some_and(|old| old.observed_ns.saturating_add(old.finished_ns) < cutoff) {
+                *slot = None;
+            }
+        }
+        for retained in [&mut self.slowest[..], &mut self.recent[..]] {
+            let slot = retained
+                .iter_mut()
+                .min_by_key(|slot| slot.map_or(0, |trace| trace.finished_ns))
+                .unwrap();
+            if slot.is_none_or(|old| trace.finished_ns > old.finished_ns) {
+                *slot = Some(trace);
+            }
         }
     }
 }
@@ -412,6 +426,31 @@ impl Observer {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn recent_tail_expires_by_completion_time_without_losing_the_lifetime_tail() {
+        let mut observer = Observer::new(&crate::local::metadata_budget()).unwrap();
+        let now = Instant::now();
+        observer.observe(0, 0, Some(1), 256, now);
+        let mut slow = observer.consume(0, 0, Some((1, 0, 4096)), now).unwrap();
+        slow.observed_ns = 0;
+        slow.finished_ns = 8_000_000_000;
+        observer.complete(slow);
+        let mut fast = slow;
+        fast.id = 2;
+        fast.observed_ns = 9_000_000_000;
+        fast.finished_ns = 1_000;
+        observer.complete(fast);
+        assert!(observer.recent.iter().flatten().any(|t| t.id == 1));
+        fast.id = 3;
+        fast.observed_ns = 11_000_000_000;
+        observer.complete(fast);
+        assert!(!observer.recent.iter().flatten().any(|t| t.id == 1));
+        assert!(observer.slowest.iter().flatten().any(|t| t.id == 1));
+        assert!(observer.recent.iter().flatten().any(|t| t.id == 3));
+        assert_eq!(observer.completed_reads, 3);
+        assert_eq!(observer.phases[0].count, 3);
+    }
 
     #[test]
     fn histogram_covers_zero_boundaries_and_saturates_the_last_bucket() {
