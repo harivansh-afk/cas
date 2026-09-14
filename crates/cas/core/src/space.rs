@@ -175,10 +175,10 @@ fn update_pressure(limits: Limits, status: &mut Status) {
     // u128 keeps percentages exact at u64 capacities without multiplication overflow.
     let percent = used * 100;
     let capacity = u128::from(limits.capacity);
-    let reserve_intact = used <= u128::from(limits.capacity - limits.reserve);
     if used >= u128::from(limits.capacity - limits.reserve) {
         status.pressured = true;
-    } else if percent < capacity * 60 && reserve_intact {
+    } else if percent < capacity * 60 {
+        // The reserve is intact here: used is strictly below capacity - reserve.
         status.pressured = false;
     }
 }
