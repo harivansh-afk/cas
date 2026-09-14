@@ -1,4 +1,6 @@
 //! The mandatory scenarios are also the execution inventory; a skip cannot pass.
+use super::Checkpoint;
+
 pub const CHECKS: &[(&str, &[&str])] = &[
     ("rust-format", &["cargo", "fmt", "--all", "--", "--check"]),
     (
@@ -144,24 +146,24 @@ const CONCURRENT: &[Vm] = &[
     ),
 ];
 
-pub fn vms(checkpoint: &str) -> Vec<Vm> {
+pub fn vms(checkpoint: Checkpoint) -> Vec<Vm> {
     let mut cases = REFERENCES.to_vec();
-    if matches!(checkpoint, "C2" | "C3" | "C4" | "C5") {
+    if checkpoint >= Checkpoint::C2 {
         cases.extend_from_slice(PACKED);
     }
-    if matches!(checkpoint, "C3" | "C4" | "C5") {
+    if checkpoint >= Checkpoint::C3 {
         cases.extend_from_slice(CONCURRENT);
     }
     cases
 }
 
-pub fn required(checkpoint: &str) -> Vec<&'static str> {
+pub fn required(checkpoint: Checkpoint) -> Vec<&'static str> {
     let mut required: Vec<_> = CHECKS
         .iter()
         .map(|(id, _)| *id)
         .chain(vms(checkpoint).into_iter().map(|(id, _, _)| id))
         .collect();
-    if matches!(checkpoint, "C3" | "C4" | "C5") {
+    if checkpoint >= Checkpoint::C3 {
         required.push("persistence-model");
     }
     required.extend(fixtures(checkpoint).iter().map(|case| case.id));
@@ -237,13 +239,13 @@ impl Fixture {
     }
 }
 
-pub fn fixtures(checkpoint: &str) -> Vec<Fixture> {
-    let mut cases = if matches!(checkpoint, "C4" | "C5") {
+pub fn fixtures(checkpoint: Checkpoint) -> Vec<Fixture> {
+    let mut cases = if checkpoint >= Checkpoint::C4 {
         STORE.to_vec()
     } else {
         Vec::new()
     };
-    if checkpoint == "C5" {
+    if checkpoint == Checkpoint::C5 {
         cases.push(Fixture {
             id: "guest-pressure",
             wrapper: "pressure",
