@@ -1,7 +1,11 @@
 // Fixed-size, little-endian staging format
 
 use super::RECORD_SIZE;
-use crate::{BLOCK_SIZE, aligned::AlignedBuffer};
+use crate::{
+    BLOCK_SIZE,
+    aligned::AlignedBuffer,
+    encoding::{put64, u64_at},
+};
 
 const CHECKSUM_OFFSET: usize = BLOCK_SIZE - 4;
 const FILE_MAGIC: &[u8; 8] = b"CASLOG01";
@@ -30,14 +34,6 @@ pub(super) struct Record {
     pub(super) length: u64,
 }
 
-fn get_u64(bytes: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
-}
-
-fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
-    bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
-}
-
 fn checksum(bytes: &[u8]) -> u32 {
     let mut crc = crc32fast::Hasher::new();
     crc.update(&bytes[..CHECKSUM_OFFSET]);
@@ -60,15 +56,15 @@ pub(super) fn decode(bytes: &[u8]) -> Option<Record> {
         return None;
     }
     let record = Record {
-        kind: match get_u64(bytes, KIND_OFFSET) {
+        kind: match u64_at(bytes, KIND_OFFSET) {
             1 => RecordKind::Write,
             2 => RecordKind::Zero,
             3 => RecordKind::Fence,
             _ => return None,
         },
-        sequence: get_u64(bytes, SEQUENCE_OFFSET),
-        offset: get_u64(bytes, LOGICAL_OFFSET),
-        length: get_u64(bytes, LENGTH_OFFSET),
+        sequence: u64_at(bytes, SEQUENCE_OFFSET),
+        offset: u64_at(bytes, LOGICAL_OFFSET),
+        length: u64_at(bytes, LENGTH_OFFSET),
     };
     match record.kind {
         RecordKind::Write if record.length == BLOCK_SIZE as u64 => Some(record),
@@ -90,10 +86,10 @@ pub(super) fn encode(record: Record, payload: &[u8]) -> AlignedBuffer {
     let mut buffer = AlignedBuffer::new(RECORD_SIZE);
     let bytes = buffer.as_mut_slice();
     bytes[..8].copy_from_slice(RECORD_MAGIC);
-    put_u64(bytes, KIND_OFFSET, record.kind as u64);
-    put_u64(bytes, SEQUENCE_OFFSET, record.sequence);
-    put_u64(bytes, LOGICAL_OFFSET, record.offset);
-    put_u64(bytes, LENGTH_OFFSET, record.length);
+    put64(bytes, KIND_OFFSET, record.kind as u64);
+    put64(bytes, SEQUENCE_OFFSET, record.sequence);
+    put64(bytes, LOGICAL_OFFSET, record.offset);
+    put64(bytes, LENGTH_OFFSET, record.length);
     bytes[BLOCK_SIZE..BLOCK_SIZE + payload.len()].copy_from_slice(payload);
     seal(bytes);
     buffer
@@ -103,17 +99,17 @@ pub(super) fn encode_header(image_bytes: u64) -> AlignedBuffer {
     let mut header = AlignedBuffer::new(BLOCK_SIZE);
     let bytes = header.as_mut_slice();
     bytes[..8].copy_from_slice(FILE_MAGIC);
-    put_u64(bytes, IMAGE_BYTES_OFFSET, image_bytes);
-    put_u64(bytes, RECORD_SIZE_OFFSET, RECORD_SIZE as u64);
+    put64(bytes, IMAGE_BYTES_OFFSET, image_bytes);
+    put64(bytes, RECORD_SIZE_OFFSET, RECORD_SIZE as u64);
     seal(bytes);
     header
 }
 
 pub(super) fn decode_header(bytes: &[u8]) -> Option<u64> {
-    let image_bytes = get_u64(bytes, IMAGE_BYTES_OFFSET);
+    let image_bytes = u64_at(bytes, IMAGE_BYTES_OFFSET);
     (&bytes[..8] == FILE_MAGIC
         && checksum_valid(bytes)
-        && get_u64(bytes, RECORD_SIZE_OFFSET) == RECORD_SIZE as u64
+        && u64_at(bytes, RECORD_SIZE_OFFSET) == RECORD_SIZE as u64
         && image_bytes > 0
         && image_bytes.is_multiple_of(BLOCK_SIZE as u64))
     .then_some(image_bytes)
