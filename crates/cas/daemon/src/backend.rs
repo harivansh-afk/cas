@@ -527,7 +527,7 @@ impl Backend {
         let Admitted {
             queue,
             id,
-            request,
+            mut request,
             permit,
             inflight,
         } = admitted;
@@ -566,13 +566,18 @@ impl Backend {
         }
         // Install retirement before gathering or handing off ownership. A local
         // enqueue returns ownership through completion even if delivery fails.
+        // Only READ retains its guest segments for the completion payload.
+        let mut segments = Segments::new_in(cas_core::budget::BudgetAllocator::new(Arc::clone(
+            &self.metadata,
+        )));
+        if let Request::Read(data) = &mut request {
+            std::mem::swap(&mut segments, &mut data.segments);
+        }
         self.pending.insert(
             id,
             PendingRequest {
                 completion,
-                segments: Segments::new_in(cas_core::budget::BudgetAllocator::new(Arc::clone(
-                    &self.metadata,
-                ))),
+                segments,
                 error_published: false,
             },
         )?;
@@ -598,13 +603,10 @@ impl Backend {
                     owned = true;
                     return Ok(());
                 }
-                Request::Read(data) => {
-                    self.pending.get_mut(&id).unwrap().segments = data.segments;
-                    Operation::Read {
-                        offset: data.offset,
-                        buffer: AlignedBuffer::new(data.len),
-                    }
-                }
+                Request::Read(data) => Operation::Read {
+                    offset: data.offset,
+                    buffer: AlignedBuffer::new(data.len),
+                },
                 Request::Write(data) if self.storage.is_local() => {
                     self.storage.gather(
                         id,

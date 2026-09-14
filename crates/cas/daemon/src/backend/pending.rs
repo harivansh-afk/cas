@@ -25,6 +25,7 @@ impl<T> Pending<T> {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn get_mut(&mut self, id: &u64) -> Option<&mut T> {
         self.entries
             .iter_mut()
