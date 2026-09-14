@@ -1,4 +1,7 @@
-//! V2 adapters. The queue thread gathers into its final append allocation.
+//! Local append storage behind one image. `Local` admits requests on the queue
+//! thread and gathers writes straight into their final append allocation;
+//! `Shared` holds the budgets, health gate and metrics that admission and the
+//! `Worker` (synchronous) or reactor (concurrent) execution both consult.
 pub(crate) mod host;
 mod pools;
 pub(crate) mod pressure;
@@ -580,6 +583,9 @@ impl Local {
         let permit = match self.shared.admit(kind)? {
             pressure::Decision::Ready(permit) => permit,
             pressure::Decision::Waiting(reason) => {
+                // A shared-host refusal clears through the reactor (rotation,
+                // index fence, host reclaim). An unsealed batch holds admitted
+                // WAL slots it never sees, so hand the batch over before waiting.
                 if self.shared.window.is_some() {
                     self.seal()?;
                 }
