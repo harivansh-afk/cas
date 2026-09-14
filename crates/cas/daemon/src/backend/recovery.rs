@@ -8,7 +8,6 @@ use cas_core::append::{
 };
 use cas_core::budget::{BudgetAllocator, BudgetArc};
 use std::fs::File;
-use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
 use vhost::vhost_user::message::VhostUserInflight;
 
@@ -225,10 +224,7 @@ impl Backend {
                 .carrier
                 .as_ref()
                 .ok_or_else(|| io::Error::other("missing fresh carrier"))?;
-            let (_, original) = current.export()?;
-            let expected = original.metadata()?;
-            let actual = file.metadata()?;
-            if (expected.dev(), expected.ino()) != (actual.dev(), actual.ino()) {
+            if !current.same_file(&file)? {
                 return Err(io::Error::other("SET must return the current GET carrier"));
             }
             // QEMU sends SET after GET before queue setup, including on fresh boot.

@@ -296,6 +296,14 @@ impl Carrier {
         Ok((self.geometry.message(), self.mapping.file.try_clone()?))
     }
 
+    /// Whether a returned descriptor names this carrier's own mapping file.
+    pub fn same_file(&self, file: &File) -> io::Result<bool> {
+        use std::os::unix::fs::MetadataExt;
+        let expected = self.mapping.file.metadata()?;
+        let actual = file.metadata()?;
+        Ok((expected.dev(), expected.ino()) == (actual.dev(), actual.ino()))
+    }
+
     pub fn identity(&self) -> Identity {
         self.identity
     }
