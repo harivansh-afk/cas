@@ -1,4 +1,6 @@
 //! Bounded queue heads, FIFO among eligible heads, and per-image byte DRR.
+//! A refused head rejoins behind the other heads of its image, so retrying it
+//! cannot displace a later eligible read on the same image.
 use super::*;
 
 const QUANTUM: usize = MAX_REQUEST_BYTES;
@@ -279,13 +281,16 @@ impl Drop for Turn<'_> {
             let retry = state.released_during_turn;
             let image = &mut state.images[ticket.port.image];
             image.deferred += 1;
-            // A release after reservation failed must survive this refusal.
-            image
+            let index = image
                 .queue
-                .iter_mut()
-                .find(|request| request.id == ticket.id)
-                .expect("granted queue head")
-                .ready = retry;
+                .iter()
+                .position(|request| request.id == ticket.id)
+                .expect("granted queue head");
+            // A release after reservation failed must survive this refusal.
+            image.queue[index].ready = retry;
+            // The next turn marks this head ready again before choosing. Behind
+            // its siblings, that retry cannot repeatedly outrank an eligible read.
+            image.queue[index..].rotate_left(1);
             state.advance();
         }
         drop(state);

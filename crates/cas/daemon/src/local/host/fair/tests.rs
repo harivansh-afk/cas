@@ -120,3 +120,64 @@ fn another_queue_can_read_while_the_older_write_lacks_capacity() {
     drop((write, read, port, other));
     assert_eq!(metadata.usage().current, Amount::default());
 }
+
+#[test]
+fn two_blocked_writers_do_not_preempt_each_others_eligible_reads() {
+    let (metadata, ports) = setup();
+    let waiting: Vec<_> = ports
+        .iter()
+        .map(|port| {
+            (
+                port.ticket(Kind::Write(QUANTUM)).unwrap().unwrap(),
+                port.ticket(Kind::Read(BLOCK_SIZE)).unwrap().unwrap(),
+            )
+        })
+        .collect();
+    // Match the frontend: try the ordinary write head, then its independent
+    // read candidate. Writes keep refusing capacity; reads have capacity.
+    let mut releases = Vec::new();
+    'visits: for _ in 0..4 {
+        for (write, read) in &waiting {
+            drop(write.turn().unwrap());
+            if let Some(turn) = read.turn().unwrap() {
+                releases.push(turn.commit());
+                if releases.len() == waiting.len() {
+                    break 'visits;
+                }
+            }
+        }
+    }
+    assert_eq!(releases.len(), waiting.len(), "each image's eligible read");
+    for port in &ports {
+        assert_eq!(port.owner.report()["images"][port.image]["admitted"], 1);
+    }
+    drop(releases);
+    // Released capacity readmits the refused writes in image order.
+    for (write, _) in &waiting {
+        write.turn().unwrap().unwrap().commit();
+    }
+    drop((waiting, ports));
+    assert_eq!(metadata.usage().current, Amount::default());
+}
+
+#[test]
+fn a_refused_write_regains_fifo_order_ahead_of_reads_that_arrive_after_release() {
+    let (metadata, [port, other]) = setup();
+    let write = port.ticket(Kind::Write(QUANTUM)).unwrap().unwrap();
+    let first = port.ticket(Kind::Read(BLOCK_SIZE)).unwrap().unwrap();
+    drop(write.turn().unwrap().unwrap()); // Refused; rejoins behind `first`.
+    let release = first.turn().unwrap().unwrap().commit();
+    let passing = port.ticket(Kind::Read(BLOCK_SIZE)).unwrap().unwrap();
+    drop(passing.turn().unwrap().unwrap().commit()); // Blocked writes never hold reads.
+    drop(release); // The write is ready again and first in its image.
+    let later = port.ticket(Kind::Read(BLOCK_SIZE)).unwrap().unwrap();
+    assert!(later.turn().unwrap().is_none());
+    write.turn().unwrap().unwrap().commit();
+    later.turn().unwrap().unwrap().commit();
+    assert_eq!(
+        port.owner.report()["images"][0]["admitted_bytes"],
+        QUANTUM + 3 * BLOCK_SIZE
+    );
+    drop((write, first, passing, later, port, other));
+    assert_eq!(metadata.usage().current, Amount::default());
+}
