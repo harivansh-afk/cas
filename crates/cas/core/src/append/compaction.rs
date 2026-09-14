@@ -41,7 +41,7 @@ pub(super) struct Span {
 impl Drop for Span {
     fn drop(&mut self) {
         if self.protect {
-            self.segment.pins.release(0);
+            self.segment.pins.release_scan();
         }
     }
 }
@@ -60,7 +60,7 @@ pub(super) fn spans(
     })?;
     for segment in &log.segments {
         if protect {
-            segment.pins.acquire(0);
+            segment.pins.hold_scan();
         }
         spans.push(Span {
             segment: Arc::clone(segment),

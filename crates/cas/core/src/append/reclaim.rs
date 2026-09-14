@@ -178,7 +178,7 @@ impl Reclamation {
                 if !envelope.fence {
                     sequence = envelope.last;
                     if envelope.payload_bytes != 0 {
-                        if segment.pins.at(0) == 0
+                        if !segment.pins.scan_held()
                             && segment.pins.at((offset / BLOCK_SIZE as u64) as u32) == 0
                         {
                             direct::punch(

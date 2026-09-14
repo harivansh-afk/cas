@@ -53,4 +53,16 @@ impl Pins {
         assert!(self.batches[block as usize].fetch_sub(1, Ordering::Release) != 0);
         assert!(self.readers.fetch_sub(1, Ordering::Release) != 0);
     }
+
+    /// A background scan holds the whole segment through the header block,
+    /// which no batch payload ever occupies.
+    pub fn hold_scan(&self) {
+        self.acquire(0);
+    }
+    pub fn release_scan(&self) {
+        self.release(0);
+    }
+    pub fn scan_held(&self) -> bool {
+        self.at(0) != 0
+    }
 }
