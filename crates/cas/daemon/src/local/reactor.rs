@@ -237,15 +237,7 @@ impl Reactor {
             metrics.allocation_identity_checks += 1;
             metrics.allocations_released += 1;
         }
-        for write in writes {
-            let result = result
-                .as_ref()
-                .copied()
-                .map_err(|error| io::Error::other(error.to_string()));
-            self.worker
-                .send(write.id, write.data.completion(), result, write.permit)?;
-        }
-        Ok(())
+        self.worker.complete_writes(writes, result)
     }
 
     fn reject(&mut self, work: Work) -> io::Result<()> {

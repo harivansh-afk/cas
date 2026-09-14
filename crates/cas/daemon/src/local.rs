@@ -945,6 +945,22 @@ impl Worker {
         notify(&self.wake.0)
     }
 
+    /// Every member of an append batch completes with the batch's one result.
+    fn complete_writes(
+        &self,
+        writes: BudgetVec<Write, BudgetAllocator>,
+        result: io::Result<()>,
+    ) -> io::Result<()> {
+        for write in writes {
+            let result = result
+                .as_ref()
+                .copied()
+                .map_err(|error| io::Error::other(error.to_string()));
+            self.send(write.id, write.data.completion(), result, write.permit)?;
+        }
+        Ok(())
+    }
+
     fn run(mut self, input: mailbox::Receiver<Command>) {
         while let Ok(command) = input.recv() {
             if self.execute(command).is_err() {
@@ -1026,13 +1042,7 @@ impl Worker {
                     .lock()
                     .expect("metrics poisoned")
                     .allocations_released += 1;
-                for write in writes {
-                    let result = result
-                        .as_ref()
-                        .copied()
-                        .map_err(|error| io::Error::other(error.to_string()));
-                    self.send(write.id, write.data.completion(), result, write.permit)?;
-                }
+                self.complete_writes(writes, result)?;
             }
             Command::Io(Io {
                 id,
