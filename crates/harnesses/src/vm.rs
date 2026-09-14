@@ -404,18 +404,19 @@ fn verify_io(
 }
 
 fn execute(args: &mut Args, summary: &mut Summary) -> io::Result<()> {
+    // summary.json retains the complete build record, not only the decoded fields.
     let value: Value = read_json(&args.build_info)?;
+    let build: VmBuild = serde_json::from_value(value.clone())?;
     if let Some(expected) = &args.expect_source
-        && (value["source_path"].as_str() != expected.to_str()
-            || value["harness"].as_str().map(Path::new) != Some(std::env::current_exe()?.as_path()))
+        && (build.source_path.as_deref() != Some(expected.as_path())
+            || build.harness.as_deref() != Some(std::env::current_exe()?.as_path()))
     {
         return Err(io::Error::other(
             "VM wrapper does not match the expected build",
         ));
     }
     File::options().read(true).write(true).open("/dev/kvm")?;
-    summary.build = Some(value.clone());
-    let build: VmBuild = serde_json::from_value(value)?;
+    summary.build = Some(value);
     if build.interactive != args.ssh_key.is_some() {
         return Err(io::Error::other(
             "dev-vm requires --ssh-key; smoke runners do not support SSH",
@@ -615,6 +616,8 @@ mod tests {
             interactive: false,
             backend: Backend::Raw,
             daemon: None,
+            source_path: None,
+            harness: None,
         };
         let mut evidence = PhaseEvidence::default();
         let result = execute_guest(

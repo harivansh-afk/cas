@@ -1,7 +1,7 @@
 //! Decode the fields needed to decide a run, retaining original JSON artifacts.
 use std::fs::File;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use cas_core::BLOCK_SIZE;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -131,7 +131,11 @@ pub struct VmBuild {
     #[serde(default)]
     pub interactive: bool,
     pub backend: Backend,
-    pub daemon: Option<std::path::PathBuf>,
+    pub daemon: Option<PathBuf>,
+    /// Nix source the wrapper was built from; checkpoint suites require an exact match.
+    pub source_path: Option<PathBuf>,
+    /// The packaged cas-harness the wrapper expects to be running.
+    pub harness: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
