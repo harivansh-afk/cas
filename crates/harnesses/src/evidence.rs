@@ -268,24 +268,52 @@ struct LocalMetrics {
 impl LocalReport {
     fn verify(&self, daemon: &DaemonReport) -> io::Result<()> {
         let metrics = &self.metrics;
-        if self.status.image_bytes != DISK_BYTES
-            || self.status.failed
-            || self.status.published == 0
-            || self.status.published != self.status.durable
-            || metrics.gathered_bytes != daemon.write_bytes
-            || daemon.guest_payload_copy_bytes != daemon.write_bytes
-            || metrics.gather_calls != daemon.writes
-            || metrics.allocation_identity_checks != metrics.batches_submitted
-            || metrics.allocations_released != metrics.batches_submitted
-            || self.append.admitted != metrics.batches_submitted
-            || (daemon.write_bytes != 0 && (daemon.writes == 0 || metrics.batches_submitted == 0))
-            || metrics.encoded_bytes
-                != daemon.write_bytes + metrics.batches_submitted * BLOCK_SIZE as u64
-        {
-            return Err(io::Error::other(
-                "local prefix, copy accounting or allocation identity failed",
-            ));
-        }
+        require(
+            self.status.image_bytes == DISK_BYTES,
+            "local image size differs from the scratch disk",
+        )?;
+        require(!self.status.failed, "local storage reported a failure")?;
+        require(
+            self.status.published != 0,
+            "local storage published nothing",
+        )?;
+        require(
+            self.status.published == self.status.durable,
+            "local published prefix is not durable",
+        )?;
+        require(
+            metrics.gathered_bytes == daemon.write_bytes,
+            "gathered bytes differ from guest write bytes",
+        )?;
+        require(
+            daemon.guest_payload_copy_bytes == daemon.write_bytes,
+            "guest payload was not copied exactly once",
+        )?;
+        require(
+            metrics.gather_calls == daemon.writes,
+            "gather calls differ from guest write count",
+        )?;
+        require(
+            metrics.allocation_identity_checks == metrics.batches_submitted,
+            "allocation identity was not checked for every batch",
+        )?;
+        require(
+            metrics.allocations_released == metrics.batches_submitted,
+            "allocations were not released for every batch",
+        )?;
+        require(
+            self.append.admitted == metrics.batches_submitted,
+            "append admissions differ from submitted batches",
+        )?;
+        require(
+            daemon.write_bytes == 0 || (daemon.writes != 0 && metrics.batches_submitted != 0),
+            "guest wrote bytes without writes or batches",
+        )?;
+        require(
+            metrics.encoded_bytes
+                == daemon.write_bytes + metrics.batches_submitted * BLOCK_SIZE as u64,
+            "encoded bytes differ from payload plus one block per batch",
+        )?;
         self.verify_resources(
             daemon.write_bytes,
             daemon.backend == Backend::LocalAsync.storage(),
@@ -294,30 +322,73 @@ impl LocalReport {
 
     fn verify_live(&self, daemon: &DaemonReport, inflight: &InflightReport) -> io::Result<()> {
         let metrics = &self.metrics;
-        if self.status.image_bytes != DISK_BYTES
-            || self.status.failed
-            || self.status.published != LIVE_BYTES / BLOCK_SIZE as u64
-            || self.status.durable != self.status.published
-            || !inflight.active
-            || inflight.saved_p > inflight.recovered_p
-            || inflight.recovered_p > self.status.published
-            || (daemon.write_bytes == 0 && inflight.recovered_p != self.status.published)
-            || inflight.replayed_requests != u64::from(daemon.restored_pending)
-            || inflight.replayed_mutations > inflight.replayed_requests
-            || inflight.replay_copy_bytes != inflight.replayed_mutations * BLOCK_SIZE as u64
-            || daemon.guest_payload_copy_bytes + inflight.replayed_write_bytes != daemon.write_bytes
-            || metrics.gathered_bytes != daemon.guest_payload_copy_bytes
-            || metrics.gather_calls * BLOCK_SIZE as u64 != metrics.gathered_bytes
-            || metrics.allocation_identity_checks != metrics.batches_submitted
-            || metrics.allocations_released != metrics.batches_submitted
-            || self.append.admitted != metrics.batches_submitted + inflight.replayed_mutations
-            || metrics.encoded_bytes
-                != metrics.gathered_bytes + metrics.batches_submitted * BLOCK_SIZE as u64
-        {
-            return Err(io::Error::other(
-                "concurrent replay prefixes, identities or copy accounting failed",
-            ));
-        }
+        require(
+            self.status.image_bytes == DISK_BYTES,
+            "local image size differs from the scratch disk",
+        )?;
+        require(!self.status.failed, "local storage reported a failure")?;
+        require(
+            self.status.published == LIVE_BYTES / BLOCK_SIZE as u64,
+            "published prefix differs from the live workload",
+        )?;
+        require(
+            self.status.durable == self.status.published,
+            "live published prefix is not durable",
+        )?;
+        require(inflight.active, "retained inflight replay was not active")?;
+        require(
+            inflight.saved_p <= inflight.recovered_p,
+            "recovered prefix regressed below the saved prefix",
+        )?;
+        require(
+            inflight.recovered_p <= self.status.published,
+            "recovered prefix exceeds the published prefix",
+        )?;
+        require(
+            daemon.write_bytes != 0 || inflight.recovered_p == self.status.published,
+            "guest reissued no writes yet recovery did not reach the published prefix",
+        )?;
+        require(
+            inflight.replayed_requests == u64::from(daemon.restored_pending),
+            "replayed requests differ from restored pending descriptors",
+        )?;
+        require(
+            inflight.replayed_mutations <= inflight.replayed_requests,
+            "replayed mutations exceed replayed requests",
+        )?;
+        require(
+            inflight.replay_copy_bytes == inflight.replayed_mutations * BLOCK_SIZE as u64,
+            "replay copied more or less than one block per mutation",
+        )?;
+        require(
+            daemon.guest_payload_copy_bytes + inflight.replayed_write_bytes == daemon.write_bytes,
+            "guest copies plus replayed writes differ from write bytes",
+        )?;
+        require(
+            metrics.gathered_bytes == daemon.guest_payload_copy_bytes,
+            "gathered bytes differ from guest payload copies",
+        )?;
+        require(
+            metrics.gather_calls * BLOCK_SIZE as u64 == metrics.gathered_bytes,
+            "gather calls do not account for one block each",
+        )?;
+        require(
+            metrics.allocation_identity_checks == metrics.batches_submitted,
+            "allocation identity was not checked for every batch",
+        )?;
+        require(
+            metrics.allocations_released == metrics.batches_submitted,
+            "allocations were not released for every batch",
+        )?;
+        require(
+            self.append.admitted == metrics.batches_submitted + inflight.replayed_mutations,
+            "append admissions differ from batches plus replayed mutations",
+        )?;
+        require(
+            metrics.encoded_bytes
+                == metrics.gathered_bytes + metrics.batches_submitted * BLOCK_SIZE as u64,
+            "encoded bytes differ from gathered payload plus one block per batch",
+        )?;
         self.verify_resources(daemon.guest_payload_copy_bytes, true)
     }
 
@@ -365,26 +436,25 @@ impl LocalReport {
 impl DaemonReport {
     pub fn verify_live(&self, backend: Backend, crash_at: &str) -> io::Result<()> {
         if backend == Backend::LocalAsync {
-            if self.schema_version != 1
-                || self.backend != backend.storage()
-                || !self.connection_ok
-                || !self.flush_negotiated
-                || !self.restartable
-                || self.errors != 0
-                || !self.drain.complete()
-                || self.queues != 4
-                || self.queue_requests.len() != 4
-                || self.queue_requests.contains(&0)
-                || self.restored_used.is_none()
-                // 128 write, eight read and eight control request owners.
-                || self.restored_pending > 144
-                || self.read_bytes < LIVE_BYTES
-                || self.flushes == 0
-            {
-                return Err(io::Error::other(
-                    "concurrent live recovery did not finish cleanly",
-                ));
-            }
+            self.verify_restarted(backend.storage(), 4)?;
+            require(
+                self.queue_requests.len() == 4,
+                "concurrent daemon did not report four queues",
+            )?;
+            require(
+                !self.queue_requests.contains(&0),
+                "a configured queue executed no requests",
+            )?;
+            require(
+                self.restored_used.is_some(),
+                "restart did not restore a used index",
+            )?;
+            // 128 write, eight read and eight control request owners.
+            require(
+                self.restored_pending <= 144,
+                "restored pending descriptors exceed the request owners",
+            )?;
+            require(self.flushes != 0, "live guest issued no FLUSH")?;
             let local = self
                 .local
                 .as_ref()
@@ -398,42 +468,79 @@ impl DaemonReport {
 
         let expected = LIVE_BYTES / BLOCK_SIZE as u64
             + u64::from(matches!(crash_at, "after-storage" | "after-status"));
-        if self.schema_version != 1
-            || self.backend != "staging_sync"
-            || !self.connection_ok
-            || !self.flush_negotiated
-            || !self.restartable
-            || self.errors != 0
-            || !self.drain.complete()
-            || self.queues != 1
-            || self.peak_inflight != 1
-            || self.restored_used.is_none_or(|used| used == 0)
-            || self.restored_pending == 0
-            || self.restored_pending > 128
-            || self.read_bytes < LIVE_BYTES
-            || self.write_bytes == 0
-            || self.flushes == 0
-            || self.staging.as_ref().is_none_or(|s| {
-                s.image_bytes != DISK_BYTES || s.appended != expected || s.durable != expected
-            })
-        {
-            return Err(io::Error::other(
-                "live recovery did not report serial replay and durable IO",
-            ));
-        }
+        self.verify_restarted("staging_sync", 1)?;
+        require(
+            self.peak_inflight == 1,
+            "serial reference exceeded one request in flight",
+        )?;
+        require(
+            self.restored_used.is_some_and(|used| used != 0),
+            "restart did not restore a used index",
+        )?;
+        require(
+            self.restored_pending != 0,
+            "restart restored no pending descriptors",
+        )?;
+        require(
+            self.restored_pending <= 128,
+            "restored pending descriptors exceed the queue",
+        )?;
+        require(self.write_bytes != 0, "live guest wrote nothing")?;
+        require(self.flushes != 0, "live guest issued no FLUSH")?;
+        let staging = self
+            .staging
+            .as_ref()
+            .ok_or_else(|| io::Error::other("missing staging report"))?;
+        require(
+            staging.image_bytes == DISK_BYTES,
+            "staging image size differs from the scratch disk",
+        )?;
+        require(
+            staging.appended == expected,
+            "staging appended prefix differs from the crash point",
+        )?;
+        require(
+            staging.durable == expected,
+            "staging durable prefix differs from the crash point",
+        )?;
         Ok(())
     }
+
+    /// Fields every report must carry for a healthy, completely drained run.
+    fn verify_healthy(&self, storage: &str, queues: u64) -> io::Result<()> {
+        require(self.schema_version == 1, "daemon report schema differs")?;
+        require(
+            self.backend == storage,
+            "daemon storage differs from the build backend",
+        )?;
+        require(self.connection_ok, "daemon connection did not complete")?;
+        require(self.flush_negotiated, "daemon did not negotiate FLUSH")?;
+        require(self.errors == 0, "daemon reported request errors")?;
+        require(
+            self.drain.complete(),
+            "daemon disconnected with pending requests",
+        )?;
+        require(
+            self.queues == queues,
+            "daemon queue count differs from the backend",
+        )
+    }
+
+    /// A healthy run that was also restarted and read the live workload back.
+    fn verify_restarted(&self, storage: &str, queues: u64) -> io::Result<()> {
+        self.verify_healthy(storage, queues)?;
+        require(self.restartable, "daemon was not restartable")?;
+        require(
+            self.read_bytes >= LIVE_BYTES,
+            "guest read less than the live workload",
+        )
+    }
+
     fn verify_clean(&self, backend: Backend, read_only: bool) -> io::Result<()> {
-        if self.schema_version != 1
-            || self.backend != backend.storage()
-            || !self.connection_ok
-            || !self.flush_negotiated
-            || self.errors != 0
-            || !self.drain.complete()
-            || self.queues != if backend == Backend::LocalAsync { 4 } else { 1 }
-        {
-            return Err(io::Error::other("daemon did not report a clean run"));
-        }
+        self.verify_healthy(
+            backend.storage(),
+            if backend == Backend::LocalAsync { 4 } else { 1 },
+        )?;
         if backend == Backend::LocalAsync
             && !read_only
             && (self.queue_requests.len() != 4 || self.queue_requests.contains(&0))
@@ -451,22 +558,31 @@ impl DaemonReport {
             .local
             .as_ref()
             .ok_or_else(|| io::Error::other("missing local report"))?;
-        if !self.restartable
-            || self
-                .inflight
+        require(self.restartable, "daemon was not restartable")?;
+        require(
+            self.inflight
                 .as_ref()
-                .is_none_or(|inflight| !inflight.active)
-            || self.write_bytes != 3 * LIVE_BYTES
-            || self.read_bytes < 5 * LIVE_BYTES
-            || self.writes != 3 * LIVE_BYTES / BLOCK_SIZE as u64
-            || self.flushes < 3
-            || local.status.epoch != 3
-            || local.status.published != 3 * LIVE_BYTES / BLOCK_SIZE as u64
-        {
-            return Err(io::Error::other(
-                "reset did not preserve epochs, prefixes and exact IO",
-            ));
-        }
+                .is_some_and(|inflight| inflight.active),
+            "retained inflight replay was not active",
+        )?;
+        require(
+            self.write_bytes == 3 * LIVE_BYTES,
+            "three epochs did not write exactly three live workloads",
+        )?;
+        require(
+            self.read_bytes >= 5 * LIVE_BYTES,
+            "resets read back less than five live workloads",
+        )?;
+        require(
+            self.writes == 3 * LIVE_BYTES / BLOCK_SIZE as u64,
+            "write count differs from three live workloads",
+        )?;
+        require(self.flushes >= 3, "each epoch did not FLUSH")?;
+        require(local.status.epoch == 3, "two resets did not reach epoch 3")?;
+        require(
+            local.status.published == 3 * LIVE_BYTES / BLOCK_SIZE as u64,
+            "published prefix differs from three live workloads",
+        )?;
         local.verify(self)
     }
 
