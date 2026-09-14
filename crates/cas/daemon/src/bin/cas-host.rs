@@ -36,7 +36,7 @@ struct Serve {
     /// Sample every 500 ms; fail the run if telemetry exceeds 64 MiB or 4,096 samples.
     #[arg(long)]
     telemetry: bool,
-    /// Keep the current and previous telemetry files instead of ending a long session.
+    /// Operational sampling: rotate two files and report output failure without stopping storage.
     #[arg(long, requires = "telemetry")]
     telemetry_rotate: bool,
     /// One-shot process pause for development crash controls.

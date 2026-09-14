@@ -18,7 +18,7 @@ pub struct ReclaimedPages {
 
 pub(super) struct Prepared<'a> {
     roots: Roots<'a>,
-    bitmap: AlignedBuffer<BudgetAllocator>,
+    live: allocator_api2::vec::Vec<u64, BudgetAllocator>,
     scratch: AlignedBuffer<BudgetAllocator>,
 }
 
@@ -30,8 +30,12 @@ impl<'a> Prepared<'a> {
                 BudgetAllocator::new(Arc::clone(&roots.metadata)),
             )
         };
+        let mut live =
+            allocator_api2::vec::Vec::new_in(BudgetAllocator::new(Arc::clone(&roots.metadata)));
+        live.try_reserve_exact(BLOCK_SIZE / size_of::<u64>())
+            .map_err(|_| io::ErrorKind::OutOfMemory)?;
         Ok(Self {
-            bitmap: allocate()?,
+            live,
             scratch: allocate()?,
             roots,
         })
@@ -40,7 +44,7 @@ impl<'a> Prepared<'a> {
     pub(super) fn run(self) -> io::Result<ReclaimedPages> {
         let Self {
             roots,
-            mut bitmap,
+            mut live,
             mut scratch,
         } = self;
         let end = roots
@@ -80,56 +84,45 @@ impl<'a> Prepared<'a> {
             removed_tail_mapping_bytes: tail_bytes,
             ..ReclaimedPages::default()
         };
-        let pages = end / BLOCK_SIZE as u64;
-        for first in (0..pages).step_by(WINDOW_PAGES as usize) {
-            let last = (first + WINDOW_PAGES).min(pages);
-            bitmap.as_mut_slice().fill(0);
-            let mut marked = Marked {
-                bytes: bitmap.as_mut_slice(),
-                first,
-                last,
-            };
-            marked.page(0);
-            for key in &roots.keys {
-                marked.page(key.end - BLOCK_SIZE as u64);
-                let mut tree = Tree::with_scratch(roots.file, key.commit, key.end, scratch)?;
-                tree.walk_pages(
-                    |offset| {
-                        marked.page(offset);
-                        Ok(())
-                    },
-                    |_| Ok(()),
-                )?;
-                result.tree_page_reads = result
-                    .tree_page_reads
-                    .checked_add(tree.page_reads())
-                    .ok_or_else(|| {
-                        io::Error::other("manifest reclamation page counter exhausted")
-                    })?;
-                scratch = tree.into_scratch();
-            }
-            result.retained_pages += marked
-                .bytes
-                .iter()
-                .map(|byte| u64::from(byte.count_ones()))
-                .sum::<u64>();
-            let mut page = first;
-            while page < last {
-                if marked.contains(page) {
-                    page += 1;
-                    continue;
-                }
-                let start = page;
-                while page < last && !marked.contains(page) {
-                    page += 1;
-                }
-                let length = (page - start) * BLOCK_SIZE as u64;
-                direct::punch(roots.file, start * BLOCK_SIZE as u64, length)?;
-                result.punch_calls += 1;
-                result.punched_logical_bytes += length;
-            }
-            result.windows += 1;
+        // Memory tracks retained pages, not historical file length. Every
+        // tree is validated once before the first destructive operation. Growth
+        // stays charged to metadata and refusal cannot justify a hole punch.
+        let mut mark = |offset| -> io::Result<()> {
+            live.try_reserve(1)
+                .map_err(|_| io::ErrorKind::OutOfMemory)?;
+            live.push(offset);
+            Ok(())
+        };
+        mark(0)?;
+        for key in &roots.keys {
+            mark(key.end - BLOCK_SIZE as u64)?;
+            let mut tree = Tree::with_scratch(roots.file, key.commit, key.end, scratch)?;
+            tree.walk_pages(&mut mark, |_| Ok(()))?;
+            result.tree_page_reads = result
+                .tree_page_reads
+                .checked_add(tree.page_reads())
+                .ok_or_else(|| io::Error::other("manifest reclamation page counter exhausted"))?;
+            scratch = tree.into_scratch();
         }
+        live.sort_unstable();
+        live.dedup();
+        result.retained_pages = live.len() as u64;
+        // Preserve the historical logical-window counter for report readers;
+        // windows no longer trigger repeated tree traversals.
+        result.windows = (end / BLOCK_SIZE as u64).div_ceil(WINDOW_PAGES);
+        let mut first = 0;
+        for &offset in &live {
+            while first < offset {
+                // Keep the existing maximum punch size even across huge holes.
+                let next = offset.min(first + WINDOW_PAGES * BLOCK_SIZE as u64);
+                direct::punch(roots.file, first, next - first)?;
+                result.punch_calls += 1;
+                result.punched_logical_bytes += next - first;
+                first = next;
+            }
+            first = offset + BLOCK_SIZE as u64;
+        }
+        require(first == end, "reclamation omitted the current COMMIT")?;
         if tail_bytes != 0 {
             // Unlike a hole punch beyond EOF, same-size truncate removes
             // preallocation on the supported filesystems. Verify it below.
@@ -141,26 +134,5 @@ impl<'a> Prepared<'a> {
             "manifest still has allocated extents beyond EOF",
         )?;
         Ok(result)
-    }
-}
-
-struct Marked<'a> {
-    bytes: &'a mut [u8],
-    first: u64,
-    last: u64,
-}
-
-impl Marked<'_> {
-    fn page(&mut self, offset: u64) {
-        let page = offset / BLOCK_SIZE as u64;
-        if (self.first..self.last).contains(&page) {
-            let bit = (page - self.first) as usize;
-            self.bytes[bit / 8] |= 1 << (bit % 8);
-        }
-    }
-
-    fn contains(&self, page: u64) -> bool {
-        let bit = (page - self.first) as usize;
-        self.bytes[bit / 8] & (1 << (bit % 8)) != 0
     }
 }

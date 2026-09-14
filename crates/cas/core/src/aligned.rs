@@ -70,3 +70,59 @@ impl<A: Allocator> AlignedBuffer<A> {
         }
     }
 }
+
+/// Bounded preparation scratch. Grows before IO and exposes initialized pages only.
+/// Submitted IO continues to own fixed buffers; this type never resizes in flight.
+pub(crate) struct AlignedPages<A: Allocator> {
+    blocks: allocator_api2::vec::Vec<Block, A>,
+    limit: usize,
+}
+
+impl<A: Allocator> AlignedPages<A> {
+    pub fn new(allocator: A, limit: usize) -> Self {
+        Self {
+            blocks: allocator_api2::vec::Vec::new_in(allocator),
+            limit,
+        }
+    }
+
+    pub fn push_zeroed(&mut self) -> io::Result<&mut [u8]> {
+        if self.blocks.len() == self.limit {
+            return Err(io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                "page plan exhausted",
+            ));
+        }
+        if self.blocks.len() == self.blocks.capacity() {
+            let capacity = self
+                .blocks
+                .capacity()
+                .max(1)
+                .saturating_mul(2)
+                .min(self.limit);
+            let _allocation = crate::io_metrics::measure((capacity * BLOCK_SIZE) as u64, |c| {
+                &mut c.buffer_allocate
+            });
+            self.blocks
+                .try_reserve_exact(capacity - self.blocks.len())
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::OutOfMemory, "page allocation denied")
+                })?;
+        }
+        let _zeroing = crate::io_metrics::measure(BLOCK_SIZE as u64, |c| &mut c.buffer_zero);
+        self.blocks.push(Block([0; BLOCK_SIZE]));
+        Ok(&mut self.blocks.last_mut().unwrap().0)
+    }
+
+    pub fn allocated_bytes(&self) -> usize {
+        self.blocks.capacity() * BLOCK_SIZE
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        // SAFETY: contiguous, initialized Block values have no padding; the
+        // borrow prevents growth or mutation while the returned slice is live.
+        unsafe {
+            std::slice::from_raw_parts(self.blocks.as_ptr().cast(), self.blocks.len() * BLOCK_SIZE)
+        }
+    }
+}

@@ -137,7 +137,7 @@ fn capacity_wait_survives_the_old_deadline_and_control_keeps_its_reserve() {
         backend.prepare_admission(1, 0, &flush, 136).unwrap(),
         Admission::Accepted(_)
     ));
-    backend.waiting[0].as_mut().unwrap().started = Instant::now() - Duration::from_secs(6);
+    backend.admission.heads[0].as_mut().unwrap().started = Instant::now() - Duration::from_secs(6);
     assert!(matches!(
         backend
             .prepare_admission(0, 0, &write_request(), 136)
@@ -155,7 +155,7 @@ fn capacity_wait_survives_the_old_deadline_and_control_keeps_its_reserve() {
         backend.report(0, true)["local"]["requests"]["admitted"],
         129
     );
-    backend.clear_changed_waits(StateChange::QueueStop(0));
+    backend.admission.changed(StateChange::QueueStop(0));
     assert!(matches!(
         backend
             .prepare_admission(0, 0, &write_request(), 136)
@@ -208,7 +208,7 @@ fn long_capacity_wait_keeps_the_descriptor_and_resumes_without_an_error_or_id_ga
     assert_eq!(vring.queue_next_avail(), 0);
     assert_eq!(mem.read_obj::<u8>(GuestAddress(0x6000)).unwrap(), 0xff);
     // Advance the recorded wait age deterministically; no sleep or guest timer.
-    backend.waiting[0].as_mut().unwrap().started = Instant::now() - Duration::from_secs(6);
+    backend.admission.heads[0].as_mut().unwrap().started = Instant::now() - Duration::from_secs(6);
     backend
         .handle_event(
             backend.completion_token(),
@@ -370,7 +370,7 @@ fn shared_frontends_defer_full_images_keep_control_live_and_wake_on_credit_relea
         else {
             panic!("first image request capacity");
         };
-        first.waiting[0] = None;
+        first.admission.heads[0] = None;
         held.push(permit);
     }
     assert!(matches!(
@@ -385,7 +385,7 @@ fn shared_frontends_defer_full_images_keep_control_live_and_wake_on_credit_relea
     else {
         panic!("full first image blocked second image");
     };
-    second.waiting[0] = None;
+    second.admission.heads[0] = None;
     let flush = Request::Flush(Completion {
         head: 4,
         status: GuestAddress(0x7000),
@@ -393,7 +393,7 @@ fn shared_frontends_defer_full_images_keep_control_live_and_wake_on_credit_relea
     let Admission::Accepted(control) = first.prepare_admission(1, 0, &flush, 136).unwrap() else {
         panic!("bulk pressure consumed the control reserve");
     };
-    first.waiting[1] = None;
+    first.admission.heads[1] = None;
     assert_eq!((first.next_id, second.next_id), (0, 0));
     // Drain earlier readiness, then release one actual accepted request owner.
     while first.completion_event.read().is_ok() {}
@@ -405,7 +405,7 @@ fn shared_frontends_defer_full_images_keep_control_live_and_wake_on_credit_relea
     else {
         panic!("released credit did not admit the waiting head");
     };
-    first.waiting[0] = None;
+    first.admission.heads[0] = None;
     drop((retry, control, other, held, first, second));
     local::host::tests::shutdown(host);
     assert_eq!(resources.metadata.usage().current.bytes, 0);
@@ -439,8 +439,8 @@ fn queue_changes_and_failure_cancel_waiting_tickets_without_consuming_guest_ids(
                 .unwrap(),
             Admission::Waiting
         ));
-        backend.clear_changed_waits(change);
-        assert!(backend.waiting.iter().all(Option::is_none));
+        backend.admission.changed(change);
+        assert!(backend.admission.heads.iter().all(Option::is_none));
         assert_eq!(
             backend.admission_report()["statistics"]["canceled"],
             index + 1
@@ -453,11 +453,65 @@ fn queue_changes_and_failure_cancel_waiting_tickets_without_consuming_guest_ids(
         Admission::Waiting
     ));
     backend.fail("injected storage failure".into());
-    assert!(backend.waiting.iter().all(Option::is_none));
+    assert!(backend.admission.heads.iter().all(Option::is_none));
     assert_eq!(backend.admission_report()["statistics"]["canceled"], 7);
     assert_eq!(backend.admission_report()["statistics"]["resumed"], 0);
     assert_eq!(backend.next_id, 0);
     drop((held, shared, backend));
+    local::host::tests::shutdown(host);
+    assert_eq!(resources.metadata.usage().current.bytes, 0);
+}
+
+#[test]
+fn another_virtqueue_read_passes_a_write_waiting_for_wal_capacity() {
+    let root = tempfile::tempdir().unwrap();
+    let resources = Arc::new(local::host::Resources::default());
+    let mut host = local::host::tests::create(root.path(), 1, Arc::clone(&resources));
+    let mut backend = host.attach([2; 16], Fault::default()).unwrap();
+    let Request::Write(mut data) = write_request() else {
+        unreachable!()
+    };
+    data.len = 64 * 1024;
+    data.segments = request::test_segments([Segment {
+        addr: GuestAddress(0x5000),
+        len: data.len,
+        writable: false,
+    }]);
+    let write = Request::Write(data);
+    let mut held = Vec::new();
+    while let Admission::Accepted(permit) = backend
+        .prepare_admission(0, held.len() as u16, &write, 136)
+        .unwrap()
+    {
+        backend.admission.finish_wait(0, true);
+        held.push(permit);
+        assert!(
+            held.len() < 128,
+            "expected byte pressure before request pressure"
+        );
+    }
+    assert_eq!(
+        backend.admission_report()["heads"][0]["reason"]["storage"],
+        "wal_rotation"
+    );
+    let Request::Write(mut data) = write_request() else {
+        unreachable!()
+    };
+    data.completion.head = 3;
+    data.segments = request::test_segments([Segment {
+        addr: GuestAddress(0x5000),
+        len: BLOCK_SIZE,
+        writable: true,
+    }]);
+    let Admission::Accepted(read) = backend
+        .prepare_admission(1, 0, &Request::Read(data), 136)
+        .unwrap()
+    else {
+        panic!("blocked write prevented an eligible read on another queue");
+    };
+    backend.admission.finish_wait(1, true);
+    assert_eq!(backend.next_id, 0); // Reservation has not assigned a guest serial.
+    drop((read, held, backend));
     local::host::tests::shutdown(host);
     assert_eq!(resources.metadata.usage().current.bytes, 0);
 }

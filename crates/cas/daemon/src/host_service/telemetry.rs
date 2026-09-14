@@ -1,4 +1,4 @@
-//! Bounded, opt-in snapshots; output failure follows normal supervisor teardown.
+//! Bounded snapshots: strict experiments fail closed; operational output can stop.
 use super::*;
 use std::io::Write;
 
@@ -76,6 +76,10 @@ impl Telemetry {
         })
     }
 
+    pub fn operational(&self) -> bool {
+        self.rotate.is_some()
+    }
+
     fn rotate_if_needed(&mut self) -> io::Result<()> {
         if let Some(path) = &self.rotate
             && (self.journal.samples == SAMPLES || self.journal.bytes > FILE_BYTES - RECORD_BYTES)
@@ -128,6 +132,42 @@ impl Telemetry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_failure_stops_only_the_operational_observer() {
+        for operational in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let report = tempfile::tempdir().unwrap();
+            let resources = Arc::new(Resources::default());
+            let host = crate::local::host::tests::create(root.path(), 1, Arc::clone(&resources));
+            let mut runtime = Runtime::Cold(host);
+            let mut telemetry = Telemetry::new(
+                &report.path().join("live.jsonl"),
+                &resources.metadata,
+                operational,
+            )
+            .unwrap();
+            telemetry.journal.writer = File::options().write(true).open("/dev/full").unwrap();
+            let result = run_services(
+                table(0, &resources.metadata).unwrap(),
+                &[],
+                &mut runtime,
+                &resources.metadata,
+                Some(telemetry),
+            );
+            assert_eq!(result.storage.is_ok(), operational);
+            assert!(result.telemetry_error.is_some());
+            assert_eq!(
+                runtime.host().unwrap().unwrap().failure().is_none(),
+                operational
+            );
+            let Runtime::Cold(host) = runtime else {
+                unreachable!()
+            };
+            crate::local::host::tests::shutdown(host);
+            assert_eq!(resources.metadata.usage().current.bytes, 0);
+        }
+    }
 
     #[test]
     fn long_session_rotates_and_strict_experiment_keeps_its_cap() {

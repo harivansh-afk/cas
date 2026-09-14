@@ -106,6 +106,10 @@ pub struct Host {
 }
 
 impl Host {
+    pub(crate) fn failure(&self) -> Option<String> {
+        self.shared.gate.failure()
+    }
+
     pub(crate) fn fail_all(&self, reason: &str) {
         self.shared.gate.fail(reason.to_owned());
     }

@@ -1,4 +1,4 @@
-//! Bounded FIFO intents and byte DRR before resource/serial admission.
+//! Bounded queue heads, FIFO among eligible heads, and per-image byte DRR.
 use super::*;
 
 const QUANTUM: usize = MAX_REQUEST_BYTES;
@@ -65,15 +65,11 @@ impl State {
         // Each payload is at most a quantum; a new visit can serve a head.
         for _ in 0..=self.images.len() {
             let image = &mut self.images[self.cursor];
-            let Some(request) = image.queue.first() else {
+            let Some(request) = image.queue.iter().find(|request| request.ready) else {
                 image.deficit = 0;
                 self.advance();
                 continue;
             };
-            if !request.ready {
-                self.advance();
-                continue;
-            }
             if self.replenish && image.deficit < request.bytes {
                 image.deficit += QUANTUM;
             }
@@ -253,7 +249,12 @@ impl Turn<'_> {
             .expect("admission scheduler poisoned");
         assert_eq!(state.granted, Some((ticket.port.image, ticket.id)));
         let image = &mut state.images[ticket.port.image];
-        let head = image.queue.remove(0);
+        let index = image
+            .queue
+            .iter()
+            .position(|request| request.id == ticket.id)
+            .expect("granted queue head");
+        let head = image.queue.remove(index);
         assert_eq!(head.id, ticket.id);
         image.deficit -= head.bytes;
         image.admitted_bytes += head.bytes as u64;
@@ -278,7 +279,12 @@ impl Drop for Turn<'_> {
             let image = &mut state.images[ticket.port.image];
             image.deferred += 1;
             // A release after reservation failed must survive this refusal.
-            image.queue.first_mut().expect("granted head").ready = retry;
+            image
+                .queue
+                .iter_mut()
+                .find(|request| request.id == ticket.id)
+                .expect("granted queue head")
+                .ready = retry;
             state.advance();
         }
         drop(state);

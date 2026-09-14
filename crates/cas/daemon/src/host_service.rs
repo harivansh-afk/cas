@@ -207,6 +207,7 @@ pub fn serve(mut config: Config) -> io::Result<()> {
             "services_ok": outcome.services.is_ok(),
             "service_error": outcome.services.as_ref().err().map(ToString::to_string),
             "shutdown_error": outcome.shutdown.as_ref().err().map(ToString::to_string),
+            "telemetry_error": outcome.telemetry_error,
             "host": outcome.shutdown.as_ref().ok(), "metadata": resources.metadata.usage(),
         }),
         Err(error) => serde_json::json!({"services_ok": false, "startup_error": error.to_string(),
@@ -220,6 +221,7 @@ pub fn serve(mut config: Config) -> io::Result<()> {
 
 struct Outcome {
     services: io::Result<()>,
+    telemetry_error: Option<String>,
     shutdown: io::Result<serde_json::Value>,
 }
 fn run(
@@ -308,9 +310,15 @@ fn run(
         thread::sleep(Duration::from_millis(10));
     };
     Ok(Outcome {
-        services: result,
+        services: result.storage,
+        telemetry_error: result.telemetry_error,
         shutdown,
     })
+}
+
+struct ServiceOutcome {
+    storage: io::Result<()>,
+    telemetry_error: Option<String>,
 }
 
 fn run_services(
@@ -319,10 +327,19 @@ fn run_services(
     runtime: &mut Runtime,
     metadata: &Arc<Budget>,
     mut telemetry: Option<Telemetry>,
-) -> io::Result<()> {
+) -> ServiceOutcome {
     let mut workers: BudgetVec<Option<JoinHandle<io::Result<()>>>, _> =
-        table(services.len(), metadata)?;
+        match table(services.len(), metadata) {
+            Ok(workers) => workers,
+            Err(error) => {
+                return ServiceOutcome {
+                    storage: Err(error),
+                    telemetry_error: None,
+                };
+            }
+        };
     let mut failure = None;
+    let mut shared_failure = None;
     for (socket, service) in services {
         match thread::Builder::new()
             .name("cas-image-socket".into())
@@ -330,17 +347,23 @@ fn run_services(
         {
             Ok(worker) => workers.push(Some(worker)),
             Err(error) => {
-                failure = Some(error);
+                shared_failure = Some(error);
                 break;
             }
         }
     }
     let mut canceled = false;
+    let mut telemetry_error = None;
     loop {
         if let Some(sampler) = &mut telemetry
             && let Err(error) = sampler.sample(runtime, controls)
         {
-            failure.get_or_insert(error);
+            telemetry_error = Some(error.to_string());
+            if sampler.operational() {
+                eprintln!("cas-host: operational telemetry stopped: {error}");
+            } else {
+                shared_failure.get_or_insert(error);
+            }
             telemetry = None;
         }
         for slot in &mut workers {
@@ -355,7 +378,24 @@ fn run_services(
                 }
             }
         }
-        if let Some(error) = &failure
+        // A socket owns one image after activation. Incomplete retained
+        // recovery still requires every endpoint, and shared gates remain fatal.
+        match runtime.host() {
+            Ok(Some(host)) => {
+                if let Some(reason) = host.failure() {
+                    shared_failure.get_or_insert_with(|| io::Error::other(reason));
+                }
+            }
+            Ok(None) => {
+                if let Some(error) = failure.take() {
+                    shared_failure.get_or_insert(error);
+                }
+            }
+            Err(error) => {
+                shared_failure.get_or_insert(error);
+            }
+        }
+        if let Some(error) = &shared_failure
             && !canceled
         {
             let reason = error.to_string();
@@ -370,5 +410,8 @@ fn run_services(
         }
         thread::sleep(Duration::from_millis(10));
     }
-    failure.map_or(Ok(()), Err)
+    ServiceOutcome {
+        storage: shared_failure.or(failure).map_or(Ok(()), Err),
+        telemetry_error,
+    }
 }

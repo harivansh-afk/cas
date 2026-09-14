@@ -186,7 +186,7 @@ fn sparse_logical_windows_and_preallocation_beyond_eof_use_bounded_scratch() {
             result.retained_pages,
             result.tree_page_reads
         ),
-        (2, 3, 2)
+        (2, 3, 1)
     );
     assert!(result.removed_tail_mapping_bytes >= 3 * 1024 * 1024);
     assert_eq!(manifest.file.metadata().unwrap().len(), end);

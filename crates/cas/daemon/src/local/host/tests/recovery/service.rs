@@ -139,3 +139,54 @@ fn cold_host_supervises_both_socket_services_and_drains_the_shared_owner() {
     assert!(first["images"][0]["report"].get("connection_ok").is_none());
     assert!(first["images"][0]["report"].get("pending").is_some());
 }
+
+#[test]
+#[ignore = "requires the exclusive XFS allocation fixture"]
+fn failed_cold_image_protocol_leaves_the_other_socket_usable() {
+    let root = tempfile::tempdir().unwrap();
+    let transport = tempfile::tempdir_in("/dev/shm").unwrap();
+    let resources = Arc::new(Resources::default());
+    setup(root.path(), &resources, SnapshotFixture::Absent);
+    let config = config(root.path(), transport.path(), Mode::Cold);
+    let (done, result) = mpsc::channel();
+    let server = thread::spawn(move || done.send(host_service::serve(config)).unwrap());
+    let mut bad = super::frontend::connect(&transport.path().join("2.sock"));
+    let mut good = super::frontend::connect(&transport.path().join("3.sock"));
+    good.get_features().unwrap();
+    let invalid = VhostUserInflight {
+        num_queues: 3,
+        ..inflight()
+    };
+    assert!(bad.get_inflight_fd(&invalid).is_err());
+    // Wait for the failed service to finish reporting, not merely disconnect.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let path = transport.path().join(format!("{}.json", "02".repeat(16)));
+        if fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .is_some_and(|r| r["connection_ok"] == false)
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "failed image did not finish");
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(result.try_recv().is_err());
+    good.get_features().unwrap();
+    let (message, file) = good.get_inflight_fd(&inflight()).unwrap();
+    good.set_inflight_fd(&message, file.as_raw_fd()).unwrap();
+    drop((good, bad, file));
+    assert!(
+        result
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .is_err()
+    );
+    server.join().unwrap();
+    assert_eq!(
+        report(transport.path(), &format!("{}.json", "03".repeat(16)))["connection_ok"],
+        true
+    );
+    assert!(report(transport.path(), "host.json")["host"]["failure"].is_null());
+}

@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{
     BLOCK_SIZE,
-    aligned::AlignedBuffer,
+    aligned::AlignedPages,
     budget::{Budget, BudgetAllocator},
     encoding::require,
 };
@@ -29,7 +29,7 @@ pub struct Stats {
 /// nothing itself; the manifest owner must compare previous(), write and sync.
 /// The input tree must have passed recovery validation before editing it.
 pub struct Prepared {
-    buffer: AlignedBuffer<BudgetAllocator>,
+    buffer: AlignedPages<BudgetAllocator>,
     previous: Commit,
     commit: Commit,
     offset: u64,
@@ -73,8 +73,8 @@ impl Prepared {
                     .is_some_and(|n| n <= i64::MAX as u64),
             "manifest output bound",
         )?;
-        let buffer = AlignedBuffer::try_new_in(bytes, BudgetAllocator::new(Arc::clone(&metadata)))?;
-        let tree = Tree::new(source, current, end, metadata)?;
+        let buffer = AlignedPages::new(BudgetAllocator::new(Arc::clone(&metadata)), pages);
+        let tree = Tree::new(source, current, end, Arc::clone(&metadata))?;
         let mut editor = Editor {
             tree,
             buffer,
@@ -90,24 +90,39 @@ impl Prepared {
             require(emitted <= bound, "COW edit exceeded 8H+8 pages")?;
             editor.max_pages_per_change = editor.max_pages_per_change.max(emitted);
         }
+        // Draft paths may have been replaced by later edits. Emit only final
+        // reachable pages into a separate bounded owner, rebasing child offsets.
+        // Old on-disk pages remain immutable and are referenced directly.
+        let mut buffer = AlignedPages::new(BudgetAllocator::new(metadata), pages);
+        let root = if editor.root.offset == 0 {
+            editor.root
+        } else {
+            let cursor = Cursor::root(Commit {
+                root: editor.root,
+                ..current
+            });
+            Root {
+                offset: editor.emit(cursor, &mut buffer)?,
+                height: editor.root.height,
+            }
+        };
         let commit = Commit {
-            root: editor.root,
+            root,
             generation,
             durable,
             ..current
         };
-        let offset = editor.next_offset();
-        commit.encode_into(editor.next_page()?, offset)?;
-        editor.pages += 1;
+        let offset = end + buffer.as_slice().len() as u64;
+        commit.encode_into(buffer.push_zeroed()?, offset)?;
         let stats = Stats {
             changes: edits.len(),
-            written_pages: editor.pages,
+            written_pages: buffer.as_slice().len() / BLOCK_SIZE,
             max_pages_per_change: editor.max_pages_per_change,
             old_page_reads: editor.tree.reads,
-            allocated_bytes: bytes,
+            allocated_bytes: buffer.allocated_bytes(),
         };
         Ok(Self {
-            buffer: editor.buffer,
+            buffer,
             previous: current,
             commit,
             offset: end,
@@ -134,7 +149,7 @@ impl Prepared {
 
 struct Editor<'a, P: PageReader> {
     tree: Tree<'a, P>,
-    buffer: AlignedBuffer<BudgetAllocator>,
+    buffer: AlignedPages<BudgetAllocator>,
     root: Root,
     pages: usize,
     max_pages_per_change: usize,
@@ -145,11 +160,41 @@ impl<P: PageReader> Editor<'_, P> {
         self.tree.end + (self.pages * BLOCK_SIZE) as u64
     }
     fn next_page(&mut self) -> io::Result<&mut [u8]> {
-        let start = self.pages * BLOCK_SIZE;
-        self.buffer
-            .as_mut_slice()
-            .get_mut(start..start + BLOCK_SIZE)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::OutOfMemory, "manifest plan exhausted"))
+        self.buffer.push_zeroed()
+    }
+
+    fn emit(
+        &mut self,
+        cursor: Cursor,
+        output: &mut AlignedPages<BudgetAllocator>,
+    ) -> io::Result<u64> {
+        if cursor.offset < self.tree.end {
+            return Ok(cursor.offset);
+        }
+        let node = self.read(cursor)?;
+        let image_bytes = self.tree.commit.image_bytes;
+        match node {
+            Node::Leaf(entries) => {
+                let offset = self.tree.end + output.as_slice().len() as u64;
+                format::leaf_into(output.push_zeroed()?, offset, image_bytes, &entries)?;
+                Ok(offset)
+            }
+            Node::Branch(mut children) => {
+                for index in 0..children.len() {
+                    let next = cursor.child(&children, index);
+                    children[index].offset = self.emit(next, output)?;
+                }
+                let offset = self.tree.end + output.as_slice().len() as u64;
+                format::branch_into(
+                    output.push_zeroed()?,
+                    offset,
+                    image_bytes,
+                    cursor.level,
+                    &children,
+                )?;
+                Ok(offset)
+            }
+        }
     }
 
     fn read(&mut self, cursor: Cursor) -> io::Result<Node> {

@@ -101,3 +101,22 @@ fn release_during_a_refused_turn_wakes_the_waiting_frontend() {
     drop((first, waiting, next, port, other));
     assert_eq!(metadata.usage().current, Amount::default());
 }
+
+#[test]
+fn another_queue_can_read_while_the_older_write_lacks_capacity() {
+    let (metadata, [port, other]) = setup();
+    let write = port.ticket(Kind::Write(QUANTUM)).unwrap().unwrap();
+    let read = port.ticket(Kind::Read(BLOCK_SIZE)).unwrap().unwrap();
+    assert!(read.turn().unwrap().is_none()); // FIFO while both are eligible.
+    drop(write.turn().unwrap().unwrap()); // WAL refusal on the first queue.
+    let read_release = read.turn().unwrap().unwrap().commit();
+    assert_eq!(port.owner.report()["images"][0]["blocked"], 1);
+    assert_eq!(
+        port.owner.report()["images"][0]["admitted_bytes"],
+        BLOCK_SIZE
+    );
+    drop(read_release);
+    write.turn().unwrap().unwrap().commit();
+    drop((write, read, port, other));
+    assert_eq!(metadata.usage().current, Amount::default());
+}

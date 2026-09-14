@@ -22,6 +22,16 @@ use std::{
     sync::{Arc, atomic::Ordering},
 };
 
+/// Volatile hint, accepted only for the published D and a retained segment.
+/// Framing is still decoded and validated from this exact batch boundary.
+#[derive(Clone, Copy)]
+pub(super) struct ScanPosition {
+    pub segment: u64,
+    pub offset: u64,
+    pub batch: u64,
+    pub sequence: u64,
+}
+
 pub(super) struct Span {
     pub segment: Arc<Segment>,
     pub end: u64,
@@ -64,6 +74,7 @@ pub(super) fn spans(
 /// No IO at capture. E and immutable end snapshots bound the background scan.
 pub struct Selection {
     base: View,
+    cursor: Option<ScanPosition>,
     through: u64,
     spans: Vec<Span, BudgetAllocator>,
     metadata: Arc<Budget>,
@@ -91,6 +102,13 @@ impl Log {
         )?;
         Ok(Some(Selection {
             base: base.clone(),
+            cursor: self.compaction_cursor.filter(|cursor| {
+                cursor.sequence == base.commit().durable
+                    && self.segments.iter().any(|segment| {
+                        segment.header.number == cursor.segment
+                            && cursor.offset <= segment.end.load(Ordering::Relaxed)
+                    })
+            }),
             through: self.durable,
             spans: spans(self, Arc::clone(&metadata), true)?,
             metadata,
@@ -112,7 +130,12 @@ impl Log {
                 && durable <= self.durable,
             "stale or non-durable compaction receipt",
         )?;
+        require(
+            compacted.cursor.sequence == durable,
+            "compaction cursor differs from D",
+        )?;
         self.index.retain_after(durable);
+        self.compaction_cursor = Some(compacted.cursor);
         self.base = Some(compacted.view);
         Ok(())
     }
@@ -127,6 +150,7 @@ struct Edit {
 /// Owned original bytes; no mutable staging map is copied or borrowed by IO.
 pub struct Input {
     base: View,
+    cursor: Option<ScanPosition>,
     through: u64,
     payload: AlignedBuffer<BudgetAllocator>,
     payload_bytes: usize,
@@ -140,6 +164,7 @@ impl Selection {
         let base = self.base.commit().durable;
         let mut input = Input {
             base: self.base,
+            cursor: self.cursor,
             through: base,
             payload: AlignedBuffer::try_new_in(
                 MAX_REQUEST_BYTES,
@@ -151,22 +176,33 @@ impl Selection {
         };
         let mut scratch =
             AlignedBuffer::try_new_in(BLOCK_SIZE, BudgetAllocator::new(self.metadata))?;
-        let mut sequence = self
+        let first = self
             .spans
             .first()
-            .ok_or_else(|| io::Error::other("no compaction segments"))?
-            .segment
-            .header
-            .preceding_sequence;
+            .ok_or_else(|| io::Error::other("no compaction segments"))?;
+        let mut sequence = self
+            .cursor
+            .map_or(first.segment.header.preceding_sequence, |cursor| {
+                cursor.sequence
+            });
         require(sequence <= base, "compaction starts above D")?;
         let mut bounded = false;
         'segments: for span in self.spans {
+            if self
+                .cursor
+                .is_some_and(|cursor| span.segment.header.number < cursor.segment)
+            {
+                continue;
+            }
+            let resume = self
+                .cursor
+                .filter(|cursor| span.segment.header.number == cursor.segment);
             require(
-                span.segment.header.preceding_sequence == sequence,
+                resume.is_some() || span.segment.header.preceding_sequence == sequence,
                 "compaction segment gap",
             )?;
-            let mut offset = BLOCK_SIZE as u64;
-            let mut batch = 1;
+            let mut offset = resume.map_or(BLOCK_SIZE as u64, |cursor| cursor.offset);
+            let mut batch = resume.map_or(1, |cursor| cursor.batch);
             while offset < span.end {
                 if sequence == self.through {
                     break 'segments;
@@ -242,6 +278,12 @@ impl Selection {
                 batch = batch
                     .checked_add(1)
                     .ok_or_else(|| io::Error::other("compaction batch overflow"))?;
+                input.cursor = Some(ScanPosition {
+                    segment: span.segment.header.number,
+                    offset,
+                    batch,
+                    sequence,
+                });
             }
         }
         require(
@@ -271,6 +313,7 @@ impl Input {
 /// Constructible only after verified chunks and a successful manifest sync.
 pub struct Compacted {
     previous: View,
+    cursor: ScanPosition,
     view: View,
 }
 

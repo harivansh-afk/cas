@@ -56,7 +56,7 @@ fn metadata_denial_and_manifest_read_failure_precede_all_chunk_output() {
             memory()
         } else {
             Budget::new(Amount {
-                bytes: 64 * 1024,
+                bytes: 2 * BLOCK_SIZE,
                 requests: 0,
             })
         };
@@ -134,4 +134,31 @@ fn prepared_output_rejects_another_file_or_new_root_before_chunk_publication() {
         ]
         .concat()
     );
+}
+
+#[test]
+fn compaction_cursor_bounds_framing_reads_across_overwrites_and_reopen() {
+    let mut f = Fixture::new();
+    for sequence in 1..=40 {
+        write(f.log(), 0, sequence);
+        f.log().flush().unwrap();
+        let scope = crate::io_metrics::Scope::enter();
+        let input = f.input();
+        let reads = scope.finish().read;
+        // One header/payload plus at most the preceding FLUSH fence.
+        assert!(
+            (2..=3).contains(&reads.calls),
+            "sequence {sequence}: {} reads",
+            reads.calls
+        );
+        let output = f.output(input);
+        f.log().publish_compaction(output).unwrap();
+        if sequence == 20 {
+            f.fresh(u64::from(sequence));
+        }
+    }
+    assert_eq!(&f.image()[..BLOCK_SIZE], &[40; BLOCK_SIZE]);
+    f.reclaim(None);
+    f.fresh(40);
+    assert_eq!(&f.image()[..BLOCK_SIZE], &[40; BLOCK_SIZE]);
 }

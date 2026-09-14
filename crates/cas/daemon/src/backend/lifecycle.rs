@@ -157,7 +157,7 @@ impl Backend {
                 self.blocked_queues[index] = false;
                 self.rebase_queues[index] = false;
             }
-            self.clear_changed_waits(change);
+            self.admission.changed(change);
             self.rearm_deadline_timer()?;
             self.validate_used_cursors(vrings)?;
             if let Storage::Local(local) = &mut self.storage {

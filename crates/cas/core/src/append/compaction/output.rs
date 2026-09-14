@@ -26,6 +26,7 @@ pub enum Publication {
 /// Every hash is computed once; the complete mapping is owned before output IO.
 pub struct Prepared<'a> {
     previous: View,
+    cursor: super::ScanPosition,
     manifest: ManifestOutput,
     chunks: ArrayVec<Chunk<'a>, { MAX_REQUEST_BYTES / BLOCK_SIZE }>,
 }
@@ -66,6 +67,7 @@ impl Input {
         }
         Ok(Prepared {
             previous: self.base.clone(),
+            cursor: self.cursor.expect("loaded compaction boundary"),
             manifest: manifest.prepare_with_metadata(
                 &changes,
                 self.through,
@@ -126,6 +128,7 @@ impl Prepared<'_> {
         observe(Publication::AfterManifest, manifest.current().durable)?;
         Ok(Compacted {
             previous: self.previous,
+            cursor: self.cursor,
             view: manifest.view()?,
         })
     }

@@ -110,8 +110,7 @@ pub struct Backend {
     paused: bool,
     change_deadline: Option<std::time::Instant>,
     recovery_deadline: Option<Deadline>,
-    waiting: [Option<admission::Waiting>; CONCURRENT_QUEUES],
-    admission_statistics: admission::Statistics,
+    admission: admission::QueueAdmission,
     deadline_timer: Option<vmm_sys_util::timerfd::TimerFd>,
     blocked_queues: [bool; CONCURRENT_QUEUES],
     rebase_queues: [bool; CONCURRENT_QUEUES],
@@ -390,8 +389,7 @@ impl Backend {
             paused: false,
             change_deadline: None,
             recovery_deadline,
-            waiting: std::array::from_fn(|_| None),
-            admission_statistics: admission::Statistics::default(),
+            admission: admission::QueueAdmission::default(),
             deadline_timer,
             blocked_queues: [false; CONCURRENT_QUEUES],
             rebase_queues: [false; CONCURRENT_QUEUES],
@@ -407,9 +405,7 @@ impl Backend {
         self.failure.as_deref()
     }
     pub(crate) fn fail(&mut self, message: String) {
-        for queue in 0..self.waiting.len() {
-            self.finish_wait(queue as u16, false);
-        }
+        self.admission.cancel_all();
         if let Some(gate) = self.storage.completion_gate() {
             let mut failed = gate.lock().expect("completion gate poisoned");
             failed.fail(message.clone());
@@ -451,7 +447,7 @@ impl Backend {
             "inflight":self.live.as_ref().map(Session::report),
             "restartable":self.restartable, "restored_used":self.restored_used, "restored_pending":self.restored_pending,
             "local":self.storage.local_report(),
-            "admission":self.admission_report(),
+            "admission":self.admission.snapshot(),
             "metadata":self.metadata.usage(),
             "staging":self.storage.status().map(|s| serde_json::json!({
                 "image_bytes":s.image_bytes, "appended":s.appended, "durable":s.durable,
@@ -854,7 +850,7 @@ impl Backend {
             if matches!(admission, Admission::Waiting) {
                 break;
             }
-            self.finish_wait(queue, true);
+            self.admission.finish_wait(queue, true);
             let observed_write =
                 matches!(&request, Request::Write(_)).then(|| self.fault.upcoming_write());
             self.fault
@@ -913,9 +909,7 @@ impl Backend {
     }
     /// Reap IO after disconnect without touching guest queues or memory.
     pub fn drain(&mut self) -> io::Result<()> {
-        for queue in 0..self.waiting.len() {
-            self.finish_wait(queue as u16, false);
-        }
+        self.admission.cancel_all();
         // An earlier gather may still own an unsealed batch when admission fails.
         if let Err(error) = self.storage.submit() {
             self.fail(error.to_string());

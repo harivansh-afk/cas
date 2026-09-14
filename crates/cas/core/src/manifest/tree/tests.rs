@@ -293,7 +293,7 @@ fn a_full_internal_root_splits_when_an_existing_leaf_grows() {
 }
 
 #[test]
-fn the_maximum_compaction_batch_fits_its_preallocated_metadata_budget() {
+fn maximum_batch_initializes_on_demand_and_emits_only_reachable_pages() {
     let metadata = metadata();
     let mut image = Image::new();
     let mut edits: Vec<_> = (0..256).map(mapping).collect();
@@ -304,12 +304,26 @@ fn the_maximum_compaction_batch_fits_its_preallocated_metadata_budget() {
     }));
     let stats = image.apply(&edits, &metadata);
     assert_eq!(stats.changes, MAX_CHANGES);
-    assert_eq!(stats.allocated_bytes, (MAX_CHANGES * 72 + 1) * BLOCK_SIZE);
-    assert_eq!(
-        metadata.usage().peak.bytes,
-        stats.allocated_bytes + BLOCK_SIZE
-    );
-    assert!(metadata.usage().peak.bytes < 128 * 1024 * 1024);
+    assert!(stats.allocated_bytes <= 16 * BLOCK_SIZE);
+    assert!(metadata.usage().peak.bytes < 8 * 1024 * 1024);
+    let mut tree = Tree::new(
+        &image,
+        image.commit,
+        image.bytes.len() as u64,
+        Arc::clone(&metadata),
+    )
+    .unwrap();
+    let mut live = 0;
+    tree.walk_pages(
+        |_| {
+            live += 1;
+            Ok(())
+        },
+        |_| Ok(()),
+    )
+    .unwrap();
+    assert_eq!(stats.written_pages, live + 1); // Final nodes plus the COMMIT.
+    drop(tree);
     let observed = image.observe(image.commit, image.bytes.len() as u64, &metadata);
     for block in 0..BLOCKS {
         assert_eq!(

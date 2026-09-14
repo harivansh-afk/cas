@@ -89,6 +89,7 @@ impl Log {
             highest_segment,
             tickets,
             base: None,
+            compaction_cursor: None,
             published: h.preceding_sequence,
             issued: 0,
             pending_descriptors: 0,
@@ -221,6 +222,14 @@ impl Log {
         self.offset += length;
         self.encoded_bytes += length;
         self.next_batch = self.next_batch.checked_add(1).ok_or(Error::Exhausted)?;
+        if self.published == base {
+            self.compaction_cursor = Some(super::compaction::ScanPosition {
+                segment: segment.header.number,
+                offset: self.offset,
+                batch: self.next_batch,
+                sequence: base,
+            });
+        }
         Ok(true)
     }
 }
