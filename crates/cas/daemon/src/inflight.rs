@@ -171,6 +171,11 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// Backend request IDs count from zero; carrier serials count from one.
+    pub fn request_id(self) -> u64 {
+        self.serial - 1
+    }
+
     fn required_publication(self) -> u64 {
         if self.rejected {
             0
@@ -289,6 +294,14 @@ impl Carrier {
 
     pub fn export(&self) -> io::Result<(VhostUserInflight, File)> {
         Ok((self.geometry.message(), self.mapping.file.try_clone()?))
+    }
+
+    /// Whether a returned descriptor names this carrier's own mapping file.
+    pub fn same_file(&self, file: &File) -> io::Result<bool> {
+        use std::os::unix::fs::MetadataExt;
+        let expected = self.mapping.file.metadata()?;
+        let actual = file.metadata()?;
+        Ok((expected.dev(), expected.ino()) == (actual.dev(), actual.ino()))
     }
 
     pub fn identity(&self) -> Identity {

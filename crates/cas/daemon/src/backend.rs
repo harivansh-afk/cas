@@ -1,4 +1,4 @@
-// Queue execution: retain owned IO until completion and publish against one memory snapshot.
+//! Queue execution: retain owned IO until completion and publish against one memory snapshot.
 
 mod admission;
 mod frontier;
@@ -81,7 +81,7 @@ struct PendingRequest {
     error_published: bool,
 }
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize)]
 struct Counters {
     reads: u64,
     writes: u64,
@@ -94,6 +94,40 @@ struct Counters {
     errors: u64,
     bounce_requests: u64,
     peak_inflight: usize,
+}
+
+#[derive(serde::Serialize)]
+struct StagingReport {
+    image_bytes: u64,
+    appended: u64,
+    durable: u64,
+    log_bytes: u64,
+    mapped_blocks: usize,
+    recovered_tail_bytes: u64,
+}
+
+/// Field names are the report schema; consumers read them by key.
+#[derive(serde::Serialize)]
+pub(crate) struct Report<'a> {
+    schema_version: u32,
+    fatal_error: Option<&'a str>,
+    backend: &'static str,
+    inflight: Option<recovery::Report>,
+    restartable: bool,
+    restored_used: Option<u16>,
+    restored_pending: u16,
+    local: Option<serde_json::Value>,
+    admission: admission::Report,
+    read_trace: Option<&'a Observer>,
+    read_progress: Option<frontier::Report>,
+    metadata: cas_core::budget::Usage,
+    staging: Option<StagingReport>,
+    negotiated_features: u64,
+    flush_negotiated: bool,
+    #[serde(flatten)]
+    counters: &'a Counters,
+    queues: usize,
+    queue_requests: &'a [u64],
 }
 
 pub struct Backend {
@@ -281,11 +315,11 @@ fn gather(
 
 impl Backend {
     #[cfg(test)]
-    pub fn new(path: &Path) -> io::Result<Self> {
+    pub(crate) fn new(path: &Path) -> io::Result<Self> {
         Self::open(path, false, None)
     }
     #[cfg(test)]
-    pub fn open(path: &Path, staging: bool, create_bytes: Option<u64>) -> io::Result<Self> {
+    pub(crate) fn open(path: &Path, staging: bool, create_bytes: Option<u64>) -> io::Result<Self> {
         Self::open_with_recovery(
             path,
             if staging {
@@ -433,8 +467,9 @@ impl Backend {
         if let Some(frontier) = &mut self.frontier {
             frontier.reads.cancel_all();
         }
-        if let Some(gate) = self.storage.completion_gate() {
-            let mut failed = gate.lock().expect("completion gate poisoned");
+        if let Some(gate) = self.storage.completion_gate()
+            && let Ok(mut failed) = gate.lock()
+        {
             failed.fail(message.clone());
         }
         if self.failure.is_none() {
@@ -467,31 +502,35 @@ impl Backend {
     pub fn pending_count(&self) -> usize {
         self.pending.len()
     }
-    pub fn report(&self, pending_at_disconnect: usize, connection_ok: bool) -> serde_json::Value {
-        let c = &self.counters;
-        serde_json::json!({
-            "schema_version":1, "fatal_error":self.failure, "backend":self.storage.name(), "connection_ok":connection_ok,
-            "inflight":self.live.as_ref().map(Session::report),
-            "restartable":self.restartable, "restored_used":self.restored_used, "restored_pending":self.restored_pending,
-            "local":self.storage.local_report(),
-            "admission":self.admission.snapshot(),
-            "read_trace":self.read_trace.as_deref(),
-            "read_progress": self.frontier.as_ref().map(frontier::Frontier::report),
-            "metadata":self.metadata.usage(),
-            "staging":self.storage.status().map(|s| serde_json::json!({
-                "image_bytes":s.image_bytes, "appended":s.appended, "durable":s.durable,
-                "log_bytes":s.log_bytes, "mapped_blocks":s.mapped_blocks,
-                "recovered_tail_bytes":s.recovered_tail_bytes
-            })),
-            "negotiated_features":self.negotiated_features,
-            "flush_negotiated":self.negotiated_features & (1 << VIRTIO_BLK_F_FLUSH) != 0,
-            "pending_at_disconnect":pending_at_disconnect, "reads":c.reads, "writes":c.writes,
-            "flushes":c.flushes, "read_bytes":c.read_bytes, "write_bytes":c.write_bytes,
-            "zeroes":c.zeroes, "zero_bytes":c.zero_bytes,
-            "guest_payload_copy_bytes":c.guest_payload_copy_bytes,
-            "errors":c.errors, "bounce_requests":c.bounce_requests, "peak_inflight":c.peak_inflight,
-            "queues":self.num_queues(), "queue_requests":&self.queue_requests[..self.num_queues()]
-        })
+    /// The connection owner adds its own lifecycle fields around this report.
+    pub(crate) fn report(&self) -> Report<'_> {
+        Report {
+            schema_version: 1,
+            fatal_error: self.failure.as_deref(),
+            backend: self.storage.name(),
+            inflight: self.live.as_ref().map(Session::report),
+            restartable: self.restartable,
+            restored_used: self.restored_used,
+            restored_pending: self.restored_pending,
+            local: self.storage.local_report(),
+            admission: self.admission.snapshot(),
+            read_trace: self.read_trace.as_deref(),
+            read_progress: self.frontier.as_ref().map(frontier::Frontier::report),
+            metadata: self.metadata.usage(),
+            staging: self.storage.status().map(|status| StagingReport {
+                image_bytes: status.image_bytes,
+                appended: status.appended,
+                durable: status.durable,
+                log_bytes: status.log_bytes,
+                mapped_blocks: status.mapped_blocks,
+                recovered_tail_bytes: status.recovered_tail_bytes,
+            }),
+            negotiated_features: self.negotiated_features,
+            flush_negotiated: self.negotiated_features & (1 << VIRTIO_BLK_F_FLUSH) != 0,
+            counters: &self.counters,
+            queues: self.num_queues(),
+            queue_requests: &self.queue_requests[..self.num_queues()],
+        }
     }
     fn finish(
         &mut self,
@@ -526,7 +565,7 @@ impl Backend {
         let Admitted {
             queue,
             id,
-            request,
+            mut request,
             permit,
             inflight,
         } = admitted;
@@ -565,13 +604,18 @@ impl Backend {
         }
         // Install retirement before gathering or handing off ownership. A local
         // enqueue returns ownership through completion even if delivery fails.
+        // Only READ retains its guest segments for the completion payload.
+        let mut segments = Segments::new_in(cas_core::budget::BudgetAllocator::new(Arc::clone(
+            &self.metadata,
+        )));
+        if let Request::Read(data) = &mut request {
+            std::mem::swap(&mut segments, &mut data.segments);
+        }
         self.pending.insert(
             id,
             PendingRequest {
                 completion,
-                segments: Segments::new_in(cas_core::budget::BudgetAllocator::new(Arc::clone(
-                    &self.metadata,
-                ))),
+                segments,
                 error_published: false,
             },
         )?;
@@ -597,13 +641,10 @@ impl Backend {
                     owned = true;
                     return Ok(());
                 }
-                Request::Read(data) => {
-                    self.pending.get_mut(&id).unwrap().segments = data.segments;
-                    Operation::Read {
-                        offset: data.offset,
-                        buffer: AlignedBuffer::new(data.len),
-                    }
-                }
+                Request::Read(data) => Operation::Read {
+                    offset: data.offset,
+                    buffer: AlignedBuffer::new(data.len),
+                },
                 Request::Write(data) if self.storage.is_local() => {
                     self.storage.gather(
                         id,
@@ -679,7 +720,7 @@ impl Backend {
                 .remove(&completed.id)
                 .ok_or_else(|| io::Error::other("unknown IO completion"))?;
             let mut trace = completed
-                ._permit
+                .permit
                 .as_mut()
                 .and_then(|permit| permit.trace.take());
             if let Some(trace) = &mut trace {
@@ -693,13 +734,7 @@ impl Backend {
             let state = &mut *queue;
             let gate = self.storage.completion_gate();
             let locking = trace.as_ref().map(|_| Instant::now());
-            let mut guard = gate
-                .as_ref()
-                .map(|gate| {
-                    gate.lock()
-                        .map_err(|_| io::Error::other("completion gate poisoned"))
-                })
-                .transpose()?;
+            let mut guard = gate.as_ref().map(|gate| gate.lock()).transpose()?;
             if let (Some(trace), Some(locking)) = (&mut trace, locking) {
                 trace.completion_lock_ns += read_trace::ns(locking.elapsed());
             }
@@ -795,14 +830,8 @@ impl Backend {
         if self.paused {
             return Ok(());
         }
-        if let Some(gate) = self.storage.completion_gate()
-            && let Some(error) = gate
-                .lock()
-                .expect("completion gate poisoned")
-                .failure
-                .as_ref()
-        {
-            return Err(io::Error::other(error.clone()));
+        if let Some(gate) = self.storage.completion_gate() {
+            gate.lock_checked()?;
         }
         if self.negotiated_features & REQUIRED_FEATURES != REQUIRED_FEATURES {
             return Err(io::Error::other("IO before required feature negotiation"));
@@ -850,30 +879,7 @@ impl Backend {
             return Ok(());
         }
         if self.restartable && self.live.is_none() && self.restored_used.is_none() {
-            if !state.is_enabled() || !state.get_queue().ready() {
-                return Ok(());
-            }
-            let queue = state.get_queue_mut();
-            let used = queue
-                .used_idx(&**mem, Ordering::Acquire)
-                .map_err(io::Error::other)?
-                .0;
-            let available = queue
-                .avail_idx(&**mem, Ordering::Acquire)
-                .map_err(io::Error::other)?
-                .0;
-            let outstanding = available.wrapping_sub(used);
-            if outstanding > queue.size() {
-                return Err(io::Error::other("invalid restartable queue distance"));
-            }
-            // Exactly one request may execute before its used entry is published.
-            // Thus used.idx is also the consumption cursor, including after wrap.
-            // Writes are durable before publication; replay of the unpublished
-            // request cannot overwrite a later completed request.
-            queue.set_next_used(used);
-            queue.set_next_avail(used);
-            self.restored_used = Some(used);
-            self.restored_pending = outstanding;
+            self.restore_serial_cursor(mem, state.get_queue_mut())?;
         }
         let mut consumed = 0;
         let limit = if self.restartable && self.live.is_none() {
@@ -909,16 +915,7 @@ impl Backend {
             let request = decode_chain(mem, chain, self.capacity_bytes, &self.metadata)?
                 .negotiated(self.negotiated_features & self.features());
             let gate = self.storage.completion_gate();
-            let mut guard = gate
-                .as_ref()
-                .map(|gate| {
-                    gate.lock()
-                        .map_err(|_| io::Error::other("completion gate poisoned"))
-                })
-                .transpose()?;
-            if let Some(error) = guard.as_ref().and_then(|guard| guard.failure.as_ref()) {
-                return Err(io::Error::other(error.clone()));
-            }
+            let mut guard = gate.as_ref().map(|gate| gate.lock_checked()).transpose()?;
             let admission =
                 self.prepare_admission(queue, next_avail.wrapping_sub(1), &request, limit)?;
             if matches!(admission, Admission::Waiting) {
@@ -962,6 +959,34 @@ impl Backend {
         }
         Ok(())
     }
+    /// Restartable staging resumes one queue from the guest's own used cursor.
+    fn restore_serial_cursor(
+        &mut self,
+        mem: &GuestMemoryMmap,
+        queue: &mut Queue,
+    ) -> io::Result<()> {
+        let used = queue
+            .used_idx(mem, Ordering::Acquire)
+            .map_err(io::Error::other)?
+            .0;
+        let available = queue
+            .avail_idx(mem, Ordering::Acquire)
+            .map_err(io::Error::other)?
+            .0;
+        let outstanding = available.wrapping_sub(used);
+        if outstanding > queue.size() {
+            return Err(io::Error::other("invalid restartable queue distance"));
+        }
+        // Exactly one request may execute before its used entry is published.
+        // Thus used.idx is also the consumption cursor, including after wrap.
+        // Writes are durable before publication; replay of the unpublished
+        // request cannot overwrite a later completed request.
+        queue.set_next_used(used);
+        queue.set_next_avail(used);
+        self.restored_used = Some(used);
+        self.restored_pending = outstanding;
+        Ok(())
+    }
     fn accept(
         &mut self,
         mem: &GuestMemoryLoadGuard<GuestMemoryMmap>,
@@ -998,12 +1023,12 @@ impl Backend {
                 })
             })
             .transpose()?;
-        if inflight.is_some_and(|entry| entry.serial != next_id) {
+        let id = self.next_id;
+        if inflight.is_some_and(|entry| entry.request_id() != id) {
             return Err(io::Error::other(
                 "admission serial differs from retained carrier",
             ));
         }
-        let id = self.next_id;
         self.next_id = next_id;
         if !self.concurrent {
             state
@@ -1034,8 +1059,8 @@ impl Backend {
             })
         });
         {
-            if let Permit::Local { _credits } = &mut permit {
-                _credits.trace = trace;
+            if let Permit::Local { credits } = &mut permit {
+                credits.trace = trace;
             }
             self.enqueue(
                 mem,
@@ -1093,7 +1118,9 @@ impl Backend {
         let Some(gate) = self.storage.completion_gate() else {
             return;
         };
-        let mut guard = gate.lock().expect("completion gate poisoned");
+        let Ok(mut guard) = gate.lock() else {
+            return;
+        };
         if guard.failure.is_none() {
             return;
         }

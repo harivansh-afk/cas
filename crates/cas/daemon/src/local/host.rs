@@ -551,7 +551,7 @@ pub(super) struct Port {
     ready: mailbox::Sender<Ready>,
     events: mailbox::Receiver<Event>,
     reply: mailbox::Sender<Reply>,
-    pub wake: EventFd,
+    pub(super) wake: EventFd,
     active: Option<Instant>,
     granted: bool,
     quiescence: Option<(u64, bool)>,

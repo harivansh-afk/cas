@@ -19,6 +19,32 @@ fn daemon_error(error: DaemonError) -> io::Error {
     io::Error::other(error.to_string())
 }
 
+/// The final report of one connection, written after its drain.
+#[derive(serde::Serialize)]
+struct FinalReport<'a> {
+    #[serde(flatten)]
+    backend: crate::backend::Report<'a>,
+    connection_ok: bool,
+    pending_at_disconnect: usize,
+    pending_after_drain: usize,
+}
+
+/// A live sample of a connected backend, taken by the host telemetry loop.
+#[derive(serde::Serialize)]
+struct Snapshot<'a> {
+    #[serde(flatten)]
+    backend: crate::backend::Report<'a>,
+    pending: usize,
+    snapshot_timing: SnapshotTiming,
+}
+
+#[derive(serde::Serialize)]
+struct SnapshotTiming {
+    backend_lock_ns: u64,
+    report_ns: u64,
+    completed_unix_ns: u64,
+}
+
 pub struct Control {
     backend: Arc<Mutex<Backend>>,
     canceled: EventFd,
@@ -31,18 +57,23 @@ impl Control {
             .lock()
             .map_err(|_| io::Error::other("backend worker panicked"))?;
         let acquired = std::time::Instant::now();
-        let pending = backend.pending_count();
-        let mut report = backend.report(pending, false);
-        let fields = report.as_object_mut().expect("backend report object");
-        fields.remove("connection_ok");
-        fields.remove("pending_at_disconnect");
-        fields.insert("pending".into(), pending.into());
-        fields.insert("snapshot_timing".into(), serde_json::json!({
-            "backend_lock_ns": crate::read_trace::ns(acquired.duration_since(requested)),
-            "report_ns": crate::read_trace::ns(acquired.elapsed()),
-            "completed_unix_ns": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(io::Error::other)?.as_nanos().min(u128::from(u64::MAX)) as u64
-        }));
-        Ok(report)
+        let report = backend.report();
+        let report_ns = crate::read_trace::ns(acquired.elapsed());
+        let completed_unix_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(io::Error::other)?
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64;
+        serde_json::to_value(Snapshot {
+            backend: report,
+            pending: backend.pending_count(),
+            snapshot_timing: SnapshotTiming {
+                backend_lock_ns: crate::read_trace::ns(acquired.duration_since(requested)),
+                report_ns,
+                completed_unix_ns,
+            },
+        })
+        .map_err(io::Error::other)
     }
 
     /// Wake an unconnected listener and close any accepted frontend.
@@ -89,11 +120,12 @@ impl Service {
         let pending_at_disconnect = backend.pending_count();
         eprintln!("cas-daemon: draining {pending_at_disconnect} requests");
         let drain_result = backend.drain();
-        let mut report = backend.report(
+        let report = FinalReport {
+            backend: backend.report(),
+            connection_ok: result.is_ok() && drain_result.is_ok() && backend.failure().is_none(),
             pending_at_disconnect,
-            result.is_ok() && drain_result.is_ok() && backend.failure().is_none(),
-        );
-        report["pending_after_drain"] = backend.pending_count().into();
+            pending_after_drain: backend.pending_count(),
+        };
         serde_json::to_writer_pretty(self.report, &report)?;
         if let Some(failure) = backend.failure() {
             return Err(io::Error::other(failure));
@@ -223,6 +255,148 @@ mod tests {
             assert_eq!(report["pending_after_drain"], 0);
             assert!(!socket.exists());
             drop((frontend, control));
+        }
+    }
+
+    /// Key paths captured from the untyped `serde_json::json!` reports these
+    /// structs replaced. Nested reports owned by other modules are not expanded.
+    #[test]
+    fn typed_reports_keep_the_untyped_key_set() {
+        use crate::BackendKind;
+        const COMMON: &[&str] = &[
+            "admission",
+            "backend",
+            "bounce_requests",
+            "errors",
+            "fatal_error",
+            "flush_negotiated",
+            "flushes",
+            "guest_payload_copy_bytes",
+            "inflight",
+            "local",
+            "metadata",
+            "negotiated_features",
+            "peak_inflight",
+            "queue_requests",
+            "queues",
+            "read_bytes",
+            "read_progress",
+            "read_trace",
+            "reads",
+            "restartable",
+            "restored_pending",
+            "restored_used",
+            "schema_version",
+            "staging",
+            "write_bytes",
+            "writes",
+            "zero_bytes",
+            "zeroes",
+        ];
+        const FINAL: &[&str] = &[
+            "connection_ok",
+            "pending_after_drain",
+            "pending_at_disconnect",
+        ];
+        const SNAPSHOT: &[&str] = &[
+            "pending",
+            "snapshot_timing",
+            "snapshot_timing.backend_lock_ns",
+            "snapshot_timing.completed_unix_ns",
+            "snapshot_timing.report_ns",
+        ];
+        const STAGING: &[&str] = &[
+            "staging.appended",
+            "staging.durable",
+            "staging.image_bytes",
+            "staging.log_bytes",
+            "staging.mapped_blocks",
+            "staging.recovered_tail_bytes",
+        ];
+        const READ_PROGRESS: &[&str] = &[
+            "read_progress.bypassed_reads",
+            "read_progress.descriptor_allocations",
+            "read_progress.descriptor_reserve_bytes",
+            "read_progress.discovered",
+            "read_progress.read_admission",
+            "read_progress.waiting_per_queue",
+        ];
+        const INFLIGHT: &[&str] = &[
+            "inflight.active",
+            "inflight.recovered_p",
+            "inflight.replay_copy_bytes",
+            "inflight.replayed_mutations",
+            "inflight.replayed_requests",
+            "inflight.replayed_write_bytes",
+            "inflight.saved_p",
+        ];
+        fn paths(value: &serde_json::Value, prefix: &str, out: &mut Vec<String>) {
+            let Some(fields) = value.as_object() else {
+                return;
+            };
+            for (key, value) in fields {
+                let path = format!("{prefix}{key}");
+                if matches!(
+                    path.as_str(),
+                    "inflight" | "read_progress" | "staging" | "snapshot_timing"
+                ) {
+                    paths(value, &format!("{path}."), out);
+                }
+                out.push(path);
+            }
+        }
+        fn expected(parts: &[&[&str]]) -> Vec<String> {
+            let mut all: Vec<String> = parts
+                .iter()
+                .flat_map(|part| part.iter().map(|s| s.to_string()))
+                .collect();
+            all.sort();
+            all
+        }
+        let directory = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let image = directory.path().join("image.raw");
+        File::create(&image).unwrap().set_len(8192).unwrap();
+        let open = |name: &str, restartable| {
+            Backend::open_with_recovery(
+                &directory.path().join(name),
+                BackendKind::LocalAsync,
+                Some(8192),
+                restartable,
+                crate::fault::Fault::default(),
+            )
+            .unwrap()
+        };
+        let cases: [(Backend, &[&[&str]]); 4] = [
+            (Backend::new(&image).unwrap(), &[]),
+            (
+                Backend::open(&directory.path().join("staging.log"), true, Some(8192)).unwrap(),
+                &[STAGING],
+            ),
+            (open("local", false), &[READ_PROGRESS]),
+            (open("live", true), &[READ_PROGRESS, INFLIGHT]),
+        ];
+        for (backend, extra) in cases {
+            let report = serde_json::to_value(FinalReport {
+                backend: backend.report(),
+                connection_ok: true,
+                pending_at_disconnect: 0,
+                pending_after_drain: 0,
+            })
+            .unwrap();
+            let mut found = Vec::new();
+            paths(&report, "", &mut found);
+            found.sort();
+            assert_eq!(found, expected(&[&[COMMON, FINAL], extra].concat()));
+            let service = Service::new(
+                backend,
+                File::create(directory.path().join("unused.json")).unwrap(),
+            )
+            .unwrap();
+            let snapshot = service.control().unwrap().snapshot().unwrap();
+            let mut found = Vec::new();
+            paths(&snapshot, "", &mut found);
+            found.sort();
+            assert_eq!(found, expected(&[&[COMMON, SNAPSHOT], extra].concat()));
         }
     }
 

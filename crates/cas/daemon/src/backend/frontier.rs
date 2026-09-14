@@ -23,6 +23,16 @@ pub(super) struct Frontier {
     pub(super) bypassed: u64,
 }
 
+#[derive(serde::Serialize)]
+pub(super) struct Report {
+    discovered: u64,
+    waiting_per_queue: [usize; CONCURRENT_QUEUES],
+    bypassed_reads: u64,
+    descriptor_reserve_bytes: usize,
+    descriptor_allocations: cas_core::budget::Usage,
+    read_admission: admission::Report,
+}
+
 impl Frontier {
     pub(super) fn new(metadata: &Arc<Budget>) -> io::Result<Self> {
         let bytes = SNAPSHOT_BYTES;
@@ -45,15 +55,15 @@ impl Frontier {
         })
     }
 
-    pub(super) fn report(&self) -> serde_json::Value {
-        serde_json::json!({
-            "discovered": self.next_order,
-            "waiting_per_queue": self.queues.each_ref().map(|queue| queue.len()),
-            "bypassed_reads": self.bypassed,
-            "descriptor_reserve_bytes": SNAPSHOT_BYTES,
-            "descriptor_allocations": self.spans.usage(),
-            "read_admission": self.reads.snapshot(),
-        })
+    pub(super) fn report(&self) -> Report {
+        Report {
+            discovered: self.next_order,
+            waiting_per_queue: self.queues.each_ref().map(|queue| queue.len()),
+            bypassed_reads: self.bypassed,
+            descriptor_reserve_bytes: SNAPSHOT_BYTES,
+            descriptor_allocations: self.spans.usage(),
+            read_admission: self.reads.snapshot(),
+        }
     }
 
     pub(super) fn retry_at(&self) -> Option<Instant> {
@@ -160,10 +170,7 @@ impl Backend {
                     .checked_add(1)
                     .ok_or_else(|| io::Error::other("discovery IDs exhausted"))?;
                 let gate = self.storage.completion_gate();
-                let mut guard = gate.as_ref().map(|gate| gate.lock()).transpose()?;
-                if let Some(error) = guard.as_ref().and_then(|state| state.failure.as_ref()) {
-                    return Err(io::Error::other(error.clone()));
-                }
+                let mut guard = gate.as_ref().map(|gate| gate.lock_checked()).transpose()?;
                 if let Some(carrier) = guard
                     .as_deref_mut()
                     .and_then(|state| state.carrier.as_mut())
@@ -192,10 +199,7 @@ impl Backend {
                 break;
             }
             let gate = self.storage.completion_gate();
-            let mut guard = gate.as_ref().map(|gate| gate.lock()).transpose()?;
-            if let Some(error) = guard.as_ref().and_then(|state| state.failure.as_ref()) {
-                return Err(io::Error::other(error.clone()));
-            }
+            let mut guard = gate.as_ref().map(|gate| gate.lock_checked()).transpose()?;
             let mut selected = None;
             for candidate in 0..frontier.queues[index].len() {
                 if !frontier.eligible(index, candidate) {

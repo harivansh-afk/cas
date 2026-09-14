@@ -1,4 +1,7 @@
-//! V2 adapters. The queue thread gathers into its final append allocation.
+//! Local append storage behind one image. `Local` admits requests on the queue
+//! thread and gathers writes straight into their final append allocation;
+//! `Shared` holds the budgets, health gate and metrics that admission and the
+//! `Worker` (synchronous) or reactor (concurrent) execution both consult.
 pub(crate) mod host;
 mod pools;
 pub(crate) mod pressure;
@@ -154,7 +157,7 @@ impl Command {
                 id,
                 data,
                 result: Err(io::Error::other(error.to_owned())),
-                _permit: Some(permit),
+                permit: Some(permit),
             })
         };
         match self {
@@ -216,8 +219,8 @@ pub struct Shared {
     metrics: Mutex<Metrics>,
     pressure: pressure::Counters,
     final_status: Mutex<append::Status>,
-    pub health: Health,
-    pub injection: OnceLock<crate::fault::Injection>,
+    pub(crate) health: Health,
+    pub(crate) injection: OnceLock<crate::fault::Injection>,
     window: Option<BudgetArc<window::Window>>,
     admission: Option<BudgetArc<host::admission::Admission>>,
 }
@@ -435,8 +438,8 @@ pub struct Local {
     packing: Option<Packing>,
     rejected: BudgetQueue<Completed>,
     paused: bool,
-    pub shared: BudgetArc<Shared>,
-    pub status: append::Status,
+    pub(crate) shared: BudgetArc<Shared>,
+    pub(crate) status: append::Status,
 }
 
 impl Local {
@@ -565,6 +568,7 @@ impl Local {
             .map(Option::flatten)
     }
 
+    #[cfg(test)]
     pub fn prepare(&mut self, kind: Kind) -> io::Result<Option<Permit>> {
         self.admit(kind).map(pressure::Decision::ready)
     }
@@ -579,6 +583,9 @@ impl Local {
         let permit = match self.shared.admit(kind)? {
             pressure::Decision::Ready(permit) => permit,
             pressure::Decision::Waiting(reason) => {
+                // A shared-host refusal clears through the reactor (rotation,
+                // index fence, host reclaim). An unsealed batch holds admitted
+                // WAL slots it never sees, so hand the batch over before waiting.
                 if self.shared.window.is_some() {
                     self.seal()?;
                 }
@@ -835,7 +842,7 @@ impl Local {
             "append":self.shared.pools.append.usage(),
             "read":self.shared.pools.read.usage(), "control":self.shared.pools.control.usage(),
             "host_append":self.shared.pools.append.host_usage(), "host_read":self.shared.pools.read.host_usage(),
-            "admission_denials": self.shared.pressure.report(),
+            "admission_denials": &self.shared.pressure,
             "staging_quota": self.shared.window.as_ref().and_then(|window| window.quota()),
             "wal_window": self.shared.window.as_ref().map(|window| window.status()) })
     }
@@ -936,12 +943,28 @@ impl Worker {
                     id,
                     data,
                     result,
-                    _permit: Some(permit),
+                    permit: Some(permit),
                 },
                 self.log.status(),
             ))
             .map_err(io::Error::other)?;
         notify(&self.wake.0)
+    }
+
+    /// Every member of an append batch completes with the batch's one result.
+    fn complete_writes(
+        &self,
+        writes: BudgetVec<Write, BudgetAllocator>,
+        result: io::Result<()>,
+    ) -> io::Result<()> {
+        for write in writes {
+            let result = result
+                .as_ref()
+                .copied()
+                .map_err(|error| io::Error::other(error.to_string()));
+            self.send(write.id, write.data.completion(), result, write.permit)?;
+        }
+        Ok(())
     }
 
     fn run(mut self, input: mailbox::Receiver<Command>) {
@@ -1025,13 +1048,7 @@ impl Worker {
                     .lock()
                     .expect("metrics poisoned")
                     .allocations_released += 1;
-                for write in writes {
-                    let result = result
-                        .as_ref()
-                        .copied()
-                        .map_err(|error| io::Error::other(error.to_string()));
-                    self.send(write.id, write.data.completion(), result, write.permit)?;
-                }
+                self.complete_writes(writes, result)?;
             }
             Command::Io(Io {
                 id,

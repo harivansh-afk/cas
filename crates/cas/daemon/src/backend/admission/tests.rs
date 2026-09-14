@@ -180,7 +180,7 @@ fn capacity_wait_survives_the_old_deadline_and_control_keeps_its_reserve() {
         Admission::Waiting
     ));
     assert_eq!(
-        backend.report(0, true)["local"]["admission_denials"]["request_credits"],
+        serde_json::to_value(backend.report()).unwrap()["local"]["admission_denials"]["request_credits"],
         1
     );
     let flush = Request::Flush(Completion {
@@ -206,7 +206,7 @@ fn capacity_wait_survives_the_old_deadline_and_control_keeps_its_reserve() {
         Admission::Accepted(_)
     ));
     assert_eq!(
-        backend.report(0, true)["local"]["requests"]["admitted"],
+        serde_json::to_value(backend.report()).unwrap()["local"]["requests"]["admitted"],
         129
     );
     backend.admission.changed(StateChange::QueueStop(0));
@@ -300,7 +300,7 @@ fn long_capacity_wait_keeps_the_descriptor_and_resumes_without_an_error_or_id_ga
         );
     }
     assert_eq!(
-        backend.report(0, true)["local"]["metrics"]["gather_calls"],
+        serde_json::to_value(backend.report()).unwrap()["local"]["metrics"]["gather_calls"],
         0
     );
     drop(permits);

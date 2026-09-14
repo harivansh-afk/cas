@@ -1,4 +1,4 @@
-// Vhost-user block device with reference storage and a concurrent local adapter.
+//! Vhost-user block device with reference storage and a concurrent local adapter.
 
 use cas_daemon::{BackendKind, backend, fault};
 

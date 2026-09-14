@@ -1,5 +1,4 @@
-// Decode the virtio wire format once
-// Execution receives validated operations
+//! Decode the virtio wire format once so execution receives validated operations.
 
 use allocator_api2::vec::Vec as BudgetVec;
 use cas_core::budget::BudgetAllocator;

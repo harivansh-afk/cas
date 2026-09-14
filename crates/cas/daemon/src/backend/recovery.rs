@@ -8,7 +8,6 @@ use cas_core::append::{
 };
 use cas_core::budget::{BudgetAllocator, BudgetArc};
 use std::fs::File;
-use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
 use vhost::vhost_user::message::VhostUserInflight;
 
@@ -57,12 +56,28 @@ impl Session {
     pub(super) fn active(&self) -> bool {
         self.phase == Phase::Active
     }
-    pub fn report(&self) -> serde_json::Value {
-        serde_json::json!({ "active": self.phase == Phase::Active,
-            "replayed_requests": self.replayed_requests, "replayed_mutations": self.replayed_mutations,
-            "replay_copy_bytes": self.replay_copy_bytes, "replayed_write_bytes": self.replayed_write_bytes, "saved_p": self.saved_p,
-            "recovered_p": self.recovered_p })
+    pub(super) fn report(&self) -> Report {
+        Report {
+            active: self.phase == Phase::Active,
+            replayed_requests: self.replayed_requests,
+            replayed_mutations: self.replayed_mutations,
+            replay_copy_bytes: self.replay_copy_bytes,
+            replayed_write_bytes: self.replayed_write_bytes,
+            saved_p: self.saved_p,
+            recovered_p: self.recovered_p,
+        }
     }
+}
+
+#[derive(serde::Serialize)]
+pub(super) struct Report {
+    active: bool,
+    replayed_requests: usize,
+    replayed_mutations: usize,
+    replay_copy_bytes: u64,
+    replayed_write_bytes: u64,
+    saved_p: u64,
+    recovered_p: u64,
 }
 
 fn geometry(message: &VhostUserInflight) -> io::Result<Geometry> {
@@ -225,10 +240,7 @@ impl Backend {
                 .carrier
                 .as_ref()
                 .ok_or_else(|| io::Error::other("missing fresh carrier"))?;
-            let (_, original) = current.export()?;
-            let expected = original.metadata()?;
-            let actual = file.metadata()?;
-            if (expected.dev(), expected.ino()) != (actual.dev(), actual.ino()) {
+            if !current.same_file(&file)? {
                 return Err(io::Error::other("SET must return the current GET carrier"));
             }
             // QEMU sends SET after GET before queue setup, including on fresh boot.
@@ -618,9 +630,9 @@ impl Backend {
                         queue,
                         Admitted {
                             queue: entry.request.queue,
-                            id: entry.serial - 1,
+                            id: entry.request_id(),
                             request: Request::Read(data),
-                            permit: Permit::Local { _credits: permit },
+                            permit: Permit::Local { credits: permit },
                             inflight: Some(entry),
                         },
                         Some(&mut state),

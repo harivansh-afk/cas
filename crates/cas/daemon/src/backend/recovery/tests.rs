@@ -218,7 +218,7 @@ fn retained_read_uses_the_normal_owned_reactor_and_original_head() {
     assert_eq!(mem.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 2);
     assert_eq!(mem.read_obj::<u32>(GuestAddress(0x300c)).unwrap(), 0);
     backend.drain().unwrap();
-    let report = backend.report(0, true);
+    let report = serde_json::to_value(backend.report()).unwrap();
     assert_eq!(report["reads"], 1);
     assert_eq!(report["local"]["metrics"]["io_queued"], 1);
     assert_eq!(report["local"]["metrics"]["io_completed"], 1);
@@ -287,7 +287,7 @@ fn retained_rejected_write_replays_only_ioerr_without_gather_or_mutation() {
     assert_eq!(backend.pending_count(), 0);
     assert!(backend.failure.is_none());
     backend.drain().unwrap();
-    let report = backend.report(0, true);
+    let report = serde_json::to_value(backend.report()).unwrap();
     assert_eq!(report["writes"], 0);
     assert_eq!(report["local"]["status"]["published"], 0);
     assert_eq!(report["inflight"]["replayed_mutations"], 0);

@@ -1,4 +1,5 @@
 use super::*;
+use cas_core::budget::Usage;
 
 pub(super) const HOST_REQUESTS: usize = 1024;
 
@@ -20,10 +21,24 @@ pub(super) struct ReplayCredits {
     _append: cas_core::budget::Lease,
 }
 
+#[derive(serde::Serialize)]
+pub(super) struct Report {
+    requests: Usage,
+    read_requests: Usage,
+    append: Usage,
+    read: Usage,
+    control: Usage,
+}
+
 impl HostPools {
-    pub fn report(&self) -> serde_json::Value {
-        serde_json::json!({ "requests": self.requests.usage(), "read_requests": self.read_requests.usage(), "append": self.append.usage(),
-            "read": self.read.usage(), "control": self.control.usage() })
+    pub fn report(&self) -> Report {
+        Report {
+            requests: self.requests.usage(),
+            read_requests: self.read_requests.usage(),
+            append: self.append.usage(),
+            read: self.read.usage(),
+            control: self.control.usage(),
+        }
     }
 
     pub fn new() -> Self {

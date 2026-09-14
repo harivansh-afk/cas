@@ -88,7 +88,7 @@ impl QueueAdmission {
         {
             Some(Reason::Fairness) => 0,
             Some(Reason::Pending) => 1,
-            Some(Reason::Storage(reason)) => 2 + reason as usize,
+            Some(Reason::Storage(reason)) => read_trace::SCHEDULER_REASONS + reason as usize,
             None => unreachable!("waiting admission must have a reason"),
         }
     }
@@ -144,10 +144,10 @@ impl QueueAdmission {
         match result {
             Decision::Ready(mut permit) => {
                 if let Some(turn) = turn {
-                    let Permit::Local { _credits } = &mut permit else {
+                    let Permit::Local { credits } = &mut permit else {
                         unreachable!("only shared hosts schedule admission");
                     };
-                    _credits.fair_release = Some(turn.commit());
+                    credits.fair_release = Some(turn.commit());
                 }
                 Ok(Admission::Accepted(permit))
             }

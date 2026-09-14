@@ -3,6 +3,7 @@ use crate::{
     Host, Resources,
     backend::Backend,
     deadline::{Deadline, RECOVERY_TIMEOUT},
+    local::reserved_vec,
     recovery::{self, Inspection, Prefixes, RetainedHost},
     service::{Control, Service},
 };
@@ -103,13 +104,6 @@ impl Runtime {
     }
 }
 
-fn table<T>(count: usize, budget: &Arc<Budget>) -> io::Result<BudgetVec<T, BudgetAllocator>> {
-    let mut table = BudgetVec::new_in(BudgetAllocator::new(Arc::clone(budget)));
-    table
-        .try_reserve_exact(count)
-        .map_err(|_| io::ErrorKind::OutOfMemory)?;
-    Ok(table)
-}
 fn create_report(path: &Path) -> io::Result<File> {
     OpenOptions::new().write(true).create_new(true).open(path)
 }
@@ -155,7 +149,7 @@ fn outputs(
             Ok(_) => return Err(io::Error::other("socket path already exists")),
         }
     }
-    let mut outputs = table(config.endpoints.len(), &resources.metadata)?;
+    let mut outputs = reserved_vec(config.endpoints.len(), &resources.metadata)?;
     let host_report = create_report(&config.reports.join("host.json"))?;
     for endpoint in &config.endpoints {
         let id = u128::from_be_bytes(endpoint.image);
@@ -234,7 +228,7 @@ fn run(
     drop(config.reports);
     let deadline = Deadline::after(RECOVERY_TIMEOUT);
     let worker_resources = Arc::clone(resources);
-    let mut ids = table(outputs.len(), &resources.metadata)?;
+    let mut ids = reserved_vec(outputs.len(), &resources.metadata)?;
     ids.extend(outputs.iter().map(|output| output.image));
     let staging_bytes = config.staging_bytes;
     let mut runtime = deadline.run(move || {
@@ -274,8 +268,8 @@ fn run(
             )?)),
         }
     })?;
-    let mut services = table(outputs.len(), &resources.metadata)?;
-    let mut controls = table(outputs.len(), &resources.metadata)?;
+    let mut services = reserved_vec(outputs.len(), &resources.metadata)?;
+    let mut controls = reserved_vec(outputs.len(), &resources.metadata)?;
     for output in outputs {
         let service = Service::new(runtime.attach(output.image, deadline)?, output.report)?;
         controls.push((output.image, service.control()?));
@@ -329,7 +323,7 @@ fn run_services(
     mut telemetry: Option<Telemetry>,
 ) -> ServiceOutcome {
     let mut workers: BudgetVec<Option<JoinHandle<io::Result<()>>>, _> =
-        match table(services.len(), metadata) {
+        match reserved_vec(services.len(), metadata) {
             Ok(workers) => workers,
             Err(error) => {
                 return ServiceOutcome {

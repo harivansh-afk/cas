@@ -1,5 +1,5 @@
-// Owned storage operations. The staging reference runs in submission order on one worker
-// Raw IO retains its io_uring baseline and kernel-owned buffers.
+//! Owned storage operations. The staging reference runs in submission order on one worker;
+//! raw IO retains its io_uring baseline and kernel-owned buffers.
 
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
@@ -27,7 +27,7 @@ use vmm_sys_util::eventfd::EventFd;
 
 pub enum Permit {
     Reference,
-    Local { _credits: local::Permit },
+    Local { credits: local::Permit },
 }
 
 #[derive(Clone, Copy)]
@@ -72,7 +72,7 @@ pub struct Completed {
     pub data: CompletionData,
     pub result: io::Result<()>,
     // Owned data is destroyed before its admission and byte credits.
-    pub _permit: Option<local::Permit>,
+    pub permit: Option<local::Permit>,
 }
 
 pub enum CompletionData {
@@ -133,8 +133,8 @@ impl Storage {
         permit: Permit,
     ) -> io::Result<()> {
         match (self, permit) {
-            (Self::Local(local), Permit::Local { _credits }) => {
-                local.zero(id, head, offset, length, _credits)
+            (Self::Local(local), Permit::Local { credits }) => {
+                local.zero(id, head, offset, length, credits)
             }
             _ => Err(io::Error::other("ZERO requires local admission credits")),
         }
@@ -179,7 +179,7 @@ impl Storage {
             Self::Opening(_) => Err(io::Error::other("IO before inflight recovery")),
             Self::Local(local) => local
                 .admit(kind)
-                .map(|permit| permit.map(|credits| Permit::Local { _credits: credits })),
+                .map(|permit| permit.map(|credits| Permit::Local { credits })),
             _ => Ok(local::pressure::Decision::Ready(Permit::Reference)),
         }
     }
@@ -207,8 +207,8 @@ impl Storage {
     ) -> io::Result<()> {
         match self {
             Self::Local(local) => match permit {
-                Permit::Local { _credits } => {
-                    local.gather(id, head, offset, length, _credits, gather)
+                Permit::Local { credits } => {
+                    local.gather(id, head, offset, length, credits, gather)
                 }
                 Permit::Reference => Err(io::Error::other("local write without admission credits")),
             },
@@ -307,7 +307,7 @@ impl Storage {
                                 id,
                                 data: operation.into(),
                                 result,
-                                _permit: None,
+                                permit: None,
                             },
                             log.status(),
                         ))
@@ -371,7 +371,7 @@ impl Storage {
             Self::Raw(raw) => raw.enqueue(id, operation),
             Self::Opening(_) => Err(io::Error::other("IO before inflight recovery")),
             Self::Local(local) => match permit {
-                Permit::Local { _credits } => local.enqueue(id, operation, _credits),
+                Permit::Local { credits } => local.enqueue(id, operation, credits),
                 Permit::Reference => Err(io::Error::other("local IO without admission credits")),
             },
             Self::Staging(staging) => staging
@@ -521,7 +521,7 @@ impl Raw {
             id,
             data: operation.into(),
             result,
-            _permit: None,
+            permit: None,
         }))
     }
 }

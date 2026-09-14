@@ -367,7 +367,7 @@ fn retained_zero_variants_replace_written_data_without_gather_and_survive_compac
             assert_eq!(frontend.status(), 0);
             assert_eq!(frontend.used(), 2);
             assert_eq!(frontend.carrier.published(), 2);
-            let report = frontend.backend.report(0, true);
+            let report = serde_json::to_value(frontend.backend.report()).unwrap();
             assert_eq!(report["inflight"]["replayed_mutations"], 1);
             assert_eq!(report["inflight"]["replay_copy_bytes"], 0);
             assert_eq!(report["zeroes"], 1);

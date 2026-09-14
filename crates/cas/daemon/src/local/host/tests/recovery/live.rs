@@ -54,7 +54,7 @@ impl Replay for Oracle {
 }
 
 fn released(resources: &Resources) {
-    let usage = resources.pools.report();
+    let usage = serde_json::to_value(resources.pools.report()).unwrap();
     for pool in ["requests", "append", "read", "control"] {
         assert_eq!(usage[pool]["current"]["bytes"], 0);
         assert_eq!(usage[pool]["current"]["requests"], 0);
