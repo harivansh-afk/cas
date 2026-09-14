@@ -34,7 +34,7 @@ impl<W: Write> Journal<W> {
     fn new(writer: W, metadata: &Arc<Budget>) -> io::Result<Self> {
         Ok(Self {
             writer,
-            buffer: Buffer(table(RECORD_BYTES, metadata)?),
+            buffer: Buffer(reserved_vec(RECORD_BYTES, metadata)?),
             samples: 0,
             bytes: 0,
         })
@@ -154,7 +154,7 @@ mod tests {
             .unwrap();
             telemetry.journal.writer = File::options().write(true).open("/dev/full").unwrap();
             let result = run_services(
-                table(0, &resources.metadata).unwrap(),
+                reserved_vec(0, &resources.metadata).unwrap(),
                 &[],
                 &mut runtime,
                 &resources.metadata,
