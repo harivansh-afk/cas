@@ -15,7 +15,7 @@ mod local;
 mod read_trace;
 mod request;
 pub mod service;
-pub mod storage;
+pub(crate) mod storage;
 pub use local::host::fault::{Point as CompactionPoint, Selection as CompactionPause};
 pub use local::host::{
     CollectionHandle, CollectionReport, Host, Quiescence, Resources, Roots, SnapshotHandle,

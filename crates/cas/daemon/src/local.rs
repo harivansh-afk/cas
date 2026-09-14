@@ -565,6 +565,7 @@ impl Local {
             .map(Option::flatten)
     }
 
+    #[cfg(test)]
     pub fn prepare(&mut self, kind: Kind) -> io::Result<Option<Permit>> {
         self.admit(kind).map(pressure::Decision::ready)
     }

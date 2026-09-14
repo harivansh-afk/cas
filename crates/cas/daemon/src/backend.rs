@@ -315,11 +315,11 @@ fn gather(
 
 impl Backend {
     #[cfg(test)]
-    pub fn new(path: &Path) -> io::Result<Self> {
+    pub(crate) fn new(path: &Path) -> io::Result<Self> {
         Self::open(path, false, None)
     }
     #[cfg(test)]
-    pub fn open(path: &Path, staging: bool, create_bytes: Option<u64>) -> io::Result<Self> {
+    pub(crate) fn open(path: &Path, staging: bool, create_bytes: Option<u64>) -> io::Result<Self> {
         Self::open_with_recovery(
             path,
             if staging {
