@@ -245,12 +245,10 @@ impl Manifest {
     }
 
     fn healthy(&self) -> io::Result<()> {
-        if self.failed {
-            return Err(io::Error::other(
-                "manifest owner failed; explicit recovery required",
-            ));
-        }
-        Ok(())
+        crate::encoding::require_healthy(
+            self.failed,
+            "manifest owner failed; explicit recovery required",
+        )
     }
 
     pub fn tree(&self) -> io::Result<Tree<'_, File>> {

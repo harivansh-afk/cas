@@ -100,12 +100,7 @@ impl Catalog {
     }
 
     fn healthy(&self) -> io::Result<()> {
-        if self.failed {
-            return Err(io::Error::other(
-                "catalog failed; explicit recovery required",
-            ));
-        }
-        Ok(())
+        crate::encoding::require_healthy(self.failed, "catalog failed; explicit recovery required")
     }
 
     pub fn prepare(&self, change: Change) -> io::Result<Prepared> {

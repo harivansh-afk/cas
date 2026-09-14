@@ -86,12 +86,10 @@ struct State {
 
 impl State {
     fn healthy(&self) -> io::Result<()> {
-        if self.failed {
-            return Err(io::Error::other(
-                "chunk store failed; explicit recovery required",
-            ));
-        }
-        Ok(())
+        crate::encoding::require_healthy(
+            self.failed,
+            "chunk store failed; explicit recovery required",
+        )
     }
 }
 
