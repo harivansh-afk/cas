@@ -30,6 +30,11 @@ impl PageReader for std::fs::File {
     }
 }
 
+/// Tree pages precede the COMMIT page that ends a view.
+fn require_before_commit(offset: u64, end: u64) -> io::Result<()> {
+    require(offset < end - BLOCK_SIZE as u64, "tree page beyond COMMIT")
+}
+
 fn validate_view(commit: Commit, end: u64) -> io::Result<()> {
     require(
         end >= (2 * BLOCK_SIZE) as u64
@@ -89,10 +94,7 @@ impl<'a, P: PageReader> Tree<'a, P> {
     }
 
     fn read_node(&mut self, cursor: Cursor) -> io::Result<Node> {
-        require(
-            cursor.offset < self.end - BLOCK_SIZE as u64,
-            "tree page beyond COMMIT",
-        )?;
+        require_before_commit(cursor.offset, self.end)?;
         self.source
             .read_page(cursor.offset, self.scratch.as_mut_slice())?;
         self.reads = self.reads.saturating_add(1);
