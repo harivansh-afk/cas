@@ -219,8 +219,8 @@ pub struct Shared {
     metrics: Mutex<Metrics>,
     pressure: pressure::Counters,
     final_status: Mutex<append::Status>,
-    pub health: Health,
-    pub injection: OnceLock<crate::fault::Injection>,
+    pub(crate) health: Health,
+    pub(crate) injection: OnceLock<crate::fault::Injection>,
     window: Option<BudgetArc<window::Window>>,
     admission: Option<BudgetArc<host::admission::Admission>>,
 }
@@ -438,8 +438,8 @@ pub struct Local {
     packing: Option<Packing>,
     rejected: BudgetQueue<Completed>,
     paused: bool,
-    pub shared: BudgetArc<Shared>,
-    pub status: append::Status,
+    pub(crate) shared: BudgetArc<Shared>,
+    pub(crate) status: append::Status,
 }
 
 impl Local {
