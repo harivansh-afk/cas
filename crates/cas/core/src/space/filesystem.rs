@@ -2,6 +2,7 @@
 use super::{Limits, Reservation, Space, Status};
 use crate::{encoding::require, segments::Tickets};
 use std::{
+    fmt,
     fs::File,
     io,
     os::{fd::AsRawFd, unix::fs::MetadataExt},
@@ -182,7 +183,15 @@ pub struct Permit {
 impl Permit {
     /// Serialize a complete allocation transaction. The closure must not return
     /// while kernel IO still owns its output or recursively acquire this owner.
-    pub fn run<T>(mut self, operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    pub fn run<T>(self, operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+        self.run_with(operation)
+    }
+
+    /// `run` for operations whose own error type also carries IO failures.
+    pub fn run_with<T, E: From<io::Error> + fmt::Display>(
+        mut self,
+        operation: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E> {
         let _owner = self.governor.lock()?;
         let mut attempt = Attempt {
             governor: &self.governor,
@@ -193,10 +202,12 @@ impl Permit {
         let observed = attempt.finish();
         match (result, observed) {
             (Ok(value), Ok(())) => Ok(value),
-            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(error)) => Err(error.into()),
             (Err(operation), Err(observation)) => Err(io::Error::other(format!(
                 "allocation operation: {operation}; physical observation: {observation}"
-            ))),
+            ))
+            .into()),
         }
     }
 }

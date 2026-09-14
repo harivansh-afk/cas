@@ -267,8 +267,8 @@ impl Recovery {
         self.require_prefix(required)?;
         self.repair(repair)?;
         repair.output(self.log.config.segment_bytes, || {
-            self.log.rotate(None).map_err(io::Error::other)?;
-            self.log.flush().map_err(io::Error::other)
+            self.log.rotate(None)?;
+            self.log.flush()
         })?;
         Ok(self.log)
     }
@@ -489,9 +489,7 @@ impl LivePlan {
         let mut log = self.recovery.log;
         // A retained fence may fill its segment. Only finish establishes E.
         if log.offset + BLOCK_SIZE as u64 > log.config.segment_bytes {
-            repair.output(log.config.segment_bytes, || {
-                log.rotate(Some(self.epoch)).map_err(io::Error::other)
-            })?;
+            repair.output(log.config.segment_bytes, || log.rotate(Some(self.epoch)))?;
         }
         Ok(LiveRecovery {
             log,
@@ -542,9 +540,7 @@ impl LiveRecovery {
             crate::space::Recovery::default,
             crate::space::Recovery::governed,
         );
-        repair.output(self.log.config.segment_bytes, || {
-            self.log.append(builder).map_err(io::Error::other)
-        })?;
+        repair.output(self.log.config.segment_bytes, || self.log.append(builder))?;
         self.next += 1;
         Ok(mutation)
     }
@@ -557,9 +553,7 @@ impl LiveRecovery {
             crate::space::Recovery::default,
             crate::space::Recovery::governed,
         );
-        repair.output(self.log.config.segment_bytes, || {
-            self.log.flush().map_err(io::Error::other)
-        })?;
+        repair.output(self.log.config.segment_bytes, || self.log.flush())?;
         Ok(self.log)
     }
 }
