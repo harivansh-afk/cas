@@ -1,4 +1,4 @@
-// Queue execution: retain owned IO until completion and publish against one memory snapshot.
+//! Queue execution: retain owned IO until completion and publish against one memory snapshot.
 
 mod admission;
 mod frontier;
