@@ -5,8 +5,10 @@ mod lifecycle;
 mod pending;
 pub(crate) mod recovery;
 use crate::inflight::Entry;
+use crate::read_trace::{self, Observer};
 use admission::Admission;
 use recovery::Session;
+use std::time::Instant;
 
 use cas_core::budget::Budget;
 use pending::Pending;
@@ -111,6 +113,7 @@ pub struct Backend {
     change_deadline: Option<std::time::Instant>,
     recovery_deadline: Option<Deadline>,
     admission: admission::QueueAdmission,
+    read_trace: Option<allocator_api2::boxed::Box<Observer, cas_core::budget::BudgetAllocator>>,
     deadline_timer: Option<vmm_sys_util::timerfd::TimerFd>,
     blocked_queues: [bool; CONCURRENT_QUEUES],
     rebase_queues: [bool; CONCURRENT_QUEUES],
@@ -362,6 +365,13 @@ impl Backend {
             },
             &metadata,
         )?;
+        let read_trace = if matches!(kind, BackendKind::LocalAsync)
+            && std::env::var_os("CAS_TRACE_READS").is_some_and(|value| value == "1")
+        {
+            Some(Observer::new(&metadata)?)
+        } else {
+            None
+        };
         let capacity_bytes = storage.image_bytes();
         let zeroes_supported = storage.shared_host();
         let exit = vmm_sys_util::event::new_event_consumer_and_notifier(
@@ -390,6 +400,7 @@ impl Backend {
             change_deadline: None,
             recovery_deadline,
             admission: admission::QueueAdmission::default(),
+            read_trace,
             deadline_timer,
             blocked_queues: [false; CONCURRENT_QUEUES],
             rebase_queues: [false; CONCURRENT_QUEUES],
@@ -448,6 +459,7 @@ impl Backend {
             "restartable":self.restartable, "restored_used":self.restored_used, "restored_pending":self.restored_pending,
             "local":self.storage.local_report(),
             "admission":self.admission.snapshot(),
+            "read_trace":self.read_trace.as_deref(),
             "metadata":self.metadata.usage(),
             "staging":self.storage.status().map(|s| serde_json::json!({
                 "image_bytes":s.image_bytes, "appended":s.appended, "durable":s.durable,
@@ -642,16 +654,28 @@ impl Backend {
     }
     fn complete(&mut self, mem: &GuestMemoryMmap, vrings: &[VringMutex]) -> io::Result<()> {
         loop {
-            let Some(completed) = self.storage.try_complete()? else {
+            let Some(mut completed) = self.storage.try_complete()? else {
                 return Ok(());
             };
             let pending = self
                 .pending
                 .remove(&completed.id)
                 .ok_or_else(|| io::Error::other("unknown IO completion"))?;
+            let mut trace = completed
+                ._permit
+                .as_mut()
+                .and_then(|permit| permit.trace.take());
+            if let Some(trace) = &mut trace {
+                trace.frontend_received_ns = trace.at();
+            }
+            let locking = trace.as_ref().map(|_| Instant::now());
             let mut queue = vrings[usize::from(pending.completion.queue)].get_mut();
+            if let (Some(trace), Some(locking)) = (&mut trace, locking) {
+                trace.completion_lock_ns += read_trace::ns(locking.elapsed());
+            }
             let state = &mut *queue;
             let gate = self.storage.completion_gate();
+            let locking = trace.as_ref().map(|_| Instant::now());
             let mut guard = gate
                 .as_ref()
                 .map(|gate| {
@@ -659,6 +683,9 @@ impl Backend {
                         .map_err(|_| io::Error::other("completion gate poisoned"))
                 })
                 .transpose()?;
+            if let (Some(trace), Some(locking)) = (&mut trace, locking) {
+                trace.completion_lock_ns += read_trace::ns(locking.elapsed());
+            }
             let failure = guard
                 .as_ref()
                 .and_then(|guard| guard.failure.as_ref())
@@ -675,6 +702,10 @@ impl Backend {
                     None,
                     guard.as_deref_mut(),
                 )?;
+                if let (Some(observer), Some(mut trace)) = (&mut self.read_trace, trace.take()) {
+                    trace.finished_ns = trace.at();
+                    observer.complete(*trace);
+                }
                 if self.storage.status().is_some() || self.storage.is_local() {
                     return Err(error);
                 }
@@ -692,6 +723,12 @@ impl Backend {
                         Some((&pending.segments, buffer.as_slice())),
                         guard.as_deref_mut(),
                     )?;
+                    if let (Some(observer), Some(mut trace)) = (&mut self.read_trace, trace.take())
+                    {
+                        trace.finished_ns = trace.at();
+                        trace.success = true;
+                        observer.complete(*trace);
+                    }
                     self.counters.reads += 1;
                     self.counters.read_bytes += buffer.as_slice().len() as u64;
                 }
@@ -782,7 +819,13 @@ impl Backend {
         if self.blocked_queues[usize::from(queue)] {
             return Ok(());
         }
+        let locking = self.read_trace.as_ref().map(|_| Instant::now());
         let mut state = vring.get_mut();
+        if let (Some(observer), Some(locking)) = (&mut self.read_trace, locking) {
+            let waited = read_trace::ns(locking.elapsed());
+            observer.queue_lock_wait_ns += waited;
+            observer.max_queue_lock_wait_ns = observer.max_queue_lock_wait_ns.max(waited);
+        }
         if !state.is_enabled() || !state.get_queue().ready() {
             return Ok(());
         }
@@ -825,9 +868,24 @@ impl Backend {
             if !self.concurrent && self.pending.len() >= limit {
                 break;
             }
+            if let Some(observer) = &mut self.read_trace {
+                let ring = state.get_queue();
+                observer.observe(
+                    queue,
+                    ring.next_avail(),
+                    ring.avail_idx(&**mem, Ordering::Acquire)
+                        .ok()
+                        .map(|index| index.0),
+                    ring.size(),
+                    Instant::now(),
+                );
+            }
             let Some(NextChain { chain, next_avail }) = peek(mem.clone(), &mut state)? else {
                 break;
             };
+            if let Some(observer) = &mut self.read_trace {
+                observer.head(queue, next_avail.wrapping_sub(1), Instant::now());
+            }
             let request = decode_chain(mem, chain, self.capacity_bytes, &self.metadata)?
                 .negotiated(self.negotiated_features & self.features());
             let next_id = self
@@ -848,6 +906,14 @@ impl Backend {
             let admission =
                 self.prepare_admission(queue, next_avail.wrapping_sub(1), &request, limit)?;
             if matches!(admission, Admission::Waiting) {
+                if let Some(observer) = &mut self.read_trace {
+                    observer.waiting(
+                        queue,
+                        next_avail.wrapping_sub(1),
+                        matches!(request, Request::Write(_)),
+                        Instant::now(),
+                    );
+                }
                 break;
             }
             self.admission.finish_wait(queue, true);
@@ -884,7 +950,19 @@ impl Backend {
             ) {
                 self.queue_requests[usize::from(queue)] += 1;
             }
-            if let Admission::Accepted(permit) = admission {
+            let trace = self.read_trace.as_mut().and_then(|observer| {
+                let read = match &request {
+                    Request::Read(data) => Some((id, data.offset, data.len)),
+                    _ => None,
+                };
+                let trace =
+                    observer.consume(queue, next_avail.wrapping_sub(1), read, Instant::now());
+                trace.and_then(|trace| observer.own(trace))
+            });
+            if let Admission::Accepted(mut permit) = admission {
+                if let Permit::Local { _credits } = &mut permit {
+                    _credits.trace = trace;
+                }
                 self.enqueue(
                     mem,
                     &mut state,

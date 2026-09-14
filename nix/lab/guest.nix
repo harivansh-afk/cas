@@ -3,6 +3,7 @@
   pkgs,
   modulesPath,
   backend ? "cas",
+  guestCores ? 1,
   ...
 }:
 {
@@ -39,7 +40,7 @@
   virtualisation = {
     diskImage = null;
     memorySize = 512;
-    cores = 1;
+    cores = guestCores;
     graphics = false;
     writableStore = false;
     useHostCerts = false;

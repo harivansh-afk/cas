@@ -158,6 +158,20 @@ impl Backend {
                 self.rebase_queues[index] = false;
             }
             self.admission.changed(change);
+            if let Some(observer) = &mut self.read_trace {
+                match change {
+                    StateChange::Memory | StateChange::Reset | StateChange::Attachment => {
+                        observer.reset(None)
+                    }
+                    StateChange::QueueConfiguration(index)
+                    | StateChange::QueueStop(index)
+                    | StateChange::QueueEnable {
+                        index,
+                        enabled: false,
+                    } => observer.reset(Some(index)),
+                    _ => (),
+                }
+            }
             self.rearm_deadline_timer()?;
             self.validate_used_cursors(vrings)?;
             if let Storage::Local(local) = &mut self.storage {

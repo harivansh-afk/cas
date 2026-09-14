@@ -160,6 +160,15 @@
               source_path = toString self.outPath;
             };
           };
+          casctl-read-probe = import ./nix/lab {
+            inherit pkgs lib nixpkgs;
+            guestCores = 2;
+            traceReads = true;
+            provenance = {
+              source_revision = self.rev or self.dirtyRev or "unversioned";
+              source_path = toString self.outPath;
+            };
+          };
           vm-smoke = raw;
           daemon-smoke = daemon;
           staging-smoke = staging;

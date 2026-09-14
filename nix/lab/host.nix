@@ -3,6 +3,7 @@
   pkgs,
   cas,
   guests,
+  traceReads ? false,
   ...
 }:
 let
@@ -58,6 +59,7 @@ in
     postStart = builtins.readFile ../guest/sshd-post-start.sh;
   };
   systemd.services.cas-fixture = {
+    environment = lib.optionalAttrs traceReads { CAS_TRACE_READS = "1"; };
     path = with pkgs; [
       coreutils
       util-linux

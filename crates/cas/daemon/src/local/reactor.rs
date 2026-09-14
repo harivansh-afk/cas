@@ -334,6 +334,11 @@ impl Reactor {
         } else {
             0
         };
+        if let Work::Read(read) = &mut pending.work
+            && let Some(trace) = read.trace()
+        {
+            trace.submission_wait_ns += waited;
+        }
         pending.submitted = Some(now);
         pending.ready = None;
         let mut metrics = self.worker.shared.metrics.lock().expect("metrics poisoned");
@@ -380,7 +385,10 @@ impl Reactor {
     fn receive(&mut self) {
         loop {
             match self.input.try_recv() {
-                Ok(Command::Io(io)) if matches!(io.operation, Operation::Read { .. }) => {
+                Ok(Command::Io(mut io)) if matches!(io.operation, Operation::Read { .. }) => {
+                    if let Some(trace) = &mut io.permit.trace {
+                        trace.received_ns = trace.at();
+                    }
                     self.reads.push_back(io)
                 }
                 Ok(command) => {
@@ -446,7 +454,15 @@ impl Reactor {
         if pending.ready.is_some() {
             return Err(io::Error::other("duplicate local CQE"));
         }
-        pending.ready = Some(Instant::now());
+        let now = Instant::now();
+        if let Work::Read(read) = &mut pending.work {
+            let stage = read.trace_stage();
+            if let (Some(trace), Some(submitted)) = (read.trace(), pending.submitted) {
+                trace.io_ns[stage] += nanos(now.duration_since(submitted));
+                trace.io_calls[stage] += 1;
+            }
+        }
+        pending.ready = Some(now);
         self.worker
             .shared
             .metrics
@@ -900,6 +916,10 @@ impl Reactor {
     }
 
     fn start_read(&mut self, mut io: Io) -> io::Result<()> {
+        if let Some(trace) = &mut io.permit.trace {
+            trace.started_ns = trace.at();
+        }
+        let preparing = io.permit.trace.as_ref().map(|_| Instant::now());
         let Operation::Read { offset, buffer } = &mut io.operation else {
             unreachable!()
         };
@@ -927,7 +947,11 @@ impl Reactor {
         // SAFETY: the unique box above was initialized exactly once with Read;
         // no fallible preparation occurs until this owner is fully initialized.
         let mut read = unsafe { allocation.assume_init() };
-        if let Err(error) = read.prepare(self.worker.port.as_ref()) {
+        let prepared = read.prepare(self.worker.port.as_ref());
+        if let (Some(trace), Some(preparing)) = (read.trace(), preparing) {
+            trace.prepare_ns += nanos(preparing.elapsed());
+        }
+        if let Err(error) = prepared {
             return self.fail_read(read, error);
         }
         if read.done() {

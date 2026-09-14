@@ -28,6 +28,60 @@ fn shared(backend: &Backend) -> cas_core::budget::BudgetArc<local::Shared> {
 }
 
 #[test]
+fn read_trace_follows_an_actual_read_from_available_to_used() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut backend = Backend::open_with_recovery(
+        &directory.path().join("log"),
+        BackendKind::LocalAsync,
+        Some(0x10000),
+        false,
+        Fault::default(),
+    )
+    .unwrap();
+    let (memory, vring) = crate::backend::tests::queue();
+    let mem = memory.memory();
+    backend.update_memory(memory.clone()).unwrap();
+    backend.negotiated_features = REQUIRED_FEATURES;
+    backend.read_trace = Some(crate::read_trace::Observer::new(&backend.metadata).unwrap());
+    crate::backend::tests::data_chain(&mem, VIRTIO_BLK_T_IN);
+    mem.write_obj(1u16, GuestAddress(0x2002)).unwrap();
+    backend.process(std::slice::from_ref(&vring)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while backend.pending_count() != 0 {
+        backend
+            .complete(&mem, std::slice::from_ref(&vring))
+            .unwrap();
+        assert!(Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    let observer = backend.read_trace.as_ref().unwrap();
+    assert_eq!(observer.completed_reads, 1);
+    assert_eq!(observer.missing_observations, 0);
+    assert_eq!(observer.dropped_traces, 0);
+    let trace = observer.slowest.iter().flatten().next().unwrap();
+    assert!(trace.success);
+    assert_eq!((trace.queue, trace.offset, trace.bytes), (0, 0, 4096));
+    let milestones = [
+        trace.head_ns,
+        trace.admitted_ns,
+        trace.enqueued_ns,
+        trace.received_ns,
+        trace.started_ns,
+        trace.responded_ns,
+        trace.frontend_received_ns,
+        trace.finished_ns,
+    ];
+    assert!(milestones.windows(2).all(|pair| pair[0] <= pair[1]));
+    assert_eq!(vring.queue_next_avail(), 1);
+    assert_eq!(mem.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 1);
+    assert_eq!(
+        mem.read_obj::<u8>(GuestAddress(0x6000)).unwrap(),
+        Status::Ok as u8
+    );
+    backend.drain().unwrap();
+}
+
+#[test]
 fn metadata_release_resumes_on_the_admission_timer_without_a_guest_kick() {
     use cas_core::budget::Amount;
     let directory = tempfile::tempdir().unwrap();

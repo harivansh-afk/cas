@@ -95,6 +95,19 @@ impl Read {
     pub fn shared_io(&self) -> bool {
         self.shared_io
     }
+    pub fn trace(&mut self) -> Option<&mut crate::read_trace::ReadTrace> {
+        self.io.permit.trace.as_deref_mut()
+    }
+    pub fn trace_stage(&self) -> usize {
+        match self.stage {
+            Stage::Staging(_) => 0,
+            Stage::Manifest { .. } => 1,
+            Stage::Header(_) => 2,
+            Stage::Payload(_) => 3,
+            Stage::Waiting(_) => 4,
+            Stage::Done => unreachable!("done read has no IO stage"),
+        }
+    }
     pub fn into_io(self) -> Io {
         self.io
     }
@@ -131,6 +144,9 @@ impl Read {
     fn chunk(&mut self, hash: cas_core::chunk_index::Hash) -> io::Result<bool> {
         self.chunk_hash = Some(hash);
         if let Some(bytes) = self.cache.as_ref().and_then(|cache| cache.get(&hash)) {
+            if let Some(trace) = self.trace() {
+                trace.cache_hits += 1;
+            }
             self.response_block().copy_from_slice(bytes.as_slice());
             return Ok(false);
         }
@@ -166,6 +182,9 @@ impl Read {
         // A previous leader may have filled the cache between our miss and
         // registry lookup. Publish that value through our new cell as well.
         if let Some(bytes) = self.cache.as_ref().and_then(|cache| cache.peek(&hash)) {
+            if let Some(trace) = self.trace() {
+                trace.cache_hits += 1;
+            }
             let mut fetched = self.fetched.take().expect("owned fetch payload");
             fetched
                 .get_mut()
@@ -267,6 +286,15 @@ impl Read {
     }
 
     pub fn advance(&mut self) -> io::Result<bool> {
+        let started = self.trace().map(|_| Instant::now());
+        let result = self.advance_inner();
+        if let (Some(trace), Some(started)) = (self.trace(), started) {
+            trace.advance_ns += nanos(started.elapsed());
+        }
+        result
+    }
+
+    fn advance_inner(&mut self) -> io::Result<bool> {
         match &mut self.stage {
             Stage::Staging(index) => {
                 let Operation::Read { buffer, .. } = &mut self.io.operation else {

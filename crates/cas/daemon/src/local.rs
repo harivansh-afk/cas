@@ -59,6 +59,7 @@ impl Execution {
 }
 
 pub struct Permit {
+    pub(crate) trace: Option<crate::read_trace::OwnedTrace>,
     _request: Credits,
     _read: Option<BudgetArc<Credits>>,
     window: Option<window::Slot>,
@@ -355,6 +356,7 @@ impl Shared {
             _ => None,
         };
         Ok(Decision::Ready(Permit {
+            trace: None,
             _request: request,
             _read: read,
             window,
@@ -772,11 +774,14 @@ impl Local {
         Ok(())
     }
 
-    pub fn enqueue(&mut self, id: u64, operation: Operation, permit: Permit) -> io::Result<()> {
+    pub fn enqueue(&mut self, id: u64, operation: Operation, mut permit: Permit) -> io::Result<()> {
         if matches!(operation, Operation::Write { .. }) {
             return Err(io::Error::other(
                 "local writes must gather directly into an append batch",
             ));
+        }
+        if let Some(trace) = &mut permit.trace {
+            trace.enqueued_ns = trace.at();
         }
         let command = Command::Io(Io {
             id,
@@ -904,8 +909,11 @@ impl Worker {
         id: u64,
         data: CompletionData,
         result: io::Result<()>,
-        permit: Permit,
+        mut permit: Permit,
     ) -> io::Result<()> {
+        if let Some(trace) = &mut permit.trace {
+            trace.responded_ns = trace.at();
+        }
         *self.shared.final_status.lock().expect("status poisoned") = self.log.status();
         if let Err(error) = &result {
             // The frontend holds this same gate through status and used publication.
