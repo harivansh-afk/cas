@@ -1,10 +1,5 @@
 //! Inspect under exclusive IO locks before choosing fresh or live recovery.
-use std::{
-    fs::{self, File},
-    io,
-    path::Path,
-    sync::Arc,
-};
+use std::{fs::File, io, path::Path, sync::Arc};
 
 use super::{
     Config, Error, Limits, Log, Result,
@@ -436,10 +431,10 @@ impl Recovery {
             for (relative, (number, file)) in self.candidates[index..].iter().enumerate() {
                 repair.output(0, || {
                     if relative == 0 && offset != 0 {
-                        file.set_len(offset)?;
-                        file.sync_all()?;
+                        direct::truncate(file, offset)?;
+                        direct::sync_all(file)?;
                     } else {
-                        fs::remove_file(self.log.directory.path.join(segment::name(*number)))?;
+                        self.log.directory.remove(&segment::name(*number))?;
                     }
                     self.log.directory.sync()
                 })?;
