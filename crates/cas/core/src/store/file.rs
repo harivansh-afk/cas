@@ -135,7 +135,7 @@ impl Store {
         config.validate()?;
         let path = tickets.root().join(DIRECTORY);
         fs::create_dir(&path)?;
-        File::open(tickets.root())?.sync_all()?;
+        direct::sync_all(tickets.root_file())?;
         let directory = Directory::open(&path)?;
         Ok(Self::empty(directory, tickets, config, metadata, io_memory))
     }

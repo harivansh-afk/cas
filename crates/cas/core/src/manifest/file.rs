@@ -203,7 +203,7 @@ impl Manifest {
         direct::Alignment::query(&file)?;
         direct::preallocate(&file, 0, (2 * BLOCK_SIZE) as u64)?;
         direct::write_bytes(&file, buffer.as_slice(), 0)?;
-        file.sync_all()?;
+        direct::sync_all(&file)?;
         directory.sync()?;
         Ok(Self {
             directory,
