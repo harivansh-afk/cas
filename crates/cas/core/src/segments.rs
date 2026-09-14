@@ -90,7 +90,7 @@ impl Tickets {
     }
 
     pub fn root(&self) -> &Path {
-        &self.directory.path
+        self.directory.path()
     }
 
     /// `create` must retain the assigned filename and sync the header, file and

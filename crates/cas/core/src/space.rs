@@ -53,7 +53,7 @@ pub struct Status {
 /// plus usable filesystem free space; the agreed test filesystem excludes other
 /// writers. Archives on that filesystem count as allocations too.
 #[derive(Debug)]
-pub struct Space {
+pub(crate) struct Space {
     limits: Limits,
     status: Mutex<Status>,
 }
@@ -137,7 +137,8 @@ impl Space {
 
     /// Release only physically reclaimed bytes; logical dead data still occupies
     /// the store until punching/unlink and the required metadata sync complete.
-    pub fn reclaimed(&self, bytes: u64) -> io::Result<()> {
+    #[cfg(test)]
+    pub(crate) fn reclaimed(&self, bytes: u64) -> io::Result<()> {
         let mut status = self.status.lock().expect("space mutex poisoned");
         status.allocated = status
             .allocated
@@ -186,18 +187,20 @@ fn update_pressure(limits: Limits, status: &mut Status) {
 /// A promise precedes fallocate or output creation. Materialized bytes stay
 /// charged across IO errors and orphaning; dropping cancels only unused promise.
 #[derive(Debug)]
-pub struct Reservation {
+pub(crate) struct Reservation {
     space: Arc<Space>,
     remaining: u64,
     background: bool,
 }
 
 impl Reservation {
-    pub fn remaining(&self) -> u64 {
+    #[cfg(test)]
+    pub(crate) fn remaining(&self) -> u64 {
         self.remaining
     }
 
-    pub fn materialized(&mut self, bytes: u64) -> io::Result<()> {
+    #[cfg(test)]
+    pub(crate) fn materialized(&mut self, bytes: u64) -> io::Result<()> {
         if bytes > self.remaining {
             return Err(io::Error::other(
                 "physical allocation exceeds its disk reservation",

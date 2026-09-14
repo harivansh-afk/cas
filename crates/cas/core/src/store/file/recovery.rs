@@ -67,7 +67,7 @@ impl Inspection {
             let name = segments::name(rejected.number);
             repair.archive(directory, &name, &rejected.file, 0)?;
             repair.output(0, || {
-                fs::remove_file(directory.path.join(name))?;
+                fs::remove_file(directory.path().join(name))?;
                 directory.sync()
             })?;
         }
@@ -89,7 +89,7 @@ impl Store {
         config.validate()?;
         let directory = Directory::open(&tickets.root().join("chunks"))?;
         let mut numbers = Vec::new_in(BudgetAllocator::new(Arc::clone(&metadata)));
-        for entry in fs::read_dir(&directory.path)? {
+        for entry in fs::read_dir(directory.path())? {
             let entry = entry?;
             if entry.file_name() == "rejected" {
                 continue;
@@ -120,7 +120,7 @@ impl Store {
         let state = shared.state.get_mut().expect("private inspection state");
         state.failed = true;
         for number in numbers {
-            let file = direct::open(&shared.directory.path.join(segments::name(number)), false)?;
+            let file = direct::open(&shared.directory.path().join(segments::name(number)), false)?;
             direct::Alignment::query(&file)?;
             let file_bytes = file.metadata()?.len();
             if file_bytes < BLOCK_SIZE as u64 {

@@ -227,7 +227,7 @@ impl Segment {
                 capacity: config.segment_bytes,
             };
             header.encode_into(scratch.as_mut_slice())?;
-            let file = direct::open(&directory.path.join(segments::name(number)), true)?;
+            let file = direct::open(&directory.path().join(segments::name(number)), true)?;
             direct::Alignment::query(&file)?;
             direct::preallocate(&file, 0, config.segment_bytes)?;
             direct::write_bytes(&file, scratch.as_slice(), 0)?;

@@ -78,7 +78,7 @@ impl Catalog {
         metadata: Arc<Budget>,
     ) -> io::Result<Inspection> {
         let directory = Directory::open(&tickets.root().join(DIRECTORY))?;
-        let file = direct::open(&directory.path.join(NAME), false)?;
+        let file = direct::open(&directory.path().join(NAME), false)?;
         direct::Alignment::query(&file)?;
         let contents = Contents::read(&file, store, metadata)?;
         Ok(Inspection {
@@ -214,7 +214,7 @@ fn write(owner: &Owner, contents: &Contents) -> io::Result<File> {
     let mut attempt = 0u64;
     let (name, file) = loop {
         let name = format!("pending-{:020}-{attempt:020}.v2", contents.generation());
-        match direct::open(&directory.path.join(&name), true) {
+        match direct::open(&directory.path().join(&name), true) {
             Ok(file) => break (name, file),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 attempt = attempt
