@@ -281,30 +281,39 @@ impl Shared {
         injection.hit(point, Some(count), snapshot)
     }
 
+    /// Reference/replay convenience API. Serving uses the explicit decision.
     pub fn reserve(&self, kind: Kind) -> Option<Permit> {
-        self.reserve_reason(kind).ok()
+        self.admit(kind).ok()?.ready()
     }
 
-    fn reserve_reason(&self, kind: Kind) -> Result<Permit, pressure::Reason> {
+    fn admit(&self, kind: Kind) -> io::Result<pressure::Decision<Permit>> {
         let entry = match &self.admission {
-            Some(admission) => Some(
-                host::admission::Admission::enter(admission)
-                    .ok_or_else(|| self.pressure.denied(pressure::Reason::HostAdmission))?,
-            ),
+            Some(admission) => {
+                if admission.status().failed {
+                    return Err(io::Error::other("host admission failed"));
+                }
+                let Some(entry) = host::admission::Admission::enter(admission) else {
+                    return Ok(pressure::Decision::Waiting(
+                        self.pressure.denied(pressure::Reason::HostAdmission),
+                    ));
+                };
+                Some(entry)
+            }
             None => None,
         };
         self.reserve_with_entry(kind, entry)
     }
 
     fn reserve_control(&self) -> Option<Permit> {
-        self.reserve_with_entry(Kind::Control, None).ok()
+        self.reserve_with_entry(Kind::Control, None).ok()?.ready()
     }
 
     fn reserve_with_entry(
         &self,
         kind: Kind,
         entry: Option<host::admission::Entry>,
-    ) -> Result<Permit, pressure::Reason> {
+    ) -> io::Result<pressure::Decision<Permit>> {
+        use pressure::{Decision, Reason};
         let request = match kind {
             Kind::Control => self.pools.control.reserve(Amount {
                 bytes: BLOCK_SIZE,
@@ -314,37 +323,44 @@ impl Shared {
                 bytes: 0,
                 requests: 1,
             }),
-        }
-        .ok_or_else(|| self.pressure.denied(pressure::Reason::RequestCredits))?;
+        };
+        let Some(request) = request else {
+            return Ok(Decision::Waiting(
+                self.pressure.denied(Reason::RequestCredits),
+            ));
+        };
         let read = if let Kind::Read(bytes) = kind {
-            let credits = self
-                .pools
-                .read
-                .reserve(Amount {
-                    bytes: bytes + MAX_REQUEST_BYTES,
-                    requests: 0,
-                })
-                .ok_or_else(|| self.pressure.denied(pressure::Reason::ReadCredits))?;
-            Some(
-                BudgetArc::try_new(credits, &self.metadata)
-                    .map_err(|_| self.pressure.denied(pressure::Reason::ReadOwnerAllocation))?,
-            )
+            let Some(credits) = self.pools.read.reserve(Amount {
+                bytes: bytes + MAX_REQUEST_BYTES,
+                requests: 0,
+            }) else {
+                return Ok(Decision::Waiting(self.pressure.denied(Reason::ReadCredits)));
+            };
+            let Ok(owner) = BudgetArc::try_new(credits, &self.metadata) else {
+                return Ok(Decision::Waiting(
+                    self.pressure.denied(Reason::ReadOwnerAllocation),
+                ));
+            };
+            Some(owner)
         } else {
             None
         };
-        Ok(Permit {
-            _admission: entry,
-            fair_release: None,
+        let window = match (kind, &self.window) {
+            (Kind::Write(bytes), Some(window)) => match window::Window::reserve(window, bytes)? {
+                Decision::Ready(slot) => Some(slot),
+                Decision::Waiting(reason) => {
+                    return Ok(Decision::Waiting(self.pressure.denied(reason)));
+                }
+            },
+            _ => None,
+        };
+        Ok(Decision::Ready(Permit {
             _request: request,
             _read: read,
-            window: match (kind, &self.window) {
-                (Kind::Write(bytes), Some(window)) => Some(
-                    window::Window::reserve(window, bytes)
-                        .inspect_err(|reason| self.pressure.record(*reason))?,
-                ),
-                _ => None,
-            },
-        })
+            window,
+            _admission: entry,
+            fair_release: None,
+        }))
     }
 
     pub fn replay_next(
@@ -543,26 +559,23 @@ impl Local {
     }
 
     pub fn prepare(&mut self, kind: Kind) -> io::Result<Option<Permit>> {
-        self.prepare_reason(kind).map(Result::ok)
+        self.admit(kind).map(pressure::Decision::ready)
     }
 
-    pub(crate) fn prepare_reason(
-        &mut self,
-        kind: Kind,
-    ) -> io::Result<Result<Permit, pressure::Reason>> {
+    pub(crate) fn admit(&mut self, kind: Kind) -> io::Result<pressure::Decision<Permit>> {
         if self.paused {
             return Err(io::Error::other("local admission is paused"));
         }
         if !matches!(kind, Kind::Write(_)) {
             self.seal()?;
         }
-        let permit = match self.shared.reserve_reason(kind) {
-            Ok(permit) => permit,
-            Err(reason) => {
+        let permit = match self.shared.admit(kind)? {
+            pressure::Decision::Ready(permit) => permit,
+            pressure::Decision::Waiting(reason) => {
                 if self.shared.window.is_some() {
                     self.seal()?;
                 }
-                return Ok(Err(reason));
+                return Ok(pressure::Decision::Waiting(reason));
             }
         };
         if let Kind::Write(bytes) = kind {
@@ -581,7 +594,7 @@ impl Local {
                     requests: 0,
                 }) else {
                     self.shared.pressure.record(pressure::Reason::AppendCredits);
-                    return Ok(Err(pressure::Reason::AppendCredits));
+                    return Ok(pressure::Decision::Waiting(pressure::Reason::AppendCredits));
                 };
                 let started = Instant::now();
                 let builder = Builder::new(self.status.image_bytes, payload_capacity)
@@ -604,7 +617,7 @@ impl Local {
                 .admission_retained_peak
                 .max(self.shared.pools.append.usage().current.bytes);
         }
-        Ok(Ok(permit))
+        Ok(pressure::Decision::Ready(permit))
     }
 
     pub fn gather(

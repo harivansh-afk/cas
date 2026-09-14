@@ -174,13 +174,13 @@ impl Storage {
     pub(crate) fn prepare(
         &mut self,
         kind: local::Kind,
-    ) -> io::Result<Result<Permit, local::pressure::Reason>> {
+    ) -> io::Result<local::pressure::Decision<Permit>> {
         match self {
             Self::Opening(_) => Err(io::Error::other("IO before inflight recovery")),
             Self::Local(local) => local
-                .prepare_reason(kind)
+                .admit(kind)
                 .map(|permit| permit.map(|credits| Permit::Local { _credits: credits })),
-            _ => Ok(Ok(Permit::Reference)),
+            _ => Ok(local::pressure::Decision::Ready(Permit::Reference)),
         }
     }
 

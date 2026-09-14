@@ -131,28 +131,31 @@ impl Window {
             .is_some_and(host::capacity::Admission::pressure)
     }
 
-    pub fn reserve(owner: &BudgetArc<Self>, bytes: usize) -> Result<Slot, pressure::Reason> {
+    pub fn reserve(owner: &BudgetArc<Self>, bytes: usize) -> io::Result<pressure::Decision<Slot>> {
         if bytes > MAX_REQUEST_BYTES || !bytes.is_multiple_of(BLOCK_SIZE) {
-            return Err(pressure::Reason::InvalidWrite);
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid WAL write length",
+            ));
         }
         if let Some(admission) = &owner.admission
-            && let Err(reason) = admission.check()
+            && let pressure::Decision::Waiting(reason) = admission.check()?
         {
             owner.notify();
-            return Err(reason);
+            return Ok(pressure::Decision::Waiting(reason));
         }
         let mut state = owner.lock();
         if state.failed {
-            return Err(pressure::Reason::WalFailed);
+            return Err(io::Error::other("WAL admission failed"));
         }
         if state.rotation_wanted {
-            return Err(pressure::Reason::WalRotation);
+            return Ok(pressure::Decision::Waiting(pressure::Reason::WalRotation));
         }
         if state.unsubmitted >= state.index_capacity {
             state.index_pressure = true;
             drop(state);
             owner.notify();
-            return Err(pressure::Reason::WalIndex);
+            return Ok(pressure::Decision::Waiting(pressure::Reason::WalIndex));
         }
         let bytes = (bytes + BLOCK_SIZE) as u32;
         let mut candidate = *state;
@@ -165,13 +168,13 @@ impl Window {
             state.rotation_wanted = true;
             drop(state);
             owner.notify();
-            return Err(pressure::Reason::WalRotation);
+            return Ok(pressure::Decision::Waiting(pressure::Reason::WalRotation));
         }
         *state = candidate;
-        Ok(Slot {
+        Ok(pressure::Decision::Ready(Slot {
             owner: owner.clone(),
             bytes,
-        })
+        }))
     }
 
     pub fn append(

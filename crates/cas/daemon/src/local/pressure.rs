@@ -10,25 +10,21 @@ pub(crate) enum Reason {
     ReadOwnerAllocation,
     Staging,
     Physical,
-    WalFailed,
     WalRotation,
     WalIndex,
     AppendCredits,
-    InvalidWrite,
 }
 
-const NAMES: [&str; 11] = [
+const NAMES: [&str; 9] = [
     "host_admission",
     "request_credits",
     "read_credits",
     "read_owner_allocation",
     "staging",
     "physical",
-    "wal_failed",
     "wal_rotation",
     "wal_index",
     "append_credits",
-    "invalid_write",
 ];
 
 #[derive(Default)]
@@ -55,5 +51,26 @@ impl Counters {
                 )
             })
             .collect()
+    }
+}
+
+/// A temporary refusal is a normal admission outcome, never a terminal error.
+pub(crate) enum Decision<T> {
+    Ready(T),
+    Waiting(Reason),
+}
+
+impl<T> Decision<T> {
+    pub fn ready(self) -> Option<T> {
+        match self {
+            Self::Ready(value) => Some(value),
+            Self::Waiting(_) => None,
+        }
+    }
+    pub fn map<U>(self, map: impl FnOnce(T) -> U) -> Decision<U> {
+        match self {
+            Self::Ready(value) => Decision::Ready(map(value)),
+            Self::Waiting(reason) => Decision::Waiting(reason),
+        }
     }
 }

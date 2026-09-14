@@ -188,6 +188,99 @@ fn joined(host: &Host, second: &mut Local) {
 }
 
 #[test]
+fn shared_fetch_waiter_survives_leader_scheduler_congestion() {
+    congested_fetch(false);
+}
+
+#[test]
+fn closing_shared_fetch_waiter_cancels_its_poll_without_waiting_for_the_leader() {
+    congested_fetch(true);
+}
+
+fn congested_fetch(close_waiter: bool) {
+    use cas_core::scheduler::Scheduler;
+
+    let root = tempfile::tempdir().unwrap();
+    let resources = Arc::new(Resources::default());
+    let mut host = create(root.path(), 3, Arc::clone(&resources));
+    let mut first = attach(&mut host, 2);
+    let mut second = attach(&mut host, 3);
+    for local in [&mut first, &mut second] {
+        write(local, 0, 0, &[7; BLOCK_SIZE]);
+        drained(local, 1);
+    }
+    let (entered, wait) = mpsc::channel();
+    let (resume, resumed) = mpsc::channel();
+    host.shared.control.lock().unwrap().before_fetch = Some(Pause {
+        entered,
+        resume: resumed,
+    });
+    enqueue_read(&mut first, 1);
+    wait.recv_timeout(Duration::from_secs(3)).unwrap();
+    let queued = second.report()["metrics"]["io_queued"].as_u64().unwrap();
+    enqueue_read(&mut second, 1);
+    joined(&host, &mut second);
+    let until = Instant::now() + Duration::from_secs(3);
+    while second.report()["metrics"]["io_queued"].as_u64().unwrap() < queued + 2 {
+        assert!(Instant::now() < until, "waiter poll not submitted");
+        thread::sleep(Duration::from_millis(1));
+    }
+    // The second image just submitted its manifest read, so image 2 owns
+    // the next demand visit. Hold it exactly as the existing scheduling tests do.
+    let held = Scheduler::port(&host.shared.io_scheduler, 2).unwrap();
+    held.ready(true).unwrap();
+    resume.send(()).unwrap();
+    let until = Instant::now() + Duration::from_secs(3);
+    while host.shared.io_scheduler.status().ready_images != 2 {
+        assert!(Instant::now() < until, "leader payload not queued");
+        thread::sleep(Duration::from_millis(1));
+    }
+    if close_waiter {
+        let health = second.shared.health.clone();
+        let started = Instant::now();
+        drop(second);
+        let elapsed = started.elapsed();
+        let failure = health.lock().unwrap().failure.clone();
+        let leader_failure = first.shared.health.lock().unwrap().failure.clone();
+        held.ready(false).unwrap();
+        let leader = received(&mut first);
+        let succeeded = leader.result.is_ok();
+        let host_failed = host.shared.gate.failure();
+        drop((leader, held, first, health));
+        shutdown(host);
+        assert!(elapsed < IO_DEADLINE + Duration::from_secs(5));
+        assert_eq!(
+            failure.as_deref(),
+            Some("terminal storage drain deadline expired")
+        );
+        assert!(leader_failure.is_none());
+        assert!(host_failed.is_none());
+        assert!(succeeded);
+        assert_eq!(resources.read_memory().usage().current, Amount::default());
+        return;
+    }
+    let started = Instant::now();
+    while started.elapsed() < IO_DEADLINE + Duration::from_secs(1) {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let leader_failure = first.shared.health.lock().unwrap().failure.clone();
+    let waiter_failure = second.shared.health.lock().unwrap().failure.clone();
+    // Always release the scheduler and drain both owners before asserting.
+    held.ready(false).unwrap();
+    let leader = received(&mut first);
+    let waiter = received(&mut second);
+    let outcomes = (leader.result.is_ok(), waiter.result.is_ok());
+    drop((leader, waiter, held, first, second));
+    shutdown(host);
+    assert!(leader_failure.is_none(), "leader: {leader_failure:?}");
+    assert!(
+        waiter_failure.is_none(),
+        "waiter: {waiter_failure:?}; results: {outcomes:?}"
+    );
+    assert_eq!(outcomes, (true, true));
+}
+
+#[test]
 fn corrupt_shared_fetch_wakes_waiters_and_fails_every_image_before_publication() {
     use std::os::unix::fs::FileExt;
 

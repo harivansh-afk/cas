@@ -14,17 +14,20 @@ pub struct Admission {
 }
 
 impl Admission {
-    pub fn check(&self) -> Result<(), pressure::Reason> {
+    pub fn check(&self) -> io::Result<pressure::Decision<()>> {
+        if self.staging.failed() || self.physical.as_ref().is_some_and(|p| p.status().failed) {
+            return Err(io::Error::other("capacity account failed"));
+        }
         if !self.staging.admits(self.image) {
-            return Err(pressure::Reason::Staging);
+            return Ok(pressure::Decision::Waiting(pressure::Reason::Staging));
         }
         if self.physical.as_ref().is_some_and(|physical| {
             let status = physical.status();
             status.failed || status.pressured
         }) {
-            return Err(pressure::Reason::Physical);
+            return Ok(pressure::Decision::Waiting(pressure::Reason::Physical));
         }
-        Ok(())
+        Ok(pressure::Decision::Ready(()))
     }
 
     pub fn pressure(&self) -> bool {

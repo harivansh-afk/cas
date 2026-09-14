@@ -3,6 +3,8 @@ use super::*;
 use std::time::{Duration, Instant};
 use vhost_user_backend::StateChange;
 
+const RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
 pub(super) struct Waiting {
     head: u16,
     available: u16,
@@ -74,15 +76,15 @@ impl Backend {
             } else {
                 None
             };
-        let result = if self.pending.len() >= limit {
-            Err(Reason::Pending)
-        } else {
-            self.storage
-                .prepare(request.admission_kind())?
-                .map_err(Reason::Storage)
-        };
+        use local::pressure::Decision;
+        if self.pending.len() >= limit {
+            drop(turn);
+            self.record_wait(queue, Reason::Pending, now);
+            return Ok(Admission::Waiting);
+        }
+        let result = self.storage.prepare(request.admission_kind())?;
         match result {
-            Ok(mut permit) => {
+            Decision::Ready(mut permit) => {
                 if let Some(turn) = turn {
                     let Permit::Local { _credits } = &mut permit else {
                         unreachable!("only shared hosts schedule admission");
@@ -91,9 +93,9 @@ impl Backend {
                 }
                 Ok(Admission::Accepted(permit))
             }
-            Err(reason) => {
+            Decision::Waiting(reason) => {
                 drop(turn);
-                self.record_wait(queue, reason, now);
+                self.record_wait(queue, Reason::Storage(reason), now);
                 Ok(Admission::Waiting)
             }
         }
@@ -137,7 +139,20 @@ impl Backend {
     }
 
     pub(super) fn rearm_deadline_timer(&mut self) -> io::Result<()> {
-        let next = self.recovery_deadline.map(Deadline::instant);
+        // Some shared metadata owners release without a frontend notification.
+        // Retry the bounded queue heads, never turn elapsed pressure into IOERR.
+        let retry = self
+            .waiting
+            .iter()
+            .flatten()
+            .any(|head| head.reason.is_some())
+            .then(|| Instant::now() + RETRY_INTERVAL);
+        let next = self
+            .recovery_deadline
+            .map(Deadline::instant)
+            .into_iter()
+            .chain(retry)
+            .min();
         let Some(timer) = &mut self.deadline_timer else {
             return Ok(());
         };

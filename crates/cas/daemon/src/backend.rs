@@ -1457,6 +1457,7 @@ mod tests {
                 .storage
                 .prepare(request.admission_kind())
                 .unwrap()
+                .ready()
                 .unwrap();
             let mut health = gate.lock().unwrap();
             let entry = health
@@ -1537,6 +1538,7 @@ mod tests {
                 .storage
                 .prepare(request.admission_kind())
                 .unwrap()
+                .ready()
                 .unwrap();
             let mut state = vring.get_mut();
             state.get_queue_mut().set_next_avail(id as u16 + 1);

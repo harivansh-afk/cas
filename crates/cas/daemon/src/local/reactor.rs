@@ -15,6 +15,8 @@ mod slots;
 use slots::Slots;
 
 const IDLE_SYNC: Duration = Duration::from_millis(50);
+// enqueue() requires a successor token, so this value is never an IO owner.
+const CANCEL_CQE: u64 = u64::MAX;
 
 #[cfg(test)]
 mod tests;
@@ -48,9 +50,14 @@ struct Pending {
     submitted: Option<Instant>,
     queued: Instant,
     ready: Option<Instant>,
+    cancel_requested: bool,
 }
 
 impl Pending {
+    fn dependency(&self) -> bool {
+        matches!(&self.work, Work::Read(read) if read.notification_only())
+    }
+
     fn in_kernel(&self) -> bool {
         self.submitted.is_some() && self.ready.is_none()
     }
@@ -357,6 +364,7 @@ impl Reactor {
                 submitted: None,
                 queued: Instant::now(),
                 ready: Some(Instant::now()),
+                cancel_requested: false,
             },
         );
         if let Err(error) = self.push(token) {
@@ -428,6 +436,10 @@ impl Reactor {
     }
 
     fn complete_cqe(&mut self, token: u64, result: i32) -> io::Result<()> {
+        if token == CANCEL_CQE {
+            // The original poll's CQE, not this acknowledgment, releases ownership.
+            return Ok(());
+        }
         let Some(pending) = self.pending.get_mut(&token) else {
             return Err(io::Error::other("unknown local CQE"));
         };
@@ -441,6 +453,11 @@ impl Reactor {
             .lock()
             .expect("metrics poisoned")
             .io_completed += 1;
+        if pending.cancel_requested {
+            // Cancellation can race readiness. The closing/failed image returns
+            // its own error, without poisoning the shared fetch or its leader.
+            return Ok(());
+        }
         let error = if result < 0 {
             Some(io::Error::from_raw_os_error(-result))
         } else if result as usize != pending.expected_bytes() {
@@ -1000,6 +1017,26 @@ impl Reactor {
         Ok(())
     }
 
+    fn cancel_dependencies(&mut self) -> io::Result<()> {
+        loop {
+            let next = self.pending.iter().find_map(|(&token, pending)| {
+                (pending.in_kernel() && pending.dependency() && !pending.cancel_requested)
+                    .then_some(token)
+            });
+            let Some(token) = next else {
+                return Ok(());
+            };
+            let entry = opcode::PollRemove::new(token).build().user_data(CANCEL_CQE);
+            // SAFETY: PollRemove refers to an existing token, with no borrowed
+            // memory. The original owner stays in pending until its own CQE.
+            if unsafe { self.ring.submission().push(&entry) }.is_err() {
+                self.ring.submit()?;
+                continue;
+            }
+            self.pending.get_mut(&token).unwrap().cancel_requested = true;
+        }
+    }
+
     fn stop(&mut self, error: &io::Error) {
         self.fail(error);
         self.input.close();
@@ -1009,6 +1046,7 @@ impl Reactor {
         // These commands never reached the kernel. Return their owned errors
         // before closing the producer; Drop still drains actual pending IO.
         let _ = self.reject_queued();
+        let _ = self.cancel_dependencies();
     }
 
     fn wait(&self) -> io::Result<()> {
@@ -1090,6 +1128,7 @@ impl Reactor {
                 if !self.failed
                     && self.pending.values().any(|pending| {
                         pending.ready.is_none()
+                            && !pending.dependency()
                             && pending
                                 .submitted
                                 .is_some_and(|submitted| submitted.elapsed() >= IO_DEADLINE)
@@ -1132,6 +1171,7 @@ impl Reactor {
                 self.finish_ready()?;
                 if self.failed {
                     self.reject_queued()?;
+                    self.cancel_dependencies()?;
                 } else {
                     self.dispatch()?;
                 }
@@ -1165,6 +1205,8 @@ impl Reactor {
 
 impl Drop for Reactor {
     fn drop(&mut self) {
+        // Also cover unexpected exits before the ordinary failure loop.
+        let _ = self.cancel_dependencies();
         if let Some(scheduler) = &self.scheduler {
             let _ = scheduler.ready(false);
         }

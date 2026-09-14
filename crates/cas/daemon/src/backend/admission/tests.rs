@@ -28,6 +28,83 @@ fn shared(backend: &Backend) -> cas_core::budget::BudgetArc<local::Shared> {
 }
 
 #[test]
+fn metadata_release_resumes_on_the_admission_timer_without_a_guest_kick() {
+    use cas_core::budget::Amount;
+    let directory = tempfile::tempdir().unwrap();
+    let mut backend = Backend::open_with_recovery(
+        &directory.path().join("log"),
+        BackendKind::LocalAsync,
+        Some(0x10000),
+        false,
+        Fault::default(),
+    )
+    .unwrap();
+    let (memory, vring) = crate::backend::tests::queue();
+    let mem = memory.memory();
+    backend.update_memory(memory.clone()).unwrap();
+    backend.negotiated_features = REQUIRED_FEATURES;
+    let shared = shared(&backend);
+    let held = shared
+        .metadata()
+        .reserve(Amount {
+            bytes: 128 * MAX_REQUEST_BYTES - shared.metadata().usage().current.bytes,
+            requests: 0,
+        })
+        .unwrap();
+    crate::backend::tests::data_chain(&mem, VIRTIO_BLK_T_IN);
+    mem.write_obj(1u16, GuestAddress(0x2002)).unwrap();
+    // Model a concurrent metadata claim after descriptor parsing. The initial
+    // request already owns its spans; only the read-credit owner is refused.
+    let Request::Write(mut data) = write_request() else {
+        unreachable!()
+    };
+    data.segments = request::test_segments([Segment {
+        addr: GuestAddress(0x5000),
+        len: BLOCK_SIZE,
+        writable: true,
+    }]);
+    assert!(matches!(
+        backend
+            .prepare_admission(0, 0, &Request::Read(data), 136)
+            .unwrap(),
+        Admission::Waiting
+    ));
+    backend.rearm_deadline_timer().unwrap();
+    assert_eq!(
+        backend.admission_report()["heads"][0]["reason"]["storage"],
+        "read_owner_allocation"
+    );
+    assert_eq!(vring.queue_next_avail(), 0);
+    drop(held);
+    let (fd, token) = backend.deadline_listener().unwrap();
+    Deadline::after(Duration::from_secs(1))
+        .wait_readable(fd)
+        .unwrap();
+    backend
+        .handle_event(token, EventSet::IN, std::slice::from_ref(&vring), 0)
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while backend.pending_count() != 0 {
+        backend
+            .complete(&mem, std::slice::from_ref(&vring))
+            .unwrap();
+        assert!(Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    assert_eq!(vring.queue_next_avail(), 1);
+    assert_eq!(
+        mem.read_obj::<u8>(GuestAddress(0x6000)).unwrap(),
+        Status::Ok as u8
+    );
+    assert_eq!(backend.admission_report()["statistics"]["resumed"], 1);
+    assert_eq!(
+        io::Error::from(backend.deadline_timer.as_mut().unwrap().wait().unwrap_err()).kind(),
+        io::ErrorKind::WouldBlock
+    );
+    backend.drain().unwrap();
+}
+
+#[test]
 fn capacity_wait_survives_the_old_deadline_and_control_keeps_its_reserve() {
     let directory = tempfile::tempdir().unwrap();
     let mut backend = Backend::open_with_recovery(

@@ -1,5 +1,21 @@
 use super::*;
 
+#[test]
+fn terminal_window_errors_are_not_admission_waits() {
+    let fixture = Fixture::new();
+    assert_eq!(
+        Window::reserve(&fixture.window, 1).err().unwrap().kind(),
+        io::ErrorKind::InvalidInput
+    );
+    fixture.window.lock().failed = true;
+    assert!(Window::reserve(&fixture.window, BLOCK_SIZE).is_err());
+    assert!(fixture.shared.admit(Kind::Write(BLOCK_SIZE)).is_err());
+    assert_eq!(
+        fixture.shared.pools.requests.usage().current,
+        Amount::default()
+    );
+}
+
 struct Fixture {
     _root: tempfile::TempDir,
     log: Log,
