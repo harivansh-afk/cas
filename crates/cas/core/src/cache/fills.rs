@@ -1,7 +1,7 @@
 //! One in-progress owner per hash; completed readers keep their exact cell.
 use crate::{
     budget::{Amount, Budget, BudgetAllocator, BudgetArc, Lease, Usage},
-    chunk_index::Hash,
+    chunk_index::{Hash, bucket},
 };
 use allocator_api2::vec::Vec;
 use hashbrown::HashTable;
@@ -81,10 +81,6 @@ struct Cell<T> {
 }
 
 struct Signal(OwnedFd);
-
-fn bucket(hash: &Hash) -> u64 {
-    u64::from_le_bytes(hash[..8].try_into().unwrap())
-}
 
 fn counter(limit: usize) -> Arc<Budget> {
     Budget::new(Amount {
