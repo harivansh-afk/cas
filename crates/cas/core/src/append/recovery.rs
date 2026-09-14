@@ -1,10 +1,5 @@
 //! Inspect under exclusive IO locks before choosing fresh or live recovery.
-use std::{
-    fs::{self, File},
-    io,
-    path::Path,
-    sync::Arc,
-};
+use std::{fs::File, io, path::Path, sync::Arc};
 
 use super::{
     Config, Error, Limits, Log, Result,
@@ -75,33 +70,17 @@ impl Log {
         if config.segment_bytes < (format::MAX_BATCH_BYTES + 2 * BLOCK_SIZE) as u64 {
             return Err(Error::Capacity);
         }
-        let mut log = Self {
+        let mut log = Self::empty(
             directory,
             config,
             limits,
-            segments: super::BudgetVec::new_in(crate::budget::BudgetAllocator::new(Arc::clone(
-                &metadata,
-            ))),
             index,
-            metadata: Arc::clone(&metadata),
-            offset: BLOCK_SIZE as u64,
-            next_batch: 1,
+            Arc::clone(&metadata),
             highest_segment,
             tickets,
-            base: None,
-            compaction_cursor: None,
-            published: h.preceding_sequence,
-            issued: 0,
-            pending_descriptors: 0,
-            cohort: None,
-            durable: 0,
-            encoded_bytes: 0,
-            allocated_bytes: 0,
-            rejected_bytes: 0,
-            failed: false,
-            fenced: false,
-            rotating: false,
-        };
+            None,
+            h.preceding_sequence,
+        );
         log.segments
             .try_reserve_exact(candidates.len())
             .map_err(|_| {
@@ -272,8 +251,8 @@ impl Recovery {
         self.require_prefix(required)?;
         self.repair(repair)?;
         repair.output(self.log.config.segment_bytes, || {
-            self.log.rotate(None).map_err(io::Error::other)?;
-            self.log.flush().map_err(io::Error::other)
+            self.log.rotate(None)?;
+            self.log.flush()
         })?;
         Ok(self.log)
     }
@@ -436,10 +415,10 @@ impl Recovery {
             for (relative, (number, file)) in self.candidates[index..].iter().enumerate() {
                 repair.output(0, || {
                     if relative == 0 && offset != 0 {
-                        file.set_len(offset)?;
-                        file.sync_all()?;
+                        direct::truncate(file, offset)?;
+                        direct::sync_all(file)?;
                     } else {
-                        fs::remove_file(self.log.directory.path.join(segment::name(*number)))?;
+                        self.log.directory.remove(&segment::name(*number))?;
                     }
                     self.log.directory.sync()
                 })?;
@@ -494,9 +473,7 @@ impl LivePlan {
         let mut log = self.recovery.log;
         // A retained fence may fill its segment. Only finish establishes E.
         if log.offset + BLOCK_SIZE as u64 > log.config.segment_bytes {
-            repair.output(log.config.segment_bytes, || {
-                log.rotate(Some(self.epoch)).map_err(io::Error::other)
-            })?;
+            repair.output(log.config.segment_bytes, || log.rotate(Some(self.epoch)))?;
         }
         Ok(LiveRecovery {
             log,
@@ -512,6 +489,14 @@ pub struct LiveRecovery {
     remaining: BudgetVec<Mutation, BudgetAllocator>,
     next: usize,
     physical: Option<Arc<crate::space::Governor>>,
+}
+
+/// Replay borrows the physical owner captured at start, or runs ungoverned.
+fn repair(physical: &Option<Arc<crate::space::Governor>>) -> crate::space::Recovery<'_> {
+    physical.as_ref().map_or_else(
+        crate::space::Recovery::default,
+        crate::space::Recovery::governed,
+    )
 }
 
 impl LiveRecovery {
@@ -543,13 +528,8 @@ impl LiveRecovery {
         if self.log.published.checked_add(1) != Some(mutation.sequence) {
             return Err(io::Error::other("replay is not the next original mutation").into());
         }
-        let repair = self.physical.as_ref().map_or_else(
-            crate::space::Recovery::default,
-            crate::space::Recovery::governed,
-        );
-        repair.output(self.log.config.segment_bytes, || {
-            self.log.append(builder).map_err(io::Error::other)
-        })?;
+        let repair = repair(&self.physical);
+        repair.output(self.log.config.segment_bytes, || self.log.append(builder))?;
         self.next += 1;
         Ok(mutation)
     }
@@ -558,13 +538,8 @@ impl LiveRecovery {
         if self.next != self.remaining.len() {
             return Err(io::Error::other("replay has unresolved mutations").into());
         }
-        let repair = self.physical.as_ref().map_or_else(
-            crate::space::Recovery::default,
-            crate::space::Recovery::governed,
-        );
-        repair.output(self.log.config.segment_bytes, || {
-            self.log.flush().map_err(io::Error::other)
-        })?;
+        let repair = repair(&self.physical);
+        repair.output(self.log.config.segment_bytes, || self.log.flush())?;
         Ok(self.log)
     }
 }

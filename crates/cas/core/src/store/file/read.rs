@@ -82,10 +82,13 @@ impl Read {
     pub fn payload(&self, page: &[u8]) -> io::Result<Payload> {
         let header = Header::decode(page)?;
         require(
-            header.segment() == self.address.segment()
-                && header.batch() == self.batch_id
-                && header.first() == self.header_offset() / BLOCK_SIZE as u64 - self.batch_id + 1
-                && header.descriptors().len() == usize::from(self.batch.chunks),
+            batch_identity(
+                &header,
+                self.address.segment(),
+                self.batch_id,
+                self.header_offset(),
+                self.batch.chunks,
+            ),
             "chunk read batch identity",
         )?;
         let index =

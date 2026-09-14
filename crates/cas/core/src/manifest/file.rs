@@ -203,7 +203,7 @@ impl Manifest {
         direct::Alignment::query(&file)?;
         direct::preallocate(&file, 0, (2 * BLOCK_SIZE) as u64)?;
         direct::write_bytes(&file, buffer.as_slice(), 0)?;
-        file.sync_all()?;
+        direct::sync_all(&file)?;
         directory.sync()?;
         Ok(Self {
             directory,
@@ -245,12 +245,10 @@ impl Manifest {
     }
 
     fn healthy(&self) -> io::Result<()> {
-        if self.failed {
-            return Err(io::Error::other(
-                "manifest owner failed; explicit recovery required",
-            ));
-        }
-        Ok(())
+        crate::encoding::require_healthy(
+            self.failed,
+            "manifest owner failed; explicit recovery required",
+        )
     }
 
     pub fn tree(&self) -> io::Result<Tree<'_, File>> {
@@ -368,7 +366,7 @@ pub struct Inspection {
 }
 
 impl Inspection {
-    pub(crate) fn pin(&self) -> Arc<File> {
+    pub(crate) fn file(&self) -> Arc<File> {
         Arc::clone(&self.manifest.file)
     }
 

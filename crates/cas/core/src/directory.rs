@@ -6,11 +6,15 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 pub(crate) struct Directory {
-    pub path: PathBuf,
+    path: PathBuf,
     file: File,
 }
 
 impl Directory {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub fn file(&self) -> &File {
         &self.file
     }

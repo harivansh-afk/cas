@@ -16,7 +16,7 @@ use crate::{
     segments::Tickets,
 };
 use allocator_api2::vec::Vec;
-use std::{fs, io, os::unix::fs::MetadataExt, sync::Arc};
+use std::{io, os::unix::fs::MetadataExt, sync::Arc};
 
 #[derive(Debug, Default, Clone, Copy, serde::Serialize)]
 pub struct ReclaimStats {
@@ -178,7 +178,7 @@ impl Reclamation {
                 if !envelope.fence {
                     sequence = envelope.last;
                     if envelope.payload_bytes != 0 {
-                        if segment.pins.at(0) == 0
+                        if !segment.pins.scan_held()
                             && segment.pins.at((offset / BLOCK_SIZE as u64) as u32) == 0
                         {
                             direct::punch(
@@ -217,13 +217,8 @@ impl Reclamation {
                 && Arc::strong_count(segment) == 2
                 && Arc::strong_count(&segment.file) == 1;
             let after = if removed {
-                let unlink = crate::io_metrics::measure(0, |c| &mut c.unlink);
-                fs::remove_file(
-                    self.directory
-                        .path
-                        .join(segment::name(segment.header.number)),
-                )?;
-                drop(unlink);
+                self.directory
+                    .remove(&segment::name(segment.header.number))?;
                 observe(ReclaimOperation::Unlink {
                     segment: segment.header.number,
                 })?;

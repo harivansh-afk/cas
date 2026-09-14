@@ -22,7 +22,7 @@ pub(super) struct Candidates {
 pub(super) fn candidates(directory: &Directory, metadata: Arc<Budget>) -> io::Result<Candidates> {
     let mut highest = 0;
     let mut files = Vec::new_in(BudgetAllocator::new(metadata));
-    for entry in fs::read_dir(&directory.path)? {
+    for entry in fs::read_dir(directory.path())? {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
@@ -38,7 +38,7 @@ pub(super) fn candidates(directory: &Directory, metadata: Arc<Budget>) -> io::Re
             files.push((value, Arc::new(direct::open(&entry.path(), false)?)));
         }
     }
-    let archive = directory.path.join("rejected");
+    let archive = directory.path().join("rejected");
     if archive.exists() {
         for entry in fs::read_dir(archive)? {
             if let Some(value) = number(&entry?.file_name().to_string_lossy()) {
@@ -94,7 +94,7 @@ impl Segment {
         pins: Pins,
     ) -> io::Result<Arc<Self>> {
         let buffer = header.encode().map_err(io::Error::other)?;
-        let file = direct::open(&directory.path.join(name(header.number)), true)?;
+        let file = direct::open(&directory.path().join(name(header.number)), true)?;
         let alignment = direct::Alignment::query(&file)?;
         direct::preallocate(&file, 0, header.capacity)?;
         direct::write(&file, &buffer, 0)?;

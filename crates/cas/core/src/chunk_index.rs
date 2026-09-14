@@ -51,7 +51,8 @@ pub struct Index {
     table: HashTable<Entry, BudgetAllocator>,
 }
 
-fn bucket(hash: &Hash) -> u64 {
+/// Hash table bucket shared by every table keyed on chunk hashes.
+pub(crate) fn bucket(hash: &Hash) -> u64 {
     u64::from_le_bytes(hash[..8].try_into().unwrap())
 }
 

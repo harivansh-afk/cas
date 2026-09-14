@@ -41,10 +41,7 @@ impl Lookup {
         require(!self.failed, "manifest lookup failed")?;
         match self.cursor {
             Some(cursor) => {
-                require(
-                    cursor.offset < self.end - BLOCK_SIZE as u64,
-                    "tree page beyond COMMIT",
-                )?;
+                super::require_before_commit(cursor.offset, self.end)?;
                 Ok(LookupState::Page {
                     offset: cursor.offset,
                     level: cursor.level,

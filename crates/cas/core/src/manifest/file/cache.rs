@@ -65,6 +65,7 @@ impl PageCache {
 
     /// Only the checked manifest descent may publish a page.
     pub(super) fn fill(&self, key: PageKey, bytes: &[u8]) -> io::Result<()> {
+        let bytes: [u8; BLOCK_SIZE] = bytes.try_into().map_err(|_| io::ErrorKind::InvalidInput)?;
         let wait = crate::io_metrics::measure(0, |c| &mut c.page_cache_wait);
         let mut state = self.state.lock().expect("page cache poisoned");
         drop(wait);
@@ -87,7 +88,7 @@ impl PageCache {
         };
         let page = BudgetArc::try_new(
             CachedPage {
-                bytes: bytes.try_into().map_err(|_| io::ErrorKind::InvalidInput)?,
+                bytes,
                 _credit: credit,
             },
             &self.metadata,

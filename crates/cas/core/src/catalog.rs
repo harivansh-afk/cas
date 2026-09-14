@@ -33,7 +33,7 @@ pub enum Change {
 }
 
 struct Owner {
-    _tickets: Arc<Tickets>,
+    tickets: Arc<Tickets>,
     directory: Directory,
 }
 
@@ -57,10 +57,7 @@ impl Catalog {
         fs::create_dir(&path)?;
         let directory = Directory::open(&path)?;
         direct::sync_all(tickets.root_file())?;
-        let owner = Arc::new(Owner {
-            _tickets: tickets,
-            directory,
-        });
+        let owner = Arc::new(Owner { tickets, directory });
         let file = write(&owner, &contents)?;
         Ok(Self {
             owner,
@@ -78,14 +75,11 @@ impl Catalog {
         metadata: Arc<Budget>,
     ) -> io::Result<Inspection> {
         let directory = Directory::open(&tickets.root().join(DIRECTORY))?;
-        let file = direct::open(&directory.path.join(NAME), false)?;
+        let file = direct::open(&directory.path().join(NAME), false)?;
         direct::Alignment::query(&file)?;
         let contents = Contents::read(&file, store, metadata)?;
         Ok(Inspection {
-            owner: Arc::new(Owner {
-                _tickets: tickets,
-                directory,
-            }),
+            owner: Arc::new(Owner { tickets, directory }),
             file,
             contents,
         })
@@ -100,12 +94,7 @@ impl Catalog {
     }
 
     fn healthy(&self) -> io::Result<()> {
-        if self.failed {
-            return Err(io::Error::other(
-                "catalog failed; explicit recovery required",
-            ));
-        }
-        Ok(())
+        crate::encoding::require_healthy(self.failed, "catalog failed; explicit recovery required")
     }
 
     pub fn prepare(&self, change: Change) -> io::Result<Prepared> {
@@ -187,7 +176,7 @@ pub struct Inspection {
 
 impl Inspection {
     pub fn validate_recovery(&self, repair: crate::space::Recovery<'_>) -> io::Result<()> {
-        repair.validate_tickets(Some(&self.owner._tickets))?;
+        repair.validate_tickets(Some(&self.owner.tickets))?;
         repair.validate_file(&self.file)?;
         repair.validate_output(0)
     }
@@ -214,7 +203,7 @@ fn write(owner: &Owner, contents: &Contents) -> io::Result<File> {
     let mut attempt = 0u64;
     let (name, file) = loop {
         let name = format!("pending-{:020}-{attempt:020}.v2", contents.generation());
-        match direct::open(&directory.path.join(&name), true) {
+        match direct::open(&directory.path().join(&name), true) {
             Ok(file) => break (name, file),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 attempt = attempt

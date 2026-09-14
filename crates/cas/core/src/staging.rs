@@ -81,7 +81,7 @@ impl StagingLog {
         let file = direct::open(path, true)?;
         let header = encode_header(image_bytes);
         direct::write(&file, &header, 0)?;
-        file.sync_all()?;
+        direct::sync_all(&file)?;
         // A synced file does not by itself make a newly created name durable.
         let parent = path
             .parent()
@@ -139,8 +139,8 @@ impl StagingLog {
             }
         }
         log.recovered_tail_bytes = original_length - log.next_offset;
-        log.file.set_len(log.next_offset)?;
-        log.file.sync_all()?;
+        direct::truncate(&log.file, log.next_offset)?;
+        direct::sync_all(&log.file)?;
         Ok(log)
     }
 

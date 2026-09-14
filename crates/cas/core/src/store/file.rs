@@ -28,6 +28,9 @@ pub use collection::{Collected, Collection, Sweep, Victim};
 pub use read::{Payload, Read, Reader};
 pub use recovery::Inspection;
 
+/// Chunk segments live under this directory of the store root.
+pub(crate) const DIRECTORY: &str = "chunks";
+
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
     pub store: [u8; 16],
@@ -86,12 +89,10 @@ struct State {
 
 impl State {
     fn healthy(&self) -> io::Result<()> {
-        if self.failed {
-            return Err(io::Error::other(
-                "chunk store failed; explicit recovery required",
-            ));
-        }
-        Ok(())
+        crate::encoding::require_healthy(
+            self.failed,
+            "chunk store failed; explicit recovery required",
+        )
     }
 }
 
@@ -132,9 +133,9 @@ impl Store {
         io_memory: Arc<Budget>,
     ) -> io::Result<Self> {
         config.validate()?;
-        let path = tickets.root().join("chunks");
+        let path = tickets.root().join(DIRECTORY);
         fs::create_dir(&path)?;
-        File::open(tickets.root())?.sync_all()?;
+        direct::sync_all(tickets.root_file())?;
         let directory = Directory::open(&path)?;
         Ok(Self::empty(directory, tickets, config, metadata, io_memory))
     }
@@ -187,6 +188,17 @@ impl Store {
     }
 }
 
+/// A segment is block 0 (its header) followed by contiguous batches, each one
+/// header block and then one block per chunk, with chunk ordinals counted from
+/// 1 across the whole segment. The header of batch `batch` at block
+/// `offset / BLOCK_SIZE` therefore opens at ordinal `block - batch + 1`.
+fn batch_identity(header: &Header, segment: u64, batch: u64, offset: u64, chunks: u16) -> bool {
+    header.segment() == segment
+        && header.batch() == batch
+        && header.first() == offset / BLOCK_SIZE as u64 - batch + 1
+        && header.descriptors().len() == usize::from(chunks)
+}
+
 #[derive(Clone, Copy)]
 struct BatchLocation {
     offset: u32,
@@ -227,7 +239,7 @@ impl Segment {
                 capacity: config.segment_bytes,
             };
             header.encode_into(scratch.as_mut_slice())?;
-            let file = direct::open(&directory.path.join(segments::name(number)), true)?;
+            let file = direct::open(&directory.path().join(segments::name(number)), true)?;
             direct::Alignment::query(&file)?;
             direct::preallocate(&file, 0, config.segment_bytes)?;
             direct::write_bytes(&file, scratch.as_slice(), 0)?;

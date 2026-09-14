@@ -52,7 +52,7 @@ impl Usage {
         self.compaction = self.stopped || used * 100 >= capacity * 75;
     }
 
-    fn fits(&mut self, bytes: u64) -> bool {
+    fn admit(&mut self, bytes: u64) -> bool {
         let used = self.allocated.saturating_add(self.promised);
         if bytes > self.capacity.saturating_sub(used) {
             self.stopped = true;
@@ -145,8 +145,8 @@ impl Staging {
         if bytes == 0 || bytes > image_capacity || bytes > state.host.capacity {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        let host_fits = state.host.fits(bytes);
-        let image_fits = state.images[image].fits(bytes);
+        let host_fits = state.host.admit(bytes);
+        let image_fits = state.images[image].admit(bytes);
         if !(host_fits && image_fits) {
             return Err(io::ErrorKind::WouldBlock.into());
         }

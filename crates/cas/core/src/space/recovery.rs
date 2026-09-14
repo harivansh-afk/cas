@@ -1,7 +1,7 @@
 //! Recovery uses the same exclusive physical borrower as runtime background IO.
 use super::Governor;
 use crate::{directory::Directory, segments::Tickets};
-use std::{fs::File, io, path::PathBuf, sync::Arc};
+use std::{fmt, fs::File, io, path::PathBuf, sync::Arc};
 
 pub const METADATA_MARGIN: u64 = 16 * 1024 * 1024;
 
@@ -41,15 +41,15 @@ impl<'a> Recovery<'a> {
         Ok(total)
     }
 
-    pub fn output<T>(
+    pub fn output<T, E: From<io::Error> + fmt::Display>(
         &self,
         bytes: u64,
-        operation: impl FnOnce() -> io::Result<T>,
-    ) -> io::Result<T> {
+        operation: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E> {
         let bytes = self.output_bytes(bytes)?;
         match self.physical {
             None => operation(),
-            Some(physical) => physical.background(bytes)?.run(operation),
+            Some(physical) => physical.background(bytes)?.run_with(operation),
         }
     }
 

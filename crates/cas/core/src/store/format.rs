@@ -34,6 +34,7 @@ impl SegmentHeader {
         )
     }
 
+    #[cfg(test)]
     pub fn encode(self) -> io::Result<AlignedBuffer> {
         let mut buffer = AlignedBuffer::new(BLOCK_SIZE);
         self.encode_into(buffer.as_mut_slice())?;
@@ -197,6 +198,7 @@ pub struct Builder<A: Allocator = Global> {
     count: usize,
 }
 
+#[cfg(test)]
 impl Builder {
     pub fn new(capacity: usize) -> io::Result<Self> {
         Self::try_new_in(capacity, Global)

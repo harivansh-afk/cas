@@ -45,7 +45,7 @@ pub struct Cache {
 
 impl Key for Hash {
     fn bucket(&self) -> u64 {
-        u64::from_le_bytes(self[..8].try_into().unwrap())
+        crate::chunk_index::bucket(self)
     }
 }
 

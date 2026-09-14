@@ -10,6 +10,15 @@ pub(crate) fn require(condition: bool, message: &'static str) -> std::io::Result
     }
 }
 
+/// A failed owner refuses every operation until explicit recovery.
+pub(crate) fn require_healthy(failed: bool, message: &'static str) -> std::io::Result<()> {
+    if failed {
+        Err(std::io::Error::other(message))
+    } else {
+        Ok(())
+    }
+}
+
 pub(crate) fn u16_at(bytes: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap())
 }

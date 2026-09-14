@@ -52,7 +52,7 @@ impl Tickets {
             highest: 0,
             live: HashTable::new_in(BudgetAllocator::new(metadata)),
         };
-        scan.directory(&root.join("chunks"))?;
+        scan.directory(&root.join(crate::store::file::DIRECTORY))?;
         if let Some(images) = entries(&root.join("images"))? {
             for entry in images {
                 let entry = entry?;
@@ -90,7 +90,7 @@ impl Tickets {
     }
 
     pub fn root(&self) -> &Path {
-        &self.directory.path
+        self.directory.path()
     }
 
     /// `create` must retain the assigned filename and sync the header, file and

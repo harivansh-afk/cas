@@ -61,12 +61,7 @@ impl Snapshot {
     }
 
     fn healthy(&self) -> io::Result<()> {
-        if self.failed {
-            return Err(io::Error::other(
-                "snapshot failed; explicit recovery required",
-            ));
-        }
-        Ok(())
+        crate::encoding::require_healthy(self.failed, "snapshot failed; explicit recovery required")
     }
 
     pub fn pinned_roots(&mut self, metadata: Arc<Budget>) -> io::Result<Roots<'_>> {

@@ -70,7 +70,7 @@ impl Log {
             base: Candidate {
                 commit: selected.commit,
                 end: selected.end,
-                file: manifest.pin(),
+                file: manifest.file(),
             },
         })
     }
