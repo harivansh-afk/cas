@@ -22,8 +22,9 @@ use crate::{
     process::{self, ManagedChild},
 };
 
-// Linux 6.17.13 can delay io_uring worker exit for five seconds. See the
-// daemon-lifetime review; this is a shutdown limit, not an IO timing metric.
+// The kernel can delay io_uring worker exit for about five seconds (observed on
+// Linux 6.17.13; see the daemon-lifetime review). This bounds shutdown only; it
+// is not an IO timing metric.
 const DAEMON_SHUTDOWN: Duration = Duration::from_secs(10);
 
 mod interactive;

@@ -6,9 +6,11 @@
 # have no network and power off; interactive guests stay available over SSH.
 #
 # `cas.guest.backend` chooses how the experiment disk reaches the guest:
-#   raw      QEMU's own virtio-blk on a raw image file ($CAS_RAW_IMAGE)
-#   daemon   cas-daemon over vhost-user, raw-file storage ($CAS_VHOST_SOCKET)
-#   staging  cas-daemon over vhost-user, staging-log storage
+#   raw          QEMU's own virtio-blk on a raw image file ($CAS_RAW_IMAGE)
+#   daemon       cas-daemon over vhost-user, raw-file storage ($CAS_VHOST_SOCKET)
+#   staging      cas-daemon over vhost-user, staging-log storage
+#   local        cas-daemon over vhost-user, synchronous packed local storage
+#   local-async  cas-daemon over vhost-user, concurrent packed local storage
 # The environment variables are set by `cas-harness vm` when it starts QEMU.
 {
   config,

@@ -14,7 +14,7 @@
   qemu_kvm,
   fio,
   cas,
-  # "raw", "daemon", or "staging"; see nix/guest/default.nix.
+  # "raw", "daemon", "staging", "local" or "local-async"; see nix/guest/default.nix.
   backend,
   # The evaluated NixOS guest for this backend (a `lib.nixosSystem` result).
   guest,
