@@ -261,7 +261,7 @@ impl Carrier {
                             "used publication precedes active request or published mutation",
                         ));
                     }
-                    completed.push(interrupted.entry);
+                    completed.push((interrupted.entry, used));
                 }
                 _ => {
                     return Err(invalid(
@@ -299,11 +299,11 @@ impl Carrier {
 
         // Repair a guest-visible completion in the same order as normal
         // retirement. ACTIVE with inflight=0 also means used was published.
-        for entry in completed.iter().copied() {
-            self.finish_completion(entry, guest_used[usize::from(entry.request.queue)].unwrap())?;
+        for (entry, used) in completed.iter().copied() {
+            self.finish_completion(entry, used)?;
         }
         for record in &saved {
-            if completed.contains(&record.entry) {
+            if completed.iter().any(|(entry, _)| *entry == record.entry) {
                 continue;
             }
             if record.state == DISCOVERED {
