@@ -839,30 +839,7 @@ impl Backend {
             return Ok(());
         }
         if self.restartable && self.live.is_none() && self.restored_used.is_none() {
-            if !state.is_enabled() || !state.get_queue().ready() {
-                return Ok(());
-            }
-            let queue = state.get_queue_mut();
-            let used = queue
-                .used_idx(&**mem, Ordering::Acquire)
-                .map_err(io::Error::other)?
-                .0;
-            let available = queue
-                .avail_idx(&**mem, Ordering::Acquire)
-                .map_err(io::Error::other)?
-                .0;
-            let outstanding = available.wrapping_sub(used);
-            if outstanding > queue.size() {
-                return Err(io::Error::other("invalid restartable queue distance"));
-            }
-            // Exactly one request may execute before its used entry is published.
-            // Thus used.idx is also the consumption cursor, including after wrap.
-            // Writes are durable before publication; replay of the unpublished
-            // request cannot overwrite a later completed request.
-            queue.set_next_used(used);
-            queue.set_next_avail(used);
-            self.restored_used = Some(used);
-            self.restored_pending = outstanding;
+            self.restore_serial_cursor(mem, state.get_queue_mut())?;
         }
         let mut consumed = 0;
         let limit = if self.restartable && self.live.is_none() {
@@ -940,6 +917,34 @@ impl Backend {
             // and self-wake so a consumed/coalesced kick cannot strand requests.
             self.completion_event.write(1)?;
         }
+        Ok(())
+    }
+    /// Restartable staging resumes one queue from the guest's own used cursor.
+    fn restore_serial_cursor(
+        &mut self,
+        mem: &GuestMemoryMmap,
+        queue: &mut Queue,
+    ) -> io::Result<()> {
+        let used = queue
+            .used_idx(mem, Ordering::Acquire)
+            .map_err(io::Error::other)?
+            .0;
+        let available = queue
+            .avail_idx(mem, Ordering::Acquire)
+            .map_err(io::Error::other)?
+            .0;
+        let outstanding = available.wrapping_sub(used);
+        if outstanding > queue.size() {
+            return Err(io::Error::other("invalid restartable queue distance"));
+        }
+        // Exactly one request may execute before its used entry is published.
+        // Thus used.idx is also the consumption cursor, including after wrap.
+        // Writes are durable before publication; replay of the unpublished
+        // request cannot overwrite a later completed request.
+        queue.set_next_used(used);
+        queue.set_next_avail(used);
+        self.restored_used = Some(used);
+        self.restored_pending = outstanding;
         Ok(())
     }
     fn accept(
