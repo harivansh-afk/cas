@@ -183,10 +183,20 @@ impl Drop for ManagedChild {
     }
 }
 
+/// How a captured command ended; serialized as the lowercase word in reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CaptureStatus {
+    Ok,
+    Error,
+    Missing,
+    Timeout,
+}
+
 #[derive(Serialize)]
 pub struct Capture {
     argv: Vec<String>,
-    status: &'static str,
+    status: CaptureStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     returncode: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -253,7 +263,7 @@ pub fn run_logged(
 pub fn capture(argv: &[&str], cwd: &std::path::Path) -> Capture {
     let mut report = Capture {
         argv: argv.iter().map(|s| (*s).into()).collect(),
-        status: "error",
+        status: CaptureStatus::Error,
         returncode: None,
         stdout: None,
         stderr: None,
@@ -279,14 +289,18 @@ pub fn capture(argv: &[&str], cwd: &std::path::Path) -> Capture {
         report.returncode = Some(exit_code(status));
         report.stdout = Some(read(&mut stdout)?);
         report.stderr = Some(read(&mut stderr)?);
-        report.status = if status.success() { "ok" } else { "error" };
+        report.status = if status.success() {
+            CaptureStatus::Ok
+        } else {
+            CaptureStatus::Error
+        };
         Ok(())
     })();
     if let Err(error) = result {
         report.status = match error.kind() {
-            io::ErrorKind::NotFound => "missing",
-            io::ErrorKind::TimedOut => "timeout",
-            _ => "error",
+            io::ErrorKind::NotFound => CaptureStatus::Missing,
+            io::ErrorKind::TimedOut => CaptureStatus::Timeout,
+            _ => CaptureStatus::Error,
         };
         report.error = Some(error.to_string());
     }
@@ -368,13 +382,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let failed = capture(&["sh", "-c", "printf failed >&2; exit 7"], dir.path());
         assert_eq!(failed.returncode, Some(7));
-        assert_eq!(failed.status, "error");
+        assert_eq!(failed.status, CaptureStatus::Error);
         assert_eq!(failed.stderr.as_deref(), Some("failed"));
         let large = capture(&["sh", "-c", "head -c 262144 /dev/zero"], dir.path());
-        assert_eq!(large.status, "ok");
+        assert_eq!(large.status, CaptureStatus::Ok);
         assert_eq!(large.stdout.unwrap().len(), 262144);
         let missing = capture(&["/nonexistent/cas-harness-test"], dir.path());
-        assert_eq!(missing.status, "missing");
+        assert_eq!(missing.status, CaptureStatus::Missing);
         assert!(missing.error.is_some());
+        assert_eq!(
+            serde_json::to_value(&missing).unwrap()["status"],
+            serde_json::json!("missing")
+        );
+        for (status, word) in [
+            (CaptureStatus::Ok, "ok"),
+            (CaptureStatus::Error, "error"),
+            (CaptureStatus::Timeout, "timeout"),
+        ] {
+            assert_eq!(serde_json::to_value(status).unwrap(), word);
+        }
     }
 }
