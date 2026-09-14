@@ -144,10 +144,10 @@ impl QueueAdmission {
         match result {
             Decision::Ready(mut permit) => {
                 if let Some(turn) = turn {
-                    let Permit::Local { _credits } = &mut permit else {
+                    let Permit::Local { credits } = &mut permit else {
                         unreachable!("only shared hosts schedule admission");
                     };
-                    _credits.fair_release = Some(turn.commit());
+                    credits.fair_release = Some(turn.commit());
                 }
                 Ok(Admission::Accepted(permit))
             }

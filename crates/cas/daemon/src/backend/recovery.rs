@@ -620,7 +620,7 @@ impl Backend {
                             queue: entry.request.queue,
                             id: entry.serial - 1,
                             request: Request::Read(data),
-                            permit: Permit::Local { _credits: permit },
+                            permit: Permit::Local { credits: permit },
                             inflight: Some(entry),
                         },
                         Some(&mut state),

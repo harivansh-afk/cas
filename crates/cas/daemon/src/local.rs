@@ -154,7 +154,7 @@ impl Command {
                 id,
                 data,
                 result: Err(io::Error::other(error.to_owned())),
-                _permit: Some(permit),
+                permit: Some(permit),
             })
         };
         match self {
@@ -936,7 +936,7 @@ impl Worker {
                     id,
                     data,
                     result,
-                    _permit: Some(permit),
+                    permit: Some(permit),
                 },
                 self.log.status(),
             ))

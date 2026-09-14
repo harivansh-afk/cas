@@ -679,7 +679,7 @@ impl Backend {
                 .remove(&completed.id)
                 .ok_or_else(|| io::Error::other("unknown IO completion"))?;
             let mut trace = completed
-                ._permit
+                .permit
                 .as_mut()
                 .and_then(|permit| permit.trace.take());
             if let Some(trace) = &mut trace {
@@ -1034,8 +1034,8 @@ impl Backend {
             })
         });
         {
-            if let Permit::Local { _credits } = &mut permit {
-                _credits.trace = trace;
+            if let Permit::Local { credits } = &mut permit {
+                credits.trace = trace;
             }
             self.enqueue(
                 mem,
