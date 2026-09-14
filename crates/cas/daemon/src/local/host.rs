@@ -429,24 +429,30 @@ impl Host {
             .iter_mut()
             .find(|slot| slot.as_ref().is_some_and(|a| a.image == image))
             .ok_or_else(|| io::Error::other("unknown or already attached host image"))?;
-        let Attachment { log, mut port, .. } = slot.take().unwrap();
-        self.shared
-            .admission
-            .bind(port.index, event.try_clone()?, port.wake.try_clone()?)?;
-        let wake = port.wake.try_clone()?.into_raw_fd();
+        // Allocate and clone before taking the attachment: a denied metadata
+        // charge or an exhausted descriptor table leaves the image attachable.
+        let attachment = slot.as_ref().expect("matched attachment");
+        let frontend = event.try_clone()?;
+        let reactor = attachment.port.wake.try_clone()?;
+        let wake = attachment.port.wake.try_clone()?.into_raw_fd();
         // SAFETY: the freshly cloned eventfd transfers its unique FD owner here.
         let wake = unsafe { std::os::fd::OwnedFd::from_raw_fd(wake) };
-        self.shared.io_scheduler.bind(port.index, wake)?;
         let shared = Shared::with_pools(
-            log.status(),
+            attachment.log.status(),
             self.shared.resources.pools.image(),
-            port.health.clone(),
+            attachment.port.health.clone(),
             Arc::clone(&self.shared.resources.metadata),
-            Some(port.window.clone()),
+            Some(attachment.port.window.clone()),
             Some(self.shared.admission.clone()),
         )?;
+        self.shared
+            .admission
+            .bind(attachment.port.index, frontend, reactor)?;
+        let Attachment { log, mut port, .. } = slot.take().expect("matched attachment");
+        // From here `Port::drop` detaches the bound wake if a later step fails.
         port.attached = true;
         self.shared.attached.fetch_add(1, Ordering::Relaxed);
+        self.shared.io_scheduler.bind(port.index, wake)?;
         Local::from_host(log, event, shared, port)
     }
 

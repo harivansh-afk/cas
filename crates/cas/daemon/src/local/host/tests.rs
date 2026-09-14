@@ -757,3 +757,33 @@ fn read_page_metadata_denial_returns_ioerr_without_failing_the_shared_store() {
     assert_eq!(resources.metadata.usage().current, Amount::default());
     assert_eq!(resources.read_memory().usage().current, Amount::default());
 }
+
+#[test]
+fn a_denied_attachment_keeps_the_image_attachable_without_a_stale_wake() {
+    let root = tempfile::tempdir().unwrap();
+    let resources = Arc::new(Resources::default());
+    let mut host = create(root.path(), 1, Arc::clone(&resources));
+    let held = resources
+        .metadata
+        .reserve(Amount {
+            bytes: 128 * MAX_REQUEST_BYTES - resources.metadata.usage().current.bytes,
+            requests: 0,
+        })
+        .unwrap();
+    let event = EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK).unwrap();
+    let Err(error) = host.local([2; 16], &event) else {
+        panic!("attachment succeeded without metadata");
+    };
+    assert_eq!(error.kind(), io::ErrorKind::OutOfMemory);
+    assert!(!host.shared.admission.attached(0));
+    assert_eq!(host.shared.attached.load(Ordering::Acquire), 0);
+    assert!(host.images[0].is_some());
+    drop(held);
+    let mut local = attach(&mut host, 2);
+    assert!(host.shared.admission.attached(0));
+    write(&mut local, 0, 0, &[7u8; BLOCK_SIZE]);
+    read(&mut local, 1, &[7u8; BLOCK_SIZE]);
+    drop(local);
+    shutdown(host);
+    assert_eq!(resources.metadata.usage().current, Amount::default());
+}
