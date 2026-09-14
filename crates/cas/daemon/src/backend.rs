@@ -81,7 +81,7 @@ struct PendingRequest {
     error_published: bool,
 }
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize)]
 struct Counters {
     reads: u64,
     writes: u64,
@@ -94,6 +94,40 @@ struct Counters {
     errors: u64,
     bounce_requests: u64,
     peak_inflight: usize,
+}
+
+#[derive(serde::Serialize)]
+struct StagingReport {
+    image_bytes: u64,
+    appended: u64,
+    durable: u64,
+    log_bytes: u64,
+    mapped_blocks: usize,
+    recovered_tail_bytes: u64,
+}
+
+/// Field names are the report schema; consumers read them by key.
+#[derive(serde::Serialize)]
+pub(crate) struct Report<'a> {
+    schema_version: u32,
+    fatal_error: Option<&'a str>,
+    backend: &'static str,
+    inflight: Option<recovery::Report>,
+    restartable: bool,
+    restored_used: Option<u16>,
+    restored_pending: u16,
+    local: Option<serde_json::Value>,
+    admission: admission::Report,
+    read_trace: Option<&'a Observer>,
+    read_progress: Option<frontier::Report>,
+    metadata: cas_core::budget::Usage,
+    staging: Option<StagingReport>,
+    negotiated_features: u64,
+    flush_negotiated: bool,
+    #[serde(flatten)]
+    counters: &'a Counters,
+    queues: usize,
+    queue_requests: &'a [u64],
 }
 
 pub struct Backend {
@@ -468,31 +502,35 @@ impl Backend {
     pub fn pending_count(&self) -> usize {
         self.pending.len()
     }
-    pub fn report(&self, pending_at_disconnect: usize, connection_ok: bool) -> serde_json::Value {
-        let c = &self.counters;
-        serde_json::json!({
-            "schema_version":1, "fatal_error":self.failure, "backend":self.storage.name(), "connection_ok":connection_ok,
-            "inflight":self.live.as_ref().map(Session::report),
-            "restartable":self.restartable, "restored_used":self.restored_used, "restored_pending":self.restored_pending,
-            "local":self.storage.local_report(),
-            "admission":self.admission.snapshot(),
-            "read_trace":self.read_trace.as_deref(),
-            "read_progress": self.frontier.as_ref().map(frontier::Frontier::report),
-            "metadata":self.metadata.usage(),
-            "staging":self.storage.status().map(|s| serde_json::json!({
-                "image_bytes":s.image_bytes, "appended":s.appended, "durable":s.durable,
-                "log_bytes":s.log_bytes, "mapped_blocks":s.mapped_blocks,
-                "recovered_tail_bytes":s.recovered_tail_bytes
-            })),
-            "negotiated_features":self.negotiated_features,
-            "flush_negotiated":self.negotiated_features & (1 << VIRTIO_BLK_F_FLUSH) != 0,
-            "pending_at_disconnect":pending_at_disconnect, "reads":c.reads, "writes":c.writes,
-            "flushes":c.flushes, "read_bytes":c.read_bytes, "write_bytes":c.write_bytes,
-            "zeroes":c.zeroes, "zero_bytes":c.zero_bytes,
-            "guest_payload_copy_bytes":c.guest_payload_copy_bytes,
-            "errors":c.errors, "bounce_requests":c.bounce_requests, "peak_inflight":c.peak_inflight,
-            "queues":self.num_queues(), "queue_requests":&self.queue_requests[..self.num_queues()]
-        })
+    /// The connection owner adds its own lifecycle fields around this report.
+    pub(crate) fn report(&self) -> Report<'_> {
+        Report {
+            schema_version: 1,
+            fatal_error: self.failure.as_deref(),
+            backend: self.storage.name(),
+            inflight: self.live.as_ref().map(Session::report),
+            restartable: self.restartable,
+            restored_used: self.restored_used,
+            restored_pending: self.restored_pending,
+            local: self.storage.local_report(),
+            admission: self.admission.snapshot(),
+            read_trace: self.read_trace.as_deref(),
+            read_progress: self.frontier.as_ref().map(frontier::Frontier::report),
+            metadata: self.metadata.usage(),
+            staging: self.storage.status().map(|status| StagingReport {
+                image_bytes: status.image_bytes,
+                appended: status.appended,
+                durable: status.durable,
+                log_bytes: status.log_bytes,
+                mapped_blocks: status.mapped_blocks,
+                recovered_tail_bytes: status.recovered_tail_bytes,
+            }),
+            negotiated_features: self.negotiated_features,
+            flush_negotiated: self.negotiated_features & (1 << VIRTIO_BLK_F_FLUSH) != 0,
+            counters: &self.counters,
+            queues: self.num_queues(),
+            queue_requests: &self.queue_requests[..self.num_queues()],
+        }
     }
     fn finish(
         &mut self,

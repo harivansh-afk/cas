@@ -372,7 +372,7 @@ fn disconnect_recovery_restores_discovered_write_after_a_completed_bypass_read()
     replacement.blocked_queues[0] = false;
     guest.run_until(&mut replacement, 0);
     assert_eq!(
-        replacement.live.as_ref().unwrap().report()["replayed_mutations"],
+        serde_json::to_value(replacement.live.as_ref().unwrap().report()).unwrap()["replayed_mutations"],
         0
     );
     assert_eq!(replacement.counters.writes, 1);

@@ -56,12 +56,28 @@ impl Session {
     pub(super) fn active(&self) -> bool {
         self.phase == Phase::Active
     }
-    pub fn report(&self) -> serde_json::Value {
-        serde_json::json!({ "active": self.phase == Phase::Active,
-            "replayed_requests": self.replayed_requests, "replayed_mutations": self.replayed_mutations,
-            "replay_copy_bytes": self.replay_copy_bytes, "replayed_write_bytes": self.replayed_write_bytes, "saved_p": self.saved_p,
-            "recovered_p": self.recovered_p })
+    pub(super) fn report(&self) -> Report {
+        Report {
+            active: self.phase == Phase::Active,
+            replayed_requests: self.replayed_requests,
+            replayed_mutations: self.replayed_mutations,
+            replay_copy_bytes: self.replay_copy_bytes,
+            replayed_write_bytes: self.replayed_write_bytes,
+            saved_p: self.saved_p,
+            recovered_p: self.recovered_p,
+        }
     }
+}
+
+#[derive(serde::Serialize)]
+pub(super) struct Report {
+    active: bool,
+    replayed_requests: usize,
+    replayed_mutations: usize,
+    replay_copy_bytes: u64,
+    replayed_write_bytes: u64,
+    saved_p: u64,
+    recovered_p: u64,
 }
 
 fn geometry(message: &VhostUserInflight) -> io::Result<Geometry> {
