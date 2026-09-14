@@ -54,11 +54,13 @@ impl Endpoint {
         match self.exchange(event)? {
             Reply::Selected(None) => Ok(()),
             Reply::Selected(Some(selection)) => {
-                let attempt = statistics::Attempt::new(&self.statistics);
+                let mut attempt = statistics::Attempt::new(&self.statistics);
                 self.healthy()?;
                 let input = selection.load()?;
+                attempt.advance(statistics::Phase::Prepare);
                 let input_bytes = input.payload_bytes() as u64;
                 let prepared = input.prepare(&self.manifest)?;
+                attempt.advance(statistics::Phase::Reserve);
                 let output_bytes = (prepared.chunk_count() * BLOCK_SIZE) as u64;
                 let bytes = capacity::compaction_bytes(&prepared, store.config().segment_bytes);
                 let permit = match self.background(physical, bytes)? {
@@ -68,6 +70,7 @@ impl Endpoint {
                         return Ok(());
                     }
                 };
+                attempt.advance(statistics::Phase::Chunks);
                 #[cfg(test)]
                 {
                     let pause = self.control.lock().unwrap().compaction.take();
@@ -85,6 +88,15 @@ impl Endpoint {
                     let receipt =
                         prepared.write_with(store, &mut self.manifest, |stage, durable| {
                             use append::Publication;
+                            match stage {
+                                Publication::AfterChunks => {
+                                    attempt.advance(statistics::Phase::Manifest)
+                                }
+                                Publication::AfterManifest => {
+                                    attempt.advance(statistics::Phase::Reclaim)
+                                }
+                                Publication::BeforeChunks => (),
+                            }
                             let point = match stage {
                                 Publication::BeforeChunks => fault::Point::BeforeChunks,
                                 Publication::AfterChunks => fault::Point::AfterChunks,

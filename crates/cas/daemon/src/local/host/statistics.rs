@@ -2,6 +2,48 @@
 use super::*;
 
 #[derive(Default, Clone, Copy, serde::Serialize)]
+pub(super) struct Phases {
+    load: u64,
+    prepare: u64,
+    reserve: u64,
+    chunks: u64,
+    manifest: u64,
+    reclaim: u64,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum Phase {
+    Load,
+    Prepare,
+    Reserve,
+    Chunks,
+    Manifest,
+    Reclaim,
+}
+
+impl Phases {
+    fn add(&mut self, other: Self) {
+        self.load += other.load;
+        self.prepare += other.prepare;
+        self.reserve += other.reserve;
+        self.chunks += other.chunks;
+        self.manifest += other.manifest;
+        self.reclaim += other.reclaim;
+    }
+    fn record(&mut self, phase: Phase, ns: u64) {
+        let value = match phase {
+            Phase::Load => &mut self.load,
+            Phase::Prepare => &mut self.prepare,
+            Phase::Reserve => &mut self.reserve,
+            Phase::Chunks => &mut self.chunks,
+            Phase::Manifest => &mut self.manifest,
+            Phase::Reclaim => &mut self.reclaim,
+        };
+        *value += ns;
+    }
+}
+
+#[derive(Default, Clone, Copy, serde::Serialize)]
 pub(super) struct Totals {
     pub batches: u64,
     pub input_bytes: u64,
@@ -11,6 +53,8 @@ pub(super) struct Totals {
     pub deferred_ns: u64,
     pub failed: u64,
     pub failed_ns: u64,
+    /// Elapsed time across all attempts, including partial failed phases.
+    pub phases_ns: Phases,
 }
 
 enum Outcome {
@@ -22,22 +66,40 @@ enum Outcome {
 pub(super) struct Attempt {
     totals: BudgetArc<Mutex<Totals>>,
     started: Instant,
+    checkpoint: Instant,
+    phase: Phase,
+    phases: Phases,
     outcome: Outcome,
 }
 
 impl Attempt {
     pub fn new(totals: &BudgetArc<Mutex<Totals>>) -> Self {
+        let now = Instant::now();
         Self {
             totals: totals.clone(),
-            started: Instant::now(),
+            started: now,
+            checkpoint: now,
+            phase: Phase::Load,
+            phases: Phases::default(),
             outcome: Outcome::Failed,
         }
     }
-
+    fn record(&mut self, now: Instant) {
+        self.phases.record(
+            self.phase,
+            now.duration_since(self.checkpoint)
+                .as_nanos()
+                .min(u64::MAX as u128) as u64,
+        );
+        self.checkpoint = now;
+    }
+    pub fn advance(&mut self, next: Phase) {
+        self.record(Instant::now());
+        self.phase = next;
+    }
     pub fn deferred(mut self) {
         self.outcome = Outcome::Deferred;
     }
-
     pub fn completed(mut self, input: u64, output: u64) {
         self.outcome = Outcome::Completed { input, output };
     }
@@ -45,8 +107,14 @@ impl Attempt {
 
 impl Drop for Attempt {
     fn drop(&mut self) {
-        let elapsed = self.started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let now = Instant::now();
+        self.record(now);
+        let elapsed = now
+            .duration_since(self.started)
+            .as_nanos()
+            .min(u64::MAX as u128) as u64;
         let mut totals = self.totals.lock().expect("compaction statistics poisoned");
+        totals.phases_ns.add(self.phases);
         match self.outcome {
             Outcome::Failed => {
                 totals.failed += 1;
@@ -82,6 +150,16 @@ mod tests {
         assert_eq!((result.batches, result.failed, result.deferred), (1, 1, 1));
         assert_eq!(result.input_bytes, 4096);
         assert_eq!(result.candidate_output_bytes, 8192);
+        let phases = result.phases_ns;
+        assert_eq!(
+            phases.load
+                + phases.prepare
+                + phases.reserve
+                + phases.chunks
+                + phases.manifest
+                + phases.reclaim,
+            result.active_ns + result.failed_ns + result.deferred_ns
+        );
         drop(totals);
         assert_eq!(metadata.usage().current, Amount::default());
     }

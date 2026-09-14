@@ -14,12 +14,17 @@ pub struct Admission {
 }
 
 impl Admission {
-    pub fn admits(&self) -> bool {
-        self.staging.admits(self.image)
-            && self.physical.as_ref().is_none_or(|physical| {
-                let status = physical.status();
-                !status.failed && !status.pressured
-            })
+    pub fn check(&self) -> Result<(), pressure::Reason> {
+        if !self.staging.admits(self.image) {
+            return Err(pressure::Reason::Staging);
+        }
+        if self.physical.as_ref().is_some_and(|physical| {
+            let status = physical.status();
+            status.failed || status.pressured
+        }) {
+            return Err(pressure::Reason::Physical);
+        }
+        Ok(())
     }
 
     pub fn pressure(&self) -> bool {

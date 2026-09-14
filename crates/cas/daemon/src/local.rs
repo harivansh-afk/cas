@@ -1,6 +1,7 @@
 //! V2 adapters. The queue thread gathers into its final append allocation.
 pub(crate) mod host;
 mod pools;
+mod pressure;
 mod reactor;
 mod state;
 mod window;
@@ -206,6 +207,7 @@ pub struct Shared {
     pools: Pools,
     metadata: Arc<Budget>,
     metrics: Mutex<Metrics>,
+    pressure: pressure::Counters,
     final_status: Mutex<append::Status>,
     pub health: Health,
     pub injection: OnceLock<crate::fault::Injection>,
@@ -248,6 +250,7 @@ impl Shared {
                 pools,
                 metadata,
                 metrics: Mutex::new(Metrics::default()),
+                pressure: pressure::Counters::default(),
                 final_status: Mutex::new(status),
                 health,
                 window,
@@ -275,7 +278,10 @@ impl Shared {
 
     pub fn reserve(&self, kind: Kind) -> Option<Permit> {
         let entry = match &self.admission {
-            Some(admission) => Some(host::admission::Admission::enter(admission)?),
+            Some(admission) => Some(
+                host::admission::Admission::enter(admission)
+                    .or_else(|| self.pressure.deny(pressure::Reason::HostAdmission))?,
+            ),
             None => None,
         };
         self.reserve_with_entry(kind, entry)
@@ -299,13 +305,22 @@ impl Shared {
                 bytes: 0,
                 requests: 1,
             }),
-        }?;
+        }
+        .or_else(|| self.pressure.deny(pressure::Reason::RequestCredits))?;
         let read = if let Kind::Read(bytes) = kind {
-            let credits = self.pools.read.reserve(Amount {
-                bytes: bytes + MAX_REQUEST_BYTES,
-                requests: 0,
-            })?;
-            Some(BudgetArc::try_new(credits, &self.metadata).ok()?)
+            let credits = self
+                .pools
+                .read
+                .reserve(Amount {
+                    bytes: bytes + MAX_REQUEST_BYTES,
+                    requests: 0,
+                })
+                .or_else(|| self.pressure.deny(pressure::Reason::ReadCredits))?;
+            Some(
+                BudgetArc::try_new(credits, &self.metadata)
+                    .ok()
+                    .or_else(|| self.pressure.deny(pressure::Reason::ReadOwnerAllocation))?,
+            )
         } else {
             None
         };
@@ -315,7 +330,11 @@ impl Shared {
             _request: request,
             _read: read,
             window: match (kind, &self.window) {
-                (Kind::Write(bytes), Some(window)) => Some(window::Window::reserve(window, bytes)?),
+                (Kind::Write(bytes), Some(window)) => Some(
+                    window::Window::reserve(window, bytes)
+                        .inspect_err(|reason| self.pressure.record(*reason))
+                        .ok()?,
+                ),
                 _ => None,
             },
         })
@@ -544,6 +563,7 @@ impl Local {
                     bytes: allocation_bytes,
                     requests: 0,
                 }) else {
+                    self.shared.pressure.record(pressure::Reason::AppendCredits);
                     return Ok(None);
                 };
                 let builder = Builder::new(self.status.image_bytes, payload_capacity)
@@ -767,6 +787,8 @@ impl Local {
             "requests":self.shared.pools.requests.usage(), "append":self.shared.pools.append.usage(),
             "read":self.shared.pools.read.usage(), "control":self.shared.pools.control.usage(),
             "host_append":self.shared.pools.append.host_usage(), "host_read":self.shared.pools.read.host_usage(),
+            "admission_denials": self.shared.pressure.report(),
+            "staging_quota": self.shared.window.as_ref().and_then(|window| window.quota()),
             "wal_window": self.shared.window.as_ref().map(|window| window.status()) })
     }
 

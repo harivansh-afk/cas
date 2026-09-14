@@ -48,6 +48,10 @@ fn expired_admission_wins_over_late_credits_and_control_keeps_its_reserve() {
             .unwrap(),
         Admission::Waiting
     ));
+    assert_eq!(
+        backend.report(0, true)["local"]["admission_denials"]["request_credits"],
+        1
+    );
     let flush = Request::Flush(Completion {
         head: 4,
         status: GuestAddress(0x7000),

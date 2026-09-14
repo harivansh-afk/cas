@@ -115,33 +115,44 @@ impl Window {
         *self.lock()
     }
 
+    pub fn quota(&self) -> Option<cas_core::space::StagingUsage> {
+        self.admission.as_ref().map(|admission| {
+            admission
+                .staging
+                .status(admission.image)
+                .expect("registered image quota")
+                .1
+        })
+    }
+
     pub fn host_pressure(&self) -> bool {
         self.admission
             .as_ref()
             .is_some_and(host::capacity::Admission::pressure)
     }
 
-    pub fn reserve(owner: &BudgetArc<Self>, bytes: usize) -> Option<Slot> {
+    pub fn reserve(owner: &BudgetArc<Self>, bytes: usize) -> Result<Slot, pressure::Reason> {
         if bytes > MAX_REQUEST_BYTES || !bytes.is_multiple_of(BLOCK_SIZE) {
-            return None;
+            return Err(pressure::Reason::InvalidWrite);
         }
-        if owner
-            .admission
-            .as_ref()
-            .is_some_and(|admission| !admission.admits())
+        if let Some(admission) = &owner.admission
+            && let Err(reason) = admission.check()
         {
             owner.notify();
-            return None;
+            return Err(reason);
         }
         let mut state = owner.lock();
-        if state.failed || state.rotation_wanted {
-            return None;
+        if state.failed {
+            return Err(pressure::Reason::WalFailed);
+        }
+        if state.rotation_wanted {
+            return Err(pressure::Reason::WalRotation);
         }
         if state.unsubmitted >= state.index_capacity {
             state.index_pressure = true;
             drop(state);
             owner.notify();
-            return None;
+            return Err(pressure::Reason::WalIndex);
         }
         let bytes = (bytes + BLOCK_SIZE) as u32;
         let mut candidate = *state;
@@ -154,10 +165,10 @@ impl Window {
             state.rotation_wanted = true;
             drop(state);
             owner.notify();
-            return None;
+            return Err(pressure::Reason::WalRotation);
         }
         *state = candidate;
-        Some(Slot {
+        Ok(Slot {
             owner: owner.clone(),
             bytes,
         })
