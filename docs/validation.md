@@ -1,5 +1,19 @@
 # Validation
 
+## 2026-09-19 — Remove the Playbook notice banner
+
+Tested `a16e73a262bca1257814de85b5314eb18aa01f4e` plus the banner/style
+removal committed with this record, on Spark (aarch64 NixOS/Linux 6.17.13).
+`pnpm --dir playbook install --frozen-lockfile`, `pnpm --dir playbook check`,
+`VERCEL=1 pnpm --dir playbook build`, and `git diff --check` passed. Svelte
+reported zero errors/warnings. The retained `check.py` verified the banner text
+and CSS marker are absent from all 12 generated HTML pages. No failures or
+retries; the adapter's zero-config informational warning remains expected.
+No runtime or dependency changes. Evidence is retained locally under
+`.worktrees/remove-playbook-banner/results/banner-20260919/`. CI and production
+verification follow the push; deployment/API and anonymous HTTP receipts are
+retained there separately from these local checks.
+
 ## 2026-09-19 — Release acceptance
 
 Verified public source `01b98d19cc4118ed3e9a1cb83bb30350da350033` after the

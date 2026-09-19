@@ -64,20 +64,10 @@
 			</a>
 		</header>
 	{/if}
-	{#if !inDeck}
-		<aside class="archive-notice">Retained design pages and dated updates. Proposals and historical measurements are not current release guarantees. Historical source and evidence links require access to the private research archive.</aside>
-	{/if}
 	{@render children()}
 </main>
 
 <style>
-	.archive-notice {
-		margin-bottom: 1.5rem;
-		padding: 0.75rem 1rem;
-		border: 1px solid var(--border);
-		font-size: 0.75rem;
-		color: var(--text-tertiary);
-	}
 	/* a deck owns the whole viewport; the page component does its own spacing */
 	main.deck {
 		max-width: none;
