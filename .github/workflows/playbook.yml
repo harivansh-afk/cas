@@ -1,0 +1,43 @@
+name: playbook
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'playbook/**'
+      - 'vercel.json'
+      - '.github/workflows/playbook.yml'
+  pull_request:
+    paths:
+      - 'playbook/**'
+      - 'vercel.json'
+      - '.github/workflows/playbook.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: playbook-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: playbook
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: playbook/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - run: pnpm build

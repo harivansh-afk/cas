@@ -1,0 +1,3 @@
+# Preserve these published dependency documents byte for byte. Code stays checked.
+crates/vendor/virtio-queue-0.18.0/CHANGELOG.md -whitespace
+crates/vendor/virtio-queue-0.18.0/README.md -whitespace

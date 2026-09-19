@@ -17,7 +17,7 @@ let
   workspace = (builtins.fromTOML (builtins.readFile ../Cargo.toml)).workspace.package;
 in
 rustPlatform.buildRustPackage {
-  pname = "cas-research";
+  pname = "cas";
   inherit (workspace) version;
   outputs = [
     "out"
@@ -44,7 +44,8 @@ rustPlatform.buildRustPackage {
   };
 
   meta = {
-    description = "Research storage primitives and command-line checks";
+    description = "Content-addressed block storage for QEMU";
+    license = lib.licenses.gpl3Only;
     mainProgram = "casctl";
     platforms = lib.platforms.linux;
   };

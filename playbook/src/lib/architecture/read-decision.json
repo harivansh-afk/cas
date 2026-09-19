@@ -1,0 +1,772 @@
+{
+  "source_revision": "4ace9fd779af45180599b4236749b6d6c682780a",
+  "examples": [
+    {
+      "id": "baseline-bpf-1",
+      "stage": "baseline-bpf",
+      "guest": 1,
+      "fio_ns": 10232944,
+      "cas_ns": 9696144,
+      "before_head_ns": 352,
+      "at_head_ns": 4576,
+      "after_admission_ns": 9691216,
+      "bio_to_publication_ns": 61712,
+      "outside_bio_ns": 286752,
+      "outside_cas_ns": 188336,
+      "phases": {
+        "before_head": 352,
+        "at_head": 4576,
+        "frontend_dispatch": 1408,
+        "command_channel": 124304,
+        "reactor": 3696,
+        "execution": 9547904,
+        "response_channel": 10912,
+        "frontend_completion": 2992,
+        "execution_parts": {
+          "prepare": 9488,
+          "advance": 11264,
+          "scheduler": 61200,
+          "wal": 0,
+          "manifest": 9460832,
+          "header": 0,
+          "payload": 0,
+          "shared_fetch": 0,
+          "other": 5120
+        }
+      },
+      "queue": 0,
+      "offset": 48222208,
+      "blocker_range": null,
+      "blocker_submitters": []
+    },
+    {
+      "id": "baseline-bpf-2",
+      "stage": "baseline-bpf",
+      "guest": 2,
+      "fio_ns": 15788160,
+      "cas_ns": 11382112,
+      "before_head_ns": 464,
+      "at_head_ns": 13632,
+      "after_admission_ns": 11368016,
+      "bio_to_publication_ns": 1127024,
+      "outside_bio_ns": 1629616,
+      "outside_cas_ns": 1649408,
+      "phases": {
+        "before_head": 464,
+        "at_head": 13632,
+        "frontend_dispatch": 6336,
+        "command_channel": 673216,
+        "reactor": 9808,
+        "execution": 10655200,
+        "response_channel": 14208,
+        "frontend_completion": 9248,
+        "execution_parts": {
+          "prepare": 11792,
+          "advance": 74528,
+          "scheduler": 46576,
+          "wal": 0,
+          "manifest": 10508848,
+          "header": 0,
+          "payload": 0,
+          "shared_fetch": 0,
+          "other": 13456
+        }
+      },
+      "queue": 0,
+      "offset": 18370560,
+      "blocker_range": null,
+      "blocker_submitters": []
+    },
+    {
+      "id": "same-bpf-1",
+      "stage": "same-bpf",
+      "guest": 1,
+      "fio_ns": 7937963872,
+      "cas_ns": 7936448768,
+      "before_head_ns": 7932920864,
+      "at_head_ns": 1264,
+      "after_admission_ns": 3526640,
+      "bio_to_publication_ns": 33200,
+      "outside_bio_ns": 1054384,
+      "outside_cas_ns": 427520,
+      "phases": {
+        "before_head": 7932920864,
+        "at_head": 1264,
+        "frontend_dispatch": 960,
+        "command_channel": 16944,
+        "reactor": 2322336,
+        "execution": 1164848,
+        "response_channel": 20384,
+        "frontend_completion": 1168,
+        "execution_parts": {
+          "prepare": 1632,
+          "advance": 9600,
+          "scheduler": 53040,
+          "wal": 0,
+          "manifest": 1061744,
+          "header": 0,
+          "payload": 0,
+          "shared_fetch": 0,
+          "other": 38832
+        }
+      },
+      "queue": 0,
+      "offset": 19038208,
+      "blocker_range": [
+        134483968,
+        198447104
+      ],
+      "blocker_submitters": [
+        "fio"
+      ]
+    },
+    {
+      "id": "same-bpf-2",
+      "stage": "same-bpf",
+      "guest": 2,
+      "fio_ns": 8464355168,
+      "cas_ns": 8261784176,
+      "before_head_ns": 8260515408,
+      "at_head_ns": 1200,
+      "after_admission_ns": 1267568,
+      "bio_to_publication_ns": 31808,
+      "outside_bio_ns": 202342656,
+      "outside_cas_ns": 196528,
+      "phases": {
+        "before_head": 8260515408,
+        "at_head": 1200,
+        "frontend_dispatch": 800,
+        "command_channel": 283376,
+        "reactor": 515264,
+        "execution": 343872,
+        "response_channel": 123296,
+        "frontend_completion": 960,
+        "execution_parts": {
+          "prepare": 2000,
+          "advance": 9536,
+          "scheduler": 2560,
+          "wal": 0,
+          "manifest": 300288,
+          "header": 0,
+          "payload": 0,
+          "shared_fetch": 0,
+          "other": 29488
+        }
+      },
+      "queue": 0,
+      "offset": 20615168,
+      "blocker_range": [
+        135532544,
+        201478144
+      ],
+      "blocker_submitters": [
+        "fio"
+      ]
+    },
+    {
+      "id": "separate-bpf-1",
+      "stage": "separate-bpf",
+      "guest": 1,
+      "fio_ns": 1416119072,
+      "cas_ns": 1412404464,
+      "before_head_ns": 1405137168,
+      "at_head_ns": 67024,
+      "after_admission_ns": 7200272,
+      "bio_to_publication_ns": 52032,
+      "outside_bio_ns": 1970672,
+      "outside_cas_ns": 1691904,
+      "phases": {
+        "before_head": 1405137168,
+        "at_head": 67024,
+        "frontend_dispatch": 1232,
+        "command_channel": 12960,
+        "reactor": 5067280,
+        "execution": 2065152,
+        "response_channel": 51216,
+        "frontend_completion": 2432,
+        "execution_parts": {
+          "prepare": 4992,
+          "advance": 43040,
+          "scheduler": 10480,
+          "wal": 0,
+          "manifest": 1999520,
+          "header": 0,
+          "payload": 0,
+          "shared_fetch": 0,
+          "other": 7120
+        }
+      },
+      "queue": 1,
+      "offset": 72560640,
+      "blocker_range": [
+        268562432,
+        268570624
+      ],
+      "blocker_submitters": [
+        "jbd2/vda-8"
+      ]
+    },
+    {
+      "id": "separate-bpf-2",
+      "stage": "separate-bpf",
+      "guest": 2,
+      "fio_ns": 2406711440,
+      "cas_ns": 2405315664,
+      "before_head_ns": 2395172288,
+      "at_head_ns": 56896,
+      "after_admission_ns": 10086480,
+      "bio_to_publication_ns": 27024,
+      "outside_bio_ns": 1201200,
+      "outside_cas_ns": 167552,
+      "phases": {
+        "before_head": 2395172288,
+        "at_head": 56896,
+        "frontend_dispatch": 864,
+        "command_channel": 1936,
+        "reactor": 9164576,
+        "execution": 578944,
+        "response_channel": 336064,
+        "frontend_completion": 4096,
+        "execution_parts": {
+          "prepare": 6576,
+          "advance": 14512,
+          "scheduler": 4272,
+          "wal": 0,
+          "manifest": 546240,
+          "header": 0,
+          "payload": 0,
+          "shared_fetch": 0,
+          "other": 7344
+        }
+      },
+      "queue": 1,
+      "offset": 70156288,
+      "blocker_range": [
+        268550144,
+        268558336
+      ],
+      "blocker_submitters": [
+        "jbd2/vda-8"
+      ]
+    }
+  ],
+  "rows": [
+    {
+      "arm": "on",
+      "stage": "baseline",
+      "guest": 1,
+      "fio_read_ios": 81300,
+      "fio_read_iops": 8129.187081,
+      "fio_read_p99_ns": 2670592,
+      "fio_read_max_ns": 78258416,
+      "write_iops": 0
+    },
+    {
+      "arm": "on",
+      "stage": "baseline",
+      "guest": 2,
+      "fio_read_ios": 78267,
+      "fio_read_iops": 7825.917408,
+      "fio_read_p99_ns": 2834432,
+      "fio_read_max_ns": 76772624,
+      "write_iops": 0
+    },
+    {
+      "arm": "on",
+      "stage": "rate-baseline-bpf-1",
+      "guest": 1,
+      "fio_read_ios": 8000,
+      "fio_read_iops": 999.875016,
+      "fio_read_p99_ns": 1892352,
+      "fio_read_max_ns": 17526544,
+      "write_iops": 0
+    },
+    {
+      "arm": "on",
+      "stage": "rate-baseline-bpf-1",
+      "guest": 2,
+      "fio_read_ios": 8000,
+      "fio_read_iops": 999.875016,
+      "fio_read_p99_ns": 1875968,
+      "fio_read_max_ns": 13224800,
+      "write_iops": 0
+    },
+    {
+      "arm": "on",
+      "stage": "rate-baseline-bpf-2",
+      "guest": 1,
+      "fio_read_ios": 8000,
+      "fio_read_iops": 999.875016,
+      "fio_read_p99_ns": 1859584,
+      "fio_read_max_ns": 4341856,
+      "write_iops": 0
+    },
+    {
+      "arm": "on",
+      "stage": "rate-baseline-bpf-2",
+      "guest": 2,
+      "fio_read_ios": 8000,
+      "fio_read_iops": 999.875016,
+      "fio_read_p99_ns": 1892352,
+      "fio_read_max_ns": 6416560,
+      "write_iops": 0
+    },
+    {
+      "arm": "on",
+      "stage": "rate-baseline-off-1",
+      "guest": 1,
+      "fio_read_ios": 8000,
+      "fio_read_iops": 999.875016,
+      "fio_read_p99_ns": 1003520,
+      "fio_read_max_ns": 10128144,
+      "write_iops": 0
+    },
+    {
+      "arm": "on",
+      "stage": "rate-baseline-off-1",
+      "guest": 2,
+      "fio_read_ios": 8000,
+      "fio_read_iops": 999.875016,
+      "fio_read_p99_ns": 1036288,
+      "fio_read_max_ns": 10270576,
+      "write_iops": 0
+    },
+    {
+      "arm": "on",
+      "stage": "rate-baseline-off-2",
+      "guest": 1,
+      "fio_read_ios": 8000,
+      "fio_read_iops": 999.875016,
+      "fio_read_p99_ns": 1011712,
+      "fio_read_max_ns": 2774784,
+      "write_iops": 0
+    },
+    {
+      "arm": "on",
+      "stage": "rate-baseline-off-2",
+      "guest": 2,
+      "fio_read_ios": 8000,
+      "fio_read_iops": 999.875016,
+      "fio_read_p99_ns": 913408,
+      "fio_read_max_ns": 3290496,
+      "write_iops": 0
+    },
+    {
+      "arm": "on",
+      "stage": "same-1-retry",
+      "guest": 1,
+      "fio_read_ios": 2475,
+      "fio_read_iops": 239.755885,
+      "fio_read_p99_ns": 417333248,
+      "fio_read_max_ns": 7774517104,
+      "write_iops": 19.585565
+    },
+    {
+      "arm": "on",
+      "stage": "same-1-retry",
+      "guest": 2,
+      "fio_read_ios": 2036,
+      "fio_read_iops": 197.900467,
+      "fio_read_p99_ns": 434110464,
+      "fio_read_max_ns": 7930055968,
+      "write_iops": 18.386329
+    },
+    {
+      "arm": "on",
+      "stage": "same-2",
+      "guest": 1,
+      "fio_read_ios": 2102,
+      "fio_read_iops": 177.249346,
+      "fio_read_p99_ns": 2399141888,
+      "fio_read_max_ns": 2566544016,
+      "write_iops": 50.787941
+    },
+    {
+      "arm": "on",
+      "stage": "same-2",
+      "guest": 2,
+      "fio_read_ios": 1940,
+      "fio_read_iops": 169.077915,
+      "fio_read_p99_ns": 2365587456,
+      "fio_read_max_ns": 2519138576,
+      "write_iops": 51.548221
+    },
+    {
+      "arm": "on",
+      "stage": "separate-1",
+      "guest": 1,
+      "fio_read_ios": 38820,
+      "fio_read_iops": 3881.611839,
+      "fio_read_p99_ns": 7241728,
+      "fio_read_max_ns": 2999357072,
+      "write_iops": 39.467273
+    },
+    {
+      "arm": "on",
+      "stage": "separate-1",
+      "guest": 2,
+      "fio_read_ios": 59684,
+      "fio_read_iops": 5967.80322,
+      "fio_read_p99_ns": 5406720,
+      "fio_read_max_ns": 49310256,
+      "write_iops": 41.171548
+    },
+    {
+      "arm": "on",
+      "stage": "separate-2",
+      "guest": 1,
+      "fio_read_ios": 42822,
+      "fio_read_iops": 4281.771823,
+      "fio_read_p99_ns": 6914048,
+      "fio_read_max_ns": 2308205008,
+      "write_iops": 41.155051
+    },
+    {
+      "arm": "on",
+      "stage": "separate-2",
+      "guest": 2,
+      "fio_read_ios": 60184,
+      "fio_read_iops": 6016.595021,
+      "fio_read_p99_ns": 5865472,
+      "fio_read_max_ns": 21624672,
+      "write_iops": 39.509756
+    },
+    {
+      "arm": "recent",
+      "stage": "baseline",
+      "guest": 1,
+      "fio_read_ios": 84256,
+      "fio_read_iops": 8424.757524,
+      "fio_read_p99_ns": 2801664,
+      "fio_read_max_ns": 31538432,
+      "write_iops": 0
+    },
+    {
+      "arm": "recent",
+      "stage": "baseline",
+      "guest": 2,
+      "fio_read_ios": 88656,
+      "fio_read_iops": 8864.713529,
+      "fio_read_p99_ns": 2736128,
+      "fio_read_max_ns": 34137424,
+      "write_iops": 0
+    },
+    {
+      "arm": "recent",
+      "stage": "baseline-bpf",
+      "guest": 1,
+      "fio_read_ios": 8000,
+      "fio_read_iops": 999.875016,
+      "fio_read_p99_ns": 2539520,
+      "fio_read_max_ns": 10232944,
+      "write_iops": 0
+    },
+    {
+      "arm": "recent",
+      "stage": "baseline-bpf",
+      "guest": 2,
+      "fio_read_ios": 8000,
+      "fio_read_iops": 999.875016,
+      "fio_read_p99_ns": 2072576,
+      "fio_read_max_ns": 15788160,
+      "write_iops": 0
+    },
+    {
+      "arm": "recent",
+      "stage": "cold-read",
+      "guest": 1,
+      "fio_read_ios": 16384,
+      "fio_read_iops": 6509.336512,
+      "fio_read_p99_ns": 4177920,
+      "fio_read_max_ns": 74663040,
+      "write_iops": 0
+    },
+    {
+      "arm": "recent",
+      "stage": "cold-read",
+      "guest": 2,
+      "fio_read_ios": 16384,
+      "fio_read_iops": 6603.788795,
+      "fio_read_p99_ns": 3686400,
+      "fio_read_max_ns": 74392000,
+      "write_iops": 0
+    },
+    {
+      "arm": "recent",
+      "stage": "cold-same",
+      "guest": 1,
+      "fio_read_ios": 1514,
+      "fio_read_iops": 149.915833,
+      "fio_read_p99_ns": 2365587456,
+      "fio_read_max_ns": 2423995920,
+      "write_iops": 53.960513
+    },
+    {
+      "arm": "recent",
+      "stage": "cold-same",
+      "guest": 2,
+      "fio_read_ios": 1469,
+      "fio_read_iops": 133.049543,
+      "fio_read_p99_ns": 2298478592,
+      "fio_read_max_ns": 2316662416,
+      "write_iops": 53.505535
+    },
+    {
+      "arm": "recent",
+      "stage": "same-1",
+      "guest": 1,
+      "fio_read_ios": 1627,
+      "fio_read_iops": 139.993117,
+      "fio_read_p99_ns": 2936012800,
+      "fio_read_max_ns": 3489803632,
+      "write_iops": 41.731467
+    },
+    {
+      "arm": "recent",
+      "stage": "same-1",
+      "guest": 2,
+      "fio_read_ios": 2180,
+      "fio_read_iops": 188.859049,
+      "fio_read_p99_ns": 3003121664,
+      "fio_read_max_ns": 3172854608,
+      "write_iops": 43.35158
+    },
+    {
+      "arm": "recent",
+      "stage": "same-bpf",
+      "guest": 1,
+      "fio_read_ios": 507,
+      "fio_read_iops": 33.348681,
+      "fio_read_p99_ns": 7952400384,
+      "fio_read_max_ns": 7937963872,
+      "write_iops": 24.278215
+    },
+    {
+      "arm": "recent",
+      "stage": "same-bpf",
+      "guest": 2,
+      "fio_read_ios": 288,
+      "fio_read_iops": 26.46086,
+      "fio_read_p99_ns": 8355053568,
+      "fio_read_max_ns": 8464355168,
+      "write_iops": 25.219503
+    },
+    {
+      "arm": "recent",
+      "stage": "separate-1",
+      "guest": 1,
+      "fio_read_ios": 52128,
+      "fio_read_iops": 5212.278772,
+      "fio_read_p99_ns": 6127616,
+      "fio_read_max_ns": 61587200,
+      "write_iops": 36.705666
+    },
+    {
+      "arm": "recent",
+      "stage": "separate-1",
+      "guest": 2,
+      "fio_read_ios": 51888,
+      "fio_read_iops": 5188.281172,
+      "fio_read_p99_ns": 6455296,
+      "fio_read_max_ns": 48746192,
+      "write_iops": 45.018595
+    },
+    {
+      "arm": "recent",
+      "stage": "separate-2",
+      "guest": 1,
+      "fio_read_ios": 39988,
+      "fio_read_iops": 3998.40016,
+      "fio_read_p99_ns": 5996544,
+      "fio_read_max_ns": 1932539664,
+      "write_iops": 46.259013
+    },
+    {
+      "arm": "recent",
+      "stage": "separate-2",
+      "guest": 2,
+      "fio_read_ios": 54970,
+      "fio_read_iops": 5496.450355,
+      "fio_read_p99_ns": 5341184,
+      "fio_read_max_ns": 19386096,
+      "write_iops": 47.228507
+    },
+    {
+      "arm": "recent",
+      "stage": "separate-bpf",
+      "guest": 1,
+      "fio_read_ios": 7250,
+      "fio_read_iops": 905.797101,
+      "fio_read_p99_ns": 11337728,
+      "fio_read_max_ns": 1416119072,
+      "write_iops": 37.686536
+    },
+    {
+      "arm": "recent",
+      "stage": "separate-bpf",
+      "guest": 2,
+      "fio_read_ios": 6229,
+      "fio_read_iops": 778.527684,
+      "fio_read_p99_ns": 10420224,
+      "fio_read_max_ns": 2406711440,
+      "write_iops": 54.212454
+    },
+    {
+      "arm": "recent",
+      "stage": "warm-read",
+      "guest": 1,
+      "fio_read_ios": 16384,
+      "fio_read_iops": 8992.316136,
+      "fio_read_p99_ns": 1974272,
+      "fio_read_max_ns": 4146048,
+      "write_iops": 0
+    },
+    {
+      "arm": "recent",
+      "stage": "warm-read",
+      "guest": 2,
+      "fio_read_ios": 16384,
+      "fio_read_iops": 9117.417919,
+      "fio_read_p99_ns": 2023424,
+      "fio_read_max_ns": 6731616,
+      "write_iops": 0
+    },
+    {
+      "arm": "recent",
+      "stage": "warm-same",
+      "guest": 1,
+      "fio_read_ios": 1754,
+      "fio_read_iops": 153.134276,
+      "fio_read_p99_ns": 2332033024,
+      "fio_read_max_ns": 2451793216,
+      "write_iops": 53.001334
+    },
+    {
+      "arm": "recent",
+      "stage": "warm-same",
+      "guest": 2,
+      "fio_read_ios": 2069,
+      "fio_read_iops": 200.154784,
+      "fio_read_p99_ns": 2105540608,
+      "fio_read_max_ns": 2181830080,
+      "write_iops": 56.499951
+    },
+    {
+      "arm": "off",
+      "stage": "baseline",
+      "guest": 1,
+      "fio_read_ios": 86390,
+      "fio_read_iops": 8639.0,
+      "fio_read_p99_ns": 2572288,
+      "fio_read_max_ns": 56568768,
+      "write_iops": 0
+    },
+    {
+      "arm": "off",
+      "stage": "baseline",
+      "guest": 2,
+      "fio_read_ios": 86392,
+      "fio_read_iops": 8638.336166,
+      "fio_read_p99_ns": 2605056,
+      "fio_read_max_ns": 56912480,
+      "write_iops": 0
+    },
+    {
+      "arm": "off",
+      "stage": "same-1",
+      "guest": 1,
+      "fio_read_ios": 2565,
+      "fio_read_iops": 246.090377,
+      "fio_read_p99_ns": 438304768,
+      "fio_read_max_ns": 7493070288,
+      "write_iops": 16.8454
+    },
+    {
+      "arm": "off",
+      "stage": "same-1",
+      "guest": 2,
+      "fio_read_ios": 2264,
+      "fio_read_iops": 201.387653,
+      "fio_read_p99_ns": 92798976,
+      "fio_read_max_ns": 9976277056,
+      "write_iops": 23.317435
+    },
+    {
+      "arm": "off",
+      "stage": "same-2",
+      "guest": 1,
+      "fio_read_ios": 1494,
+      "fio_read_iops": 148.184884,
+      "fio_read_p99_ns": 2667577344,
+      "fio_read_max_ns": 3415449088,
+      "write_iops": 53.274249
+    },
+    {
+      "arm": "off",
+      "stage": "same-2",
+      "guest": 2,
+      "fio_read_ios": 1684,
+      "fio_read_iops": 165.243843,
+      "fio_read_p99_ns": 2566914048,
+      "fio_read_max_ns": 2988029776,
+      "write_iops": 49.9804
+    },
+    {
+      "arm": "off",
+      "stage": "separate-1",
+      "guest": 1,
+      "fio_read_ios": 58048,
+      "fio_read_iops": 5804.219578,
+      "fio_read_p99_ns": 6389760,
+      "fio_read_max_ns": 21835920,
+      "write_iops": 31.933651
+    },
+    {
+      "arm": "off",
+      "stage": "separate-1",
+      "guest": 2,
+      "fio_read_ios": 57926,
+      "fio_read_iops": 5792.020798,
+      "fio_read_p99_ns": 5210112,
+      "fio_read_max_ns": 25342000,
+      "write_iops": 36.355304
+    },
+    {
+      "arm": "off",
+      "stage": "separate-2",
+      "guest": 1,
+      "fio_read_ios": 56613,
+      "fio_read_iops": 5660.733927,
+      "fio_read_p99_ns": 6062080,
+      "fio_read_max_ns": 64772720,
+      "write_iops": 36.568746
+    },
+    {
+      "arm": "off",
+      "stage": "separate-2",
+      "guest": 2,
+      "fio_read_ios": 59071,
+      "fio_read_iops": 5905.918816,
+      "fio_read_p99_ns": 4816896,
+      "fio_read_max_ns": 24120496,
+      "write_iops": 41.648438
+    }
+  ],
+  "safety": [
+    {
+      "arm": "off",
+      "peak_bytes": 3085348864,
+      "disk_peak_bytes": 2127560704
+    },
+    {
+      "arm": "on",
+      "peak_bytes": 4505636864,
+      "disk_peak_bytes": 2187399168
+    },
+    {
+      "arm": "recent",
+      "peak_bytes": 4242829312,
+      "disk_peak_bytes": 2606403584
+    }
+  ]
+}

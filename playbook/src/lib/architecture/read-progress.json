@@ -1,0 +1,84 @@
+{
+  "source_revision": "4b505548f97513d65fa25f193cca67dd83aa8ee5",
+  "comparison": [
+    {
+      "label": "Read only",
+      "before_p99_ns": [
+        2572288,
+        2605056
+      ],
+      "before_max_ns": [
+        56568768,
+        56912480
+      ],
+      "after_p99_ns": [
+        2244608,
+        2277376
+      ],
+      "after_max_ns": [
+        10343040,
+        10317120
+      ]
+    },
+    {
+      "label": "Reader + writer on CPU 0",
+      "before_p99_ns": [
+        438304768,
+        92798976,
+        2667577344,
+        2566914048
+      ],
+      "before_max_ns": [
+        7493070288,
+        9976277056,
+        3415449088,
+        2988029776
+      ],
+      "after_p99_ns": [
+        61603840,
+        156237824,
+        24510464,
+        52166656
+      ],
+      "after_max_ns": [
+        6718240208,
+        6833924368,
+        3572353072,
+        3522067040
+      ]
+    },
+    {
+      "label": "Reader CPU 1, writer CPU 0",
+      "before_p99_ns": [
+        6389760,
+        5210112,
+        6062080,
+        4816896
+      ],
+      "before_max_ns": [
+        21835920,
+        25342000,
+        64772720,
+        24120496
+      ],
+      "after_p99_ns": [
+        5668864,
+        5603328,
+        5931008,
+        6389760
+      ],
+      "after_max_ns": [
+        94717184,
+        209443264,
+        202044160,
+        3062763888
+      ]
+    }
+  ],
+  "finding": "Reads can bypass writes, but admission fairness still stalls them.",
+  "attribution": "One matched 6.295-second read spent 6.293 seconds before admission and only 0.57 ms afterward. Its chunk was cached. The fairness scheduler kept refusing its turn; a separate Rust reproduction confirms that two blocked writers can repeatedly displace eligible reads without any disk IO.",
+  "remaining": "Next: preserve eligible-read selection across blocked-write retries, then repeat this workload. Overlap, FLUSH and finite-capacity rules still matter; this result does not justify a new cache or a lock-free queue.",
+  "recovery_cases": 13,
+  "crc_checks": 8,
+  "peak_gib": 3.9349594116210938
+}

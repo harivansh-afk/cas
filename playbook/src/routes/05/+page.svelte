@@ -1,0 +1,125 @@
+<script lang="ts">
+	import PageHead from '$lib/components/PageHead.svelte';
+	import PageNav from '$lib/components/PageNav.svelte';
+</script>
+
+<PageHead num="05" />
+<p class="lede">
+	Fourteen weeks at about 320 hours, which is 23 a week against the 8 the course credit corresponds to.<br />
+	The plan is sized to the work, and the descoping order defines what is removed if it slips.
+</p>
+
+<h2>Development checkpoints and research gates</h2>
+<p>
+	The schedule below is the research plan. The <a href="./01#implementation-status">architecture page</a> records the dated C0–C5 implementation status; <a href="https://git.harivan.sh/harivansh-afk/cas-research/src/commit/63354b6885179daff980e03f15a15a9c449e794a/TODO.md" target="_blank" rel="noopener">TODO.md</a> is the canonical checklist. C0–C3 are accepted, the C4 functional inventory passes, and C5 has validated shared guests, caches and integrated scheduling. Pressure workloads and final memory accounting remain open.
+</p>
+<p>
+	Development checks run on Spark with disposable KVM/XFS and nested filesystem guests. G1–G6 and dedicated-media repetitions remain pending under their own acceptance conditions. Each session retains concise results and failures; large storage artifacts follow the <a href="https://git.harivan.sh/harivansh-afk/cas-research/src/commit/63354b6885179daff980e03f15a15a9c449e794a/docs/artifact-retention.md" target="_blank" rel="noopener">archive and disk-headroom policy</a>.
+</p>
+
+<h2>Hardware</h2>
+<p>
+	The planned measurement testbed is two CloudLab c6525-100g nodes (Utah), to be reserved as a pair.<br />
+	Each node has an AMD EPYC 7402P with 24 cores at 2.80 GHz, 128 GB ECC DDR4-3200, two 1.6 TB PCIe 4.0 NVMe SSDs, and a ConnectX-5 Ex 100 GbE with one port on the experiment network.<br />
+	One NVMe holds the system and results, and the other is the device under test.<br />
+	The pair is one hop through a single switch.
+</p>
+<p>
+	RoCE between two of these nodes works on the lossy fabric, since BPF-oF ran it there (page 04).<br />
+	The testbed uses the repository's pinned NixOS host configuration. R1 adds a compatible kernel and the pinned OpenZFS userspace/module, built and boot-verified together before measurement. The host closure, locks and runtime versions are archived per cohort. The dedicated pair and its installation path remain pending.<br />
+	An experiment expires after a few hours unless it is extended, so every run is scripted to complete inside one sitting.
+</p>
+<p>
+	CloudLab is free for research.<br />
+	A project is opened by a faculty member and reviewed by CloudLab staff, so the sponsor opens it before Sep 9.<br />
+	The fallback is two OVHcloud Advance-4 2026 servers (EPYC 4585PX, 16 cores, 64 GB DDR5 ECC, 2 × 960 GB NVMe) on a 25 Gbps private link, which loses the RDMA arm and replaces the 100 GbE fabric with 25 GbE.
+</p>
+
+<h2>Schedule</h2>
+<div class="table-scroll">
+	<table class="spec">
+		<thead>
+			<tr><th>Weeks</th><th>Build</th><th>Measure</th></tr>
+		</thead>
+		<tbody>
+			<tr><td class="k">1–2</td><td>vhost-user-blk daemon in passthrough: staging log, FLUSH, replay. Kernel and ZFS image.</td><td>R0, with the drive's read and fdatasync times; passthrough within 10% of R0 p99 (G1). Thresholds frozen. <code>zdb -S</code> phase 0 on the synthetic fleet.</td></tr>
+			<tr><td class="k">3–5</td><td>Compactor with settle window, store, index, manifests, watermark, governor, recovery. Three chunk-size arms.</td><td><code>kill -9</code> recovery and the three ordering tests pass (G2). First capture numbers.</td></tr>
+			<tr><td class="k">6–7</td><td>R1 configured, both volblocksize arms. R2 if time permits.</td><td>Page 02 table complete (G3), sweep before every capacity number.</td></tr>
+			<tr><td class="k">8–9</td><td>Protocol with separate GET and PUT connections, rendezvous placement, k, segment PUT with durable ack, HAS, pins, surplus copies, sweep. Provisioning; migration with the fenced handoff.</td><td>Replicated mode on two nodes.</td></tr>
+			<tr><td class="k">10</td><td>Partitioned mode. Fleet class over TCP.</td><td>Page 03 table complete (G4).</td></tr>
+			<tr><td class="k">11–12</td><td>nvmet exports, RoCE configuration, busy-polling and blocking daemon, depth prefetch, profile prefetch.</td><td>Transport matrix and prefetch sweeps (G5). Partitioned boot storm.</td></tr>
+			<tr><td class="k">13–14</td><td></td><td>Report; reproducibility pack (G6).</td></tr>
+		</tbody>
+	</table>
+</div>
+
+<h2>Gates</h2>
+<p>
+	<strong>G1.</strong> Passthrough daemon under stock QEMU within 10% of R0 p99 by the end of week 2. If this slips, everything after it slips, and the sponsor is informed that week.
+</p>
+<p>
+	<strong>G2.</strong> The recovery and ordering tests on page 01 pass before any daemon number is reported.
+</p>
+<p>
+	<strong>G3.</strong> Page 02 table complete: R0, R1 at two block sizes, R3 at three chunk sizes; latency, capture, index, amplification; variance beside every number.
+</p>
+<p>
+	<strong>G4.</strong> Page 03 table complete: both modes, every flow, each read against the bound its row names.
+</p>
+<p>
+	<strong>G5.</strong> Transport matrix complete for every non-stretch probe, null and file, memory and NVMe, with the RoCE counters printed beside every RDMA number.
+</p>
+<p>
+	<strong>G6.</strong> One command rebuilds the fleet from dated archives, and one command reruns every table on a fresh pair.
+</p>
+
+<h2>Descoping order</h2>
+<p>
+	When the schedule slips, items come off from the top.
+</p>
+<ol class="steps">
+	<li>ibverbs daemon arm, and with it fleet class over RDMA.</li>
+	<li>Super-chunk placement.</li>
+	<li>R2 dm-vdo.</li>
+	<li>Profile prefetch (depth prefetch stays), and with it the boot-storm clause of hypothesis 3.</li>
+	<li>Fleet class over TCP. Hypothesis 4 is then reported as untested, with the literature's numbers as the estimate.</li>
+	<li>Partitioned mode. Replicated mode alone still gives hypothesis 2's transfer result, and the remote read of hypothesis 3 is then measured with the local copy disabled so that the read is forced to the peer.</li>
+</ol>
+<p>
+	Not removed under any slip: page 02, the nvmet TCP probe, and the daemon over TCP. The RDMA probes go if RoCE configuration exceeds its budget or the fallback hardware is used.
+</p>
+
+<h2>Risks</h2>
+<ul class="plain">
+	<li><strong>Daemon overrun.</strong> The largest risk and the reason G1 is at week 2. Protocol plumbing comes from maintained crates, so the hours go to the components listed as new code on page 01.</li>
+	<li><strong>RoCE configuration.</strong> GID selection, MTU, adaptive retransmission on a lossy fabric. Budgeted at 8 hours. If it exceeds 20, the RDMA rows are dropped and the TCP rows stand.</li>
+	<li><strong>Node availability.</strong> 36 nodes of this type exist, so the pair is reserved in week 1 for every measurement week.</li>
+	<li><strong>Correctness debt.</strong> The defects that stall or corrupt a guest are known from a prior implementation, and each has a test on page 01 and hours in weeks 3 to 5, before any number is taken.</li>
+	<li><strong>O_DIRECT alignment.</strong> Final append buffers satisfy the backing filesystem's alignment requirements. Verify addresses, offsets and lengths independently of the guest block size; report payload copies and any buffered fallback.</li>
+	<li><strong>Known configuration pitfalls.</strong> The 100G interface stays down unless the profile declares a link on it; the ZFS pitfalls are in the R1 table on page 02.</li>
+	<li><strong>Census realism.</strong> Scripted drift is not real drift. The fleet is built from real dated archives, the scripts are published, and the numbers it supplies are bounds the daemon is read against, not claims about fleets in the wild.</li>
+</ul>
+
+<h2>Logistics</h2>
+<p>
+	CS 4993, 1 credit.<br />
+	Expectations in writing before Sep 9.<br />
+	Thirty minutes of sponsor time every two weeks, with G1 as a scheduled meeting.
+</p>
+
+<h2>Future work</h2>
+<p>
+	<strong>Availability.</strong><br />
+	Fleet class is the seed of replication before acknowledgment. With it and k ≥ 2 on N ≥ 3 the system has a failure model, which needs membership, failure detection, and rebalancing, none of which this study touches.
+</p>
+<p>
+	<strong>Placement and reclamation.</strong><br />
+	Super-chunk placement for locality. A cache policy that weighs a chunk's owner distance. An on-disk copy-on-read tier for chunks that are cold at their owner. Reference counts kept as derived state, with the sweep as the auditor, so an overwrite frees space at once as it does in ZFS.
+</p>
+<p>
+	<strong>The same split elsewhere.</strong><br />
+	Prefix caching in LLM serving (vLLM, SGLang, Mooncake) names cached KV blocks by a hash chain over the whole token history, so two requests share only along a common prefix. That is lineage.<br />
+	The same document after two different preambles is computed twice. That is the cross-host case here, and its size on a real trace is unmeasured.
+</p>
+
+<PageNav num="05" />

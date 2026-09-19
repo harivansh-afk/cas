@@ -1,0 +1,547 @@
+{
+ "date": "2026-09-15",
+ "revisions": {
+  "main": "4e890f2",
+  "main_full": "4e890f2c7e5bd74ddb4505200d8b0eb28a5fb1d0",
+  "control": "f6506e1",
+  "integration": "d64f5f4",
+  "c5": "b8399ad",
+  "update02": "4b50554"
+ },
+ "tests": {
+  "passed": 504,
+  "ignored": 25
+ },
+ "review": {
+  "reviewers": 6,
+  "prs": [
+   {
+    "number": 55,
+    "kind": "runtime fix",
+    "title": "Refused admission heads rotate behind their image\u2019s eligible reads"
+   },
+   {
+    "number": 56,
+    "kind": "runtime fix",
+    "title": "A denied image attachment stays attachable without a stale admission wake"
+   },
+   {
+    "number": 57,
+    "kind": "documentation",
+    "title": "Eleven stale status statements corrected"
+   },
+   {
+    "number": 58,
+    "kind": "refactor",
+    "title": "cas-core: shared helpers, direct IO routing, narrower visibility, dead module removed"
+   },
+   {
+    "number": 59,
+    "kind": "refactor",
+    "title": "cas-daemon: typed reports, one gate helper, no production panics on a poisoned gate"
+   },
+   {
+    "number": 60,
+    "kind": "refactor",
+    "title": "Harness: typed crash points and checkpoints, one helper per duplicated idiom"
+   }
+  ],
+  "integration_pr": 61,
+  "commits": 62,
+  "diff": {
+   "core": {
+    "files": 35,
+    "insertions": 250,
+    "deletions": 388
+   },
+   "daemon": {
+    "files": 30,
+    "insertions": 792,
+    "deletions": 284
+   },
+   "harness": {
+    "files": 31,
+    "insertions": 810,
+    "deletions": 489
+   },
+   "all_crates": {
+    "files": 92,
+    "insertions": 1816,
+    "deletions": 1123
+   }
+  },
+  "first_party_lines": 59336
+ },
+ "checkpoints": [
+  {
+   "id": "C0\u2013C3",
+   "state": "accepted",
+   "note": "Design, build-bound validator, packed append, four queues, retained live recovery."
+  },
+  {
+   "id": "C4",
+   "state": "functional scenarios passed",
+   "scenarios": 40,
+   "open": "Final allocation audit."
+  },
+  {
+   "id": "C5",
+   "state": "scenarios passed on b8399ad",
+   "scenarios": 41,
+   "open": "Memory accounting, dedicated-media repetitions, rerun on current main."
+  }
+ ],
+ "gates": [
+  {
+   "id": "G1",
+   "name": "Passthrough within 10% of raw p99",
+   "state": "not started: no dedicated host, no R0 baseline"
+  },
+  {
+   "id": "G2",
+   "name": "Recovery and ordering suite",
+   "state": "development suites pass; not rerun on current main"
+  },
+  {
+   "id": "G3",
+   "name": "Single-host table (R0, R1, R3)",
+   "state": "not started: no ZFS R1 profile"
+  },
+  {
+   "id": "G4",
+   "name": "Two-host table",
+   "state": "not started"
+  },
+  {
+   "id": "G5",
+   "name": "Transport matrix",
+   "state": "not started"
+  },
+  {
+   "id": "G6",
+   "name": "One-command reproduction",
+   "state": "not started"
+  }
+ ],
+ "todo": {
+  "done": 130,
+  "open": 29,
+  "sections": {
+   "Foundation": {
+    "done": 16,
+    "open": 0
+   },
+   "Next": {
+    "done": 31,
+    "open": 9
+   },
+   "Local storage": {
+    "done": 62,
+    "open": 6
+   },
+   "Architecture review": {
+    "done": 12,
+    "open": 7
+   },
+   "Two hosts": {
+    "done": 0,
+    "open": 4
+   },
+   "Publication": {
+    "done": 0,
+    "open": 3
+   },
+   "Research updates": {
+    "done": 9,
+    "open": 0
+   }
+  }
+ },
+ "baseline_2026_09_13": {
+  "fdatasync_p99_ms": {
+   "cas": 9.76,
+   "raw": 3.62
+  },
+  "sequential_read_mib_s": {
+   "cas": 437,
+   "raw": 842
+  }
+ },
+ "lab": {
+  "arms": [
+   {
+    "id": "control",
+    "source": "f6506e1",
+    "label": "Before (main before the review)"
+   },
+   {
+    "id": "off",
+    "source": "d64f5f4",
+    "label": "After, pass 1"
+   },
+   {
+    "id": "off2",
+    "source": "d64f5f4",
+    "label": "After, pass 2"
+   }
+  ],
+  "workloads": [
+   {
+    "label": "Read only",
+    "arms": {
+     "control": {
+      "p99_ms": [
+       5.537792,
+       5.537792
+      ],
+      "max_ms": [
+       282.049024,
+       283.904592
+      ],
+      "read_ios": [
+       67612,
+       67964
+      ],
+      "write_mib_s": [
+       0.0,
+       0.0
+      ],
+      "bypassed": [
+       0,
+       0
+      ]
+     },
+     "off": {
+      "p99_ms": [
+       5.07904,
+       4.947968
+      ],
+      "max_ms": [
+       228.085808,
+       227.041536
+      ],
+      "read_ios": [
+       64290,
+       67151
+      ],
+      "write_mib_s": [
+       0.0,
+       0.0
+      ],
+      "bypassed": [
+       0,
+       0
+      ]
+     },
+     "off2": {
+      "p99_ms": [
+       4.046848,
+       4.112384
+      ],
+      "max_ms": [
+       120.197984,
+       116.728368
+      ],
+      "read_ios": [
+       75262,
+       75391
+      ],
+      "write_mib_s": [
+       0.0,
+       0.0
+      ],
+      "bypassed": [
+       0,
+       0
+      ]
+     }
+    }
+   },
+   {
+    "label": "Reader and writer on CPU 0",
+    "arms": {
+     "control": {
+      "p99_ms": [
+       287.309824,
+       287.309824,
+       229.638144,
+       219.152384
+      ],
+      "max_ms": [
+       24127.628928,
+       22663.774384,
+       8143.4036,
+       8124.086672
+      ],
+      "read_ios": [
+       5207,
+       4804,
+       2336,
+       2762
+      ],
+      "write_mib_s": [
+       8.776408195495605,
+       9.524471282958984,
+       21.038789749145508,
+       21.424349784851074
+      ],
+      "bypassed": [
+       2592,
+       1969,
+       1113,
+       1647
+      ]
+     },
+     "off": {
+      "p99_ms": [
+       14.876672,
+       11.4688,
+       20.054016,
+       19.00544
+      ],
+      "max_ms": [
+       25529.32176,
+       23093.738048,
+       321.299456,
+       306.82712
+      ],
+      "read_ios": [
+       29531,
+       32927,
+       32344,
+       33237
+      ],
+      "write_mib_s": [
+       8.536845207214355,
+       8.943061828613281,
+       16.497386932373047,
+       24.019564628601074
+      ],
+      "bypassed": [
+       27251,
+       30157,
+       30936,
+       31596
+      ]
+     },
+     "off2": {
+      "p99_ms": [
+       8.585216,
+       8.84736,
+       12.386304,
+       11.206656
+      ],
+      "max_ms": [
+       696.96456,
+       671.266464,
+       351.174224,
+       324.688016
+      ],
+      "read_ios": [
+       45874,
+       45064,
+       41860,
+       43164
+      ],
+      "write_mib_s": [
+       11.173818588256836,
+       11.27877426147461,
+       23.142072677612305,
+       19.29715347290039
+      ],
+      "bypassed": [
+       43049,
+       42651,
+       41837,
+       43142
+      ]
+     }
+    }
+   },
+   {
+    "label": "Reader CPU 1, writer CPU 0",
+    "arms": {
+     "control": {
+      "p99_ms": [
+       20.31616,
+       19.791872,
+       19.791872,
+       19.529728
+      ],
+      "max_ms": [
+       319.255568,
+       9059.681824,
+       188.090304,
+       190.808816
+      ],
+      "read_ios": [
+       31285,
+       17171,
+       29857,
+       30552
+      ],
+      "write_mib_s": [
+       19.041095733642578,
+       20.532475471496582,
+       18.889183044433594,
+       19.370131492614746
+      ],
+      "bypassed": [
+       0,
+       0,
+       0,
+       0
+      ]
+     },
+     "off": {
+      "p99_ms": [
+       18.481152,
+       16.71168,
+       23.724032,
+       17.956864
+      ],
+      "max_ms": [
+       542.422288,
+       8996.216912,
+       11738.416736,
+       105.710496
+      ],
+      "read_ios": [
+       33149,
+       19663,
+       21165,
+       37213
+      ],
+      "write_mib_s": [
+       18.941784858703613,
+       19.811384201049805,
+       17.05202293395996,
+       17.79293155670166
+      ],
+      "bypassed": [
+       15313,
+       409,
+       0,
+       0
+      ]
+     },
+     "off2": {
+      "p99_ms": [
+       20.840448,
+       19.791872,
+       10.944512,
+       11.075584
+      ],
+      "max_ms": [
+       5557.479696,
+       5474.335664,
+       174.68672,
+       113.333552
+      ],
+      "read_ios": [
+       18755,
+       18770,
+       45008,
+       45615
+      ],
+      "write_mib_s": [
+       27.306272506713867,
+       27.44876766204834,
+       27.504725456237793,
+       27.403709411621094
+      ],
+      "bypassed": [
+       1,
+       4,
+       0,
+       0
+      ]
+     }
+    }
+   }
+  ],
+  "final": {
+   "control": {
+    "read_admission_max_wait_ms": [
+     8110.358464,
+     8096.30256
+    ],
+    "head_max_wait_ms": [
+     23127.982544,
+     22013.008176
+    ],
+    "bypassed": [
+     3705,
+     3616
+    ],
+    "refused_turns": [
+     1345363,
+     1321083
+    ],
+    "admitted": [
+     147575,
+     132730
+    ],
+    "errors": [
+     0,
+     0
+    ]
+   },
+   "off": {
+    "read_admission_max_wait_ms": [
+     114.144624,
+     137.150528
+    ],
+    "head_max_wait_ms": [
+     24296.002224,
+     22328.1296
+    ],
+    "bypassed": [
+     73500,
+     62162
+    ],
+    "refused_turns": [
+     558225,
+     548356
+    ],
+    "admitted": [
+     190682,
+     194924
+    ],
+    "errors": [
+     0,
+     0
+    ]
+   },
+   "off2": {
+    "read_admission_max_wait_ms": [
+     72.295376,
+     82.614928
+    ],
+    "head_max_wait_ms": [
+     18275.632448,
+     17371.98696
+    ],
+    "bypassed": [
+     84887,
+     85797
+    ],
+    "refused_turns": [
+     579174,
+     612962
+    ],
+    "admitted": [
+     236349,
+     235500
+    ],
+    "errors": [
+     0,
+     0
+    ]
+   }
+  },
+  "smoke_cases": 13,
+  "seed_checks": 6,
+  "host_note": "A Documents archive (tar | zstd) and a guest-removal job ran on Spark throughout; load average 6\u20139 on 20 cores. Only arms within this session are comparable."
+ }
+}

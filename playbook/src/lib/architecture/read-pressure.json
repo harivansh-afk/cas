@@ -1,0 +1,881 @@
+{
+  "source_revision": "fc738c2ea60b61bc3f380930533636c319b8b9d7",
+  "rows": [
+    {
+      "stage": "baseline",
+      "guest": 1,
+      "image": "00000000000000000000000000000002",
+      "read_ios": 82907,
+      "read_iops": 8289.871013,
+      "fio_max_ms": 67.097696,
+      "fio_clat_p99_ms": 2.605056,
+      "written_bytes": 0,
+      "sampled_before": "live/jobs/baseline-before.json",
+      "sampled_after": "live/jobs/baseline-after.json",
+      "retained_new_seed_traces": 32,
+      "slowest_retained_seed_read": {
+        "admitted_ns": 1696,
+        "advance_ns": 15472,
+        "ahead": 0,
+        "available": 10725,
+        "behind_write_ns": 0,
+        "bytes": 4096,
+        "cache_hits": 0,
+        "completion_lock_ns": 96,
+        "enqueued_ns": 2016,
+        "finished_ns": 63896464,
+        "frontend_received_ns": 63889872,
+        "head_ns": 112,
+        "head_stall_ns": 0,
+        "id": 10813,
+        "io_calls": [
+          0,
+          0,
+          1,
+          1,
+          0
+        ],
+        "io_ns": [
+          0,
+          0,
+          95440,
+          557856,
+          0
+        ],
+        "observed_ns": 132238940176,
+        "offset": 12959744,
+        "prepare_ns": 7280,
+        "queue": 0,
+        "received_ns": 11232,
+        "responded_ns": 63417072,
+        "started_ns": 12336,
+        "submission_wait_ns": 62724032,
+        "success": true
+      },
+      "slowest_phases_ns": {
+        "before_head": 112,
+        "at_head": 1584,
+        "frontend_dispatch": 320,
+        "command_channel": 9216,
+        "reactor_dependency": 1104,
+        "execution": 63404736,
+        "response_channel": 472800,
+        "guest_completion": 6592,
+        "execution_breakdown": {
+          "prepare": 7280,
+          "advance": 15472,
+          "scheduler": 62724032,
+          "wal": 0,
+          "manifest": 0,
+          "chunk_header": 95440,
+          "chunk_payload": 557856,
+          "shared_fetch": 0,
+          "other": 4656
+        }
+      }
+    },
+    {
+      "stage": "baseline",
+      "guest": 2,
+      "image": "00000000000000000000000000000003",
+      "read_ios": 84997,
+      "read_iops": 8498.850115,
+      "fio_max_ms": 64.717225,
+      "fio_clat_p99_ms": 2.53952,
+      "written_bytes": 0,
+      "sampled_before": "live/jobs/baseline-before.json",
+      "sampled_after": "live/jobs/baseline-after.json",
+      "retained_new_seed_traces": 32,
+      "slowest_retained_seed_read": {
+        "admitted_ns": 2352,
+        "advance_ns": 37360,
+        "ahead": 0,
+        "available": 10236,
+        "behind_write_ns": 0,
+        "bytes": 4096,
+        "cache_hits": 0,
+        "completion_lock_ns": 112,
+        "enqueued_ns": 3088,
+        "finished_ns": 63950960,
+        "frontend_received_ns": 63946944,
+        "head_ns": 160,
+        "head_stall_ns": 0,
+        "id": 10511,
+        "io_calls": [
+          0,
+          0,
+          1,
+          1,
+          0
+        ],
+        "io_ns": [
+          0,
+          0,
+          104416,
+          262768,
+          0
+        ],
+        "observed_ns": 132238869984,
+        "offset": 59047936,
+        "prepare_ns": 7680,
+        "queue": 0,
+        "received_ns": 5520,
+        "responded_ns": 63438544,
+        "started_ns": 6192,
+        "submission_wait_ns": 63012032,
+        "success": true
+      },
+      "slowest_phases_ns": {
+        "before_head": 160,
+        "at_head": 2192,
+        "frontend_dispatch": 736,
+        "command_channel": 2432,
+        "reactor_dependency": 672,
+        "execution": 63432352,
+        "response_channel": 508400,
+        "guest_completion": 4016,
+        "execution_breakdown": {
+          "prepare": 7680,
+          "advance": 37360,
+          "scheduler": 63012032,
+          "wal": 0,
+          "manifest": 0,
+          "chunk_header": 104416,
+          "chunk_payload": 262768,
+          "shared_fetch": 0,
+          "other": 8096
+        }
+      }
+    },
+    {
+      "stage": "same-1",
+      "guest": 1,
+      "image": "00000000000000000000000000000002",
+      "read_ios": 2825,
+      "read_iops": 272.920491,
+      "fio_max_ms": 7808.607659,
+      "fio_clat_p99_ms": 325.05856,
+      "written_bytes": 351272960,
+      "sampled_before": "live/jobs/same-1-before.json",
+      "sampled_after": "live/jobs/same-1-drain-11.json",
+      "retained_new_seed_traces": 32,
+      "slowest_retained_seed_read": {
+        "admitted_ns": 7806790112,
+        "advance_ns": 7296,
+        "ahead": 59,
+        "available": 21267,
+        "behind_write_ns": 7801751648,
+        "bytes": 4096,
+        "cache_hits": 1,
+        "completion_lock_ns": 64,
+        "enqueued_ns": 7806791232,
+        "finished_ns": 7807998064,
+        "frontend_received_ns": 7807997040,
+        "head_ns": 7804513488,
+        "head_stall_ns": 2275312,
+        "id": 86891,
+        "io_calls": [
+          0,
+          1,
+          0,
+          0,
+          0
+        ],
+        "io_ns": [
+          0,
+          1154400,
+          0,
+          0,
+          0
+        ],
+        "observed_ns": 146259026016,
+        "offset": 22974464,
+        "prepare_ns": 7840,
+        "queue": 0,
+        "received_ns": 7806812176,
+        "responded_ns": 7807991520,
+        "started_ns": 7806813120,
+        "submission_wait_ns": 752,
+        "success": true
+      },
+      "slowest_phases_ns": {
+        "before_head": 7804513488,
+        "at_head": 2276624,
+        "frontend_dispatch": 1120,
+        "command_channel": 20944,
+        "reactor_dependency": 944,
+        "execution": 1178400,
+        "response_channel": 5520,
+        "guest_completion": 1024,
+        "execution_breakdown": {
+          "prepare": 7840,
+          "advance": 7296,
+          "scheduler": 752,
+          "wal": 0,
+          "manifest": 1154400,
+          "chunk_header": 0,
+          "chunk_payload": 0,
+          "shared_fetch": 0,
+          "other": 8112
+        }
+      }
+    },
+    {
+      "stage": "same-1",
+      "guest": 2,
+      "image": "00000000000000000000000000000003",
+      "read_ios": 2697,
+      "read_iops": 260.554536,
+      "fio_max_ms": 7926.754222,
+      "fio_clat_p99_ms": 429.91616,
+      "written_bytes": 360710144,
+      "sampled_before": "live/jobs/same-1-before.json",
+      "sampled_after": "live/jobs/same-1-drain-11.json",
+      "retained_new_seed_traces": 32,
+      "slowest_retained_seed_read": {
+        "admitted_ns": 7924663568,
+        "advance_ns": 31712,
+        "ahead": 45,
+        "available": 22540,
+        "behind_write_ns": 7922038816,
+        "bytes": 4096,
+        "cache_hits": 1,
+        "completion_lock_ns": 80,
+        "enqueued_ns": 7924664560,
+        "finished_ns": 7926003968,
+        "frontend_received_ns": 7925974576,
+        "head_ns": 7924654416,
+        "head_stall_ns": 0,
+        "id": 88351,
+        "io_calls": [
+          0,
+          3,
+          0,
+          0,
+          0
+        ],
+        "io_ns": [
+          0,
+          708752,
+          0,
+          0,
+          0
+        ],
+        "observed_ns": 145923671648,
+        "offset": 20860928,
+        "prepare_ns": 4480,
+        "queue": 0,
+        "received_ns": 7924680304,
+        "responded_ns": 7925968576,
+        "started_ns": 7925216368,
+        "submission_wait_ns": 1024,
+        "success": true
+      },
+      "slowest_phases_ns": {
+        "before_head": 7924654416,
+        "at_head": 9152,
+        "frontend_dispatch": 992,
+        "command_channel": 15744,
+        "reactor_dependency": 536064,
+        "execution": 752208,
+        "response_channel": 6000,
+        "guest_completion": 29392,
+        "execution_breakdown": {
+          "prepare": 4480,
+          "advance": 31712,
+          "scheduler": 1024,
+          "wal": 0,
+          "manifest": 708752,
+          "chunk_header": 0,
+          "chunk_payload": 0,
+          "shared_fetch": 0,
+          "other": 6240
+        }
+      }
+    },
+    {
+      "stage": "separate-1",
+      "guest": 1,
+      "image": "00000000000000000000000000000002",
+      "read_ios": 43948,
+      "read_iops": 4393.921216,
+      "fio_max_ms": 2196.079611,
+      "fio_clat_p99_ms": 6.455296,
+      "written_bytes": 507510784,
+      "sampled_before": "live/jobs/separate-1-before.json",
+      "sampled_after": "live/jobs/separate-1-drain-11.json",
+      "retained_new_seed_traces": 8,
+      "slowest_retained_seed_read": {
+        "admitted_ns": 2190364288,
+        "advance_ns": 20320,
+        "ahead": 8,
+        "available": 31055,
+        "behind_write_ns": 2179969344,
+        "bytes": 4096,
+        "cache_hits": 1,
+        "completion_lock_ns": 80,
+        "enqueued_ns": 2190365328,
+        "finished_ns": 2195586688,
+        "frontend_received_ns": 2195583760,
+        "head_ns": 2180853040,
+        "head_stall_ns": 9510032,
+        "id": 118818,
+        "io_calls": [
+          0,
+          3,
+          0,
+          0,
+          0
+        ],
+        "io_ns": [
+          0,
+          1510016,
+          0,
+          0,
+          0
+        ],
+        "observed_ns": 214371170768,
+        "offset": 52207616,
+        "prepare_ns": 992,
+        "queue": 1,
+        "received_ns": 2190400368,
+        "responded_ns": 2195578736,
+        "started_ns": 2194040576,
+        "submission_wait_ns": 2000,
+        "success": true
+      },
+      "slowest_phases_ns": {
+        "before_head": 2180853040,
+        "at_head": 9511248,
+        "frontend_dispatch": 1040,
+        "command_channel": 35040,
+        "reactor_dependency": 3640208,
+        "execution": 1538160,
+        "response_channel": 5024,
+        "guest_completion": 2928,
+        "execution_breakdown": {
+          "prepare": 992,
+          "advance": 20320,
+          "scheduler": 2000,
+          "wal": 0,
+          "manifest": 1510016,
+          "chunk_header": 0,
+          "chunk_payload": 0,
+          "shared_fetch": 0,
+          "other": 4832
+        }
+      }
+    },
+    {
+      "stage": "separate-1",
+      "guest": 2,
+      "image": "00000000000000000000000000000003",
+      "read_ios": 60151,
+      "read_iops": 6014.49855,
+      "fio_max_ms": 22.226324,
+      "fio_clat_p99_ms": 4.620288,
+      "written_bytes": 485490688,
+      "sampled_before": "live/jobs/separate-1-before.json",
+      "sampled_after": "live/jobs/separate-1-drain-11.json",
+      "retained_new_seed_traces": 0,
+      "slowest_retained_seed_read": null,
+      "slowest_phases_ns": null
+    },
+    {
+      "stage": "separate-2",
+      "guest": 1,
+      "image": "00000000000000000000000000000002",
+      "read_ios": 59764,
+      "read_iops": 5975.80242,
+      "fio_max_ms": 32.194607,
+      "fio_clat_p99_ms": 4.947968,
+      "written_bytes": 507510784,
+      "sampled_before": "live/jobs/separate-2-before.json",
+      "sampled_after": "live/jobs/separate-2-drain-6.json",
+      "retained_new_seed_traces": 0,
+      "slowest_retained_seed_read": null,
+      "slowest_phases_ns": null
+    },
+    {
+      "stage": "separate-2",
+      "guest": 2,
+      "image": "00000000000000000000000000000003",
+      "read_ios": 43541,
+      "read_iops": 4353.664634,
+      "fio_max_ms": 2210.378892,
+      "fio_clat_p99_ms": 5.275648,
+      "written_bytes": 499122176,
+      "sampled_before": "live/jobs/separate-2-before.json",
+      "sampled_after": "live/jobs/separate-2-drain-6.json",
+      "retained_new_seed_traces": 8,
+      "slowest_retained_seed_read": {
+        "admitted_ns": 2200284384,
+        "advance_ns": 16864,
+        "ahead": 3,
+        "available": 25684,
+        "behind_write_ns": 2199893360,
+        "bytes": 4096,
+        "cache_hits": 1,
+        "completion_lock_ns": 80,
+        "enqueued_ns": 2200285024,
+        "finished_ns": 2208542176,
+        "frontend_received_ns": 2208540560,
+        "head_ns": 2200164000,
+        "head_stall_ns": 119472,
+        "id": 180814,
+        "io_calls": [
+          0,
+          2,
+          0,
+          0,
+          0
+        ],
+        "io_ns": [
+          0,
+          698432,
+          0,
+          0,
+          0
+        ],
+        "observed_ns": 279413083712,
+        "offset": 44658688,
+        "prepare_ns": 3712,
+        "queue": 1,
+        "received_ns": 2200670592,
+        "responded_ns": 2207775184,
+        "started_ns": 2207036224,
+        "submission_wait_ns": 1264,
+        "success": true
+      },
+      "slowest_phases_ns": {
+        "before_head": 2200164000,
+        "at_head": 120384,
+        "frontend_dispatch": 640,
+        "command_channel": 385568,
+        "reactor_dependency": 6365632,
+        "execution": 738960,
+        "response_channel": 765376,
+        "guest_completion": 1616,
+        "execution_breakdown": {
+          "prepare": 3712,
+          "advance": 16864,
+          "scheduler": 1264,
+          "wal": 0,
+          "manifest": 698432,
+          "chunk_header": 0,
+          "chunk_payload": 0,
+          "shared_fetch": 0,
+          "other": 18688
+        }
+      }
+    },
+    {
+      "stage": "same-2",
+      "guest": 1,
+      "image": "00000000000000000000000000000002",
+      "read_ios": 2023,
+      "read_iops": 180.04628,
+      "fio_max_ms": 3108.828235,
+      "fio_clat_p99_ms": 2868.903936,
+      "written_bytes": 499122176,
+      "sampled_before": "live/jobs/same-2-before.json",
+      "sampled_after": "live/jobs/same-2-drain-8.json",
+      "retained_new_seed_traces": 24,
+      "slowest_retained_seed_read": {
+        "admitted_ns": 3106750240,
+        "advance_ns": 11344,
+        "ahead": 85,
+        "available": 26706,
+        "behind_write_ns": 3103402400,
+        "bytes": 4096,
+        "cache_hits": 1,
+        "completion_lock_ns": 80,
+        "enqueued_ns": 3106750656,
+        "finished_ns": 3108431584,
+        "frontend_received_ns": 3108427504,
+        "head_ns": 3106749104,
+        "head_stall_ns": 0,
+        "id": 196073,
+        "io_calls": [
+          0,
+          3,
+          0,
+          0,
+          0
+        ],
+        "io_ns": [
+          0,
+          413872,
+          0,
+          0,
+          0
+        ],
+        "observed_ns": 333117681104,
+        "offset": 12701696,
+        "prepare_ns": 1936,
+        "queue": 0,
+        "received_ns": 3106762832,
+        "responded_ns": 3107931856,
+        "started_ns": 3107413504,
+        "submission_wait_ns": 25824,
+        "success": true
+      },
+      "slowest_phases_ns": {
+        "before_head": 3106749104,
+        "at_head": 1136,
+        "frontend_dispatch": 416,
+        "command_channel": 12176,
+        "reactor_dependency": 650672,
+        "execution": 518352,
+        "response_channel": 495648,
+        "guest_completion": 4080,
+        "execution_breakdown": {
+          "prepare": 1936,
+          "advance": 11344,
+          "scheduler": 25824,
+          "wal": 0,
+          "manifest": 413872,
+          "chunk_header": 0,
+          "chunk_payload": 0,
+          "shared_fetch": 0,
+          "other": 65376
+        }
+      }
+    },
+    {
+      "stage": "same-2",
+      "guest": 2,
+      "image": "00000000000000000000000000000003",
+      "read_ios": 1849,
+      "read_iops": 181.061496,
+      "fio_max_ms": 2713.634002,
+      "fio_clat_p99_ms": 2566.914048,
+      "written_bytes": 587202560,
+      "sampled_before": "live/jobs/same-2-before.json",
+      "sampled_after": "live/jobs/same-2-drain-8.json",
+      "retained_new_seed_traces": 24,
+      "slowest_retained_seed_read": {
+        "admitted_ns": 2711055136,
+        "advance_ns": 31584,
+        "ahead": 45,
+        "available": 26651,
+        "behind_write_ns": 2708404144,
+        "bytes": 4096,
+        "cache_hits": 1,
+        "completion_lock_ns": 80,
+        "enqueued_ns": 2711056304,
+        "finished_ns": 2712580144,
+        "frontend_received_ns": 2712577872,
+        "head_ns": 2711027936,
+        "head_stall_ns": 25904,
+        "id": 196170,
+        "io_calls": [
+          0,
+          3,
+          0,
+          0,
+          0
+        ],
+        "io_ns": [
+          0,
+          282976,
+          0,
+          0,
+          0
+        ],
+        "observed_ns": 328674968464,
+        "offset": 20303872,
+        "prepare_ns": 4512,
+        "queue": 0,
+        "received_ns": 2711063520,
+        "responded_ns": 2712549600,
+        "started_ns": 2712144400,
+        "submission_wait_ns": 80736,
+        "success": true
+      },
+      "slowest_phases_ns": {
+        "before_head": 2711027936,
+        "at_head": 27200,
+        "frontend_dispatch": 1168,
+        "command_channel": 7216,
+        "reactor_dependency": 1080880,
+        "execution": 405200,
+        "response_channel": 28272,
+        "guest_completion": 2272,
+        "execution_breakdown": {
+          "prepare": 4512,
+          "advance": 31584,
+          "scheduler": 80736,
+          "wal": 0,
+          "manifest": 282976,
+          "chunk_header": 0,
+          "chunk_payload": 0,
+          "shared_fetch": 0,
+          "other": 5392
+        }
+      }
+    }
+  ],
+  "verify_jobs": [
+    {
+      "stage": "seed",
+      "guest": 1,
+      "bytes": 67108864,
+      "error": 0
+    },
+    {
+      "stage": "seed",
+      "guest": 2,
+      "bytes": 67108864,
+      "error": 0
+    },
+    {
+      "stage": "verify",
+      "guest": 1,
+      "bytes": 67108864,
+      "error": 0
+    },
+    {
+      "stage": "verify",
+      "guest": 2,
+      "bytes": 67108864,
+      "error": 0
+    },
+    {
+      "stage": "restart-verify",
+      "guest": 1,
+      "bytes": 67108864,
+      "error": 0
+    },
+    {
+      "stage": "restart-verify",
+      "guest": 2,
+      "bytes": 67108864,
+      "error": 0
+    }
+  ],
+  "session_totals": [
+    {
+      "image": "00000000000000000000000000000002",
+      "reads": 192190,
+      "traced": 192106,
+      "missed": 84,
+      "max_queue_lock_wait_ns": 186912,
+      "queue_requests": [
+        92274,
+        104127,
+        0,
+        0
+      ],
+      "total_read_ns": 272068819952,
+      "behind_write_ns": 182907108576
+    },
+    {
+      "image": "00000000000000000000000000000003",
+      "reads": 193670,
+      "traced": 193594,
+      "missed": 76,
+      "max_queue_lock_wait_ns": 76672,
+      "queue_requests": [
+        92735,
+        103977,
+        0,
+        0
+      ],
+      "total_read_ns": 260393066272,
+      "behind_write_ns": 173879619488
+    }
+  ],
+  "cleanup": {
+    "utc": "2026-09-14T18:05:22.171770+00:00",
+    "disk_removed": true,
+    "keys_removed": true,
+    "tmp_removed": true,
+    "timer_stopped": true,
+    "runs": [
+      {
+        "path": "live/state/archives/read-attribution-1789409093266887161/runs/1789408569300916201",
+        "outcome": {
+          "error": null,
+          "finished": "2026-09-14T18:02:53Z",
+          "started": "2026-09-14T17:56:09Z",
+          "success": true
+        },
+        "host": {
+          "error": null,
+          "success": true
+        },
+        "memory_peak_bytes": 3130523648,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0"
+        }
+      },
+      {
+        "path": "live/state/archives/read-attribution-1789409093266887161/runs/1789408996490044560",
+        "outcome": {
+          "error": null,
+          "finished": "2026-09-14T18:04:52Z",
+          "started": "2026-09-14T18:03:16Z",
+          "success": true
+        },
+        "host": {
+          "error": null,
+          "success": true
+        },
+        "memory_peak_bytes": 2935869440,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0"
+        }
+      }
+    ],
+    "headroom": {
+      "utc": "2026-09-14T18:05:22.171819+00:00",
+      "available_ram": 111911112704,
+      "free_disk": 38268207104
+    }
+  },
+  "telemetry_samples_validated": 773,
+  "sampled_head_maxima": [
+    {
+      "image": "00000000000000000000000000000002",
+      "queue": 0,
+      "reason": "fairness",
+      "wait_ns": 3173829776
+    },
+    {
+      "image": "00000000000000000000000000000002",
+      "queue": 0,
+      "reason": {
+        "storage": "append_credits"
+      },
+      "wait_ns": 4651040
+    },
+    {
+      "image": "00000000000000000000000000000002",
+      "queue": 0,
+      "reason": {
+        "storage": "read_credits"
+      },
+      "wait_ns": 40307808
+    },
+    {
+      "image": "00000000000000000000000000000002",
+      "queue": 0,
+      "reason": {
+        "storage": "staging"
+      },
+      "wait_ns": 7482693024
+    },
+    {
+      "image": "00000000000000000000000000000002",
+      "queue": 0,
+      "reason": {
+        "storage": "wal_rotation"
+      },
+      "wait_ns": 3430586976
+    },
+    {
+      "image": "00000000000000000000000000000002",
+      "queue": 1,
+      "reason": "fairness",
+      "wait_ns": 1343586848
+    },
+    {
+      "image": "00000000000000000000000000000002",
+      "queue": 1,
+      "reason": {
+        "storage": "read_credits"
+      },
+      "wait_ns": 3713168
+    },
+    {
+      "image": "00000000000000000000000000000002",
+      "queue": 1,
+      "reason": {
+        "storage": "staging"
+      },
+      "wait_ns": 2193236528
+    },
+    {
+      "image": "00000000000000000000000000000002",
+      "queue": 1,
+      "reason": {
+        "storage": "wal_rotation"
+      },
+      "wait_ns": 82776032
+    },
+    {
+      "image": "00000000000000000000000000000003",
+      "queue": 0,
+      "reason": "fairness",
+      "wait_ns": 2596060368
+    },
+    {
+      "image": "00000000000000000000000000000003",
+      "queue": 0,
+      "reason": {
+        "storage": "append_credits"
+      },
+      "wait_ns": 4563408
+    },
+    {
+      "image": "00000000000000000000000000000003",
+      "queue": 0,
+      "reason": {
+        "storage": "read_credits"
+      },
+      "wait_ns": 42272
+    },
+    {
+      "image": "00000000000000000000000000000003",
+      "queue": 0,
+      "reason": {
+        "storage": "staging"
+      },
+      "wait_ns": 9198632688
+    },
+    {
+      "image": "00000000000000000000000000000003",
+      "queue": 0,
+      "reason": {
+        "storage": "wal_rotation"
+      },
+      "wait_ns": 104645120
+    },
+    {
+      "image": "00000000000000000000000000000003",
+      "queue": 1,
+      "reason": "fairness",
+      "wait_ns": 2138891760
+    },
+    {
+      "image": "00000000000000000000000000000003",
+      "queue": 1,
+      "reason": {
+        "storage": "read_credits"
+      },
+      "wait_ns": 3261504
+    },
+    {
+      "image": "00000000000000000000000000000003",
+      "queue": 1,
+      "reason": {
+        "storage": "staging"
+      },
+      "wait_ns": 1633930864
+    }
+  ],
+  "unique_retained_reads_validated": 192,
+  "completed_stage_jobs": 24,
+  "limits": "TCG development attribution. First observation excludes pre-ring delay. Tail retention is lifetime-wide; no stage tail example does not imply no slow reads. Status snapshots can lag a job boundary; stage counter deltas are intentionally omitted. No tracing-off overhead control."
+}

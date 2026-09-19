@@ -1,0 +1,377 @@
+/*
+ * CAS Playbook styles.
+ *
+ * Monochrome stone palette, light-first with an automatic dark scheme.
+ * Berkeley Mono Variable (wght 100..700) carries everything; hierarchy
+ * comes from weight and color, so the size ramp stays tight:
+ * 11 / 13 / 14 / 15 / 24. Tracking is zero except on uppercase labels;
+ * never negative on a mono grid.
+ */
+
+@font-face {
+	font-family: 'Berkeley Mono';
+	src: url('./lib/assets/fonts/BerkeleyMono-Variable.woff2') format('woff2');
+	font-weight: 100 700;
+	font-style: normal;
+	font-display: swap;
+}
+
+:root {
+	--font-mono: 'Berkeley Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+	/* weight ramp (variable wght axis) */
+	--weight-body: 400;
+	--weight-medium: 500;
+	--weight-strong: 600;
+	--weight-display: 700;
+
+	/* backgrounds match harivan.sh (website/src/style.css --bg) */
+	--background: #fdfdfc;
+	--background-secondary: #f5f5f3;
+	--surface: #ffffff;
+	--border: #e6e6e2;
+	--border-subtle: #f0f0ec;
+	--code-bg: #f4f4f1;
+
+	--text-primary: #1c1917;
+	--text-secondary: #44403c;
+	--text-tertiary: #78716c;
+	--text-quaternary: #a8a29e;
+
+	--radius: 6px;
+
+	/* 680px ~= 77ch at 14px Berkeley Mono */
+	--content-width: 680px;
+}
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		--background: #0d0d0b;
+		--background-secondary: #141412;
+		--surface: #141412;
+		--border: #262622;
+		--border-subtle: #1c1c19;
+		--code-bg: #141412;
+
+		--text-primary: #fafaf9;
+		--text-secondary: #d6d3d1;
+		--text-tertiary: #a8a29e;
+		--text-quaternary: #78716c;
+	}
+}
+
+* {
+	box-sizing: border-box;
+	margin: 0;
+	padding: 0;
+}
+
+html {
+	overflow-x: hidden;
+	overscroll-behavior-x: none;
+	font-size: 16px;
+	background: var(--background);
+	color-scheme: light dark;
+	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale;
+	text-rendering: optimizeLegibility;
+}
+
+body {
+	overflow-x: hidden;
+	overscroll-behavior-x: none;
+	background: var(--background);
+	color: var(--text-secondary);
+	font-family: var(--font-mono);
+	font-feature-settings: 'liga' 1, 'calt' 1;
+	font-size: 0.875rem; /* 14px */
+	font-weight: var(--weight-body);
+	line-height: 1.7;
+	padding: 5rem 1.5rem 6rem;
+	counter-reset: section;
+}
+
+main {
+	max-width: var(--content-width);
+	margin: 0 auto;
+}
+
+::selection {
+	background: var(--text-primary);
+	color: var(--background);
+}
+
+h1,
+h2 {
+	color: var(--text-primary);
+	text-wrap: balance;
+}
+h1 {
+	font-size: 1.5rem; /* 24px */
+	font-weight: var(--weight-display);
+	line-height: 1.3;
+	margin: 0.5rem 0 1.25rem;
+}
+h2 {
+	font-size: 0.9375rem; /* 15px */
+	font-weight: var(--weight-strong);
+	line-height: 1.4;
+	margin: 2.5rem 0 0.75rem;
+	counter-increment: section;
+}
+h2::before {
+	content: counter(section) '. ';
+	color: var(--text-quaternary);
+	font-weight: var(--weight-medium);
+	font-variant-numeric: tabular-nums;
+}
+
+p,
+ul,
+ol {
+	margin-bottom: 1.125rem;
+}
+p {
+	text-wrap: pretty;
+}
+
+a {
+	color: var(--text-secondary);
+	text-decoration: none;
+	transition: color 0.15s ease;
+}
+a:hover {
+	color: var(--text-tertiary);
+}
+p a,
+li a {
+	color: var(--text-primary);
+	border-bottom: 1px solid var(--border);
+	transition: border-color 0.15s ease;
+}
+p a:hover,
+li a:hover {
+	color: var(--text-primary);
+	border-bottom-color: var(--text-tertiary);
+}
+a:focus-visible {
+	outline: 2px solid var(--text-primary);
+	outline-offset: 2px;
+	border-radius: 2px;
+}
+
+strong {
+	font-weight: var(--weight-strong);
+	color: var(--text-primary);
+}
+
+/* key-term highlight: the skim layer — a handful of phrases per page */
+mark {
+	background: color-mix(in srgb, #d97706 16%, transparent);
+	color: var(--text-primary);
+	font-weight: var(--weight-strong);
+	padding: 0.0625em 0.25em;
+	border-radius: 3px;
+	box-decoration-break: clone;
+	-webkit-box-decoration-break: clone;
+}
+
+.eyebrow {
+	display: block;
+	font-size: 0.6875rem; /* 11px */
+	font-weight: var(--weight-medium);
+	text-transform: uppercase;
+	letter-spacing: 0.12em;
+	color: var(--text-tertiary);
+}
+
+.lede {
+	font-size: 0.9375rem;
+}
+
+.tag-stretch {
+	display: inline-block;
+	font-size: 0.625rem;
+	font-weight: var(--weight-medium);
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--text-tertiary);
+	border: 1px dashed var(--border);
+	border-radius: 4px;
+	padding: 0.0625rem 0.375rem;
+	margin-left: 0.5rem;
+	white-space: nowrap;
+}
+
+ul.plain {
+	padding-left: 1.25rem;
+}
+ul.plain li {
+	margin-bottom: 0.375rem;
+}
+ul.plain li::marker {
+	color: var(--text-quaternary);
+}
+
+ol.steps {
+	padding-left: 1.5rem;
+	margin-bottom: 1.25rem;
+}
+ol.steps li {
+	margin-bottom: 0.375rem;
+}
+ol.steps li::marker {
+	color: var(--text-tertiary);
+	font-variant-numeric: tabular-nums;
+}
+
+/* ---------- code, tables ---------- */
+code {
+	font-size: 0.8125em;
+	background: var(--code-bg);
+	border: 1px solid var(--border);
+	padding: 0.125em 0.375em;
+	border-radius: 4px;
+}
+
+/* figures break out of the text column on wide screens; tables stay in it and scroll */
+figure {
+	--wide: min(1000px, 100vw - 3rem);
+	width: var(--wide);
+	margin-left: calc((100% - var(--wide)) / 2);
+}
+
+/* tables: scroll sideways inside their own box, with edge shadows and a thin bar */
+.table-scroll {
+	margin-top: 1.5rem;
+	margin-bottom: 1.5rem;
+	overflow-x: auto;
+	overscroll-behavior-x: none;
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	background: var(--surface);
+	scrollbar-width: thin;
+	scrollbar-color: var(--border) transparent;
+}
+.table-scroll::-webkit-scrollbar {
+	height: 8px;
+}
+.table-scroll::-webkit-scrollbar-thumb {
+	background: var(--border);
+	border-radius: 8px;
+	border: 2px solid transparent;
+	background-clip: padding-box;
+}
+.table-scroll::-webkit-scrollbar-track {
+	background: transparent;
+}
+table.spec {
+	width: max-content;
+	min-width: 100%;
+	border-collapse: separate;
+	border-spacing: 0;
+	font-size: 0.8125rem;
+	font-variant-numeric: tabular-nums;
+	line-height: 1.5;
+	background: transparent;
+}
+table.spec th,
+table.spec td {
+	text-align: left;
+	padding: 0.625rem 0.75rem;
+	vertical-align: top;
+	font-weight: var(--weight-body);
+	min-width: 22ch;
+	max-width: 44ch;
+	white-space: normal;
+}
+table.spec thead th {
+	font-size: 0.6875rem;
+	text-transform: uppercase;
+	letter-spacing: 0.1em;
+	color: var(--text-primary);
+	font-weight: var(--weight-strong);
+	background: var(--background-secondary);
+	border-bottom: 1px solid var(--border);
+	white-space: nowrap;
+}
+table.spec td {
+	border-bottom: 1px solid var(--border-subtle);
+}
+table.spec tbody tr:hover td {
+	background: var(--background-secondary);
+}
+table.spec tbody tr:last-child td {
+	border-bottom: 0;
+}
+table.spec td.k,
+table.spec thead th:first-child {
+	position: sticky;
+	left: 0;
+	z-index: 1;
+	background: var(--surface);
+	box-shadow: 1px 0 0 var(--border-subtle);
+}
+table.spec thead th:first-child {
+	background: var(--background-secondary);
+}
+table.spec tbody tr:hover td.k {
+	background: var(--background-secondary);
+}
+table.spec td.k {
+	color: var(--text-primary);
+	font-weight: var(--weight-strong);
+	min-width: 12ch;
+	max-width: 26ch;
+}
+table.spec a {
+	color: var(--text-primary);
+	border-bottom: 1px solid var(--border);
+	transition: border-color 0.15s ease;
+}
+table.spec a:hover {
+	border-bottom-color: var(--text-tertiary);
+}
+
+figure {
+	margin-top: 1.5rem;
+	margin-bottom: 1.5rem;
+	display: flex;
+	flex-direction: column;
+	gap: 0.5rem;
+}
+figcaption {
+	font-size: 0.8125rem;
+	line-height: 1.6;
+	color: var(--text-tertiary);
+	max-width: 64ch;
+	margin: 0.25rem auto 0;
+	padding: 0.625rem 1rem;
+	text-align: center;
+	border: 1px dotted var(--text-quaternary);
+	border-radius: var(--radius);
+}
+
+.note {
+	color: var(--text-tertiary);
+	font-size: 0.8125rem;
+}
+
+@media (max-width: 640px) {
+	body {
+		padding: 3rem 1.25rem 4rem;
+	}
+	h1 {
+		font-size: 1.3125rem;
+	}
+	h2 {
+		margin-top: 2rem;
+	}
+	table.spec {
+		font-size: 0.75rem;
+	}
+	table.spec th,
+	table.spec td {
+		padding: 0.5rem 0.625rem;
+	}
+}

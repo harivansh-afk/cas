@@ -1,0 +1,482 @@
+{
+  "source_revision": "bdb26fc2ea96e229c7822001c9886172750b3b92",
+  "runtime_revision": "6db21e41f9ce2338a39b7e095552ff50f4990ea5",
+  "scope": "One nested KVM/TCG lab; successive stages retain backlog. Not steady-state or production performance.",
+  "samples": 791,
+  "quota_intervals": [
+    {
+      "guest": 1,
+      "first_stopped_s": 225.56534936,
+      "first_reopened_s": 237.688136448,
+      "sampled_duration_s": 12.122787088
+    },
+    {
+      "guest": 1,
+      "first_stopped_s": 317.358111728,
+      "first_reopened_s": 327.963921712,
+      "sampled_duration_s": 10.605809984
+    },
+    {
+      "guest": 2,
+      "first_stopped_s": 226.069878176,
+      "first_reopened_s": 239.202892208,
+      "sampled_duration_s": 13.133014032
+    },
+    {
+      "guest": 2,
+      "first_stopped_s": 318.368996112,
+      "first_reopened_s": 328.974106784,
+      "sampled_duration_s": 10.605110672
+    }
+  ],
+  "max_finished_admission_wait_s": [
+    12.660759216,
+    13.595489824
+  ],
+  "resumed_waits": [
+    4338,
+    3965
+  ],
+  "errors": [
+    0,
+    0
+  ],
+  "drained": true,
+  "operations_scope": "Normal image-worker turns through progression-final-telemetry, before mixed IO. Includes rotations and reclaim-only work, excludes host GC/snapshot work. Counters publish at turn end. Requested bytes are not device traffic; time includes descheduling.",
+  "progression_input_mib": 878.03125,
+  "progression_gc_attempts": 0,
+  "operations": {
+    "allocate": {
+      "calls": 3695,
+      "elapsed_ns": 79803616,
+      "requested_bytes": 5411123200,
+      "share_of_timed_operations_percent": 0.09463035787007289
+    },
+    "buffer_allocate": {
+      "calls": 7399,
+      "elapsed_ns": 36115888,
+      "requested_bytes": 67830718464,
+      "share_of_timed_operations_percent": 0.042825871527368775
+    },
+    "buffer_zero": {
+      "calls": 7399,
+      "elapsed_ns": 12221900368,
+      "requested_bytes": 67830718464,
+      "share_of_timed_operations_percent": 14.492611533745734
+    },
+    "hash": {
+      "calls": 224773,
+      "elapsed_ns": 492996448,
+      "requested_bytes": 920670208,
+      "share_of_timed_operations_percent": 0.58459043137738
+    },
+    "punch": {
+      "calls": 222252,
+      "elapsed_ns": 1074851024,
+      "requested_bytes": 3336089600,
+      "share_of_timed_operations_percent": 1.2745479735922531
+    },
+    "read": {
+      "calls": 650047,
+      "elapsed_ns": 46096143632,
+      "requested_bytes": 3258691584,
+      "share_of_timed_operations_percent": 54.66036236160579
+    },
+    "scheduler_wait": {
+      "calls": 653742,
+      "elapsed_ns": 57922112,
+      "requested_bytes": 6506610688,
+      "share_of_timed_operations_percent": 0.06868348154988921
+    },
+    "sync": {
+      "calls": 5224,
+      "elapsed_ns": 22755455232,
+      "requested_bytes": 0,
+      "share_of_timed_operations_percent": 26.98319925879778
+    },
+    "unlink": {
+      "calls": 194,
+      "elapsed_ns": 9623632,
+      "requested_bytes": 0,
+      "share_of_timed_operations_percent": 0.011411609972283528
+    },
+    "write": {
+      "calls": 3695,
+      "elapsed_ns": 1507127392,
+      "requested_bytes": 3247919104,
+      "share_of_timed_operations_percent": 1.7871371199614516
+    }
+  },
+  "phase_ns": {
+    "chunks": 12784814768,
+    "load": 20153254544,
+    "manifest": 8389960224,
+    "prepare": 23421320080,
+    "reclaim": 24710596304,
+    "reserve": 1047504
+  },
+  "manifest": {
+    "manifest_allocated_bytes": 66306793472,
+    "manifest_changes": 224823,
+    "manifest_old_page_reads": 101906,
+    "manifest_written_pages": 660731
+  },
+  "exchange_ns": 471204896,
+  "collection_after_mixed": {
+    "attempts": 1,
+    "completed": 1,
+    "error": null,
+    "last": {
+      "allocated_after": 912809984,
+      "allocated_before": 4026339328,
+      "capacity_exhausted": false,
+      "chunks": {
+        "chunks_copied": 25295,
+        "encoded_bytes_copied": 105742336,
+        "headers_retained": 0,
+        "segments_removed": 49
+      },
+      "compactions": 0,
+      "manifests": {
+        "file_bytes": 2810314752,
+        "punch_calls": 1830,
+        "punched_logical_bytes": 2802851840,
+        "removed_tail_mapping_bytes": 0,
+        "retained_pages": 1822,
+        "roots": 2,
+        "tree_page_reads": 19998,
+        "windows": 22
+      },
+      "pause_micros": 3166633,
+      "rounds": 1
+    }
+  },
+  "jobs": [
+    {
+      "file": "1m-q32-1.json",
+      "job": "1m-q32",
+      "errno": 0,
+      "write": {
+        "mib": 68.0,
+        "mib_s": 4.765241622924805,
+        "runtime_s": 14.27,
+        "max_ms": 14238.859309,
+        "p99_ms": 14294.188032
+      }
+    },
+    {
+      "file": "1m-q32-2.json",
+      "job": "1m-q32",
+      "errno": 0,
+      "write": {
+        "mib": 74.0,
+        "mib_s": 4.727527618408203,
+        "runtime_s": 15.653,
+        "max_ms": 15246.537866,
+        "p99_ms": 15233.712128
+      }
+    },
+    {
+      "file": "4k-q1-1.json",
+      "job": "4k-q1",
+      "errno": 0,
+      "write": {
+        "mib": 30.546875,
+        "mib_s": 3.0495033264160156,
+        "runtime_s": 10.017,
+        "max_ms": 391.277307,
+        "p99_ms": 2.801664
+      }
+    },
+    {
+      "file": "4k-q1-2.json",
+      "job": "4k-q1",
+      "errno": 0,
+      "write": {
+        "mib": 31.36328125,
+        "mib_s": 3.132568359375,
+        "runtime_s": 10.012,
+        "max_ms": 404.997767,
+        "p99_ms": 2.506752
+      }
+    },
+    {
+      "file": "4k-q32-1.json",
+      "job": "4k-q32",
+      "errno": 0,
+      "write": {
+        "mib": 77.31640625,
+        "mib_s": 7.702371597290039,
+        "runtime_s": 10.038,
+        "max_ms": 406.381319,
+        "p99_ms": 291.504128
+      }
+    },
+    {
+      "file": "4k-q32-2.json",
+      "job": "4k-q32",
+      "errno": 0,
+      "write": {
+        "mib": 76.60546875,
+        "mib_s": 7.630785942077637,
+        "runtime_s": 10.039,
+        "max_ms": 410.123558,
+        "p99_ms": 283.11552
+      }
+    },
+    {
+      "file": "4k-q64-1.json",
+      "job": "4k-q64",
+      "errno": 0,
+      "write": {
+        "mib": 116.0,
+        "mib_s": 11.404973983764648,
+        "runtime_s": 10.171,
+        "max_ms": 349.863947,
+        "p99_ms": 265.289728
+      }
+    },
+    {
+      "file": "4k-q64-2.json",
+      "job": "4k-q64",
+      "errno": 0,
+      "write": {
+        "mib": 117.3359375,
+        "mib_s": 11.694999694824219,
+        "runtime_s": 10.033,
+        "max_ms": 310.95579,
+        "p99_ms": 219.152384
+      }
+    },
+    {
+      "file": "4k-q8-1.json",
+      "job": "4k-q8",
+      "errno": 0,
+      "write": {
+        "mib": 78.0,
+        "mib_s": 7.758877754211426,
+        "runtime_s": 10.053,
+        "max_ms": 331.03736,
+        "p99_ms": 14.614528
+      }
+    },
+    {
+      "file": "4k-q8-2.json",
+      "job": "4k-q8",
+      "errno": 0,
+      "write": {
+        "mib": 77.73828125,
+        "mib_s": 7.754441261291504,
+        "runtime_s": 10.025,
+        "max_ms": 364.041159,
+        "p99_ms": 14.876672
+      }
+    },
+    {
+      "file": "mixed-1.json",
+      "job": "mixed-read",
+      "errno": 0,
+      "read": {
+        "mib": 6.984375,
+        "mib_s": 0.5486545562744141,
+        "runtime_s": 12.73,
+        "max_ms": 11339.158546,
+        "p99_ms": 100.139008
+      }
+    },
+    {
+      "file": "mixed-1.json",
+      "job": "mixed-write",
+      "errno": 0,
+      "write": {
+        "mib": 265.0,
+        "mib_s": 21.20508861541748,
+        "runtime_s": 12.497,
+        "max_ms": 11511.361604,
+        "p99_ms": 11475.615744
+      }
+    },
+    {
+      "file": "mixed-2.json",
+      "job": "mixed-read",
+      "errno": 0,
+      "read": {
+        "mib": 6.57421875,
+        "mib_s": 0.4902839660644531,
+        "runtime_s": 13.409,
+        "max_ms": 11145.302692,
+        "p99_ms": 549.453824
+      }
+    },
+    {
+      "file": "mixed-2.json",
+      "job": "mixed-write",
+      "errno": 0,
+      "write": {
+        "mib": 271.0,
+        "mib_s": 20.093422889709473,
+        "runtime_s": 13.487,
+        "max_ms": 11699.804711,
+        "p99_ms": 11609.833472
+      }
+    },
+    {
+      "file": "reboot-verify-1.json",
+      "job": "reboot-verify-seed",
+      "errno": 0,
+      "read": {
+        "mib": 64.0,
+        "mib_s": 49.192928314208984,
+        "runtime_s": 1.301,
+        "max_ms": 255.823085,
+        "p99_ms": 254.803968
+      }
+    },
+    {
+      "file": "reboot-verify-2.json",
+      "job": "reboot-verify-seed",
+      "errno": 0,
+      "read": {
+        "mib": 64.0,
+        "mib_s": 52.41605186462402,
+        "runtime_s": 1.221,
+        "max_ms": 232.973483,
+        "p99_ms": 233.832448
+      }
+    },
+    {
+      "file": "seed-1.json",
+      "job": "seed",
+      "errno": 0,
+      "read": {
+        "mib": 64.0,
+        "mib_s": 423.8410587310791,
+        "runtime_s": 0.151,
+        "max_ms": 34.974354,
+        "p99_ms": 34.865152
+      },
+      "write": {
+        "mib": 64.0,
+        "mib_s": 160.80401992797852,
+        "runtime_s": 0.398,
+        "max_ms": 131.77122,
+        "p99_ms": 131.596288
+      }
+    },
+    {
+      "file": "seed-2.json",
+      "job": "seed",
+      "errno": 0,
+      "read": {
+        "mib": 64.0,
+        "mib_s": 309.17874336242676,
+        "runtime_s": 0.207,
+        "max_ms": 182.520704,
+        "p99_ms": 183.5008
+      },
+      "write": {
+        "mib": 64.0,
+        "mib_s": 48.37490463256836,
+        "runtime_s": 1.323,
+        "max_ms": 554.011336,
+        "p99_ms": 557.842432
+      }
+    },
+    {
+      "file": "verify-1.json",
+      "job": "verify-seed",
+      "errno": 0,
+      "read": {
+        "mib": 64.0,
+        "mib_s": 96.67673683166504,
+        "runtime_s": 0.662,
+        "max_ms": 136.443566,
+        "p99_ms": 137.363456
+      }
+    },
+    {
+      "file": "verify-2.json",
+      "job": "verify-seed",
+      "errno": 0,
+      "read": {
+        "mib": 64.0,
+        "mib_s": 89.38547420501709,
+        "runtime_s": 0.716,
+        "max_ms": 130.714356,
+        "p99_ms": 130.547712
+      }
+    }
+  ],
+  "memory": [
+    {
+      "run": "1789392679114619249",
+      "sample_count": 297,
+      "lab_peak_bytes": 3338293248,
+      "memory_events": {
+        "low": "0",
+        "high": "0",
+        "max": "0",
+        "oom": "0",
+        "oom_kill": "0",
+        "oom_group_kill": "0"
+      },
+      "storage_sampled_peak_pss_bytes": 475156480
+    },
+    {
+      "run": "1789393130858389259",
+      "sample_count": 152,
+      "lab_peak_bytes": 3039784960,
+      "memory_events": {
+        "low": "0",
+        "high": "0",
+        "max": "0",
+        "oom": "0",
+        "oom_kill": "0",
+        "oom_group_kill": "0"
+      },
+      "storage_sampled_peak_pss_bytes": 371271680
+    }
+  ],
+  "cleanup": {
+    "archive": "results/congestion-wait-2026-09-14/live/state/archives/pressure-fix-1789393358066687556",
+    "memory_available_bytes": 110708862976,
+    "disk_free_bytes": 56002445312,
+    "bulk_removed": true,
+    "labs": [],
+    "units": "Id=casctl-9dd5b06b0d3cfceb0abd.service\nLoadState=not-found\nActiveState=inactive\nMainPID=0\n\nId=cas-congestion-20260914-deadline.timer\nLoadState=not-found\nActiveState=inactive\n\nId=cas-congestion-20260914-deadline.service\nLoadState=not-found\nActiveState=inactive\nMainPID=0\n",
+    "runs": [
+      {
+        "run": "1789392679114619249",
+        "outcome": {
+          "error": null,
+          "finished": "2026-09-14T13:38:13Z",
+          "started": "2026-09-14T13:31:19Z",
+          "success": true
+        },
+        "outer_memory": {
+          "memory_current_bytes": 286150656,
+          "memory_events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n",
+          "memory_peak_bytes": 3338293248,
+          "scope": "whole lab user service including outer QEMU; overlaps inner guest accounting",
+          "utc": "2026-09-14T13:38:13Z"
+        }
+      },
+      {
+        "run": "1789393130858389259",
+        "outcome": {
+          "error": null,
+          "finished": "2026-09-14T13:42:29Z",
+          "started": "2026-09-14T13:38:50Z",
+          "success": true
+        },
+        "outer_memory": {
+          "memory_current_bytes": 205574144,
+          "memory_events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n",
+          "memory_peak_bytes": 3039784960,
+          "scope": "whole lab user service including outer QEMU; overlaps inner guest accounting",
+          "utc": "2026-09-14T13:42:29Z"
+        }
+      }
+    ]
+  }
+}

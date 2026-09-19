@@ -1,0 +1,9 @@
+/.worktrees/
+/target/
+/results/
+/result
+/result-*
+__pycache__/
+# tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")) leftovers from aborted test runs
+.tmp*/
+.vercel

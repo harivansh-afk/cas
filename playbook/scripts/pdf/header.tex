@@ -1,0 +1,30 @@
+% Typesetting for the spec PDF. Pandoc supplies the document class,
+% fontspec, hyperref, longtable, and graphicx; this file tunes them.
+
+\usepackage{microtype}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage{float}
+\usepackage{titlesec}
+
+% Sentences flow; paragraphs are separated by space, not indent, as on the site.
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.55\baselineskip}
+
+% Figures stay where the prose put them.
+\floatplacement{figure}{H}
+\captionsetup{font=small,labelfont=bf,skip=6pt}
+
+% Section titles: the seven pages become numbered sections 0 to 6.
+\titleformat{\section}{\Large\bfseries}{\thesection}{0.6em}{}
+\titleformat{\subsection}{\large\bfseries}{\thesubsection}{0.6em}{}
+\titlespacing*{\section}{0pt}{2.2\baselineskip}{0.8\baselineskip}
+\titlespacing*{\subsection}{0pt}{1.4\baselineskip}{0.4\baselineskip}
+
+% Inline code in the site's mono at a size that sits inside serif text.
+\let\oldtexttt\texttt
+\renewcommand{\texttt}[1]{\oldtexttt{\small #1}}
+
+% Tables: the site's flat rules.
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.15}

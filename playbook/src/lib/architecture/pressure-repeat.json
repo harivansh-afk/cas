@@ -1,0 +1,597 @@
+{
+  "source_revision": "eeff4b5d865224b3273d7f2ce5ff2863ff90c2ad",
+  "reference_revision": "bdb26fc2ea96e229c7822001c9886172750b3b92",
+  "scope": "One nested KVM/TCG development repetition, same workload/geometry; timing, backlog and written volume differ. Not a statistical speedup or dedicated-media result.",
+  "jobs": [
+    {
+      "file": "1m-q32-1.json",
+      "job": "1m-q32",
+      "errno": 0,
+      "write": {
+        "mib": 183.0,
+        "mib_s": 9.786619186401367,
+        "runtime_s": 18.699,
+        "max_ms": 9339.527395,
+        "p99_ms": 9328.132096
+      }
+    },
+    {
+      "file": "1m-q32-2.json",
+      "job": "1m-q32",
+      "errno": 0,
+      "write": {
+        "mib": 172.0,
+        "mib_s": 9.23737907409668,
+        "runtime_s": 18.62,
+        "max_ms": 9072.565702,
+        "p99_ms": 9059.69664
+      }
+    },
+    {
+      "file": "4k-q1-1.json",
+      "job": "4k-q1",
+      "errno": 0,
+      "write": {
+        "mib": 33.86328125,
+        "mib_s": 3.3802433013916016,
+        "runtime_s": 10.018,
+        "max_ms": 296.223922,
+        "p99_ms": 2.408448
+      }
+    },
+    {
+      "file": "4k-q1-2.json",
+      "job": "4k-q1",
+      "errno": 0,
+      "write": {
+        "mib": 32.671875,
+        "mib_s": 3.2632713317871094,
+        "runtime_s": 10.012,
+        "max_ms": 379.18299,
+        "p99_ms": 2.277376
+      }
+    },
+    {
+      "file": "4k-q32-1.json",
+      "job": "4k-q32",
+      "errno": 0,
+      "write": {
+        "mib": 88.04296875,
+        "mib_s": 8.768345832824707,
+        "runtime_s": 10.041,
+        "max_ms": 323.527032,
+        "p99_ms": 214.95808
+      }
+    },
+    {
+      "file": "4k-q32-2.json",
+      "job": "4k-q32",
+      "errno": 0,
+      "write": {
+        "mib": 88.90625,
+        "mib_s": 8.870223045349121,
+        "runtime_s": 10.023,
+        "max_ms": 325.102766,
+        "p99_ms": 210.763776
+      }
+    },
+    {
+      "file": "4k-q64-1.json",
+      "job": "4k-q64",
+      "errno": 0,
+      "write": {
+        "mib": 132.6640625,
+        "mib_s": 13.221452713012695,
+        "runtime_s": 10.034,
+        "max_ms": 244.865809,
+        "p99_ms": 158.334976
+      }
+    },
+    {
+      "file": "4k-q64-2.json",
+      "job": "4k-q64",
+      "errno": 0,
+      "write": {
+        "mib": 135.1484375,
+        "mib_s": 13.454298973083496,
+        "runtime_s": 10.045,
+        "max_ms": 181.12448,
+        "p99_ms": 149.946368
+      }
+    },
+    {
+      "file": "4k-q8-1.json",
+      "job": "4k-q8",
+      "errno": 0,
+      "write": {
+        "mib": 86.74609375,
+        "mib_s": 8.657294273376465,
+        "runtime_s": 10.02,
+        "max_ms": 362.39057,
+        "p99_ms": 12.517376
+      }
+    },
+    {
+      "file": "4k-q8-2.json",
+      "job": "4k-q8",
+      "errno": 0,
+      "write": {
+        "mib": 88.4140625,
+        "mib_s": 8.823758125305176,
+        "runtime_s": 10.02,
+        "max_ms": 358.697662,
+        "p99_ms": 11.730944
+      }
+    },
+    {
+      "file": "mixed-1.json",
+      "job": "mixed-read",
+      "errno": 0,
+      "read": {
+        "mib": 5.69140625,
+        "mib_s": 0.45542144775390625,
+        "runtime_s": 12.497,
+        "max_ms": 10496.720602,
+        "p99_ms": 608.17408
+      }
+    },
+    {
+      "file": "mixed-1.json",
+      "job": "mixed-write",
+      "errno": 0,
+      "write": {
+        "mib": 271.0,
+        "mib_s": 21.890145301818848,
+        "runtime_s": 12.38,
+        "max_ms": 11117.242873,
+        "p99_ms": 10938.744832
+      }
+    },
+    {
+      "file": "mixed-2.json",
+      "job": "mixed-read",
+      "errno": 0,
+      "read": {
+        "mib": 5.80078125,
+        "mib_s": 0.4905099868774414,
+        "runtime_s": 11.826,
+        "max_ms": 9570.32798,
+        "p99_ms": 717.225984
+      }
+    },
+    {
+      "file": "mixed-2.json",
+      "job": "mixed-write",
+      "errno": 0,
+      "write": {
+        "mib": 262.0,
+        "mib_s": 22.44688129425049,
+        "runtime_s": 11.672,
+        "max_ms": 10283.031364,
+        "p99_ms": 10267.656192
+      }
+    },
+    {
+      "file": "reboot-verify-1.json",
+      "job": "reboot-verify-seed",
+      "errno": 0,
+      "read": {
+        "mib": 64.0,
+        "mib_s": 72.81001091003418,
+        "runtime_s": 0.879,
+        "max_ms": 133.051248,
+        "p99_ms": 132.644864
+      }
+    },
+    {
+      "file": "reboot-verify-2.json",
+      "job": "reboot-verify-seed",
+      "errno": 0,
+      "read": {
+        "mib": 64.0,
+        "mib_s": 52.24489784240723,
+        "runtime_s": 1.225,
+        "max_ms": 256.963882,
+        "p99_ms": 256.90112
+      }
+    },
+    {
+      "file": "seed-1.json",
+      "job": "seed",
+      "errno": 0,
+      "read": {
+        "mib": 64.0,
+        "mib_s": 402.5157232284546,
+        "runtime_s": 0.159,
+        "max_ms": 19.806444,
+        "p99_ms": 19.791872
+      },
+      "write": {
+        "mib": 64.0,
+        "mib_s": 204.47284317016602,
+        "runtime_s": 0.313,
+        "max_ms": 93.382831,
+        "p99_ms": 93.847552
+      }
+    },
+    {
+      "file": "seed-2.json",
+      "job": "seed",
+      "errno": 0,
+      "read": {
+        "mib": 64.0,
+        "mib_s": 524.590163230896,
+        "runtime_s": 0.122,
+        "max_ms": 21.717049,
+        "p99_ms": 21.62688
+      },
+      "write": {
+        "mib": 64.0,
+        "mib_s": 148.49187850952148,
+        "runtime_s": 0.431,
+        "max_ms": 63.57987,
+        "p99_ms": 63.700992
+      }
+    },
+    {
+      "file": "verify-1.json",
+      "job": "verify-seed",
+      "errno": 0,
+      "read": {
+        "mib": 64.0,
+        "mib_s": 48.26546001434326,
+        "runtime_s": 1.326,
+        "max_ms": 285.772488,
+        "p99_ms": 287.309824
+      }
+    },
+    {
+      "file": "verify-2.json",
+      "job": "verify-seed",
+      "errno": 0,
+      "read": {
+        "mib": 64.0,
+        "mib_s": 40.17576885223389,
+        "runtime_s": 1.593,
+        "max_ms": 261.311881,
+        "p99_ms": 261.095424
+      }
+    }
+  ],
+  "commands_passed": 18,
+  "fio_jobs_passed": 20,
+  "samples": 607,
+  "input_mib": 1172.58984375,
+  "reference_input_mib": 878.03125,
+  "operations": {
+    "allocate": {
+      "calls": 5317,
+      "elapsed_ns": 91136304,
+      "requested_bytes": 4170223616
+    },
+    "buffer_allocate": {
+      "calls": 28899,
+      "elapsed_ns": 648662960,
+      "requested_bytes": 13650501632
+    },
+    "buffer_zero": {
+      "calls": 1016412,
+      "elapsed_ns": 340860160,
+      "requested_bytes": 6241005568
+    },
+    "hash": {
+      "calls": 300179,
+      "elapsed_ns": 654622944,
+      "requested_bytes": 1229533184
+    },
+    "punch": {
+      "calls": 250032,
+      "elapsed_ns": 1233619168,
+      "requested_bytes": 4548800512
+    },
+    "read": {
+      "calls": 564834,
+      "elapsed_ns": 40200770192,
+      "requested_bytes": 3177529344
+    },
+    "scheduler_wait": {
+      "calls": 570151,
+      "elapsed_ns": 51925792,
+      "requested_bytes": 4480249856
+    },
+    "sync": {
+      "calls": 7301,
+      "elapsed_ns": 31713679984,
+      "requested_bytes": 0
+    },
+    "unlink": {
+      "calls": 246,
+      "elapsed_ns": 11256992,
+      "requested_bytes": 0
+    },
+    "write": {
+      "calls": 5317,
+      "elapsed_ns": 1591641072,
+      "requested_bytes": 1302720512
+    }
+  },
+  "normalized_operations": {
+    "allocate": {
+      "calls_per_input_mib": 4.534407344852973,
+      "requested_mib_per_input_mib": 3.3916677493395695,
+      "elapsed_ms_per_input_mib": 0.07772223551633503
+    },
+    "buffer_allocate": {
+      "calls_per_input_mib": 24.64544627777056,
+      "requested_mib_per_input_mib": 11.102034425667009,
+      "elapsed_ms_per_input_mib": 0.5531882810152474
+    },
+    "buffer_zero": {
+      "calls_per_input_mib": 866.8094862134099,
+      "requested_mib_per_input_mib": 5.075847066622694,
+      "elapsed_ms_per_input_mib": 0.2906900156238028
+    },
+    "hash": {
+      "calls_per_input_mib": 255.99658874753067,
+      "requested_mib_per_input_mib": 0.9999866747950417,
+      "elapsed_ms_per_input_mib": 0.5582710335495348
+    },
+    "punch": {
+      "calls_per_input_mib": 213.23056935269486,
+      "requested_mib_per_input_mib": 3.699566597708731,
+      "elapsed_ms_per_input_mib": 1.0520466082622932
+    },
+    "read": {
+      "calls_per_input_mib": 481.6978443149679,
+      "requested_mib_per_input_mib": 2.5843035748193603,
+      "elapsed_ms_per_input_mib": 34.283744146577256
+    },
+    "scheduler_wait": {
+      "calls_per_input_mib": 486.23225165982086,
+      "requested_mib_per_input_mib": 3.643813940163167,
+      "elapsed_ms_per_input_mib": 0.044282996545440614
+    },
+    "sync": {
+      "calls_per_input_mib": 6.2263885696391865,
+      "requested_mib_per_input_mib": 0.0,
+      "elapsed_ms_per_input_mib": 27.04584228921691
+    },
+    "unlink": {
+      "calls_per_input_mib": 0.2097920268636132,
+      "requested_mib_per_input_mib": 0.0,
+      "elapsed_ms_per_input_mib": 0.009600110439298695
+    },
+    "write": {
+      "calls_per_input_mib": 4.534407344852973,
+      "requested_mib_per_input_mib": 1.059510365343807,
+      "elapsed_ms_per_input_mib": 1.3573723842855856
+    }
+  },
+  "operations_scope": "Normal worker turns through progression drain, including rotations and reclaim-only work; excludes GC/snapshots. Time includes descheduling and instrumentation. Requested bytes are not physical traffic.",
+  "manifest": {
+    "manifest_allocated_bytes": 735035392,
+    "manifest_changes": 300229,
+    "manifest_old_page_reads": 118310,
+    "manifest_written_pages": 121363
+  },
+  "phase_ns": {
+    "chunks": 19083060832,
+    "load": 9518457344,
+    "manifest": 7489354320,
+    "prepare": 15060505728,
+    "reclaim": 28666640640,
+    "reserve": 1239104
+  },
+  "comparison": [
+    {
+      "label": "Initialized bytes",
+      "unit": "MiB / input MiB",
+      "before": 73.67438694522546,
+      "after": 5.075847066622694,
+      "change_percent": -93.11043189216298
+    },
+    {
+      "label": "Background reads",
+      "unit": "calls / input MiB",
+      "before": 740.3460867708296,
+      "after": 481.6978443149679,
+      "change_percent": -34.936126100700925
+    },
+    {
+      "label": "Final manifest pages",
+      "unit": "pages / input MiB",
+      "before": 752.5142185998506,
+      "after": 103.4999583587345,
+      "change_percent": -86.24611259155881
+    },
+    {
+      "label": "Syncs",
+      "unit": "calls / input MiB",
+      "before": 5.94967434245649,
+      "after": 6.2263885696391865,
+      "change_percent": 4.650913835873038
+    }
+  ],
+  "mixed_queue_evidence": [
+    {
+      "guest": 1,
+      "queue_request_deltas": [
+        2214,
+        0,
+        0,
+        0
+      ],
+      "sampled_waits": [
+        {
+          "queue": 0,
+          "reason": {
+            "storage": "wal_rotation"
+          },
+          "samples": 6
+        },
+        {
+          "queue": 0,
+          "reason": {
+            "storage": "staging"
+          },
+          "samples": 19
+        }
+      ],
+      "max_sampled_head_wait_s": 9.339189888
+    },
+    {
+      "guest": 2,
+      "queue_request_deltas": [
+        1929,
+        0,
+        0,
+        0
+      ],
+      "sampled_waits": [
+        {
+          "queue": 0,
+          "reason": {
+            "storage": "wal_rotation"
+          },
+          "samples": 6
+        },
+        {
+          "queue": 0,
+          "reason": {
+            "storage": "staging"
+          },
+          "samples": 17
+        }
+      ],
+      "max_sampled_head_wait_s": 8.705951328
+    }
+  ],
+  "quota_intervals": [
+    {
+      "guest": 1,
+      "start_s": 184.771696752,
+      "reopened_s": 192.347739552,
+      "sampled_seconds": 7.5760428
+    },
+    {
+      "guest": 1,
+      "start_s": 193.35634496,
+      "reopened_s": 202.444391216,
+      "sampled_seconds": 9.088046256
+    },
+    {
+      "guest": 1,
+      "start_s": 244.46812136,
+      "reopened_s": 254.077135728,
+      "sampled_seconds": 9.609014368
+    },
+    {
+      "guest": 2,
+      "start_s": 184.771696752,
+      "reopened_s": 192.347739552,
+      "sampled_seconds": 7.5760428
+    },
+    {
+      "guest": 2,
+      "start_s": 193.860270192,
+      "reopened_s": 201.940403552,
+      "sampled_seconds": 8.08013336
+    },
+    {
+      "guest": 2,
+      "start_s": 244.9752228,
+      "reopened_s": 253.569191248,
+      "sampled_seconds": 8.593968448
+    }
+  ],
+  "max_finished_wait_s": [
+    9.829013728,
+    9.13013648
+  ],
+  "gc_attempts": 0,
+  "drained": true,
+  "drain_window": {
+    "sampled_seconds": 14.6654192,
+    "compacted_mib": 317.0546875,
+    "mib_s": 21.619203868376296,
+    "scope": "After-stage snapshot to first drained sample; start/end can lag IO and operation publication."
+  },
+  "reference_drain_window": {
+    "sampled_seconds": 23.772562576,
+    "compacted_mib": 310.37890625,
+    "mib_s": 13.056182111530054,
+    "scope": "After-stage snapshot to first drained sample; start/end can lag IO and operation publication."
+  },
+  "memory": [
+    {
+      "run": "1789399414617910656",
+      "lab_peak_bytes": 3014885376,
+      "sampled_storage_peak_pss_bytes": 463370240,
+      "memory_events": {
+        "low": "0",
+        "high": "0",
+        "max": "0",
+        "oom": "0",
+        "oom_kill": "0",
+        "oom_group_kill": "0"
+      }
+    },
+    {
+      "run": "1789399741786638149",
+      "lab_peak_bytes": 2905116672,
+      "sampled_storage_peak_pss_bytes": 385274880,
+      "memory_events": {
+        "low": "0",
+        "high": "0",
+        "max": "0",
+        "oom": "0",
+        "oom_kill": "0",
+        "oom_group_kill": "0"
+      }
+    }
+  ],
+  "cleanup": {
+    "utc": "2026-09-14T15:31:07.964065+00:00",
+    "archive": "results/pressure-repeat-2026-09-14/live/state/archives/merged-pressure-1789399867818150307",
+    "bulk_removed": true,
+    "labs": [],
+    "memory_available_bytes": 110759124992,
+    "disk_free_bytes": 47530225664,
+    "runs": [
+      {
+        "run": "1789399414617910656",
+        "outcome": {
+          "error": null,
+          "finished": "2026-09-14T15:28:52Z",
+          "started": "2026-09-14T15:23:34Z",
+          "success": true
+        },
+        "outer_memory": {
+          "memory_current_bytes": 72286208,
+          "memory_events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n",
+          "memory_peak_bytes": 3014885376,
+          "scope": "whole lab user service including outer QEMU; overlaps inner guest accounting",
+          "utc": "2026-09-14T15:28:52Z"
+        }
+      },
+      {
+        "run": "1789399741786638149",
+        "outcome": {
+          "error": null,
+          "finished": "2026-09-14T15:30:55Z",
+          "started": "2026-09-14T15:29:01Z",
+          "success": true
+        },
+        "outer_memory": {
+          "memory_current_bytes": 50184192,
+          "memory_events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n",
+          "memory_peak_bytes": 2905116672,
+          "scope": "whole lab user service including outer QEMU; overlaps inner guest accounting",
+          "utc": "2026-09-14T15:30:55Z"
+        }
+      }
+    ]
+  },
+  "reference_receipts_verified": 148,
+  "extension": "Not run: baseline already exercised quota stops; no change to the frozen workload."
+}

@@ -1,0 +1,294 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-09",
+  "experiment": "dated_root_image_census_pilot",
+  "tested_revision": "3c591389eb70fa351a683b8334f2ad32d80bfe9b",
+  "tested_worktree_clean": true,
+  "host": "Linux spark 6.17.13 #1-NixOS SMP PREEMPT_DYNAMIC Tue Jan  1 00:00:00 UTC 1980 aarch64 GNU/Linux",
+  "tools": [
+    "qemu-img version 10.2.4",
+    "Copyright (c) 2003-2025 Fabrice Bellard and the QEMU Project developers",
+    "dumpe2fs 1.47.4 (6-Mar-2025)",
+    "\tUsing EXT2FS Library version 1.47.4"
+  ],
+  "runner_store_path": "/nix/store/pig4nlma1ci4l46q9050l1vym1gicaa4-cas-census-pilot",
+  "started": "2026-09-09T16:54:11+00:00",
+  "finished": "2026-09-09T16:55:40+00:00",
+  "inputs": [
+    {
+      "date": "20260705",
+      "url": "https://cloud-images.ubuntu.com/noble/20260705/noble-server-cloudimg-arm64.img",
+      "qcow2_sha256": "7df0201546f75b8bcc1044594c806c35749421ad3c9bc1be2a3ab806cfae39cc",
+      "qcow2_bytes": 615630848
+    },
+    {
+      "date": "20260826",
+      "url": "https://cloud-images.ubuntu.com/noble/20260826/noble-server-cloudimg-arm64.img",
+      "qcow2_sha256": "afa139bac6f2629c1e1f2f8f34215f3a9ad9779801bcb945521ba1a45016743f",
+      "qcow2_bytes": 619036160
+    }
+  ],
+  "retained_input_checksums": [
+    "6577aecdaa1b0bb1ca13b06b9fb46f7c17b3a6aff29596be079041fa107f7480  ./20260705.raw",
+    "c4aa3198c37c5e18c3935d088db4b494c05fdbd5df8659cfd2e319ef7f7e83f7  ./20260705.root.raw",
+    "8fba23b1c03d483386652206f0c5abc430cc2625cf9ce6c87d0f3fa71ed351e0  ./20260826.raw",
+    "620a70fe4b21110776d6fa654eb5a74ca510d2ab1beab5600f96f853f500931c  ./20260826.root.raw",
+    "7df0201546f75b8bcc1044594c806c35749421ad3c9bc1be2a3ab806cfae39cc  ./20260705.qcow2",
+    "afa139bac6f2629c1e1f2f8f34215f3a9ad9779801bcb945521ba1a45016743f  ./20260826.qcow2"
+  ],
+  "census": {
+    "hash": "BLAKE3-256",
+    "results": [
+      {
+        "chunk_bytes": 4096,
+        "cross_image_duplicate_bytes": 1295044608,
+        "fleet_unique_bytes": 2120196096,
+        "images": [
+          {
+            "base_elsewhere_bytes": 0,
+            "base_in_place_bytes": 0,
+            "blake3": "6dfe3e6cc3787acfec5afea3f5db96d850f60c5c414cffe28d0fe3c27b1931ee",
+            "logical_bytes": 2683285504,
+            "new_unique_bytes": 1700560896,
+            "nonzero_chunk_bytes": 1791254528,
+            "path": "20260705.root.raw",
+            "prior_image_only_bytes": 0,
+            "unique_bytes": 1700560896,
+            "within_image_only_bytes": 90693632,
+            "zero_chunk_bytes": 892030976
+          },
+          {
+            "base_elsewhere_bytes": 1096437760,
+            "base_in_place_bytes": 249401344,
+            "blake3": "62fe9673317ac0471f2301792984630126501e6bc64490ea48d73c3300ca6e6c",
+            "logical_bytes": 2683285504,
+            "new_unique_bytes": 419635200,
+            "nonzero_chunk_bytes": 1805545472,
+            "path": "20260826.root.raw",
+            "prior_image_only_bytes": 0,
+            "unique_bytes": 1714679808,
+            "within_image_only_bytes": 40071168,
+            "zero_chunk_bytes": 877740032
+          }
+        ],
+        "independently_unique_bytes": 3415240704,
+        "nonzero_chunk_bytes": 3596800000,
+        "within_image_duplicate_bytes": 181559296
+      },
+      {
+        "chunk_bytes": 16384,
+        "cross_image_duplicate_bytes": 674955264,
+        "fleet_unique_bytes": 2922577920,
+        "images": [
+          {
+            "base_elsewhere_bytes": 0,
+            "base_in_place_bytes": 0,
+            "blake3": "6dfe3e6cc3787acfec5afea3f5db96d850f60c5c414cffe28d0fe3c27b1931ee",
+            "logical_bytes": 2683285504,
+            "new_unique_bytes": 1792606208,
+            "nonzero_chunk_bytes": 1819164672,
+            "path": "20260705.root.raw",
+            "prior_image_only_bytes": 0,
+            "unique_bytes": 1792606208,
+            "within_image_only_bytes": 26558464,
+            "zero_chunk_bytes": 864120832
+          },
+          {
+            "base_elsewhere_bytes": 444137472,
+            "base_in_place_bytes": 249888768,
+            "blake3": "62fe9673317ac0471f2301792984630126501e6bc64490ea48d73c3300ca6e6c",
+            "logical_bytes": 2683285504,
+            "new_unique_bytes": 1129971712,
+            "nonzero_chunk_bytes": 1832910848,
+            "path": "20260826.root.raw",
+            "prior_image_only_bytes": 0,
+            "unique_bytes": 1804926976,
+            "within_image_only_bytes": 8912896,
+            "zero_chunk_bytes": 850374656
+          }
+        ],
+        "independently_unique_bytes": 3597533184,
+        "nonzero_chunk_bytes": 3652075520,
+        "within_image_duplicate_bytes": 54542336
+      }
+    ],
+    "schema_version": 1,
+    "scope": "raw bytes; all-zero chunks excluded; no allocation or lineage inferred"
+  },
+  "clone_control": {
+    "hash": "BLAKE3-256",
+    "results": [
+      {
+        "chunk_bytes": 4096,
+        "cross_image_duplicate_bytes": 1700560896,
+        "fleet_unique_bytes": 1700560896,
+        "images": [
+          {
+            "base_elsewhere_bytes": 0,
+            "base_in_place_bytes": 0,
+            "blake3": "6dfe3e6cc3787acfec5afea3f5db96d850f60c5c414cffe28d0fe3c27b1931ee",
+            "logical_bytes": 2683285504,
+            "new_unique_bytes": 1700560896,
+            "nonzero_chunk_bytes": 1791254528,
+            "path": "20260705.root.raw",
+            "prior_image_only_bytes": 0,
+            "unique_bytes": 1700560896,
+            "within_image_only_bytes": 90693632,
+            "zero_chunk_bytes": 892030976
+          },
+          {
+            "base_elsewhere_bytes": 0,
+            "base_in_place_bytes": 1791254528,
+            "blake3": "6dfe3e6cc3787acfec5afea3f5db96d850f60c5c414cffe28d0fe3c27b1931ee",
+            "logical_bytes": 2683285504,
+            "new_unique_bytes": 0,
+            "nonzero_chunk_bytes": 1791254528,
+            "path": "20260705.root.raw",
+            "prior_image_only_bytes": 0,
+            "unique_bytes": 1700560896,
+            "within_image_only_bytes": 0,
+            "zero_chunk_bytes": 892030976
+          }
+        ],
+        "independently_unique_bytes": 3401121792,
+        "nonzero_chunk_bytes": 3582509056,
+        "within_image_duplicate_bytes": 181387264
+      },
+      {
+        "chunk_bytes": 16384,
+        "cross_image_duplicate_bytes": 1792606208,
+        "fleet_unique_bytes": 1792606208,
+        "images": [
+          {
+            "base_elsewhere_bytes": 0,
+            "base_in_place_bytes": 0,
+            "blake3": "6dfe3e6cc3787acfec5afea3f5db96d850f60c5c414cffe28d0fe3c27b1931ee",
+            "logical_bytes": 2683285504,
+            "new_unique_bytes": 1792606208,
+            "nonzero_chunk_bytes": 1819164672,
+            "path": "20260705.root.raw",
+            "prior_image_only_bytes": 0,
+            "unique_bytes": 1792606208,
+            "within_image_only_bytes": 26558464,
+            "zero_chunk_bytes": 864120832
+          },
+          {
+            "base_elsewhere_bytes": 0,
+            "base_in_place_bytes": 1819164672,
+            "blake3": "6dfe3e6cc3787acfec5afea3f5db96d850f60c5c414cffe28d0fe3c27b1931ee",
+            "logical_bytes": 2683285504,
+            "new_unique_bytes": 0,
+            "nonzero_chunk_bytes": 1819164672,
+            "path": "20260705.root.raw",
+            "prior_image_only_bytes": 0,
+            "unique_bytes": 1792606208,
+            "within_image_only_bytes": 0,
+            "zero_chunk_bytes": 864120832
+          }
+        ],
+        "independently_unique_bytes": 3585212416,
+        "nonzero_chunk_bytes": 3638329344,
+        "within_image_duplicate_bytes": 53116928
+      }
+    ],
+    "schema_version": 1,
+    "scope": "raw bytes; all-zero chunks excluded; no allocation or lineage inferred"
+  },
+  "independent_verification": {
+    "allocation": [
+      {
+        "date": "20260705",
+        "filesystem_blocks": 655099,
+        "block_bytes": 4096,
+        "free_blocks": 179682,
+        "allocated_blocks": 475417,
+        "nonzero_free_blocks_excluded": 0,
+        "every_allocated_block_unchanged": true,
+        "every_free_block_zero": true
+      },
+      {
+        "date": "20260826",
+        "filesystem_blocks": 655099,
+        "block_bytes": 4096,
+        "free_blocks": 176186,
+        "allocated_blocks": 478913,
+        "nonzero_free_blocks_excluded": 0,
+        "every_allocated_block_unchanged": true,
+        "every_free_block_zero": true
+      }
+    ],
+    "exact_counts": [
+      {
+        "chunk_bytes": 4096,
+        "exact_byte_equality_matches_rust": true,
+        "fleet_unique_bytes": 2120196096,
+        "independently_unique_bytes": 3415240704
+      },
+      {
+        "chunk_bytes": 16384,
+        "exact_byte_equality_matches_rust": true,
+        "fleet_unique_bytes": 2922577920,
+        "independently_unique_bytes": 3597533184
+      }
+    ],
+    "passed": true
+  },
+  "nonzero_free_space_control": {
+    "nonzero_free_block_offset": 135397376,
+    "injected_bytes": 4096,
+    "normalized_image_exactly_matches_original": true,
+    "passed": true
+  },
+  "expected_input_failures": [
+    {
+      "case": "no_images",
+      "exit_code": 2,
+      "passed": true
+    },
+    {
+      "case": "missing_image",
+      "exit_code": 1,
+      "passed": true
+    },
+    {
+      "case": "directory_image",
+      "exit_code": 1,
+      "passed": true
+    },
+    {
+      "case": "existing_output",
+      "exit_code": 1,
+      "passed": true
+    },
+    {
+      "case": "bad_checksum",
+      "exit_code": 1,
+      "passed": true
+    }
+  ],
+  "validation": {
+    "rust_tests_passed": 73,
+    "rustfmt": "passed",
+    "clippy": "passed",
+    "nix_format": "passed",
+    "nix_evaluation_both_architectures": "passed",
+    "nix_native_checks": "passed",
+    "input_checksums_after_scanning": "passed"
+  },
+  "evidence": {
+    "local_directory": "Private archive; not distributed with this snapshot",
+    "archive": "evidence.tar.gz",
+    "sha256": "3c388905528b710a353d9edae24d1b30e89c857e974b29127852cd166024b147",
+    "bytes": 92069,
+    "manifest_entries": 95,
+    "manifest_verified": true,
+    "excludes": "Disk images; retained locally and reproducible from pinned inputs"
+  },
+  "limitations": [
+    "Two unbooted publisher images, no controlled clone/update lineage",
+    "Root ext4 partitions only; EFI, boot and GPT excluded",
+    "Normalized nonzero chunk bytes, not physical storage savings",
+    "No CDC, shifted-only scan, ZFS clone accounting, or performance comparison"
+  ],
+  "paper_gate": null
+}

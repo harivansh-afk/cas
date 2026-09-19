@@ -1,5 +1,5 @@
 {
-  description = "CAS research tools and reproducible Linux test environments";
+  description = "CAS storage and reproducible Linux test environments";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
@@ -237,13 +237,7 @@
       });
 
       # treefmt wrapper around nixfmt; `nix fmt` formats the tree, `nix fmt -- --ci` checks it.
-      formatter = eachSystem (
-        pkgs:
-        pkgs.nixfmt-tree.override {
-          # Frozen source exhibits are evidence, not maintained build inputs.
-          settings.formatter.nixfmt.excludes = [ "docs/research/history/evidence/**" ];
-        }
-      );
+      formatter = eachSystem (pkgs: pkgs.nixfmt-tree);
 
       nixosModules = {
         # Tools, SSH, and measurement defaults for any dedicated test host.

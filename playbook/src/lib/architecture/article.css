@@ -1,0 +1,30 @@
+/* Shared layout for the long-form update articles (/updates/2/, /updates/3/,
+   /updates/4/). Child combinators keep these rules off the elements inside
+   embedded components. The rules are not in a cascade layer: app.css resets
+   every margin and padding without a layer, and an unlayered declaration
+   beats a layered one, which zeroed every padding here. */
+.architecture { overflow-wrap: anywhere; }
+.architecture .back { display: inline-block; margin-bottom: 2rem; font-size: 0.8125rem; }
+.architecture .reference { color: var(--text-tertiary); font-size: 0.75rem; }
+.architecture .checkpoint { border-left: 2px solid var(--text-primary); padding-left: 1rem; font-size: 0.8125rem; }
+.architecture > nav { margin: 2rem 0 3rem; padding: 1.25rem; border: 1px solid var(--border); border-radius: var(--radius); }
+.architecture > nav ol { display: grid; grid-template-columns: 1fr 1fr; column-gap: 2rem; row-gap: 0.45rem; padding-left: 1.5rem; margin: 0; font-size: 0.75rem; }
+.architecture section, .architecture details { scroll-margin-top: 1.5rem; }
+.architecture > section > h2 { font-size: 1.0625rem; margin-top: 3.5rem; }
+.architecture > section > h3 { font-size: 0.875rem; margin: 1.75rem 0 0.75rem; color: var(--text-primary); }
+.architecture > section > details, .architecture > section > details > details { border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); padding: 0.85rem 0; margin: 1.25rem 0; }
+.architecture > section > details + details { border-top: 0; margin-top: -1.25rem; }
+.architecture > section > details > summary, .architecture > section > details > details > summary { cursor: pointer; color: var(--text-primary); font-size: 0.8125rem; }
+.architecture > section > details > summary:focus-visible, .architecture > section > details > details > summary:focus-visible { outline: 2px solid var(--text-primary); outline-offset: 4px; }
+.architecture > section > details[open] > summary, .architecture > section > details > details[open] > summary { margin-bottom: 1.25rem; }
+.architecture > section > details > p, .architecture > section > details > details > p { font-size: 0.8125rem; }
+.architecture > section > pre, .architecture > section > details > pre { overflow-x: auto; padding: 1rem; background: var(--background-secondary); border: 1px solid var(--border); border-radius: var(--radius); margin: 1rem 0; font-size: 0.6875rem; line-height: 1.8; }
+.architecture > section > pre code, .architecture > section > details > pre code { background: none; padding: 0; border: 0; font-size: inherit; }
+.architecture .prefix-key { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin: 1.5rem 0; font-size: 0.75rem; }
+.architecture .prefix-key strong { display: block; font-size: 1.25rem; color: var(--text-primary); }
+.architecture .lookup-key { display: flex; align-items: center; flex-direction: column; gap: 0.3rem; padding: 1rem; margin: 1.5rem 0; background: var(--background-secondary); border: 1px solid var(--border); border-radius: var(--radius); text-align: center; }
+.architecture .lookup-key span { display: block; font-size: 0.8125rem; }
+.architecture .findings li { margin-bottom: 1rem; }
+.architecture > footer { border-top: 1px solid var(--border); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 1rem; margin-top: 3rem; padding-top: 1rem; font-size: 0.75rem; }
+@media (max-width: 640px) { .architecture > nav ol { grid-template-columns: 1fr; } .architecture > section > h2 { font-size: 0.9375rem; } }
+@media print { .architecture > nav, .architecture .back, .architecture > footer { display: none; } .architecture pre { white-space: pre-wrap; overflow: visible; } .architecture .table-scroll { overflow: visible; } }

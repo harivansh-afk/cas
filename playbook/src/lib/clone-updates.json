@@ -1,0 +1,780 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-09",
+  "host": "spark",
+  "architecture": "aarch64",
+  "host_kernel": "6.17.13",
+  "host_filesystem": "ext4",
+  "source": {
+    "base_revision": "2dc6e7bf8453d6d26546457ede66aecdf0b45f7a",
+    "prepare": "Uncommitted fleet implementation on base_revision, then committed unchanged as 1b8c2562b89a6a08f4e98ddcc594419aa5e497cf; development.patch retained",
+    "august": "1b8c2562b89a6a08f4e98ddcc594419aa5e497cf",
+    "september": "426f2f290b939e460945fc6dc4e708180fdaf748; only public CLI help changed since August, plus unrelated manuscript wording",
+    "prepare_and_august_cas": "/nix/store/gknnn7h8cc0xnv1g7q7h3kxl4x026xxw-cas-research-0.1.0",
+    "september_cas": "/nix/store/sys3p5rjbch2wlyprc4kw65cbpaizs0b-cas-research-0.1.0",
+    "workload_sha256": "aea0c6789049d1e8fd338a3cbef315fa069f586f32731a46c37c642e989dd4f1",
+    "analysis": "experiments/verify-fleet.py at 426f2f290b939e460945fc6dc4e708180fdaf748; exact byte sets independent of BLAKE3",
+    "presentation_changes_during_run": "Only documentation and slides changed after 426f2f2; guest workload and census unchanged"
+  },
+  "input_url": "https://cloud-images.ubuntu.com/noble/20260705/noble-server-cloudimg-arm64.img",
+  "fleet": {
+    "cpus_per_guest": 2,
+    "epochs": [
+      "20260805T000000Z",
+      "20260905T000000Z"
+    ],
+    "firmware": "/nix/store/65wlcx10x6m46x3q48gifjacd32v8r2w-OVMF-202602-fd/FV/AAVMF_CODE.fd",
+    "image": "20260705.qcow2 (private artifact; use the pinned input URL and checksum)",
+    "image_date": "20260705",
+    "image_sha256": "7df0201546f75b8bcc1044594c806c35749421ad3c9bc1be2a3ab806cfae39cc",
+    "memory_mib": 2048,
+    "note": "Stock QEMU storage; offline content census, not a CAS performance experiment",
+    "roles": [
+      "web",
+      "cache",
+      "database"
+    ],
+    "schema_version": 1,
+    "workload": "/nix/store/q9w24cxcf8cx7a7qrak4jyfczkhl42ij-update-guest.sh"
+  },
+  "guests": [
+    {
+      "path": "base",
+      "started": "2026-09-09T18:38:22+00:00",
+      "finished": "2026-09-09T18:38:22+00:00",
+      "booted_kernel": "Linux base 6.8.0-134-generic #134-Ubuntu SMP PREEMPT_DYNAMIC Fri Jun 26 18:28:11 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux",
+      "exit_code": 0
+    },
+    {
+      "path": "t1/web",
+      "started": "2026-09-09T18:39:36+00:00",
+      "finished": "2026-09-09T18:41:22+00:00",
+      "booted_kernel": "Linux web 6.8.0-134-generic #134-Ubuntu SMP PREEMPT_DYNAMIC Fri Jun 26 18:28:11 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux",
+      "exit_code": 0
+    },
+    {
+      "path": "t1/cache",
+      "started": "2026-09-09T18:42:25+00:00",
+      "finished": "2026-09-09T18:44:11+00:00",
+      "booted_kernel": "Linux cache 6.8.0-134-generic #134-Ubuntu SMP PREEMPT_DYNAMIC Fri Jun 26 18:28:11 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux",
+      "exit_code": 0
+    },
+    {
+      "path": "t1/database",
+      "started": "2026-09-09T18:45:08+00:00",
+      "finished": "2026-09-09T18:46:46+00:00",
+      "booted_kernel": "Linux database 6.8.0-134-generic #134-Ubuntu SMP PREEMPT_DYNAMIC Fri Jun 26 18:28:11 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux",
+      "exit_code": 0
+    },
+    {
+      "path": "t2/web",
+      "started": "2026-09-09T18:47:29+00:00",
+      "finished": "2026-09-09T18:49:57+00:00",
+      "booted_kernel": "Linux web 6.8.0-137-generic #137-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 17 19:15:13 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux",
+      "exit_code": 0
+    },
+    {
+      "path": "t2/cache",
+      "started": "2026-09-09T18:50:29+00:00",
+      "finished": "2026-09-09T18:52:36+00:00",
+      "booted_kernel": "Linux cache 6.8.0-137-generic #137-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 17 19:15:13 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux",
+      "exit_code": 0
+    },
+    {
+      "path": "t2/database",
+      "started": "2026-09-09T18:53:10+00:00",
+      "finished": "2026-09-09T18:55:04+00:00",
+      "booted_kernel": "Linux database 6.8.0-137-generic #137-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 17 19:15:13 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux",
+      "exit_code": 0
+    }
+  ],
+  "epochs": [
+    {
+      "epoch": "t0",
+      "label": "T0 \u00b7 July base",
+      "census": {
+        "hash": "BLAKE3-256",
+        "results": [
+          {
+            "chunk_bytes": 4096,
+            "cross_image_duplicate_bytes": 5125705728,
+            "descendants": {
+              "base_content_duplicate_bytes": 3417137152,
+              "base_present_unique_bytes": 1708568576,
+              "fleet_unique_bytes": 1708568576,
+              "independently_unique_bytes": 5125705728,
+              "novel_content_duplicate_bytes": 0
+            },
+            "fleet_unique_bytes": 1708568576,
+            "images": [
+              {
+                "base_elsewhere_bytes": 0,
+                "base_in_place_bytes": 0,
+                "blake3": "9106c880e7a124590d1717c3ae9d63a0d54afb38ee9eb10f71f315c716bb3df6",
+                "logical_bytes": 7515123712,
+                "new_unique_bytes": 1708568576,
+                "nonzero_chunk_bytes": 1795473408,
+                "path": "base/root.root.raw",
+                "prior_image_only_bytes": 0,
+                "unique_bytes": 1708568576,
+                "within_image_only_bytes": 86904832,
+                "zero_chunk_bytes": 5719650304
+              },
+              {
+                "base_elsewhere_bytes": 0,
+                "base_in_place_bytes": 1795473408,
+                "blake3": "9106c880e7a124590d1717c3ae9d63a0d54afb38ee9eb10f71f315c716bb3df6",
+                "logical_bytes": 7515123712,
+                "new_unique_bytes": 0,
+                "nonzero_chunk_bytes": 1795473408,
+                "path": "base/root.root.raw",
+                "prior_image_only_bytes": 0,
+                "unique_bytes": 1708568576,
+                "within_image_only_bytes": 0,
+                "zero_chunk_bytes": 5719650304
+              },
+              {
+                "base_elsewhere_bytes": 0,
+                "base_in_place_bytes": 1795473408,
+                "blake3": "9106c880e7a124590d1717c3ae9d63a0d54afb38ee9eb10f71f315c716bb3df6",
+                "logical_bytes": 7515123712,
+                "new_unique_bytes": 0,
+                "nonzero_chunk_bytes": 1795473408,
+                "path": "base/root.root.raw",
+                "prior_image_only_bytes": 0,
+                "unique_bytes": 1708568576,
+                "within_image_only_bytes": 0,
+                "zero_chunk_bytes": 5719650304
+              },
+              {
+                "base_elsewhere_bytes": 0,
+                "base_in_place_bytes": 1795473408,
+                "blake3": "9106c880e7a124590d1717c3ae9d63a0d54afb38ee9eb10f71f315c716bb3df6",
+                "logical_bytes": 7515123712,
+                "new_unique_bytes": 0,
+                "nonzero_chunk_bytes": 1795473408,
+                "path": "base/root.root.raw",
+                "prior_image_only_bytes": 0,
+                "unique_bytes": 1708568576,
+                "within_image_only_bytes": 0,
+                "zero_chunk_bytes": 5719650304
+              }
+            ],
+            "independently_unique_bytes": 6834274304,
+            "nonzero_chunk_bytes": 7181893632,
+            "within_image_duplicate_bytes": 347619328
+          },
+          {
+            "chunk_bytes": 16384,
+            "cross_image_duplicate_bytes": 5396152320,
+            "descendants": {
+              "base_content_duplicate_bytes": 3597434880,
+              "base_present_unique_bytes": 1798717440,
+              "fleet_unique_bytes": 1798717440,
+              "independently_unique_bytes": 5396152320,
+              "novel_content_duplicate_bytes": 0
+            },
+            "fleet_unique_bytes": 1798717440,
+            "images": [
+              {
+                "base_elsewhere_bytes": 0,
+                "base_in_place_bytes": 0,
+                "blake3": "9106c880e7a124590d1717c3ae9d63a0d54afb38ee9eb10f71f315c716bb3df6",
+                "logical_bytes": 7515123712,
+                "new_unique_bytes": 1798717440,
+                "nonzero_chunk_bytes": 1823752192,
+                "path": "base/root.root.raw",
+                "prior_image_only_bytes": 0,
+                "unique_bytes": 1798717440,
+                "within_image_only_bytes": 25034752,
+                "zero_chunk_bytes": 5691371520
+              },
+              {
+                "base_elsewhere_bytes": 0,
+                "base_in_place_bytes": 1823752192,
+                "blake3": "9106c880e7a124590d1717c3ae9d63a0d54afb38ee9eb10f71f315c716bb3df6",
+                "logical_bytes": 7515123712,
+                "new_unique_bytes": 0,
+                "nonzero_chunk_bytes": 1823752192,
+                "path": "base/root.root.raw",
+                "prior_image_only_bytes": 0,
+                "unique_bytes": 1798717440,
+                "within_image_only_bytes": 0,
+                "zero_chunk_bytes": 5691371520
+              },
+              {
+                "base_elsewhere_bytes": 0,
+                "base_in_place_bytes": 1823752192,
+                "blake3": "9106c880e7a124590d1717c3ae9d63a0d54afb38ee9eb10f71f315c716bb3df6",
+                "logical_bytes": 7515123712,
+                "new_unique_bytes": 0,
+                "nonzero_chunk_bytes": 1823752192,
+                "path": "base/root.root.raw",
+                "prior_image_only_bytes": 0,
+                "unique_bytes": 1798717440,
+                "within_image_only_bytes": 0,
+                "zero_chunk_bytes": 5691371520
+              },
+              {
+                "base_elsewhere_bytes": 0,
+                "base_in_place_bytes": 1823752192,
+                "blake3": "9106c880e7a124590d1717c3ae9d63a0d54afb38ee9eb10f71f315c716bb3df6",
+                "logical_bytes": 7515123712,
+                "new_unique_bytes": 0,
+                "nonzero_chunk_bytes": 1823752192,
+                "path": "base/root.root.raw",
+                "prior_image_only_bytes": 0,
+                "unique_bytes": 1798717440,
+                "within_image_only_bytes": 0,
+                "zero_chunk_bytes": 5691371520
+              }
+            ],
+            "independently_unique_bytes": 7194869760,
+            "nonzero_chunk_bytes": 7295008768,
+            "within_image_duplicate_bytes": 100139008
+          }
+        ],
+        "schema_version": 1,
+        "scope": "raw bytes; all-zero chunks excluded; no allocation or lineage inferred"
+      },
+      "verification": {
+        "epoch": "t0",
+        "allocation": {
+          "base": {
+            "filesystem_blocks": 1834747,
+            "free_blocks": 1318946,
+            "nonzero_free_blocks_excluded": 660,
+            "every_allocated_block_unchanged": true,
+            "every_free_block_zero": true
+          }
+        },
+        "census": [
+          {
+            "chunk_bytes": 4096,
+            "exact_byte_sets_match": true,
+            "independently_unique_bytes": 5125705728,
+            "fleet_unique_bytes": 1708568576,
+            "base_present_unique_bytes": 1708568576,
+            "base_content_duplicate_bytes": 3417137152,
+            "novel_content_duplicate_bytes": 0
+          },
+          {
+            "chunk_bytes": 16384,
+            "exact_byte_sets_match": true,
+            "independently_unique_bytes": 5396152320,
+            "fleet_unique_bytes": 1798717440,
+            "base_present_unique_bytes": 1798717440,
+            "base_content_duplicate_bytes": 3597434880,
+            "novel_content_duplicate_bytes": 0
+          }
+        ],
+        "packages": {
+          "base": {
+            "added": 0,
+            "removed": 0,
+            "changed": 0
+          }
+        },
+        "common_package_versions_agree": true,
+        "common_packages": 663,
+        "passed": true
+      }
+    },
+    {
+      "epoch": "t1",
+      "label": "T1 \u00b7 August",
+      "census": {
+        "hash": "BLAKE3-256",
+        "results": [
+          {
+            "chunk_bytes": 4096,
+            "cross_image_duplicate_bytes": 4773109760,
+            "descendants": {
+              "base_content_duplicate_bytes": 2837458944,
+              "base_present_unique_bytes": 1419333632,
+              "fleet_unique_bytes": 1944829952,
+              "independently_unique_bytes": 5298606080,
+              "novel_content_duplicate_bytes": 516317184
+            },
+            "fleet_unique_bytes": 2234064896,
+            "images": [
+              {
+                "base_elsewhere_bytes": 0,
+                "base_in_place_bytes": 0,
+                "blake3": "9106c880e7a124590d1717c3ae9d63a0d54afb38ee9eb10f71f315c716bb3df6",
+                "logical_bytes": 7515123712,
+                "new_unique_bytes": 1708568576,
+                "nonzero_chunk_bytes": 1795473408,
+                "path": "base/root.root.raw",
+                "prior_image_only_bytes": 0,
+                "unique_bytes": 1708568576,
+                "within_image_only_bytes": 86904832,
+                "zero_chunk_bytes": 5719650304
+              },
+              {
+                "base_elsewhere_bytes": 339849216,
+                "base_in_place_bytes": 1315663872,
+                "blake3": "5cb7cfe3dad91d3504dc9a7a0872de45e20bc12b592932fe205a56a1e5da0eb0",
+                "logical_bytes": 7515123712,
+                "new_unique_bytes": 344948736,
+                "nonzero_chunk_bytes": 2020995072,
+                "path": "t1/web/root.root.raw",
+                "prior_image_only_bytes": 0,
+                "unique_bytes": 1763774464,
+                "within_image_only_bytes": 20533248,
+                "zero_chunk_bytes": 5494128640
+              },
+              {
+                "base_elsewhere_bytes": 340598784,
+                "base_in_place_bytes": 1315647488,
+                "blake3": "c7e4a48eb0a7e573e0e0cb848cf673c08dfb7bd7af70ad02691f2ff0f68f03a5",
+                "logical_bytes": 7515123712,
+                "new_unique_bytes": 90083328,
+                "nonzero_chunk_bytes": 2026758144,
+                "path": "t1/cache/root.root.raw",
+                "prior_image_only_bytes": 263659520,
+                "unique_bytes": 1767415808,
+                "within_image_only_bytes": 16769024,
+                "zero_chunk_bytes": 5488365568
+              },
+              {
+                "base_elsewhere_bytes": 340283392,
+                "base_in_place_bytes": 1315737600,
+                "blake3": "574357fe41a433f8c1ef6df8d292a9477bf651bb56c366c40602a8a2a28f7b02",
+                "logical_bytes": 7515123712,
+                "new_unique_bytes": 90464256,
+                "nonzero_chunk_bytes": 2024124416,
+                "path": "t1/database/root.root.raw",
+                "prior_image_only_bytes": 263540736,
+                "unique_bytes": 1767415808,
+                "within_image_only_bytes": 14098432,
+                "zero_chunk_bytes": 5490999296
+              }
+            ],
+            "independently_unique_bytes": 7007174656,
+            "nonzero_chunk_bytes": 7867351040,
+            "within_image_duplicate_bytes": 860176384
+          },
+          {
+            "chunk_bytes": 16384,
+            "cross_image_duplicate_bytes": 4833755136,
+            "descendants": {
+              "base_content_duplicate_bytes": 2690220032,
+              "base_present_unique_bytes": 1367572480,
+              "fleet_unique_bytes": 2486550528,
+              "independently_unique_bytes": 5952733184,
+              "novel_content_duplicate_bytes": 775962624
+            },
+            "fleet_unique_bytes": 2917695488,
+            "images": [
+              {
+                "base_elsewhere_bytes": 0,
+                "base_in_place_bytes": 0,
+                "blake3": "9106c880e7a124590d1717c3ae9d63a0d54afb38ee9eb10f71f315c716bb3df6",
+                "logical_bytes": 7515123712,
+                "new_unique_bytes": 1798717440,
+                "nonzero_chunk_bytes": 1823752192,
+                "path": "base/root.root.raw",
+                "prior_image_only_bytes": 0,
+                "unique_bytes": 1798717440,
+                "within_image_only_bytes": 25034752,
+                "zero_chunk_bytes": 5691371520
+              },
+              {
+                "base_elsewhere_bytes": 114425856,
+                "base_in_place_bytes": 1325481984,
+                "blake3": "5cb7cfe3dad91d3504dc9a7a0872de45e20bc12b592932fe205a56a1e5da0eb0",
+                "logical_bytes": 7515123712,
+                "new_unique_bytes": 626884608,
+                "nonzero_chunk_bytes": 2071494656,
+                "path": "t1/web/root.root.raw",
+                "prior_image_only_bytes": 0,
+                "unique_bytes": 1979465728,
+                "within_image_only_bytes": 4702208,
+                "zero_chunk_bytes": 5443629056
+              },
+              {
+                "base_elsewhere_bytes": 116375552,
+                "base_in_place_bytes": 1325432832,
+                "blake3": "c7e4a48eb0a7e573e0e0cb848cf673c08dfb7bd7af70ad02691f2ff0f68f03a5",
+                "logical_bytes": 7515123712,
+                "new_unique_bytes": 237191168,
+                "nonzero_chunk_bytes": 2077360128,
+                "path": "t1/cache/root.root.raw",
+                "prior_image_only_bytes": 394493952,
+                "unique_bytes": 1982627840,
+                "within_image_only_bytes": 3866624,
+                "zero_chunk_bytes": 5437763584
+              },
+              {
+                "base_elsewhere_bytes": 106725376,
+                "base_in_place_bytes": 1325580288,
+                "blake3": "574357fe41a433f8c1ef6df8d292a9477bf651bb56c366c40602a8a2a28f7b02",
+                "logical_bytes": 7515123712,
+                "new_unique_bytes": 254902272,
+                "nonzero_chunk_bytes": 2075262976,
+                "path": "t1/database/root.root.raw",
+                "prior_image_only_bytes": 386662400,
+                "unique_bytes": 1990639616,
+                "within_image_only_bytes": 1392640,
+                "zero_chunk_bytes": 5439860736
+              }
+            ],
+            "independently_unique_bytes": 7751450624,
+            "nonzero_chunk_bytes": 8047869952,
+            "within_image_duplicate_bytes": 296419328
+          }
+        ],
+        "schema_version": 1,
+        "scope": "raw bytes; all-zero chunks excluded; no allocation or lineage inferred"
+      },
+      "verification": {
+        "epoch": "t1",
+        "allocation": {
+          "base": {
+            "filesystem_blocks": 1834747,
+            "free_blocks": 1318946,
+            "nonzero_free_blocks_excluded": 660,
+            "every_allocated_block_unchanged": true,
+            "every_free_block_zero": true
+          },
+          "t1/web": {
+            "filesystem_blocks": 1834747,
+            "free_blocks": 1266447,
+            "nonzero_free_blocks_excluded": 340942,
+            "every_allocated_block_unchanged": true,
+            "every_free_block_zero": true
+          },
+          "t1/cache": {
+            "filesystem_blocks": 1834747,
+            "free_blocks": 1265021,
+            "nonzero_free_blocks_excluded": 329180,
+            "every_allocated_block_unchanged": true,
+            "every_free_block_zero": true
+          },
+          "t1/database": {
+            "filesystem_blocks": 1834747,
+            "free_blocks": 1265520,
+            "nonzero_free_blocks_excluded": 341983,
+            "every_allocated_block_unchanged": true,
+            "every_free_block_zero": true
+          }
+        },
+        "census": [
+          {
+            "chunk_bytes": 4096,
+            "exact_byte_sets_match": true,
+            "independently_unique_bytes": 5298606080,
+            "fleet_unique_bytes": 1944829952,
+            "base_present_unique_bytes": 1419333632,
+            "base_content_duplicate_bytes": 2837458944,
+            "novel_content_duplicate_bytes": 516317184
+          },
+          {
+            "chunk_bytes": 16384,
+            "exact_byte_sets_match": true,
+            "independently_unique_bytes": 5952733184,
+            "fleet_unique_bytes": 2486550528,
+            "base_present_unique_bytes": 1367572480,
+            "base_content_duplicate_bytes": 2690220032,
+            "novel_content_duplicate_bytes": 775962624
+          }
+        ],
+        "packages": {
+          "web": {
+            "added": 10,
+            "removed": 0,
+            "changed": 68
+          },
+          "cache": {
+            "added": 11,
+            "removed": 0,
+            "changed": 68
+          },
+          "database": {
+            "added": 10,
+            "removed": 0,
+            "changed": 68
+          }
+        },
+        "common_package_versions_agree": true,
+        "common_packages": 669,
+        "passed": true
+      }
+    },
+    {
+      "epoch": "t2",
+      "label": "T2 \u00b7 September",
+      "census": {
+        "hash": "BLAKE3-256",
+        "results": [
+          {
+            "chunk_bytes": 4096,
+            "cross_image_duplicate_bytes": 4802613248,
+            "descendants": {
+              "base_content_duplicate_bytes": 2752663552,
+              "base_present_unique_bytes": 1376935936,
+              "fleet_unique_bytes": 2108051456,
+              "independently_unique_bytes": 5533728768,
+              "novel_content_duplicate_bytes": 673013760
+            },
+            "fleet_unique_bytes": 2439684096,
+            "images": [
+              {
+                "base_elsewhere_bytes": 0,
+                "base_in_place_bytes": 0,
+                "blake3": "9106c880e7a124590d1717c3ae9d63a0d54afb38ee9eb10f71f315c716bb3df6",
+                "logical_bytes": 7515123712,
+                "new_unique_bytes": 1708568576,
+                "nonzero_chunk_bytes": 1795473408,
+                "path": "base/root.root.raw",
+                "prior_image_only_bytes": 0,
+                "unique_bytes": 1708568576,
+                "within_image_only_bytes": 86904832,
+                "zero_chunk_bytes": 5719650304
+              },
+              {
+                "base_elsewhere_bytes": 637407232,
+                "base_in_place_bytes": 1157656576,
+                "blake3": "1e2e1897f509d5de2d13f158d3e6bac4b666843922fa1c8991c9e2a5d010b0d9",
+                "logical_bytes": 7515123712,
+                "new_unique_bytes": 465997824,
+                "nonzero_chunk_bytes": 2300710912,
+                "path": "t2/web/root.root.raw",
+                "prior_image_only_bytes": 0,
+                "unique_bytes": 1842380800,
+                "within_image_only_bytes": 39649280,
+                "zero_chunk_bytes": 5214412800
+              },
+              {
+                "base_elsewhere_bytes": 638156800,
+                "base_in_place_bytes": 1157644288,
+                "blake3": "8d0047fdcedb7ddc8696fe18d52da38ed30ecc3659b53ed3ba17ad4191d2cde4",
+                "logical_bytes": 7515123712,
+                "new_unique_bytes": 131850240,
+                "nonzero_chunk_bytes": 2306482176,
+                "path": "t2/cache/root.root.raw",
+                "prior_image_only_bytes": 362221568,
+                "unique_bytes": 1845522432,
+                "within_image_only_bytes": 16609280,
+                "zero_chunk_bytes": 5208641536
+              },
+              {
+                "base_elsewhere_bytes": 637947904,
+                "base_in_place_bytes": 1157718016,
+                "blake3": "318954cb292877d3a59f3d870dfcf8da9694d0c87c062f102b747c4a63a15879",
+                "logical_bytes": 7515123712,
+                "new_unique_bytes": 133267456,
+                "nonzero_chunk_bytes": 2304036864,
+                "path": "t2/database/root.root.raw",
+                "prior_image_only_bytes": 361062400,
+                "unique_bytes": 1845825536,
+                "within_image_only_bytes": 14041088,
+                "zero_chunk_bytes": 5211086848
+              }
+            ],
+            "independently_unique_bytes": 7242297344,
+            "nonzero_chunk_bytes": 8706703360,
+            "within_image_duplicate_bytes": 1464406016
+          },
+          {
+            "chunk_bytes": 16384,
+            "cross_image_duplicate_bytes": 4861706240,
+            "descendants": {
+              "base_content_duplicate_bytes": 2419146752,
+              "base_present_unique_bytes": 1254621184,
+              "fleet_unique_bytes": 2837807104,
+              "independently_unique_bytes": 6444892160,
+              "novel_content_duplicate_bytes": 1187938304
+            },
+            "fleet_unique_bytes": 3381903360,
+            "images": [
+              {
+                "base_elsewhere_bytes": 0,
+                "base_in_place_bytes": 0,
+                "blake3": "9106c880e7a124590d1717c3ae9d63a0d54afb38ee9eb10f71f315c716bb3df6",
+                "logical_bytes": 7515123712,
+                "new_unique_bytes": 1798717440,
+                "nonzero_chunk_bytes": 1823752192,
+                "path": "base/root.root.raw",
+                "prior_image_only_bytes": 0,
+                "unique_bytes": 1798717440,
+                "within_image_only_bytes": 25034752,
+                "zero_chunk_bytes": 5691371520
+              },
+              {
+                "base_elsewhere_bytes": 194297856,
+                "base_in_place_bytes": 1158332416,
+                "blake3": "1e2e1897f509d5de2d13f158d3e6bac4b666843922fa1c8991c9e2a5d010b0d9",
+                "logical_bytes": 7515123712,
+                "new_unique_bytes": 913801216,
+                "nonzero_chunk_bytes": 2369437696,
+                "path": "t2/web/root.root.raw",
+                "prior_image_only_bytes": 0,
+                "unique_bytes": 2137587712,
+                "within_image_only_bytes": 103006208,
+                "zero_chunk_bytes": 5145686016
+              },
+              {
+                "base_elsewhere_bytes": 195182592,
+                "base_in_place_bytes": 1158266880,
+                "blake3": "8d0047fdcedb7ddc8696fe18d52da38ed30ecc3659b53ed3ba17ad4191d2cde4",
+                "logical_bytes": 7515123712,
+                "new_unique_bytes": 364314624,
+                "nonzero_chunk_bytes": 2375270400,
+                "path": "t2/cache/root.root.raw",
+                "prior_image_only_bytes": 646283264,
+                "unique_bytes": 2178187264,
+                "within_image_only_bytes": 11223040,
+                "zero_chunk_bytes": 5139853312
+              },
+              {
+                "base_elsewhere_bytes": 196788224,
+                "base_in_place_bytes": 1158414336,
+                "blake3": "318954cb292877d3a59f3d870dfcf8da9694d0c87c062f102b747c4a63a15879",
+                "logical_bytes": 7515123712,
+                "new_unique_bytes": 305070080,
+                "nonzero_chunk_bytes": 2373140480,
+                "path": "t2/database/root.root.raw",
+                "prior_image_only_bytes": 678690816,
+                "unique_bytes": 2129117184,
+                "within_image_only_bytes": 34177024,
+                "zero_chunk_bytes": 5141983232
+              }
+            ],
+            "independently_unique_bytes": 8243609600,
+            "nonzero_chunk_bytes": 8941600768,
+            "within_image_duplicate_bytes": 697991168
+          }
+        ],
+        "schema_version": 1,
+        "scope": "raw bytes; all-zero chunks excluded; no allocation or lineage inferred"
+      },
+      "verification": {
+        "epoch": "t2",
+        "allocation": {
+          "base": {
+            "filesystem_blocks": 1834747,
+            "free_blocks": 1318946,
+            "nonzero_free_blocks_excluded": 660,
+            "every_allocated_block_unchanged": true,
+            "every_free_block_zero": true
+          },
+          "t2/web": {
+            "filesystem_blocks": 1834747,
+            "free_blocks": 1201374,
+            "nonzero_free_blocks_excluded": 484693,
+            "every_allocated_block_unchanged": true,
+            "every_free_block_zero": true
+          },
+          "t2/cache": {
+            "filesystem_blocks": 1834747,
+            "free_blocks": 1199946,
+            "nonzero_free_blocks_excluded": 457015,
+            "every_allocated_block_unchanged": true,
+            "every_free_block_zero": true
+          },
+          "t2/database": {
+            "filesystem_blocks": 1834747,
+            "free_blocks": 1200439,
+            "nonzero_free_blocks_excluded": 471195,
+            "every_allocated_block_unchanged": true,
+            "every_free_block_zero": true
+          }
+        },
+        "census": [
+          {
+            "chunk_bytes": 4096,
+            "exact_byte_sets_match": true,
+            "independently_unique_bytes": 5533728768,
+            "fleet_unique_bytes": 2108051456,
+            "base_present_unique_bytes": 1376935936,
+            "base_content_duplicate_bytes": 2752663552,
+            "novel_content_duplicate_bytes": 673013760
+          },
+          {
+            "chunk_bytes": 16384,
+            "exact_byte_sets_match": true,
+            "independently_unique_bytes": 6444892160,
+            "fleet_unique_bytes": 2837807104,
+            "base_present_unique_bytes": 1254621184,
+            "base_content_duplicate_bytes": 2419146752,
+            "novel_content_duplicate_bytes": 1187938304
+          }
+        ],
+        "packages": {
+          "web": {
+            "added": 6,
+            "removed": 0,
+            "changed": 112
+          },
+          "cache": {
+            "added": 6,
+            "removed": 0,
+            "changed": 109
+          },
+          "database": {
+            "added": 6,
+            "removed": 0,
+            "changed": 111
+          }
+        },
+        "common_package_versions_agree": true,
+        "common_packages": 675,
+        "passed": true
+      }
+    }
+  ],
+  "negative_controls": [
+    {
+      "case": "bad-checksum",
+      "exit": 1,
+      "passed": true
+    },
+    {
+      "case": "existing-output",
+      "exit": 1,
+      "passed": true
+    },
+    {
+      "case": "existing-epoch",
+      "exit": 1,
+      "passed": true
+    },
+    {
+      "case": "interrupt-real-kvm",
+      "exit": 1,
+      "guest_pid": 1292268,
+      "guest_reaped": true,
+      "passed": true
+    }
+  ],
+  "previous_pilot_regression": {
+    "all_original_fields_match": true,
+    "passed": true
+  },
+  "limits": [
+    "Three guest lineages on one Spark; one base boot and six update boots, no repeated-run variance estimate",
+    "Dates select immutable package archives; the actual experiment ran on September 9",
+    "Stock QEMU storage, no CAS chunk store, compactor, remote reads or performance measurement",
+    "Root partition only; free ext4 blocks zeroed, all-zero chunks excluded, allocated metadata and slack included",
+    "Descendant totals exclude the ancestor and remove within-image duplicates first",
+    "Base-content duplicates are content provenance, not measured QCOW2 or ZFS physical savings",
+    "Novel means a whole chunk absent from T0 at that size; its subregions can contain old bytes",
+    "New duplicates include metadata and configuration as well as packages",
+    "Final installed kernel is not claimed boot-tested after the final upgrade",
+    "CDC, ZFS clone accounting, compression and CAS metadata costs remain unmeasured"
+  ],
+  "evidence": {
+    "local_root": "Private archive; not distributed with this snapshot",
+    "fleet_directory": "development-fleet",
+    "raw_images": "Retained locally; excluded from the small evidence archive",
+    "archive": {
+      "path": "evidence.tar.gz",
+      "bytes": 1984282,
+      "sha256": "924ff9defa3de54a6212c18a06822e5d044fd2e1c561e06c0321a1da5cc027ec",
+      "manifest_entries_verified": 250,
+      "excludes": "Disk images and firmware are retained locally; slides are validated and retained separately"
+    }
+  }
+}
