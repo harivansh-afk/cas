@@ -30,7 +30,9 @@ The research repository is not a deployment source.
 
 [`vercel.json`](../vercel.json) is the build configuration: repository root,
 Other/static framework, frozen pnpm 11.5.3 install, typecheck before build,
-`playbook/build` output, and extensionless HTML URLs. The project uses Node 24.
+`playbook/build` output, and extensionless HTML URLs. The adapter explicitly
+writes `build/` even under `VERCEL=1`; CI checks this output contract. The project
+uses Node 24.
 Only the generated static directory is served. Configure changes in this file
 rather than overriding its build commands in the dashboard.
 

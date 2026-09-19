@@ -1,5 +1,46 @@
 # Validation
 
+## 2026-09-19 — Public cutover and Vercel output regression
+
+Public `main` was replaced on both forges using explicit leases against
+`2291726fc7188744950c86e37351969cd3a15dc9`. Both resolved to
+`a9d0663604b4d788d00804c3c93a65f0593c672d`; mirror synchronization then
+succeeded without errors. Its tree exactly matches the reviewed/licensed
+snapshot (`f9c995b343ac04cb3509a2b50358d20a062cc329`). A fresh GitHub clone
+passed fsck and the all-object audit: 186 commits, including the 185 retained
+historical code/build commits, no excluded research paths, and no original
+research or old snapshot commit objects. Anonymous API reads returned 200 for
+`cas` on both forges, 404 for both research repositories, and 404 for the
+original research commit through the public GitHub repository. GitHub detects
+GPLv3; Cargo/Nix metadata and the README specify GPL-3.0-only.
+
+Vercel is connected to GitHub repository ID `1377398935`, branch `main`, not
+the research repository. The first Git-triggered production deployment,
+`dpl_FCLCSv1n8Scs91d2uvAdLs7AgZ8v` on `a9d0663`, failed after a successful
+install, typecheck and build: adapter-static detected `VERCEL=1` and changed
+its default output to `.vercel/output/static`, while hosting expected
+`playbook/build`. The previous production site remained live.
+
+Reproduced on Spark, aarch64 NixOS/Linux 6.17.13, source `a9d0663` plus the
+uncommitted fix in this record: `VERCEL=1 npx --yes pnpm@11.5.3 --dir playbook
+build` completed but `test -f playbook/build/index.html` failed. Explicit
+adapter `pages` and `assets` paths now fix the output to `build` in both
+environments. GitHub CI now builds with `VERCEL=1` and asserts the index,
+numbered chapter and nested update paths.
+
+After the fix, pnpm typecheck passed with zero diagnostics; the Vercel-mode
+build produced all 12 HTML pages in `playbook/build`; all three output
+assertions and actionlint passed. The adapter's informational warning about
+opting out of Vercel zero-config mode is expected. No runtime or dependency
+changes were made. These local results do not yet establish the retried
+production deployment or new GitHub run.
+
+Evidence: `.worktrees/release-acceptance/results/release-20260919/` contains
+the failing reproduction, successful fixed build and lint output. The first
+remote deployment log, history audit and pre-rewrite bundle remain under
+`.worktrees/vercel-ci/results/{vercel-ci,code-history}-20260919/`. Production
+acceptance is recorded after the next mirrored push.
+
 ## 2026-09-19 — GPL licensing and code-history restoration
 
 The owner selected GPL-3.0-only for first-party code and explicitly authorized

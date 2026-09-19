@@ -10,6 +10,8 @@ Run `just check` for Rust changes, the relevant Nix checks for build changes,
 and `pnpm check` plus `pnpm build` in `playbook/` for site changes. Storage tests
 need Linux and a checkout filesystem supporting aligned `O_DIRECT`; live
 fixtures additionally need KVM and their documented filesystem features.
+For deployment changes, also build with `VERCEL=1` and check `playbook/build/`:
+adapter-static otherwise switches its default output directory on Vercel.
 
 For each testing session, update `docs/validation.md` with the date, tested
 revision and uncommitted changes, host, commands, outcomes, failures/retries,
@@ -18,7 +20,7 @@ archive. Separate local checks from CI, deployment, and performance conclusions.
 Check off a TODO only when its acceptance condition passes and link the record.
 Mark unavailable historical artifacts as unavailable rather than as proof.
 
-Publication uses reviewed files and a fresh Git history. Never merge or mirror
-the private research repository into this repository. Audit Playbook data and
-built output as well as source before publishing; repository privacy does not
-provide access control for a separately deployed website.
+Publication uses reviewed files and audited code-only history. Never merge or
+mirror unfiltered private research history into this repository. Audit Playbook
+data and built output as well as source before publishing; repository privacy
+does not provide access control for a separately deployed website.
