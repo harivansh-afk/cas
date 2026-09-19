@@ -1,8 +1,8 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": null,
-  "installCommand": "npx --yes pnpm@11.5.3 --dir playbook install --frozen-lockfile",
-  "buildCommand": "npx --yes pnpm@11.5.3 --dir playbook check && npx --yes pnpm@11.5.3 --dir playbook build",
+  "installCommand": "bash playbook/scripts/pdf/install.sh && npx --yes pnpm@11.5.3 --dir playbook install --frozen-lockfile",
+  "buildCommand": "bash playbook/scripts/pdf/publish.sh",
   "outputDirectory": "playbook/build",
   "cleanUrls": true,
   "git": {

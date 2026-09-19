@@ -1,5 +1,40 @@
 # Validation
 
+## 2026-09-19 — Restore the paper download
+
+Source `87950b617f0bfa0256d82acfbb190ecf6b20e91f` plus this change, tested on
+Spark/aarch64 Linux and an Amazon Linux 2023 container matching Vercel's build
+OS family. The header PDF icon is unconditional again. Native Vercel GitHub
+integration is retained: installation now provisions the PDF toolchain and
+publishing builds/checks HTML and the original Pandoc/XeLaTeX paper together.
+No deployment token or authentication change is required.
+
+Local checks: frozen pnpm install, Svelte check (zero errors/warnings), and
+`VERCEL=1 pnpm build` passed. The paper checker first rejected the absent PDF.
+The Amazon Linux installer and subsequent PDF build/check passed: 28 pages,
+253,283 bytes, with the original serif/mono typography, figures and chapter
+structure. The checker validates the header link order, PDF signature,
+parseability, title/final chapter, and writes its SHA-256 sidecar. ShellCheck,
+actionlint and whitespace checks passed. Downloaded Pandoc 3.7.0.2 and uv
+0.8.22 archives are pinned by version and verified SHA-256.
+
+Failures/retries: an unnecessary attempt to create a project-scoped deployment
+token was denied (403); no token or GitHub secret was created. Vercel's documented
+dnf installation support made that approach unnecessary. Amazon Linux's existing
+curl-minimal conflicted with requesting curl; the installer now uses the existing
+curl. An oversized TeX collection install was stopped in the disposable test
+container and replaced by explicit required packages. TeX Live 2021 rejected
+Pandoc's graphicx `alt` key; a compatibility definition is supplied only when
+that key is absent, preserving visible captions. XeTeX auxiliary work now stays
+inside its ignored build directory. The pre-PDF HTML crawl's `/spec.pdf` 404 is
+expected; the production gate requires a valid PDF before deployment succeeds.
+
+Raw logs, failed checks, generated PDF and visual evidence are retained under
+`.worktrees/restore-paper/results/paper-20260919/` and its ignored Playbook build
+folders. No runtime changes or storage experiments. Local checks are distinct
+from CI and deployment; their remote receipts and live PDF checksum are retained
+after the mirrored push.
+
 ## 2026-09-19 — Remove the Playbook notice banner
 
 Tested `a16e73a262bca1257814de85b5314eb18aa01f4e` plus the banner/style

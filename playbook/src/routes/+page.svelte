@@ -7,8 +7,6 @@
 	import GitHubIcon from '$lib/components/GitHubIcon.svelte';
 	import PdfIcon from '$lib/components/PdfIcon.svelte';
 
-	const includePdf = import.meta.env.VITE_SPEC_PDF === 'true';
-
 	const spec = pages.map(({ num, title, description }) => ({
 		num,
 		title,
@@ -46,11 +44,9 @@
 <div class="eyebrow-row">
 	<span class="eyebrow">research specification</span>
 	<span class="links">
-		{#if includePdf}
-			<a class="site-link" href="{base}/spec.pdf" target="_blank" rel="noopener" aria-label="PDF of the specification" title="PDF">
-				<PdfIcon />
-			</a>
-		{/if}
+		<a class="site-link" href="{base}/spec.pdf" target="_blank" rel="noopener" aria-label="PDF of the specification" title="PDF">
+			<PdfIcon />
+		</a>
 		<a class="site-link" href={repo} target="_blank" rel="noopener" aria-label="source on GitHub" title="source on GitHub">
 			<GitHubIcon />
 		</a>

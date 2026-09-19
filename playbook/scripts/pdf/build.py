@@ -153,7 +153,7 @@ def main() -> None:
         ]
     )
     run(["latexmk", "-xelatex", "-interaction=nonstopmode", "-halt-on-error", f"-output-directory={WORK}", str(tex)],
-        stdout=subprocess.DEVNULL)
+        stdout=subprocess.DEVNULL, cwd=WORK)
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(WORK / "spec.pdf", out)

@@ -38,9 +38,11 @@ jobs:
           node-version: 24
           cache: pnpm
           cache-dependency-path: playbook/pnpm-lock.yaml
+      - name: Install paper build tools
+        run: bash scripts/pdf/install.sh
       - run: pnpm install --frozen-lockfile
-      - run: pnpm check
-      - run: pnpm build
+      - name: Build and verify site and paper
+        run: bash scripts/pdf/publish.sh
         env:
           VERCEL: '1'
       - name: Verify the static output contract
@@ -48,3 +50,5 @@ jobs:
           test -f build/index.html
           test -f build/00.html
           test -f build/updates/4/index.html
+          test -s build/spec.pdf
+          test -s build/spec.pdf.sha256
