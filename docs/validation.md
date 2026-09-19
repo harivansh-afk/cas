@@ -1,5 +1,38 @@
 # Validation
 
+## 2026-09-19 — Release acceptance
+
+Verified public source `01b98d19cc4118ed3e9a1cb83bb30350da350033` after the
+output-directory correction. Only Forgejo was pushed for this commit; GitHub
+received the identical SHA through its `main`-only mirror. Vercel's GitHub
+integration automatically built production deployment
+`dpl_BhTcd4vrRLv8iUPU4zKSFEYiYA9y` from that SHA. It reached `READY`, and
+`vercel inspect cas-playbook.vercel.app --json` resolved the public alias to
+that deployment. GitHub Playbook run `35459512586` passed all steps, including
+Vercel-mode output assertions. No manual deployment or deployment token was used.
+
+On Spark, `uv run --no-project python results/release-20260919/verify_public.py`
+passed unauthenticated HTTPS checks for all 12 routes and 36 linked assets;
+responses passed the scoped content-marker audit. Raw HTML, hashes, CI metadata
+and alias receipts are retained in the release worktree's
+`results/release-20260919/`. The public index was also opened in the task's
+pinned browser tab. An initial relative screenshot path failed because the
+browser session used a different working directory; the absolute-path retry
+succeeded.
+
+Both public repositories resolve to the same revision and expose only `main`
+on GitHub. Both research repositories remain private and unchanged at
+`c80c77a`; anonymous API access to them and to the original research commit
+through public `cas` returns 404. The restored history retains 185 audited
+code/build commits plus the reviewed baseline and subsequent public changes.
+First-party code is GPL-3.0-only; vendored notices and the separate font terms
+are not replaced. Local native checks remain the 504-pass/25-ignore result
+recorded below; no new storage experiment is claimed.
+
+This acceptance update changes only the tracker and this record. Final remote
+SHA/alias receipts for its documentation-only push are retained alongside the
+other session artifacts; it does not change the tested site or runtime.
+
 ## 2026-09-19 — Public cutover and Vercel output regression
 
 Public `main` was replaced on both forges using explicit leases against

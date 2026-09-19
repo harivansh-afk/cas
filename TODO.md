@@ -20,7 +20,8 @@ Check off work only when its acceptance condition passes, with a record in
   font whose redistribution license is recorded.
 - [x] Obtain owner approval to publish the retained Playbook content while
   keeping the research archive private. [Publication session](docs/validation.md#2026-09-19--vercel-ci-and-public-repositories)
-- [ ] Verify automatic Vercel deployment from the GitHub mirror after a main push.
+- [x] Verify automatic Vercel deployment from the GitHub mirror after a main push.
+  [Release acceptance](docs/validation.md#2026-09-19--release-acceptance)
 
 Research planning and historical acceptance records are maintained separately
 in the private research archive.
