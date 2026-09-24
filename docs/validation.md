@@ -366,3 +366,35 @@ The content audit is a scoped check, not a proof of commercial non-sensitivity
 or a complete source-provenance review. Playbook and its displayed historical
 measurements are retained by request. First-party licensing and redistribution
 rights for the bundled font still require owner review before public release.
+
+## 2026-09-24 — Update 05 architecture explanation
+
+Spark/aarch64 Linux. Base `ecc39e49fcb66ab28a8d16018de04a589273c304`
+plus the Update 05 page, its route-specific figure component/data, article title,
+and this validation entry in `.worktrees/update5-redesign`. No runtime changes
+or new performance experiments. Historical numeric inputs remain unchanged.
+
+The page now explains write/read routing, capacity waits, compaction work,
+bounded read discovery, refused-ticket rotation, and the native test setup.
+Seven pairs of diagrams carry accessible descriptions. Source links pin the
+architecture explanation to the base revision; native runner links retain the
+revision in `native.json`. Read p99, maximum latency, and bypass admission are
+separate quantities. Native data checks remain separate from unrun dedicated
+NVMe measurements.
+
+`pnpm check` passed with zero errors and warnings; `pnpm build` passed.
+An initial root-directory invocation selected pnpm 12.3.4 and was rejected;
+commands run inside `playbook/` selected the required pnpm 11.5.3. The design
+detector returned no findings. A browser inspection at 1440x1000 and 390x844
+confirmed paired/stacked diagrams, no document overflow, no duplicate IDs, and
+no labels outside the new SVG viewBoxes. Desktop architecture, desktop scheduler,
+and mobile architecture screenshots were visually inspected. The first automated
+accessibility scan found a keyboard-inaccessible scrolling table; the table
+regions now have keyboard focus and accessible names. The final scan reported
+zero violations. Svelte's noninteractive-tabindex lint is locally suppressed
+with the scrolling-region justification. SVG contrast was marked
+incomplete by the automated scan and was inspected visually.
+
+Raw logs, accessibility reports, and screenshots are under ignored
+`results/update5-redesign/` in the task worktree. These are local site checks,
+not CI, deployment, storage correctness, or new performance acceptance.
