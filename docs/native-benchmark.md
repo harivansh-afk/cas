@@ -32,9 +32,12 @@ and without a rate cap. These are offered rates; report achieved rates too.
 The second script argument is timed seconds; the third is working-set MiB.
 
 Each invocation creates fresh storage, verifies seeded data before measurement,
-and checks CRCs afterward. Rotate arm order across at least five repetitions.
+and checks CRCs afterward. The final independent scan disables seed/sequence
+matching across separate fio jobs; it checks content/header integrity, not
+latest-write freshness after a crash. Rotate arm order across at least five repetitions.
 The baseline reads begin only after CAS's compaction frontier catches the
-published writes in two consecutive samples. Record drain failures and failed
+published writes in two distinct advancing samples after the drain begins.
+Record drain failures and failed
 jobs; do not filter them out of the cohort.
 
 Guest IO is direct. The raw host file is direct. CAS's clean cache is 16 MiB

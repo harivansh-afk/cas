@@ -37,12 +37,17 @@ fio_job() {
     "$CAS_OUTPUT/guest-${vm#vm}/$label.json" > /dev/null
 }
 settle() {
-  local label=$1 stable=0 deadline=$((SECONDS + 120)) sample
+  local label=$1 stable=0 deadline=$((SECONDS + 120)) sample elapsed last_elapsed
   phase "$label"
   if [[ $CAS_BACKEND == cas ]]; then
+    sample=$(tail -n 2 "$CAS_OUTPUT/daemon/telemetry.jsonl")
+    last_elapsed=$(jq -er '.elapsed_ns | numbers' <<< "${sample%%$'\n'*}")
     while (( SECONDS < deadline )); do
       # Read the penultimate line so an in-progress append is never mistaken for a sample.
       sample=$(tail -n 2 "$CAS_OUTPUT/daemon/telemetry.jsonl")
+      elapsed=$(jq -er '.elapsed_ns | numbers' <<< "${sample%%$'\n'*}")
+      if (( elapsed <= last_elapsed )); then sleep 1; continue; fi
+      last_elapsed=$elapsed
       if jq -e '[.images[].report.local.status | (.published != null and .published == .compacted and .issued == .published)] | length > 0 and all' \
         <<< "${sample%%$'\n'*}" > /dev/null 2>&1; then
         stable=$((stable + 1))
@@ -128,7 +133,8 @@ fi
 phase verify
 for ((i=1; i<=CAS_GUESTS; i++)); do
   fio_job "vm$i" verify --ioengine=io_uring --rw=read --bs=4k --iodepth=16 \
-    --verify=crc32c --verify_interval=4096 --verify_fatal=1 --verify_only=1
+    --verify=crc32c --verify_interval=4096 --verify_fatal=1 --verify_only=1 \
+    --verify_header_seed=0 --verify_write_sequence=0
 done
 finish_phase verify
 du -B1 -s "$CAS_STORAGE" > "$CAS_OUTPUT/storage-allocated.txt"
