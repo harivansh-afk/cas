@@ -1,0 +1,12 @@
+{
+  "date": "2026-09-24",
+  "source_revision": "a1bbdf3f6835c036ff7a8cb322859d96f413beb4",
+  "status": "All three backends passed direct KVM data checks on file-backed XFS. Dedicated NVMe measurements have not started.",
+  "baseline": [],
+  "pressure": [],
+  "accounting": [],
+  "completed": 0,
+  "failed": 0,
+  "failed_runs": [],
+  "notes": []
+}

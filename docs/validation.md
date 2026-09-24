@@ -16,6 +16,44 @@ Raw local checks: `results/native-2026-09-24/just-check-01.log` and
 Native hardware results and any failures will be recorded separately with the
 exact committed revision. [Runner and measurement contract](native-benchmark.md).
 
+## 2026-09-24 — Direct KVM protocol checks and Update 05 draft
+
+On a CloudLab Clemson r6615, the native runner booted NixOS guests directly
+under KVM. A live KVM descriptor in each QEMU process confirmed acceleration.
+The raw and CAS smoke checks passed at `bd8999d`; passthrough and the two-guest
+CAS smoke passed at `806faf9`. These checks used file-backed XFS for development,
+not the spare physical NVMe. CRC checks and clean shutdown passed. The physical
+device remains unformatted pending owner approval.
+
+A short CAS baseline trial at `806faf9` failed in fio 3.41's verification-state
+bookkeeping after the ramp reset the IO issue count. The failed log was kept.
+`a1bbdf3` disables unused fio verification-state saving; CRC generation and the
+final full-file scan remain enabled. The same short baseline then passed, as
+did the two-guest pressure script. No CAS storage behavior or recovery timeout
+changed. These protocol results do not accept a performance gate.
+
+The private research repository retains the exact experiment records and
+archives. Public inputs, commands and interpretation are in
+[native-benchmark.md](native-benchmark.md). The new Update 05 uses the existing
+article layout and audited Spark display data. It has no dedicated-NVMe timing
+rows yet. The recap separates compaction work counts from the later scheduler
+latency result. It also corrects two historical prose claims: the records do
+not agree that the control ran first, and they establish continued writer
+progress rather than unchanged throughput. Numeric historical data did not change.
+
+Local `pnpm check` and `pnpm build` passed with pnpm 11.5.3. An initial command
+from the repository root selected pnpm 12.3.4 and was rejected; running from
+`playbook/` selected the pinned version. The standard site build does not itself
+generate the separate PDF artifact. Desktop and mobile DOM checks found no
+page overflow or duplicate element IDs. Screenshots were captured; this
+session's tool runtime could not provide image inspection. The mechanical
+design check returned no findings. The draft uses the requested Unslop rules
+from `cursor/plugins` revision `12d587dfb20741cafc376c42c696c5f6e2a64487`.
+
+Raw local site checks and screenshots: `results/native-2026-09-24/`. No merge,
+production deployment, native-media benchmark, ZFS comparison or full C5 rerun
+is claimed here.
+
 ## 2026-09-19 — Restore the paper download
 
 Source `87950b617f0bfa0256d82acfbb190ecf6b20e91f` plus this change, tested on

@@ -31,7 +31,7 @@
 		<h1>Reads no longer wait on writers</h1>
 		<p class="lede">The single-host backend is functionally complete and now reviewed end to end. This update reports that review, the two runtime defects it found, and a live measurement of the fix against the previous scheduler under identical conditions. It then says plainly how far the research study itself has progressed: not yet past its first gate.</p>
 		<p><a href="{base}/updates/2/">Update 02</a> explains how the backend works. Nothing in the architecture changed here; this page is about its state.</p>
-		<p class="checkpoint"><strong>Latest finding:</strong> with the previous scheduler, independent reads waited up to {(Math.max(...status.lab.final.control.read_admission_max_wait_ms) / 1000).toFixed(1)} s for admission while two images retried blocked writes. After the fix the same counter peaked at {Math.max(...status.lab.final.off.read_admission_max_wait_ms).toFixed(0)} ms, same-CPU read p99 fell from hundreds of milliseconds to 9–20 ms, and writer throughput did not change. Multi-second tails from FLUSH barriers behind WAL-blocked writes remain. <a href="#acceptance">Measurements ↓</a></p>
+		<p class="checkpoint"><strong>Latest finding:</strong> with the previous scheduler, independent reads waited up to {(Math.max(...status.lab.final.control.read_admission_max_wait_ms) / 1000).toFixed(1)} s for admission while two images retried blocked writes. After the fix the same counter peaked at {Math.max(...status.lab.final.off.read_admission_max_wait_ms).toFixed(0)} ms, same-CPU read p99 fell from hundreds of milliseconds to 9–20 ms, and writers continued to progress. Multi-second tails from FLUSH barriers behind WAL-blocked writes remain. <a href="#acceptance">Measurements ↓</a></p>
 	</header>
 
 	<nav aria-label="Update contents"><ol>{#each sections as [id, title]}<li><a href={`#${id}`}>{title}</a></li>{/each}</ol></nav>
@@ -76,7 +76,7 @@
 
 	<section id="acceptance">
 		<h2>The fix, measured against a control</h2>
-		<p>The integrated source passed its native checks and all {status.lab.smoke_cases} live QEMU recovery and reset cases. Then the same two-guest mixed workload from Update 02 ran three times in one session: first on the previous runtime as a control, then twice on the new one.</p>
+		<p>The integrated source passed its native checks and all {status.lab.smoke_cases} live QEMU recovery and reset cases. Then the same two-guest mixed workload from Update 02 ran three times in one session: once on the previous runtime as a control and twice on the new one.</p>
 		<Integration />
 		<p><strong>What did not change.</strong> Slowest reads of 5–25 s appear in every arm, including the control. The same-CPU ones coincide with ordinary-head waits of the same length, consistent with writes and FLUSH barriers queued behind WAL capacity while compaction drained at about half its earlier rate on the loaded host; the separate-CPU ones occur with almost no bypasses and are a different mechanism. The second pass had no same-CPU read above 0.7 s. These tails are the next scheduling item.</p>
 	</section>
