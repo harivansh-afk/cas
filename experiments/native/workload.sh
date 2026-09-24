@@ -32,6 +32,7 @@ fio_job() {
   guest "$vm" timeout --signal=INT 150 fio --name="$label" \
     --filename=/mnt/cas/workload.bin --size="${size_mib}m" \
     --direct=1 --randrepeat=1 --randseed=240924 --refill_buffers=1 \
+    --verify_state_save=0 \
     --buffer_compress_percentage=0 --lat_percentiles=1 --percentile_list=50:99:99.9 \
     --output-format=json+ --output="/results/$label.json" "$@"
   date -u +%s.%N > "$CAS_OUTPUT/guest-${vm#vm}/$label.host-end"

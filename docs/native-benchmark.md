@@ -40,6 +40,10 @@ Each invocation creates fresh storage, verifies seeded data before measurement,
 and checks CRCs afterward. The final independent scan disables seed/sequence
 matching across separate fio jobs; it checks content/header integrity, not
 latest-write freshness after a crash. Rotate arm order across at least five repetitions.
+Timed CRC jobs disable fio verification-state checkpoints. In fio 3.41, the
+ramp resets the IO issue count but leaves that checkpoint counter unchanged,
+which can abort the job. CRC generation and the final scan remain enabled.
+No test here resumes fio from a saved verification state.
 The baseline reads begin only after CAS's compaction frontier catches the
 published writes in two distinct advancing samples after the drain begins.
 Record drain failures and failed
