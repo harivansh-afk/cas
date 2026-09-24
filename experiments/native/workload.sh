@@ -6,7 +6,7 @@ seconds=${2:-30}
 size_mib=${3:-512}
 [[ $seconds =~ ^[0-9]+$ && $seconds -ge 1 && $seconds -le 60 ]]
 [[ $size_mib =~ ^[0-9]+$ && $size_mib -ge 64 && $size_mib -le 2048 ]]
-case "$mode" in smoke|baseline|pressure) ;; *) exit 2 ;; esac
+case "$mode" in smoke|baseline|pressure|accounting) ;; *) exit 2 ;; esac
 printf '{"mode":"%s","seconds":%s,"size_mib":%s,"seed":240924,"direct":true,"cache_reset":false}\n' \
   "$mode" "$seconds" "$size_mib" > "$CAS_OUTPUT/workload-settings.json"
 
@@ -28,11 +28,13 @@ finish_phase() {
 fio_job() {
   local vm=$1 label=$2
   shift 2
+  date -u +%s.%N > "$CAS_OUTPUT/guest-${vm#vm}/$label.host-start"
   guest "$vm" timeout --signal=INT 150 fio --name="$label" \
     --filename=/mnt/cas/workload.bin --size="${size_mib}m" \
     --direct=1 --randrepeat=1 --randseed=240924 --refill_buffers=1 \
     --buffer_compress_percentage=0 --lat_percentiles=1 --percentile_list=50:99:99.9 \
-    --output-format=json --output="/results/$label.json" "$@"
+    --output-format=json+ --output="/results/$label.json" "$@"
+  date -u +%s.%N > "$CAS_OUTPUT/guest-${vm#vm}/$label.host-end"
   jq -e '.jobs | length > 0 and all(.[]; .error == 0)' \
     "$CAS_OUTPUT/guest-${vm#vm}/$label.json" > /dev/null
 }
@@ -104,6 +106,17 @@ if [[ $mode == baseline ]]; then
     --verify=crc32c --verify_interval=4096 --do_verify=0
   finish_phase flush
   settle flush-drain
+elif [[ $mode == accounting ]]; then
+  # A finite write has no ramp or timed cutoff. Device/application counters
+  # cover its complete foreground work and subsequent compaction drain.
+  guest vm1 cat /sys/block/vda/stat > "$CAS_OUTPUT/accounting.guest-before.diskstat"
+  phase accounting
+  fio_job vm1 accounting --ioengine=io_uring --rw=write --bs=4k --iodepth=32 \
+    --randseed=240925 --end_fsync=1 --verify=crc32c --verify_interval=4096 --do_verify=0
+  finish_phase accounting-foreground
+  settle accounting-drain
+  guest vm1 cat /sys/block/vda/stat > "$CAS_OUTPUT/accounting.guest-after.diskstat"
+  finish_phase accounting
 elif [[ $mode == pressure ]]; then
   [[ $CAS_GUESTS == 2 ]]
   phase reader-alone

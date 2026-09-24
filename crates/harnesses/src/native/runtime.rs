@@ -120,6 +120,7 @@ struct Sampler {
     block_stat: PathBuf,
     cgroup: PathBuf,
     output: PathBuf,
+    started: Instant,
 }
 impl Sampler {
     fn new(args: &Args, device: &Path, processes: Vec<(&'static str, u32)>) -> io::Result<Self> {
@@ -142,6 +143,7 @@ impl Sampler {
             )),
             cgroup: Path::new("/sys/fs/cgroup").join(group),
             output: args.output.clone(),
+            started: Instant::now(),
         })
     }
     fn tick(&mut self) -> io::Result<()> {
@@ -158,6 +160,8 @@ impl Sampler {
             .collect();
         let value = serde_json::json!({
             "utc":host::utc_now()?, "phase":fs::read_to_string(self.output.join("phase")).ok(),
+            "elapsed_ns":self.started.elapsed().as_nanos(),
+            "unix_ns":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(io::Error::other)?.as_nanos(),
             "processes":processes, "device_stat":fs::read_to_string(&self.block_stat)?,
             "meminfo":fs::read_to_string("/proc/meminfo")?,
             "memory_current":fs::read_to_string(self.cgroup.join("memory.current")).ok(),

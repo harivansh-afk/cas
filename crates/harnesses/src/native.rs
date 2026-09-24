@@ -154,11 +154,15 @@ pub fn run(mut args: Args) -> io::Result<()> {
     fs::copy(&build.lock, args.output.join("flake.lock"))?;
     fs::copy(&args.script, args.output.join("workload.sh"))?;
     evidence::write_json(&args.output.join("request.json"), &args)?;
+    // SAFETY: sysconf takes a constant selector and no pointers or retained storage.
+    let clock_ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    evidence::require(clock_ticks > 0, "CPU tick frequency unavailable")?;
     evidence::write_json(
         &args.output.join("identity.json"),
         &serde_json::json!({
             "source_revision":build.source_revision, "source_path":build.source_path,
             "started_at":host::utc_now()?, "cpu_affinity":host::cpu_affinity()?,
+            "clock_ticks_per_second":clock_ticks,
             "host_kernel":host::identity()?.kernel, "device":device,
             "workload_blake3":blake3::hash(&fs::read(&args.script)?).to_hex().to_string(),
             "paper_gates":[], "native_media":!args.allow_loop_device,

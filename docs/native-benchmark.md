@@ -30,6 +30,11 @@ and QD32, 128 KiB sequential reads, and write-plus-fdatasync at QD1. `pressure`
 needs `--guests 2`: one guest reads while the other writes at 8, 32, 128 MiB/s
 and without a rate cap. These are offered rates; report achieved rates too.
 The second script argument is timed seconds; the third is working-set MiB.
+`accounting` performs one finite sequential overwrite with a new seed, without
+ramp or time limit, followed by drain. It retains guest and host-device sector
+counters around that whole interval. Timed-job phase counters include ramp and
+drain differently from fio's reported bytes; do not use them for amplification
+or CPU-per-byte ratios. Device counters measure host writes, not SSD NAND writes.
 
 Each invocation creates fresh storage, verifies seeded data before measurement,
 and checks CRCs afterward. The final independent scan disables seed/sequence
@@ -49,7 +54,8 @@ cannot be added into a transaction p99. A timed write job runs background
 compaction; the pressure arm measures concurrent-reader interference explicitly.
 
 Every result contains pinned build/lock identities, exact process commands,
-QEMU invocation and KVM evidence, fio JSON, guest kernels, startup/shutdown
+QEMU invocation and KVM evidence, fio JSON+ histograms and per-job wall times,
+guest kernels, startup/shutdown
 outcome, one-second host/process/cgroup samples, block-device counters, and
 CAS telemetry. Guest memory and daemon shared mappings overlap PSS/cgroup
 accounting; do not sum those views. Device-sector counters include guest
