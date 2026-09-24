@@ -23,7 +23,7 @@
 </script>
 
 <div class="integration">
-	<p class="finding"><strong>Independent reads waited up to {seconds(Math.max(...lab.final.control.read_admission_max_wait_ms))} in admission before the fix and at most {seconds(Math.max(...lab.final.off.read_admission_max_wait_ms, ...lab.final.off2.read_admission_max_wait_ms))} after it.</strong> Same host session, same workload, control first.</p>
+	<p class="finding"><strong>Independent reads waited up to {seconds(Math.max(...lab.final.control.read_admission_max_wait_ms))} in admission before the fix and at most {seconds(Math.max(...lab.final.off.read_admission_max_wait_ms, ...lab.final.off2.read_admission_max_wait_ms))} after it.</strong> Three back-to-back runs in one host session, with the same workload.</p>
 	<!-- svelte-ignore a11y_no_noninteractive_tabindex (The comparison scrolls horizontally on small screens.) -->
 	<div class="table-scroll" role="region" aria-label="Read latency by arm" tabindex="0"><table class="spec">
 		<thead><tr><th>Workload</th><th>Arm</th><th>Read p99</th><th>Slowest read</th><th>Reads per 10 s</th><th>Write MiB/s</th></tr></thead>

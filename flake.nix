@@ -160,6 +160,11 @@
         {
           default = pkgs.cas;
           inherit (pkgs) cas;
+          native = import ./nix/native.nix {
+            inherit pkgs lib nixpkgs;
+            provenance = labProvenance;
+            lock = ./flake.lock;
+          };
           casctl = import ./nix/lab {
             inherit pkgs lib nixpkgs;
             provenance = labProvenance;
