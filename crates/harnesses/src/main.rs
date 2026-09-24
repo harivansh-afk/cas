@@ -1,6 +1,6 @@
 //! Development VM checks and host inventories. No paper gate is inferred here.
 use cas_harness::{
-    filesystem, fixture, fleet, host, persistence, pressure, process, shared, suite, vm,
+    filesystem, fixture, fleet, host, native, persistence, pressure, process, shared, suite, vm,
 };
 
 use std::io;
@@ -18,6 +18,8 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run host-native storage and direct KVM guests on an existing dedicated XFS mount.
+    Native(native::Args),
     /// Run the source-bound development checkpoint suite from a Nix wrapper.
     Suite(suite::Args),
     /// Exercise buffered files and SQLite on a mounted ext4 guest disk.
@@ -70,6 +72,7 @@ fn run() -> io::Result<()> {
     let args = Args::parse();
     process::install_signal_handlers()?;
     match args.command {
+        Command::Native(args) => native::run(args),
         Command::Suite(args) => suite::run(args),
         Command::Filesystem(args) => filesystem::run(args),
         Command::Pressure(args) => pressure::run(args),

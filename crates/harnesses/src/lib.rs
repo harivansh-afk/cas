@@ -8,6 +8,7 @@ pub mod fixture;
 pub mod fleet;
 pub mod host;
 pub mod lab;
+pub mod native;
 pub mod persistence;
 pub mod pressure;
 pub mod process;

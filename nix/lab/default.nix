@@ -11,7 +11,13 @@ let
   guests = lib.genAttrs [ "cas" "raw" "daemon" ] (
     backend:
     lib.nixosSystem {
-      specialArgs = { inherit backend guestCores probeTools; };
+      specialArgs = {
+        inherit backend guestCores probeTools;
+        guestMemoryMiB = if probeTools then 1024 else 512;
+        guestAcceleration = "tcg";
+        guestQueues = if backend == "cas" then 4 else 1;
+        guestQueueSize = if backend == "daemon" then 128 else 256;
+      };
       modules = [
         ./guest.nix
         { nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system; }

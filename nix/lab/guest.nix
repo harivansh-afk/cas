@@ -4,6 +4,10 @@
   modulesPath,
   backend ? "cas",
   guestCores ? 1,
+  guestMemoryMiB ? (if probeTools then 1024 else 512),
+  guestAcceleration ? "tcg",
+  guestQueues ? (if backend == "cas" then 4 else 1),
+  guestQueueSize ? (if backend == "daemon" then 128 else 256),
   probeTools ? false,
   ...
 }:
@@ -43,35 +47,34 @@
   };
   virtualisation = {
     diskImage = null;
-    memorySize = if probeTools then 1024 else 512;
+    memorySize = guestMemoryMiB;
     cores = guestCores;
     graphics = false;
     writableStore = false;
     useHostCerts = false;
     qemu = {
-      forceAccel = false;
+      forceAccel = guestAcceleration == "kvm";
       enableSharedMemory = true;
       networkingOptions = lib.mkForce [
         ''-nic "user,model=virtio-net-pci,restrict=on,hostfwd=tcp:127.0.0.1:$CAS_SSH_PORT-:22"''
       ];
-      options = [
-        "-machine accel=tcg"
-        "-no-reboot"
-      ]
-      ++ (
-        if backend == "raw" then
-          [
-            ''-drive "if=none,id=data,file=$CAS_RAW_IMAGE,format=raw,cache=none,aio=io_uring,werror=report,rerror=report"''
-            "-device virtio-blk-pci,drive=data,logical_block_size=4096,physical_block_size=4096,num-queues=1"
-          ]
-        else
-          [
-            ''-chardev "socket,id=cas,path=$CAS_VHOST_SOCKET"''
-            "-device vhost-user-blk-pci,chardev=cas,num-queues=${
-              if backend == "daemon" then "1,queue-size=128" else "4,queue-size=256"
-            }"
-          ]
-      );
+      options =
+        lib.optional (guestAcceleration == "tcg") "-machine accel=tcg"
+        ++ [
+          "-no-reboot"
+        ]
+        ++ (
+          if backend == "raw" then
+            [
+              ''-drive "if=none,id=data,file=$CAS_RAW_IMAGE,format=raw,cache=none,aio=io_uring,werror=report,rerror=report"''
+              "-device virtio-blk-pci,drive=data,logical_block_size=4096,physical_block_size=4096,num-queues=${toString guestQueues},queue-size=${toString guestQueueSize}"
+            ]
+          else
+            [
+              ''-chardev "socket,id=cas,path=$CAS_VHOST_SOCKET"''
+              "-device vhost-user-blk-pci,chardev=cas,num-queues=${toString guestQueues},queue-size=${toString guestQueueSize}"
+            ]
+        );
     };
     sharedDirectories.results = {
       source = ''"$CAS_RESULTS_DIR"'';

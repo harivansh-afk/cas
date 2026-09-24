@@ -1,5 +1,21 @@
 # Validation
 
+## 2026-09-24 — Native KVM runner preparation
+
+On Spark, base `2d56108a2ab38b1985816448acbe6f08d8c29c3e` plus the native
+harness, workload script and Nix guest changes in `.worktrees/cloudlab-native`.
+`nix develop -c just check` passed: formatting, Clippy, 506 tests and whitespace
+checks; 25 live-fixture tests remained ignored. Shell syntax validation and
+`nix fmt -- --ci` passed. `nix flake check --no-build --all-systems` evaluated
+both supported architectures, including the new native wrapper. Initial Nix
+evaluation exposed a missing module argument; explicit guest geometry arguments
+fixed it before the passing evaluation. No storage runtime policy changed.
+
+Raw local checks: `results/native-2026-09-24/just-check-01.log` and
+`just-check-02.log`. Evaluation is not a guest run or performance acceptance.
+Native hardware results and any failures will be recorded separately with the
+exact committed revision. [Runner and measurement contract](native-benchmark.md).
+
 ## 2026-09-19 — Restore the paper download
 
 Source `87950b617f0bfa0256d82acfbb190ecf6b20e91f` plus this change, tested on
