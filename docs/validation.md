@@ -398,3 +398,35 @@ incomplete by the automated scan and was inspected visually.
 Raw logs, accessibility reports, and screenshots are under ignored
 `results/update5-redesign/` in the task worktree. These are local site checks,
 not CI, deployment, storage correctness, or new performance acceptance.
+
+## 2026-10-19 — Cargo and flake dependency refresh
+
+Spark/aarch64 Linux, worktree `.worktrees/deps-update`. Tested base
+`537b6dbfafccb8d3c665426500e36805ae881ff7` plus uncommitted `Cargo.lock`,
+`flake.lock`, and this validation entry. Cargo updates 20 compatible packages;
+the flake refreshes nixpkgs, rust-overlay, and disko. The Rust toolchain remains
+1.98.1. No runtime source changes or storage-format changes.
+
+Registry review found allocator-api2 0.4.0 as the only incompatible direct
+upgrade. It remains on 0.2: current hashbrown 0.17.1 requires allocator-api2
+0.2, and CAS passes its BudgetAllocator into hashbrown tables. Changing the
+allocator trait version requires a coordinated migration, beyond this refresh.
+The patched virtio-queue and vhost-user-backend remain at current upstream
+versions with local patches preserved.
+
+Local commands use `CARGO_BUILD_JOBS=3` and Nix `cores=3`, `max-jobs=1`.
+`cargo update`, `nix flake update`, `cargo build`, and `cargo test` passed.
+Cargo tests passed 506 tests with 25 existing ignored tests.
+`just check` passed formatting, strict Clippy, workspace tests, and whitespace.
+`nix build -L --cores 3 --max-jobs 1` passed, including release-profile tests.
+`just nix-check` passed Nix formatting, all-system evaluation, and all native
+flake checks. x86_64-linux outputs were evaluated but not built on this ARM host.
+
+The initial `nix build` client stopped progressing after toolchain preparation.
+Only that client was interrupted; the retry with `-L` fetched the remaining
+Rust archives and completed successfully. Both logs are retained. No source or
+vendor-hash corrections were needed.
+
+Raw command output is retained under ignored
+`results/deps-update-2026-10/` in the worktree. These checks do not establish CI,
+deployment, KVM fixture acceptance, power-loss safety, or performance results.
