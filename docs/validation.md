@@ -180,6 +180,38 @@ runtime is now disabled with `nix.enable = false`. This removes an invalid
 boot operation rather than changing recovery or application deadlines. Nix
 still builds and source-binds the guest and its immutable executable closure.
 
+### Isolated pressure coverage failure
+
+At `838bc5e`, `just-check-05` and `nix-check-05` passed. The five focused
+shared replacement/crash variants all passed (`isolate-*-04`), retaining the
+original TCG geometry, deadlines and recovery assertions. Guest pressure then
+completed all eleven stages in both guests and both fresh-boot content oracles,
+but failed the final above-drain coverage assertion. The full inventory was
+gated off rather than accepting this partial result.
+
+The controller measured 31,725,231 bytes/s against a calibration of 34,881,328
+bytes/s. Its burst interval was 1.057658 s; the two guests recorded 0.656032
+and 0.754246 s including deterministic payload generation, direct writes,
+pacing and sync. Control publication/observation contributes additional elapsed
+time, so guest-local rates cannot replace the conservative controller check.
+The VM averaged 60.39% idle CPU with maximum load 3.435 and zero reported
+steal; this is not evidence of external CPU contention or a CAS data failure.
+Raw failure, all stage records and fresh-boot oracles remain in
+`isolate-guest-pressure-04/` and its command receipt.
+
+The next fixture correction prepares the same finite 16 MiB burst payload
+before publishing readiness. This removes deterministic hash expansion under
+TCG from the offered-load interval. It adds one bounded 16 MiB guest buffer
+within the unchanged 512 MiB guest; the reported guest process memory includes
+it. Calibration, payload identities, one-MiB direct writes, rate pacing,
+terminal sync, controller timing and the above-drain assertion are unchanged.
+Preparation duration and bytes are retained in `ready.json`. A regression
+compares all prepared bytes with the previous streamed generator and runs the
+direct-read identity oracle. Runtime acceptance of this correction is pending.
+Spark `just-check-12` stopped at formatting after the helper signature cleanup;
+after formatting, `just-check-13` passed formatting, strict Clippy, 514 tests
+with 25 fixture ignores and whitespace checks on `838bc5e` plus this change.
+
 ## 2026-11-08 — C5 publication rerun and telemetry tail regression
 
 Spark/aarch64, host Linux 7.0.14, 128 GB unified memory, accessible KVM;
