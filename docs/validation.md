@@ -1,5 +1,66 @@
 # Validation
 
+## 2026-11-08 — C5 isolated-host continuation
+
+Continuation from `4e3cfb0338810a2330dc14719e01fba36f0557c8` on
+`validate/c5-rerun`. Spark retains all earlier evidence. New provider lifecycle,
+monitoring and remote-run artifacts are under ignored
+`results/c5-isolated-2026-11-08/`. Local command logs continue under
+`results/c5-2026-11-08/`. No push or merge is authorized or performed.
+
+### Capacity diagnosis and fixture correction
+
+The two smoke failures were caused by an undersized fixture cap, not incorrect
+physical accounting. `st_blocks * 512` includes real allocation metadata and
+must remain charged. Two 64 MiB write passes can approach 384 MiB under a
+conservative allowance of one header and one commit block per 4 KiB payload,
+before explicit flush records and segment rounding. Batching previously hid
+this requirement; even the observed batched run needed a fourth 64 MiB segment
+and exceeded the 256 MiB cap by 4–8 KiB. Merely subtracting filesystem overhead
+or shrinking segments would not make that fixed cap sufficient in all batching
+schedules.
+
+`cas-daemon` now accepts an explicit local/local-async `--staging-bytes` limit.
+Only the smoke runner selects 512 MiB, enough for this workload plus allocation
+headroom. Default daemon/core limits and shared-host policy stay unchanged.
+The configured limit is used on creation, rotation, ordinary cold reopen and
+retained-frontend cold opening. The regression performs five write/flush epochs
+for each execution mode, verifies the default limit still rejects the retained
+allocation, then opens with the explicit limit and verifies exact data and
+mutation/durability prefixes. The fixture budget is deliberately larger; no
+capacity assertion, actual allocation accounting or timeout is weakened.
+
+On the base plus these uncommitted Rust changes, the targeted regression passed
+(`capacity-config-green-03.log`). Earlier attempts caught a missing enum
+comparison trait and an invalid attempt to use a concurrent-only attachment
+operation in the synchronous test; the regression now uses ordinary cold epochs
+for both modes. Strict Clippy subsequently flagged default convenience wrappers
+that became test-only; they were marked accordingly (`just-check-05.log`).
+`nix develop -c just check` then passed formatting, strict Clippy, 512 tests
+with 25 existing ignores, and whitespace checks (`just-check-06.log`).
+
+XFS fixture tests now use `--nocapture` so panic/assertion diagnostics survive
+an outer timeout. Test selection, serialization and all deadlines are unchanged.
+
+### Isolated-host preparation
+
+The provider rejected the requested 16-vCPU Ubuntu VM with `LIMIT_EXCEEDED`:
+the current plan permits at most eight vCPUs per VM. A new task-owned
+`cas-c5-1108-isolated` VM was created with eight vCPUs, 16 GiB RAM and 64 GiB
+disk, Ubuntu 24.04, x86_64 kernel 6.1.102. KVM API version 12 and successful
+`KVM_CREATE_VM` were observed as the unprivileged test user. All pre-existing
+resources, including active census VMs, are excluded from the cleanup ledger.
+A scoped SSH identity grants access only to this task VM; credentials are not
+copied into it or included in result archives.
+
+Setup retries are retained: the Ubuntu Nix package requires membership in
+`nix-users`; provider exec terminates detached child commands, so persistent
+build/monitor jobs use task-owned systemd units. The monitor initially failed
+because this kernel omits `/proc/pressure`; PSI is explicitly unavailable.
+CPU user/system/idle/iowait/steal, load, memory and free disk are sampled every
+second. Build intervals are separate from experiment intervals. Physical-host
+load is not exposed by the provider and must not be claimed as measured.
+
 ## 2026-11-08 — C5 publication rerun and telemetry tail regression
 
 Spark/aarch64, host Linux 7.0.14, 128 GB unified memory, accessible KVM;

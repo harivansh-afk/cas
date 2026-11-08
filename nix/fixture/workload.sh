@@ -21,7 +21,7 @@ done
 run_tests() {
   local module="$1" executable="$2" filter="$3"
   "$executable" "$filter" --list > "/results/$module.list"
-  "$executable" "$filter" --include-ignored --test-threads=1 > "/results/$module.log" 2>&1
+  "$executable" "$filter" --include-ignored --nocapture --test-threads=1 > "/results/$module.log" 2>&1
 }
 export CAS_SPACE_REPORT=/results/space-observations.json
 run_tests space "$CAS_CORE_TESTS" space::filesystem::tests

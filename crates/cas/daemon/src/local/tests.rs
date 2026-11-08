@@ -900,3 +900,46 @@ fn zero_batches_reserve_only_a_header_and_preserve_mutation_and_flush_order() {
         assert_eq!(report["append"]["current"]["bytes"], 0);
     }
 }
+
+#[test]
+fn explicit_staging_budget_survives_rotations_and_cold_reopen() {
+    for execution in [Execution::Synchronous, Execution::Concurrent] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("log");
+        let event = EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK).unwrap();
+        let limits = append::Limits {
+            staging_bytes: 512 * MAX_REQUEST_BYTES as u64,
+            ..append::Limits::default()
+        };
+        for generation in 1..=5 {
+            let mut local = Local::open_with_limits(
+                &path,
+                (generation == 1).then_some(8 * MAX_REQUEST_BYTES as u64),
+                &event,
+                execution,
+                limits,
+            )
+            .unwrap();
+            write(&mut local, generation, 0, BLOCK_SIZE, generation as u8);
+            local.receive(true).unwrap().unwrap().result.unwrap();
+            let permit = local.prepare(Kind::Control).unwrap().unwrap();
+            local.enqueue(10, Operation::Flush, permit).unwrap();
+            local.receive(true).unwrap().unwrap().result.unwrap();
+            local.stop().unwrap();
+            drop(local);
+        }
+        // The default cap still rejects these retained allocations. An explicit
+        // cap must survive both ordinary and retained-frontend cold opening.
+        assert!(matches!(
+            Log::open(&path, append::Limits::default()),
+            Err(append::Error::Capacity)
+        ));
+        let mut opening = crate::storage::Opening::with_limits(&path, None, limits).unwrap();
+        let mut log = opening.fresh().unwrap();
+        let mut bytes = AlignedBuffer::new(BLOCK_SIZE);
+        log.read_into(0, &mut bytes).unwrap();
+        assert_eq!(bytes.as_slice(), &[5; BLOCK_SIZE]);
+        assert!(log.status().allocated_bytes <= limits.staging_bytes);
+        assert_eq!((log.status().published, log.status().durable), (5, 5));
+    }
+}

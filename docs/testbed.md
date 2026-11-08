@@ -33,6 +33,13 @@ nix build .#staging-smoke --out-link result-staging
 ./result-staging/bin/cas-vm-smoke --live-recovery --output results/live-run
 ```
 
+The local/local-async smoke runner passes `--staging-bytes 536870912` (512 MiB)
+to `cas-daemon`, including on cold reopen. The two 64 MiB write passes need
+space for WAL framing, segment rounding and filesystem allocation metadata;
+a 256 MiB cap cannot guarantee completion. Standalone daemon calls still default
+to 256 MiB. An explicit cap must be supplied again on restart. Physical allocated
+blocks remain charged; this fixture budget does not change `cas-host` policy.
+
 The raw and serial staging paths are controls, not the shared `cas-host`
 implementation. The serial live-recovery check does not establish concurrent
 shared recovery. Outputs contain build identity, commands, guest logs, and IO
