@@ -263,6 +263,16 @@ checks that the separate Nix budget cannot extend the runtime scenario budgets;
 the exception is also emitted in `conditions.json`. This is the only timeout
 increase in this continuation.
 
+The first local-control fixture at `33caf60` (`isolate-guest-pressure-06`)
+failed immediately and retained the daemon's exact error: `socket/report
+directory must lie outside the storage filesystem`. This validates the new
+failure-retention path, not C5. The outer fixture now mounts a dedicated
+256 MiB tmpfs at `/run/cas-shared-control` and uses its `results` subdirectory;
+the storage/report isolation guard is preserved. Earlier complete pressure
+evidence occupies about 15 MiB. The mount is recorded in `control-mount.json`;
+the same exit handler copies all evidence out. The tmpfs budget belongs to the
+outer fixture, not the daemon's payload accounting or either 512 MiB guest.
+
 ## 2026-11-08 — C5 publication rerun and telemetry tail regression
 
 Spark/aarch64, host Linux 7.0.14, 128 GB unified memory, accessible KVM;
