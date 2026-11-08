@@ -61,6 +61,7 @@ struct GuestCompletion {
 }
 
 struct Prepared {
+    received: Instant,
     queue: u16,
     available: u16,
     request: Request,
@@ -754,6 +755,13 @@ impl Backend {
                     None,
                     guard.as_deref_mut(),
                 )?;
+                if let Some(remote) = completed
+                    .permit
+                    .as_mut()
+                    .and_then(|permit| permit.remote.as_mut())
+                {
+                    remote.finish(false);
+                }
                 if let (Some(observer), Some(mut trace)) = (&mut self.read_trace, trace.take()) {
                     trace.finished_ns = trace.at();
                     observer.complete(*trace);
@@ -780,6 +788,13 @@ impl Backend {
                         trace.finished_ns = trace.at();
                         trace.success = true;
                         observer.complete(*trace);
+                    }
+                    if let Some(remote) = completed
+                        .permit
+                        .as_mut()
+                        .and_then(|permit| permit.remote.as_mut())
+                    {
+                        remote.finish(true);
                     }
                     self.counters.reads += 1;
                     self.counters.read_bytes += buffer.as_slice().len() as u64;
@@ -912,6 +927,7 @@ impl Backend {
             if let Some(observer) = &mut self.read_trace {
                 observer.head(queue, next_avail.wrapping_sub(1), Instant::now());
             }
+            let received = Instant::now();
             let request = decode_chain(mem, chain, self.capacity_bytes, &self.metadata)?
                 .negotiated(self.negotiated_features & self.features());
             let gate = self.storage.completion_gate();
@@ -943,6 +959,7 @@ impl Backend {
                 mem,
                 &mut state,
                 Prepared {
+                    received,
                     queue,
                     available: next_avail.wrapping_sub(1),
                     request,
@@ -995,6 +1012,7 @@ impl Backend {
         mut health: Option<&mut local::ImageState>,
     ) -> io::Result<()> {
         let Prepared {
+            received,
             queue,
             available,
             request,
@@ -1061,6 +1079,7 @@ impl Backend {
         {
             if let Permit::Local { credits } = &mut permit {
                 credits.trace = trace;
+                credits.received = Some(received);
             }
             self.enqueue(
                 mem,

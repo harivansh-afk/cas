@@ -27,6 +27,7 @@ use std::os::fd::{FromRawFd, IntoRawFd};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 pub struct Resources {
+    pub peer: crate::peer::Config,
     pub cache_bytes: usize,
     pub metadata_cache_bytes: usize,
     pub metadata: Arc<Budget>,
@@ -38,6 +39,7 @@ pub struct Resources {
 impl Default for Resources {
     fn default() -> Self {
         Self {
+            peer: crate::peer::Config::default(),
             cache_bytes: Self::DEFAULT_CACHE_BYTES,
             metadata_cache_bytes: 16 * MAX_REQUEST_BYTES,
             metadata: metadata_budget(),
@@ -57,6 +59,8 @@ impl Resources {
 }
 
 struct SharedHost {
+    peer: Option<BudgetArc<crate::peer::Client>>,
+    peer_metrics: Option<BudgetArc<crate::peer::metrics::Metrics>>,
     admission: BudgetArc<admission::Admission>,
     fair: BudgetArc<fair::Fair>,
     io_scheduler: BudgetArc<cas_core::scheduler::Scheduler>,
@@ -99,6 +103,7 @@ pub struct Roots<I = Vec<(Log, Manifest)>, S = Vec<Snapshot>> {
 /// Embedding API for the catalog owner and the same native validation frontend.
 /// Inputs must be inspected/stabilized together and allocated from Resources.
 pub struct Host {
+    peer_service: Option<crate::peer::Server>,
     shared: BudgetArc<SharedHost>,
     images: BudgetVec<Option<Attachment>, BudgetAllocator>,
     ready: Option<mailbox::Sender<Ready>>,
@@ -233,11 +238,40 @@ impl Host {
             Some(gates) => gates.host.clone(),
             None => state::HostGate::new(&metadata)?,
         };
+        resources.peer.validate()?;
+        let peer_metrics = (resources.peer.peer_listen.is_some()
+            || resources.peer.peer_address.is_some())
+        .then(|| crate::peer::metrics::Metrics::new(&metadata))
+        .transpose()?;
+        let peer = resources
+            .peer
+            .peer_address
+            .map(|address| {
+                BudgetArc::try_new(
+                    crate::peer::Client::new(
+                        address,
+                        &metadata,
+                        peer_metrics.as_ref().expect("peer metrics").clone(),
+                    )?,
+                    &metadata,
+                )
+            })
+            .transpose()?;
         let shared = BudgetArc::try_new(
             SharedHost {
+                peer,
+                peer_metrics,
                 admission,
                 fair,
-                io_scheduler: cas_core::scheduler::Scheduler::new(image_count, &metadata)?,
+                io_scheduler: cas_core::scheduler::Scheduler::new(
+                    image_count
+                        + if resources.peer.peer_listen.is_some() {
+                            crate::peer::CONNECTIONS
+                        } else {
+                            0
+                        },
+                    &metadata,
+                )?,
                 gate,
                 reader: store.reader()?,
                 cache: cas_core::cache::Cache::new(resources.cache_bytes, &metadata)?,
@@ -347,6 +381,21 @@ impl Host {
         }
         let mut retained = reserved_vec(snapshots.as_ref().len(), &shared.resources.metadata)?;
         retained.extend(snapshots);
+        let peer_service = shared
+            .resources
+            .peer
+            .peer_listen
+            .map(|address| {
+                crate::peer::Server::start(
+                    address,
+                    shared.reader.clone(),
+                    shared.cache.clone(),
+                    &metadata,
+                    shared.peer_metrics.as_ref().expect("peer metrics").clone(),
+                    (shared.io_scheduler.clone(), image_count),
+                )
+            })
+            .transpose()?;
         let owner = worker::Owner {
             catalog: context.catalog,
             snapshots: retained,
@@ -360,6 +409,7 @@ impl Host {
             .spawn(move || owner.run())?;
         Ok(Self {
             shared,
+            peer_service,
             images: attachments,
             ready: Some(ready),
             worker: Some(worker),
@@ -464,9 +514,14 @@ impl Host {
         self.shared.reader.status()
     }
 
+    pub fn peer_address(&self) -> Option<std::net::SocketAddr> {
+        self.peer_service.as_ref().map(crate::peer::Server::address)
+    }
+
     pub fn report(&self) -> serde_json::Value {
         serde_json::json!({ "failure": self.shared.gate.failure(), "store": self.store_status(),
             "admission": self.shared.admission.status(),
+            "peer": self.shared.peer_metrics.as_ref().map(|metrics| metrics.report()),
             "cache": self.shared.cache.status(), "metadata_cache": self.shared.pages.status(),
             "fetches": self.shared.fetches.status(), "admission_scheduler":self.shared.fair.report(), "io_scheduler":self.shared.io_scheduler.status(),
             "collection": *self.shared.collection.lock().expect("collection status poisoned"),
@@ -488,6 +543,13 @@ impl Host {
                 "host images still attached",
             ));
         }
+        if let Some(service) = &mut self.peer_service {
+            service.shutdown()?;
+        }
+        if let Some(peer) = &self.shared.peer {
+            peer.shutdown()?;
+        }
+        self.peer_service.take();
         self.images.clear();
         self.ready.take();
         if self
@@ -590,6 +652,15 @@ impl Port {
         cas_core::scheduler::Scheduler::port(&self.shared.io_scheduler, self.index)
     }
 
+    pub fn peer(&self) -> Option<BudgetArc<crate::peer::Client>> {
+        self.shared.peer.clone()
+    }
+    pub fn peer_config(&self) -> &crate::peer::Config {
+        &self.shared.resources.peer
+    }
+    pub fn peer_metrics(&self) -> Option<BudgetArc<crate::peer::metrics::Metrics>> {
+        self.shared.peer_metrics.clone()
+    }
     pub fn reader(&self) -> Reader {
         self.shared.reader.clone()
     }

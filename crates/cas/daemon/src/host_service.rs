@@ -59,6 +59,7 @@ pub fn parse_id(value: &str) -> Result<[u8; 16], String> {
 }
 
 pub struct Config {
+    pub peer: crate::peer::Config,
     pub root: PathBuf,
     pub store: [u8; 16],
     pub segment_bytes: u64,
@@ -171,6 +172,8 @@ pub fn serve(mut config: Config) -> io::Result<()> {
     }
     let mut resources = Resources::default();
     resources.cache_bytes = config.cache_bytes;
+    resources.peer = config.peer.clone();
+    resources.peer.validate()?;
     let (outputs, report) = outputs(&mut config, &resources)?;
     if let Some(pause) = config.pause.take() {
         if !config

@@ -12,6 +12,7 @@ mod deadline;
 pub mod fault;
 pub mod host_service;
 mod local;
+pub mod peer;
 mod read_trace;
 mod request;
 pub mod service;

@@ -21,6 +21,8 @@ struct Storage {
 #[command(about = "Serve all catalog images from one governed local host")]
 struct Serve {
     #[command(flatten)]
+    peer: cas_daemon::peer::Config,
+    #[command(flatten)]
     storage: Storage,
     #[arg(long, value_enum)]
     mode: Mode,
@@ -98,6 +100,7 @@ fn main() -> std::io::Result<()> {
     }
     let args = Serve::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     host_service::serve(host_service::Config {
+        peer: args.peer,
         root: args.storage.root,
         store: args.storage.store,
         mode: args.mode,

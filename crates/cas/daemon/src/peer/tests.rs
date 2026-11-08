@@ -1,0 +1,207 @@
+use super::{metrics::Metrics, wire::*, *};
+use cas_core::{
+    BLOCK_SIZE,
+    budget::{Amount, Budget},
+};
+use std::{
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
+    sync::Arc,
+    thread,
+    time::{Duration, Instant},
+};
+
+fn memory() -> Arc<Budget> {
+    Budget::new(Amount {
+        bytes: 32 * 1024 * 1024,
+        requests: 0,
+    })
+}
+fn wait(ticket: &Ticket) -> (metrics::Phases, std::io::Result<()>, [u8; BLOCK_SIZE]) {
+    let mut fd = libc::pollfd {
+        fd: ticket.notification(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: fd is initialized and the ticket retains the live eventfd.
+    assert_eq!(unsafe { libc::poll(&mut fd, 1, 4000) }, 1);
+    let mut bytes = [0xa5; BLOCK_SIZE];
+    let (phases, result) = ticket.finish(&mut bytes);
+    (phases, result, bytes)
+}
+fn request(socket: &mut TcpStream) -> Header {
+    let mut bytes = [0; HEADER + 32];
+    socket.read_exact(&mut bytes).unwrap();
+    Header::decode(&bytes, false).unwrap()
+}
+fn response(h: Header, bytes: &[u8; BLOCK_SIZE]) -> [u8; FRAME] {
+    let mut frame = [0; FRAME];
+    Header { bytes: FRAME, ..h }.encode(&mut frame);
+    frame[HEADER..].copy_from_slice(bytes);
+    frame
+}
+
+#[test]
+fn pipelined_gets_handle_fragmentation_without_growing_transport_memory() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let peer = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket.set_read_timeout(Some(TIMEOUT)).unwrap();
+        socket.set_nodelay(true).unwrap();
+        let requests: Vec<_> = (0..4).map(|_| request(&mut socket)).collect();
+        // No reply before all four requests proves the client pipelines.
+        for h in requests {
+            let frame = response(h, &[7; BLOCK_SIZE]);
+            for part in frame.chunks(1023) {
+                socket.write_all(part).unwrap();
+            }
+        }
+    });
+    let budget = memory();
+    let metrics = Metrics::new(&budget).unwrap();
+    let client = Client::new(address, &budget, metrics.clone()).unwrap();
+    let before = budget.usage();
+    let hash = *blake3::hash(&[7; BLOCK_SIZE]).as_bytes();
+    let tickets: Vec<_> = (0..4).map(|_| client.fetch(hash).unwrap()).collect();
+    for ticket in &tickets {
+        let (p, result, bytes) = wait(ticket);
+        result.unwrap();
+        assert_eq!(bytes, [7; BLOCK_SIZE]);
+        assert!(p.send_ns <= p.first_byte_ns && p.first_byte_ns <= p.verified_ns);
+    }
+    assert_eq!(budget.usage().admitted, before.admitted);
+    assert_eq!(metrics.report()["counters"]["max_inflight"], 4);
+    drop((tickets, client, metrics));
+    peer.join().unwrap();
+    assert_eq!(budget.usage().current, Amount::default());
+}
+
+#[test]
+fn peer_down_short_reads_bad_hash_identity_and_status_never_publish_bytes() {
+    for failure in 0..7 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = if failure == 0 {
+            drop(listener);
+            None
+        } else {
+            Some(thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut h = request(&mut socket);
+                let mut frame = response(h, &[7; BLOCK_SIZE]);
+                match failure {
+                    1 => {
+                        socket.write_all(&frame[..9]).unwrap();
+                    }
+                    2 => {
+                        socket.write_all(&frame[..FRAME - 1]).unwrap();
+                    }
+                    3 => {
+                        frame[HEADER] ^= 1;
+                        socket.write_all(&frame).unwrap();
+                    }
+                    4 => {
+                        h.id += 1;
+                        frame = response(h, &[7; BLOCK_SIZE]);
+                        socket.write_all(&frame).unwrap();
+                    }
+                    5 => {
+                        Header {
+                            bytes: HEADER,
+                            status: MISSING,
+                            ..h
+                        }
+                        .encode(&mut frame);
+                        socket.write_all(&frame[..HEADER]).unwrap();
+                    }
+                    6 => {
+                        thread::sleep(TIMEOUT + Duration::from_millis(150));
+                    }
+                    _ => unreachable!(),
+                }
+            }))
+        };
+        let budget = memory();
+        let metrics = Metrics::new(&budget).unwrap();
+        let client = Client::new(address, &budget, metrics.clone()).unwrap();
+        let ticket = client
+            .fetch(*blake3::hash(&[7; BLOCK_SIZE]).as_bytes())
+            .unwrap();
+        let started = Instant::now();
+        let (_, result, bytes) = wait(&ticket);
+        assert!(result.is_err(), "case {failure}");
+        assert_eq!(bytes, [0xa5; BLOCK_SIZE]);
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_eq!(metrics.report()["counters"]["errors"], 1);
+        drop((ticket, client, metrics));
+        if let Some(peer) = peer {
+            peer.join().unwrap();
+        }
+        assert_eq!(budget.usage().current, Amount::default());
+    }
+}
+
+#[test]
+fn cancellation_retains_transport_slot_until_reply() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let peer = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let first = request(&mut socket);
+        let second = request(&mut socket);
+        assert_ne!(first.id, second.id);
+        socket
+            .write_all(&response(first, &[7; BLOCK_SIZE]))
+            .unwrap();
+        socket
+            .write_all(&response(second, &[7; BLOCK_SIZE]))
+            .unwrap();
+    });
+    let budget = memory();
+    let metrics = Metrics::new(&budget).unwrap();
+    let client = Client::new(address, &budget, metrics.clone()).unwrap();
+    let hash = *blake3::hash(&[7; BLOCK_SIZE]).as_bytes();
+    drop(client.fetch(hash).unwrap());
+    let ticket = client.fetch(hash).unwrap();
+    wait(&ticket).1.unwrap();
+    drop((ticket, client, metrics));
+    peer.join().unwrap();
+    assert_eq!(budget.usage().current, Amount::default());
+}
+
+#[test]
+fn has_checks_bounds_before_connecting() {
+    let address = "127.0.0.1:1".parse().unwrap();
+    assert!(has(address, &[], &mut []).is_err());
+    assert!(has(address, &[[0; 32]; MAX_HASHES + 1], &mut [0; 17]).is_err());
+    assert!(has(address, &[[0; 32]], &mut []).is_err());
+}
+
+#[test]
+fn failed_connection_is_replaced_for_the_next_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut first, _) = listener.accept().unwrap();
+        request(&mut first);
+        drop(first);
+        let (mut second, _) = listener.accept().unwrap();
+        let h = request(&mut second);
+        second.write_all(&response(h, &[7; BLOCK_SIZE])).unwrap();
+    });
+    let budget = memory();
+    let metrics = Metrics::new(&budget).unwrap();
+    let client = Client::new(address, &budget, metrics.clone()).unwrap();
+    let hash = *blake3::hash(&[7; BLOCK_SIZE]).as_bytes();
+    let first = client.fetch(hash).unwrap();
+    assert!(wait(&first).1.is_err());
+    drop(first);
+    let second = client.fetch(hash).unwrap();
+    wait(&second).1.unwrap();
+    drop(second);
+    assert_eq!(metrics.report()["counters"]["connections"], 2);
+    drop((client, metrics));
+    server.join().unwrap();
+    assert_eq!(budget.usage().current, Amount::default());
+}

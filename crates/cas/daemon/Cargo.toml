@@ -9,6 +9,7 @@ license.workspace = true
 
 [dependencies]
 cas-core.workspace = true
+blake3.workspace = true
 allocator-api2.workspace = true
 virtio-bindings = "0.2.7"
 clap.workspace = true

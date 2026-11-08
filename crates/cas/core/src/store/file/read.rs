@@ -111,8 +111,17 @@ impl Read {
             BLOCK_SIZE,
             BudgetAllocator::new(Arc::clone(&self.metadata)),
         )?;
-        direct::read_bytes(&self.file, scratch.as_mut_slice(), self.header_offset())?;
-        self.payload(scratch.as_slice())?.load(destination)
+        self.load_with_scratch(scratch.as_mut_slice(), destination)
+    }
+
+    /// Reuse aligned caller-owned header scratch on a bounded service worker.
+    pub fn load_with_scratch(&self, scratch: &mut [u8], destination: &mut [u8]) -> io::Result<()> {
+        require(
+            scratch.len() == BLOCK_SIZE && destination.len() == BLOCK_SIZE,
+            "chunk scratch/destination size",
+        )?;
+        direct::read_bytes(&self.file, scratch, self.header_offset())?;
+        self.payload(scratch)?.load(destination)
     }
 }
 

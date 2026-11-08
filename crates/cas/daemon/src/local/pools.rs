@@ -1,7 +1,7 @@
 use super::*;
 use cas_core::budget::Usage;
 
-pub(super) const HOST_REQUESTS: usize = 1024;
+pub(crate) const HOST_REQUESTS: usize = 1024;
 
 pub(super) const IMAGE_REQUESTS: usize = 128;
 pub(super) const IMAGE_READ_REQUESTS: usize = 8;
