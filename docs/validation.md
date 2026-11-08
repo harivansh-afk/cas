@@ -917,3 +917,13 @@ Local fixture cohorts now last five seconds. `nix fmt -- --ci` passed in
 passed. This covers the ACK counter change and all existing fleet crash/fencing
 regressions. The harness additionally records controller elapsed time for each
 explicit fleet command, separately from drift generation/background repair.
+
+Builds of both `.#two-host-fixture` and `.#two-host`, and all-systems flake
+evaluation, passed (`nix-build-verified.log`, `nix-eval-last.log`). The committed
+`eba8f53` fixture attempt `local-007` exposed a readiness race under load ~60:
+the disk/host-key markers preceded static interface configuration and the SSH
+master timed out during banner exchange. Its logs and failed disks are retained.
+Readiness now probes the actual forwarded SSH banner before the owned master
+starts; pinned-key authentication remains mandatory. A loopback unit test
+rejects non-SSH banners and absent listeners. The authenticated handshake allows
+120 seconds under TCG scheduling interference.

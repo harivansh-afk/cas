@@ -77,7 +77,9 @@ The default run executes:
   full-image provisioning, guest migration, full-image resync, and file allocation.
 - `independent-stores`: two non-networked CAS stores with the same seeded data and
   drift files, separately formatted ext4 metadata, and measured allocation/index
-  occupancy. The guest payloads match; filesystem UUIDs/format metadata differ.
+  occupancy. The workload and file sizes match; fio write-timestamp headers and filesystem
+  UUIDs/format metadata differ. This is a workload-matched capacity control, not
+  a claim that independently formatted disks have identical hashes.
 
 `settings.seconds` and `repeats` default to five 30-second runs. `depths` defaults
 to 1, 4, 16, 64. Set `inline_us` to 0 for the blocking control or 50 for the bounded

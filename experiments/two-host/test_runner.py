@@ -1,10 +1,12 @@
 """Fail-closed measurement rules; run with uv run --no-project python -m unittest."""
 
+import socket
+import threading
 import tempfile
 import unittest
 from pathlib import Path
 
-from agent import CLONE, IMAGE, Agent, fio_options
+from agent import CLONE, IMAGE, Agent, fio_options, ssh_ready
 from runner import classify, deltas, has_overlap, phases, rsync_bytes
 
 
@@ -96,6 +98,27 @@ class MeasurementTests(unittest.TestCase):
             finally:
                 a.close()
                 b.close()
+
+    def test_guest_readiness_requires_an_ssh_banner(self):
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen()
+            port = listener.getsockname()[1]
+
+            def banners():
+                for banner in (b"HTTP/1.0 200 OK\r\n", b"SSH-2.0-test\r\n"):
+                    with listener.accept()[0] as stream:
+                        stream.sendall(banner)
+
+            worker = threading.Thread(target=banners)
+            worker.start()
+            try:
+                self.assertFalse(ssh_ready(port))
+                self.assertTrue(ssh_ready(port))
+            finally:
+                worker.join(timeout=5)
+            self.assertFalse(worker.is_alive())
+        self.assertFalse(ssh_ready(port))
 
     def test_inventory_bytes_alone_do_not_certify_put_contention(self):
         sample = {"ship_bytes": 65536, "verified_gets": 20, "ship_chunks_acked": 0}

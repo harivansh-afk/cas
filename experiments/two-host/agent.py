@@ -58,6 +58,16 @@ def wait_for(predicate, seconds=180):
     raise TimeoutError("experiment readiness deadline")
 
 
+def ssh_ready(port):
+    # Disk readiness and sshd's host key precede late interface configuration.
+    # Probe the forwarded path; the authenticated master still checks the key.
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1) as stream:
+            return stream.recv(128).startswith(b"SSH-2.0-")
+    except OSError:
+        return False
+
+
 def fio_options(kind, size, seconds, depth=1, seed=42):
     options = [
         "fio",
@@ -393,7 +403,7 @@ class Agent:
             "-o",
             "BatchMode=yes",
             "-o",
-            "ConnectTimeout=30",
+            "ConnectTimeout=120",
             "-o",
             "StrictHostKeyChecking=yes",
             "-o",
@@ -408,6 +418,7 @@ class Agent:
             str(control),
             "root@127.0.0.1",
         ]
+        wait_for(lambda: ready() and ssh_ready(port), 180)
         # A foreground, owned master avoids a new SSH handshake for each phase.
         # No ControlPersist daemon is left behind after the experiment.
         master = self.spawn(name + "-ssh", ["ssh", "-M", "-N", *self.guests[name][1:]])
