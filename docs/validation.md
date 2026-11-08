@@ -241,6 +241,28 @@ The probe and cleanup are recorded in `nix-probe-note.json`. Subsequent flake
 references must use Git filtering. Ubuntu's base Nix is 2.18.1 versus Spark's
 2.34.7; evaluator timing will be checked before releasing the full suite.
 
+### Nix evaluation bound
+
+The task VM installed Nix 2.34.9 from the repository's pinned nixpkgs and
+recorded the version inside `nix develop` (`nix-package`, `nix-version`). On
+clean `33caf60`, packages, `just-check-07` and complete `nix-check-07` passed.
+An explicit `timeout --kill-after=5 115 nix flake check` then failed with exit
+124 (`nix-timed-07`), before pressure testing started. The same complete check
+with evaluator statistics passed in 143.966 seconds (`nix-isolated-08`). Nix
+reported 140.633 CPU-seconds and 7.701 seconds in GC (5.48%); the child resource
+record has one major fault and 128 input blocks. This is real evaluation work,
+not an IO stall or a failing check retried into acceptance.
+
+**The `nix-check` acceptance timeout is deliberately raised from 115 to 300
+seconds.** The generic IO-scenario bound is wrong for this complete package and
+NixOS evaluation graph on the isolated supported host. The new bound leaves
+roughly twice the measured evaluation time while remaining finite. No Nix
+outputs or checks are omitted. Every other scenario, inner-guest deadline,
+admission assertion and the pressure above-drain check is unchanged. A regression
+checks that the separate Nix budget cannot extend the runtime scenario budgets;
+the exception is also emitted in `conditions.json`. This is the only timeout
+increase in this continuation.
+
 ## 2026-11-08 — C5 publication rerun and telemetry tail regression
 
 Spark/aarch64, host Linux 7.0.14, 128 GB unified memory, accessible KVM;

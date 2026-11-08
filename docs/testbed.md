@@ -66,6 +66,12 @@ fixtures (C5). The harness binds evidence to exact sources and built binaries;
 its independent verifier rejects missing or altered required records.
 A pass applies only to the tested revision and failure model.
 
+The Nix flake check has a separate 300-second build-validation budget: complete
+evaluation took 144 seconds on the isolated eight-vCPU correctness host.
+Other command scenarios retain 115 seconds, shared/XFS fixtures 510 seconds,
+and pressure 1260 seconds. Guest IO, recovery and admission deadlines remain
+independent of this build-validation budget.
+
 ## Interactive guests
 
 Use [casctl](casctl.md) for named shared-host labs. A simpler staging-backed
