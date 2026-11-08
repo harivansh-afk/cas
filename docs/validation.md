@@ -980,3 +980,15 @@ certified. The isolated guest now loads virtio_net early and explicitly configur
 its one restricted user-network interface before sshd starts. Host networking is
 unchanged. This removes the device-unit ordering dependency rather than extending
 the readiness timeout again.
+
+
+`f2c518f` built both runner packages, passed Nix formatting and all-systems
+flake evaluation (`nix-build-network.log`, `nix-network-fmt.log`,
+`nix-eval-network.log`). `local-011` confirmed the new network unit completed
+before SSH startup, but exceeded the ten-minute TCG boot deadline under Spark
+load above 100 and CPU pressure around 70–80%. It did not reach a workload.
+`physical-load.jsonl` and `cpu-placement.json` retain physical-host evidence;
+the existing performance-core pin was retained. TCG boot now allows twenty
+minutes and the local suite four hours, with a boot RPC envelope covering its
+readiness phases. Native KVM and storage/protocol deadlines are unchanged.
+The fixture now records physical host pressure automatically every five seconds.

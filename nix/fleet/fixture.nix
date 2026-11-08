@@ -103,7 +103,7 @@ in
     ];
     serviceConfig = {
       Type = "oneshot";
-      TimeoutStartSec = 7200;
+      TimeoutStartSec = 14400;
       ExecStart = lib.getExe workload;
       ExecStopPost = lib.getExe finish;
     };

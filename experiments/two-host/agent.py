@@ -394,7 +394,7 @@ class Agent:
                 directory / "host-key.pub"
             ).exists()
 
-        wait_for(ready, 600 if self.build["acceleration"] == "tcg" else 240)
+        wait_for(ready, 1200 if self.build["acceleration"] == "tcg" else 240)
         write_json(
             directory / "qemu.json",
             qemu_record(process.pid, self.build["acceleration"]),

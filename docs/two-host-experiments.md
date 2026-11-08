@@ -183,3 +183,11 @@ the same counter-sampling schedule.
 Both launchers accept `--cases flows-k1,flows-k2` (or other listed case names)
 for a focused development rerun. The selected list is retained in the raw
 configuration; a subset's success does not certify the omitted cases.
+
+The local TCG fixture allows 20 minutes for guest boot and four hours for its
+whole suite; native KVM guest boot retains a four-minute limit. Agent RPC waits
+cover boot plus authenticated readiness. These startup limits do not alter CAS
+IO or peer protocol deadlines. `host-pressure.jsonl` samples the physical
+launcher's CPU, IO and memory pressure and load every five seconds, since guest
+load alone cannot reveal competing work on Spark. The isolated guest explicitly
+loads its virtio network driver and configures its one interface before sshd.

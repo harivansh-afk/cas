@@ -7,6 +7,8 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 from agent import stop, write_json
@@ -54,8 +56,31 @@ with (output / "console.log").open("x") as log:
         stderr=log,
         start_new_session=True,
     )
+    sampled = threading.Event()
+
+    def sample():
+        with (output / "host-pressure.jsonl").open("x") as evidence:
+            while not sampled.is_set():
+                evidence.write(
+                    json.dumps(
+                        {
+                            "unix_ns": time.time_ns(),
+                            "loadavg": os.getloadavg(),
+                            "pressure": {
+                                name: Path("/proc/pressure", name).read_text()
+                                for name in ("cpu", "io", "memory")
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+                evidence.flush()
+                sampled.wait(5)
+
+    sampler = threading.Thread(target=sample)
+    sampler.start()
     try:
-        status = process.wait(timeout=7300)
+        status = process.wait(timeout=14500)
         result = json.loads((output / "run/results.json").read_text())
         completion = json.loads((output / "completion.json").read_text())
         if status or not result["success"] or completion["service_result"] != "success":
@@ -64,5 +89,7 @@ with (output / "console.log").open("x") as log:
             )
     finally:
         stop(process)
+        sampled.set()
+        sampler.join()
 # Failures retain the disposable disks for diagnosis, as well as the logs.
 shutil.rmtree(scratch)

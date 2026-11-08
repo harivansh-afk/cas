@@ -154,7 +154,7 @@ class Remote:
         request = {"method": method, "args": args}
         self.process.stdin.write(json.dumps(request) + "\n")
         self.process.stdin.flush()
-        value = self.replies.get(timeout=900)
+        value = self.replies.get(timeout=2400 if method == "boot" else 900)
         self.events.write(json.dumps({"request": request, "response": value}) + "\n")
         self.events.flush()
         if "error" in value:
