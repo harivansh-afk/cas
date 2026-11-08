@@ -16,7 +16,8 @@ pub fn report(address: SocketAddr) -> io::Result<serde_json::Value> {
         Flow::Control,
         std::sync::Arc::new(Metrics::default()),
     )?;
-    let mut bytes = [0; 64 * 1024];
+    // Administrative snapshots include the bounded remote-read timing ring.
+    let mut bytes = vec![0; wire::MAX_BODY];
     let n = client.exchange(7, &mut [], &mut bytes)?;
     Ok(serde_json::from_slice(&bytes[..n])?)
 }

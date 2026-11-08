@@ -32,7 +32,7 @@ struct Serve {
     /// Existing directory on another filesystem; creates host.json and per-image reports.
     #[arg(long)]
     reports: PathBuf,
-    /// Clean chunk-cache bytes; bounded by the default host cap.
+    /// Clean chunk-cache bytes; zero disables payload caching, bounded by the host cap.
     #[arg(long, default_value_t = cas_daemon::Resources::DEFAULT_CACHE_BYTES)]
     cache_bytes: usize,
     /// Sample every 500 ms; fail the run if telemetry exceeds 64 MiB or 4,096 samples.

@@ -854,3 +854,38 @@ with raw-copy/ZFS/rsync baselines. Add QEMU freeze/device/RAM transfer and resum
 orchestration and measure full blackout. Exercise power loss and a physically
 dark peer separately from these SIGKILL tests. No CloudLab, KVM, Nix package,
 complete C5 rerun or paper performance/capacity gate is claimed.
+
+## 2026-11-08 — two-host experiment controls and harness regressions
+
+Tested `a75a750` plus the peer timing report, zero-capacity cache, GET/PUT regression,
+QEMU/SSH runner and harness test changes in this worktree, on shared aarch64 Spark.
+Raw evidence is under ignored `results/two-host/`. No push, merge, deployment or
+CloudLab result is implied.
+
+- `RUST_TEST_THREADS=3 CARGO_BUILD_JOBS=3 just check` passed in
+  `just-check-4.log`: 536 Rust tests passed, 27 ignored; six Python runner tests
+  passed, including a real loopback TCP rsync transfer with exact byte readback.
+  The new core test verifies that a zero-byte cache retains neither payload nor
+  membership, still rejects a hash mismatch, and releases its metadata budget.
+- `cargo test -p cas-daemon get_progresses_and_verifies -- --nocapture` passed
+  after correcting the test's nonblocking shutdown polling. It stalls an actual
+  compaction PUT before insertion/ACK in one process and completes 32 verified
+  GETs through its separate listener. No latency threshold is inferred.
+- `nix flake check --no-build --all-systems` passed (`nix-eval.log`). Nix package
+  tests and fixture builds were also exercised; the final QEMU record follows.
+- Early unbounded parallel checks exposed transient `WouldBlock` after IO-owner
+  teardown in existing opening/recovery tests, and a repeatable ring-setup race
+  in the lifecycle test. The latter now initializes wraparound cursors before
+  enabling the queue, preserving the same replay assertions. Twenty consecutive
+  focused runs passed (`lifecycle-repeat.log`). A separate harness assertion now
+  permits its intentional immediate-exit launcher to already be a zombie, while
+  still requiring descendant cleanup. No runtime ordering/recovery rule changed.
+- Retained failures/retries: `just-check-initial.log`, `just-check-2.log`,
+  `lifecycle-{retry,diagnostic,initial-base,initial-base-2}.log`,
+  `nix-package-failure.log`, `nix-build-{2,3}.log`, and
+  `python-baseline-test{,-2,-3}.log`. The first baseline attempts incorrectly
+  combined a daemon URL with SSH transport options and explicitly requested group
+  switching as an unprivileged daemon; the successful TCP test covers both fixes.
+  The early fixture attempts found missing VM-specific XFS mounts, the service's
+  1,024-descriptor soft limit, unsupported zero-byte chunk cache configuration,
+  and a slow TCG guest bootstrap. Those unsuccessful runs are not measurements.

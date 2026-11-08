@@ -95,6 +95,7 @@ impl fleet::Handler for Gateway {
         if op == 7 && body.is_empty() {
             let runtime = self.shared.fleet.as_ref().unwrap();
             let value = serde_json::json!({"fleet":runtime.metrics.report(),
+                "peer":self.shared.peer_metrics.as_ref().map(|metrics| metrics.report()),
                 "store":self.shared.reader.status(), "cache":self.shared.cache.status(),
                 "placement":runtime.state.lock().unwrap().placement});
             let mut destination = &mut *output;

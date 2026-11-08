@@ -572,3 +572,60 @@ fn cold_recovery_refuses_a_tail_below_the_durable_handoff_record_without_repair(
     assert!(result.is_err());
     assert_eq!(before, super::super::recovery::files(roots[1].path()));
 }
+
+#[test]
+fn get_progresses_and_verifies_while_compaction_put_waits_for_durable_ack() {
+    let roots = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+    let addresses = addresses();
+    let mut a = Daemon::start(roots[0].path(), 0, 2, addresses, "");
+    let mut b = Daemon::start(roots[1].path(), 1, 2, addresses, "");
+    attached(&mut a, 2);
+    a.command(json!({"op":"seed"}));
+    wait_chunks(&mut b, 64);
+    b.kill();
+    drop(b);
+    // Stop the bulk receiver before insertion/ACK. Its owner cannot service
+    // more bulk work; GET must still progress using its independent workers.
+    let mut b = Daemon::start(roots[1].path(), 1, 2, addresses, "put-before");
+    a.command(json!({"op":"tail","value":0x95}));
+    a.command(json!({"op":"compact"}));
+    let until = Instant::now() + Duration::from_secs(20);
+    while !roots[1].path().join("pause").exists() {
+        assert!(Instant::now() < until, "shipper never reached PUT");
+        thread::sleep(Duration::from_millis(5));
+    }
+    let budget = crate::local::metadata_budget();
+    let metrics = crate::peer::metrics::Metrics::new(&budget).unwrap();
+    let client = crate::peer::Client::new(addresses[1], &budget, metrics.clone()).unwrap();
+    let expected = [2; BLOCK_SIZE];
+    let hash = *blake3::hash(&expected).as_bytes();
+    let mut buffer = [0; BLOCK_SIZE];
+    let mut samples = Vec::new();
+    for _ in 0..32 {
+        let started = Instant::now();
+        let ticket = client.fetch(hash).unwrap();
+        while !ticket.ready() {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "GET blocked behind PUT"
+            );
+            thread::sleep(Duration::from_micros(50));
+        }
+        let (phases, result) = ticket.finish(&mut buffer);
+        result.unwrap();
+        assert_eq!(buffer, expected);
+        samples.push(json!({"elapsed_ns":started.elapsed().as_nanos(),"phases":phases}));
+    }
+    assert_eq!(metrics.report()["counters"]["verified"], 32);
+    evidence(
+        "get-during-stalled-put",
+        &json!({"samples":samples,"client":metrics.report()}),
+    );
+    let until = Instant::now() + Duration::from_secs(5);
+    while let Err(error) = client.shutdown() {
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(Instant::now() < until);
+        thread::sleep(Duration::from_millis(1));
+    }
+    b.kill();
+}
