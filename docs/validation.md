@@ -497,3 +497,66 @@ These are local development checks. No CI, Nix package validation, QEMU guest
 run, CloudLab deployment, cross-host timing, local NVMe comparison, complete C5
 rerun, or physical power-loss acceptance was performed. Nothing was pushed or
 merged; the main checkout stayed on `main`.
+
+## 2026-11-08 — Release loopback remote-read attribution
+
+Tested exact revision `5253ccf104294cd0cdf6265c446d0855b9cfbc26`, with a clean
+working tree and the same Spark/kernel/toolchain/filesystem as above. No code
+changes followed this measurement; the final validation commit only records
+these results. Command (from the worktree root):
+
+```sh
+CAS_PEER_EVIDENCE="$PWD/results/peer-fetch/release-loopback" CARGO_BUILD_JOBS=3 \
+  cargo test --release -p cas-daemon --lib \
+  local::host::tests::peer::two_daemon_loopback -- --nocapture
+```
+
+The release integration passed on its first run. It verified every payload,
+retained one TCP GET connection, observed four outstanding GETs in the pipeline
+phase, and passed peer-loss error handling. A reported 704 verified chunks and
+no reader cache residency; B reported 64 disk/store fills and 640 memory hits.
+After B stopped, A reported one error/failed read and still 704 verified chunks.
+
+One run, QD1, 4 KiB, 64 distinct chunks, cache fills disabled on A. Exclude the
+first 100 warmup reads; all subsequent 600 measured reads hit B's memory. Times
+below are microseconds, computed from the per-request timestamps, with nearest
+rank quantiles (`ceil(p*n)`). The harness records receipt before admission and
+completion when its blocking completion receive returns. This includes the
+real daemon reactor/transport path but excludes QEMU and guest scheduling.
+
+| Phase | Mean (µs) | p50 (µs) | p99 (µs) |
+| --- | ---: | ---: | ---: |
+| Request receipt → GET send | 55.810 | 25.057 | 796.076 |
+| GET send → first reply byte | 97.542 | 56.785 | 1404.885 |
+| First byte → received and BLAKE3 verified | 5.995 | 5.760 | 14.656 |
+| Verified → harness completion | 84.911 | 24.640 | 2366.212 |
+| Receipt → completion | 244.258 | 112.242 | 3247.297 |
+
+Phase means sum to the total mean; marginal phase quantiles do not sum to total
+quantiles. First-byte-to-verification includes the remaining TCP receive, hash,
+and worker bookkeeping, not pure hashing cost. This is a shared development
+host with no CPU/IRQ affinity or idle-state controls, and one short run. The
+large tails are measured, not discarded or attributed to an unverified cause.
+These numbers establish instrumentation and the exercised path, not the paper's
+remote-memory-versus-local-NVMe result. No local NVMe latency arm was run.
+
+Raw evidence: `results/peer-fetch/release-loopback.log`,
+`release-loopback/{reader,pipeline,server,failure}.json`, `revision.txt`,
+`uncommitted.txt` (empty), `host.txt`, `toolchain.txt`, `filesystem.txt`,
+`loopback-link.txt`, `loopback-qdisc.txt`, and `release-binary.sha256`. The retained
+`results/peer-fetch/summarize.py` checks 600 successful single-chunk observations,
+nonnegative phase durations, and additive means; it emits `latency-summary.json`
+and `latency-summary.txt`. Run it with `uv run results/peer-fetch/summarize.py`.
+This is an ignored evidence-analysis helper, not a maintained analysis module.
+`cargo run --quiet -p cas-daemon --bin cas-host -- --help` also passed and exposed
+all four peer flags; output is retained as `cas-host-help.txt`.
+
+Remaining for CloudLab: build the pinned revision on both hosts, bind the
+explicit private NIC addresses, configure reachability, prepare matching
+compacted replicas, attach the guest/harness, and verify cache hit counters.
+Record kernel/NIC/firmware/MTU/IRQ/C-state settings and transport baselines.
+Measure controlled local NVMe and peer-memory/peer-NVMe arms with repeated runs,
+QD/size sweeps, CPU/IOPS, guest tails, and loss/failure behavior. Long-run phase
+capture must account for the bounded 1,024-record ring; periodic telemetry is
+not lossless. PUT contention and busy-polling require additional implementation.
+No paper performance gate, CI, merge, push, or deployment is claimed.
