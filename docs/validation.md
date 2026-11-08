@@ -140,6 +140,74 @@ before running a test; the corrected wrapper selected the just-built binary.
 The second wrapper recorded the child failure in `results.json` but itself
 exited zero; the test log and child exit 101 are the authoritative failure.
 
+### Complete rerun on the committed fixes
+
+The exact clean source was `f05b47b5229b46aba6841b4df21a67860bf2ed42`,
+including telemetry fix `8bcee17`, attachment-rebase fix `69c57c4`, and the
+epoch fixture geometry correction `f05b47b`. Checkpoint and CAS package builds
+passed with release tests (`build-checkpoints-05`, `build-cas-02`).
+`nix develop -c just nix-check` passed (`nix-prepare-02`). The source-bound
+suite also passed its workspace tests (511 passed, 25 ignored) and its timed
+Nix check in 95.545 seconds. No tracked files changed during the suite or
+independent verification.
+
+```
+nix develop -c result-checkpoints/bin/cas-checkpoints \
+  --checkpoint C5 --checkout . --output results/c5-2026-11-08/suite-02
+result-cas/bin/cas-harness verify-suite --output results/c5-2026-11-08/suite-02
+```
+
+All **41 scenarios executed: 32 passed, nine failed**, in 52.49 minutes.
+Independent verification exited 1 with `required scenario local-sync failed`.
+This complete receipt does not establish C5 acceptance. The TODO gate remains
+unchecked.
+The final documentation commit records this result; it is not another tested
+runtime revision. Nothing was pushed, merged or deployed.
+
+| Failed scenario(s) | Evidence and remaining diagnosis |
+| --- | --- |
+| `local-sync`, `async-io` | Both completed their initial 64 MiB write/read verification, then failed queue-depth writes with `staging capacity exhausted`. Three retained 64 MiB segments consume 201,330,688 and 201,334,784 bytes respectively. A fourth nominal segment exceeds the 268,435,456-byte cap by 4 KiB and 8 KiB. `standalone-capacity-02.json` records actual file block counts and daemon statuses. The standalone smoke workload/default geometry needs allocation headroom; the strict cap correctly refused further allocation. This remains unresolved; the unit-test geometry fix does not change these runtime defaults. |
+| `xfs-store` | The runtime log marks `unique_live_payload_reports_capacity_exhaustion_and_preserves_reads` **FAILED**. Later tests continued until the outer guest process exceeded 285 seconds at the terminal-close/drain-deadline test. Rust's captured failure details were not printed before the process was killed, so the original assertion and its root cause are unavailable. Advancement past the capacity test is not evidence of a pass. |
+| `shared-replacement`, `shared-before-chunks`, `shared-after-chunks`, `shared-after-manifest` | `application readiness expired`. Inner-guest logs show slow NixOS activation/boot; the requested crash boundaries were not reached. |
+| `shared-after-unlink` | The requested cut and daemon replacement completed (`compaction-pause.json`, `restart.json`), but the cold verification phase expired while guests were still booting. Exact readback acceptance is absent. |
+| `guest-pressure` | `shared readiness: timed out`. The earlier ENODATA did not recur, but no pressure stage was released and no pressure read-latency result exists. |
+
+The after-D and after-punch shared crash-cut fixtures passed completely, including
+verification. This run sampled host one-minute load from 16.50 to 88.40 and
+minimum free disk space of 244.55 GiB. Contention and nested TCG startup are
+important confounders, not proof of the sole cause of every timeout. No timing
+bound, workload, verification assertion or production capacity limit was
+loosened to obtain a pass.
+
+Across all 82 available completed fio read-job records, the largest recorded
+completion latency was 61.065 ms (async smoke p99 5.997 ms); the baseline smoke
+maximum was 161.435 ms. No multi-second read completion is established by these
+records. This does not bound pressure read stalls: the pressure workload never
+started. The baseline isolated XFS test's 97.303-second aggregate readback of
+256 MiB remains a throughput concern, not a measured individual-read maximum.
+The earlier intermittent continuous-overwrite release-test failure remains
+unexplained despite isolated repetitions and subsequent package/suite passes.
+
+Raw evidence remains in `results/c5-2026-11-08/`: `suite-02/`, command JSON/log
+pairs, `verify-suite-02.log`, `inventory-02.json`, `read-latencies-02.json`,
+`standalone-capacity-02.json`, `resource-samples-02.jsonl`, and
+`resource-summary-02.json`. The diagnostic XFS probe below does not replace or
+repair the failed full-suite record.
+
+The post-run isolated XFS probe used the exact `f05b47b` package/test binary,
+the same kernel/XFS fixture, and the unchanged test with `--exact --ignored
+--nocapture --test-threads=1` plus `RUST_BACKTRACE=1`. It passed in 101.77 seconds,
+with 256 MiB seeded in 23.843 seconds and read back in 75.808 seconds. All data,
+capacity and no-admitted-write assertions passed. Evidence:
+`xfs-probe-build-03.{json,log}`, `xfs-isolated-03.{json,log}`, and
+`xfs-isolated-03/{command.json,probe.log,unique-live-capacity.json}`. The probe
+wrapper's QEMU exit was checked against the actual test summary and result,
+not treated alone as success. The failure within the full runtime inventory
+was not reproduced; its assertion and root cause remain unresolved. A future
+full fixture should retain uncaptured test diagnostics so a later process
+timeout cannot hide an earlier assertion. No changes were made to the fixture
+runner or test bounds in this session.
+
 ## 2026-09-24 — Native KVM runner preparation
 
 On Spark, base `2d56108a2ab38b1985816448acbe6f08d8c29c3e` plus the native

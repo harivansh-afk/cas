@@ -12,7 +12,8 @@ Check off work only when its acceptance condition passes, with a record in
   capacity waits; retain recovery and data-integrity evidence.
 - [ ] Rerun the complete C5 inventory on the publication snapshot; earlier
   acceptance belongs to earlier revisions, not this tree.
-  [Current rerun](docs/validation.md#2026-11-08--c5-publication-rerun-and-telemetry-tail-regression).
+  [Current rerun](docs/validation.md#2026-11-08--c5-publication-rerun-and-telemetry-tail-regression):
+  32/41 passed at `f05b47b`; independent verification failed.
 - [ ] Verify sustained workloads on dedicated native storage, separately from
   nested-VM correctness checks.
 - [x] License first-party source under GPL-3.0-only while retaining third-party
