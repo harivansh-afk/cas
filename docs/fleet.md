@@ -85,9 +85,9 @@ the root's recorded E as mandatory evidence and rejects a shorter WAL before
 repair. Tests exercise these transitions with real process kills.
 
 The operation moves the block backend state, not QEMU CPU/RAM/device state.
-Guest freeze, QEMU migration/reconnection and resume orchestration remain testbed
-work. Reported freeze/fence/transfer/install times are daemon timings, not total
-VM blackout. Quiescence currently pauses the whole host. Fenced source manifests,
+The [two-host runner](two-host-experiments.md) orchestrates clean guest shutdown,
+fenced handoff, cold boot on B, data verification and workload continuation.
+It measures total guest downtime separately from daemon timings. Quiescence currently pauses the whole host. Fenced source manifests,
 old WALs and rejected import artifacts are conservatively retained; they count
 against physical capacity. Capacity experiments should use fresh roots and report
 these retained recovery bytes separately from live chunk/index occupancy.
@@ -175,6 +175,6 @@ Tests cover both placement modes, data-verified provisioning/migration/return,
 independently drifted clones, duplicate sync, PUT interruption, handoff kills,
 required-prefix rejection and interrupted sweep. They run independent daemon
 processes using the native admission/reactor harness. CloudLab still needs real
-100 GbE, dedicated storage, controlled CPU/IRQ affinity, QEMU orchestration,
-workload/capacity runs and physical host-loss validation. Local k=2 replication
+100 GbE, dedicated storage, controlled CPU/IRQ affinity, hardware runs of the
+QEMU/workload/capacity harness and physical host-loss validation. Local k=2 replication
 alone does not protect a host's not-yet-shipped WAL tail.

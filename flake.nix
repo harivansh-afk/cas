@@ -156,10 +156,31 @@
           };
           sharedRecovery = sharedFor pkgs { liveRecovery = true; };
           pressure = sharedFor pkgs { pressure = true; };
+          fleetRunner =
+            acceleration:
+            import ./nix/fleet {
+              inherit
+                pkgs
+                lib
+                nixpkgs
+                acceleration
+                ;
+              provenance = labProvenance;
+            };
         in
         {
           default = pkgs.cas;
           inherit (pkgs) cas;
+          two-host = fleetRunner "kvm";
+          two-host-fixture = pkgs.callPackage ./nix/fleet/fixture-runner.nix {
+            guest = lib.nixosSystem {
+              specialArgs.runner = fleetRunner "tcg";
+              modules = [
+                ./nix/fleet/fixture.nix
+                { nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system; }
+              ];
+            };
+          };
           native = import ./nix/native.nix {
             inherit pkgs lib nixpkgs;
             provenance = labProvenance;
@@ -226,6 +247,8 @@
           packages = with pkgs; [
             cas.toolchain
             just
+            uv
+            rsync
             qemu_kvm
             fio
             openssh

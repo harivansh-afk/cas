@@ -87,3 +87,7 @@ Vendored dependencies retain their own licenses and notices under
 `crates/vendor/`; this grant does not relicense third-party material. The bundled
 Berkeley Mono font is not covered by the GPL grant; its separate redistribution
 terms have not been recorded here.
+
+The [two-host experiment runner](docs/two-host-experiments.md) boots QEMU guests,
+measures fenced disk handoff against a full-image rsync control, and collects
+remote-read, shipping-contention and capacity evidence over local or SSH agents.
