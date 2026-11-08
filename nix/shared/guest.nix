@@ -63,6 +63,9 @@ in
   networking.useDHCP = false;
   system.stateVersion = "26.05";
   documentation.enable = false;
+  # This fixed-workload guest never installs packages. Registration otherwise
+  # tries to create /nix/store/.links on the immutable program image.
+  nix.enable = false;
   services.timesyncd.enable = false;
   virtualisation = {
     diskImage = null;

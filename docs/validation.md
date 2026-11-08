@@ -170,6 +170,16 @@ observed Nix registration service failure whose detailed cause was not in the
 previous per-workload journal. No deadline or existing oracle changed. The
 remaining five focused cases and final suite were gated off after this failure.
 
+At `751d3da`, the corrected mount assertion passed and both applications
+completed daemon replacement with the same original QEMU PIDs/start ticks.
+The retained boot journal identified the unrelated registration failure:
+`register-nix-paths` attempted to create `/nix/store/.links` on the read-only
+program image (14.329 s wall time, 64.4 MiB peak memory for the failed service).
+The fixed-workload inner guest never invokes the Nix package manager, so its
+runtime is now disabled with `nix.enable = false`. This removes an invalid
+boot operation rather than changing recovery or application deadlines. Nix
+still builds and source-binds the guest and its immutable executable closure.
+
 ## 2026-11-08 — C5 publication rerun and telemetry tail regression
 
 Spark/aarch64, host Linux 7.0.14, 128 GB unified memory, accessible KVM;
