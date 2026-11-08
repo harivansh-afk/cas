@@ -1318,6 +1318,20 @@ impl VhostUserBackendMut for Backend {
                         Err(error) if error.kind() == io::ErrorKind::WouldBlock => (),
                         Err(error) => return Err(error),
                     }
+                    // Host admission/collection wakes the frontend even before
+                    // QEMU connects. This is not a guest queue kick: no accepted
+                    // IO can exist before feature and memory setup complete.
+                    if self.negotiated_features & REQUIRED_FEATURES != REQUIRED_FEATURES
+                        || self.memory.is_none()
+                    {
+                        if let Some(failure) = &self.failure {
+                            return Err(io::Error::other(failure.clone()));
+                        }
+                        if let Some(gate) = self.storage.completion_gate() {
+                            gate.lock_checked()?;
+                        }
+                        return Ok(());
+                    }
                 }
                 timer
                     if self
@@ -1469,6 +1483,53 @@ mod tests {
             panic!("advertised maximum must decode as WRITE");
         };
         assert_eq!(request.len, MAX_REQUEST_BYTES);
+    }
+
+    #[test]
+    fn host_wakeup_before_negotiation_never_consumes_a_guest_queue() {
+        for setup in 0..3 {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("image.raw");
+            File::create(&path)
+                .unwrap()
+                .set_len(BLOCK_SIZE as u64)
+                .unwrap();
+            let mut backend = Backend::new(&path).unwrap();
+            let (memory, vring) = queue();
+            data_chain(
+                &memory.memory(),
+                virtio_bindings::bindings::virtio_blk::VIRTIO_BLK_T_IN,
+            );
+            memory
+                .memory()
+                .write_obj(1u16, GuestAddress(0x2002))
+                .unwrap();
+            if setup == 1 {
+                backend.acked_features(backend.features());
+            }
+            if setup == 2 {
+                backend.update_memory(memory).unwrap();
+            }
+            backend.completion_event.write(1).unwrap();
+            backend
+                .handle_event(
+                    backend.completion_token(),
+                    EventSet::IN,
+                    std::slice::from_ref(&vring),
+                    0,
+                )
+                .unwrap();
+            assert!(backend.failure().is_none());
+            assert_eq!(backend.pending_count(), 0);
+            assert_eq!(vring.queue_next_avail(), 0);
+            // Real guest IO still requires both negotiated features and memory.
+            assert!(
+                backend
+                    .handle_event(0, EventSet::IN, std::slice::from_ref(&vring), 0)
+                    .is_err()
+            );
+            assert_eq!(vring.queue_next_avail(), 0);
+        }
     }
 
     #[test]

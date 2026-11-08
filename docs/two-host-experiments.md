@@ -23,7 +23,9 @@ unmounts ext4 and issues FLUSH before QEMU exits; `cas-fleet migrate` still perf
 the persistent writer-generation handoff. The daemon has one-shot image
 attachments; after both guests exit, the harness restarts both daemons in cold
 recovery mode before handing off. Recovery is included in `handoff_ns` and also
-reported as nested `cold_recovery_ns`. Flow counter deltas start after recovery. The old guest is gone before B boots.
+reported as nested `cold_recovery_ns`. The source restarts without frontend
+listeners; B declares only the migrating image. Flow counter deltas start after
+recovery. The old guest is gone before B boots.
 
 Downtime starts immediately before asking A to shut down and ends after B has
 booted, mounted the disk, verified the original file and acknowledged drift file,

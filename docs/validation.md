@@ -928,7 +928,33 @@ starts; pinned-key authentication remains mandatory. A loopback unit test
 rejects non-SSH banners and absent listeners. The authenticated handshake allows
 120 seconds under TCG scheduling interference.
 
-`local-008` was stopped during guest startup: a one-second banner probe repeatedly
+`local-008` failed during guest startup: a one-second banner probe repeatedly
 closed SSH sessions before their TCG-scheduled banners arrived. The probe now
 allows 30 seconds per attempt within the existing readiness deadline, avoiding
 that retry pressure. No storage/performance result is claimed from this attempt.
+
+
+`66dec34` passed `just check` in `just-check-final.log` (536 Rust tests,
+27 ignored, eight Python tests). Its `local-009` guest run verified provisioning,
+drift and cold remote reads, then reached a durable destination activation but
+reported migration failure. Focused replay from copies of retained XFS disks
+(`diagnose-001` through `diagnose-003`) isolated the cause: an administrative
+frontend wake before feature negotiation was treated as guest IO, failing the
+source's dormant vhost service during handoff finalization. Root records showed
+A fenced at generation 2 and B active at that same generation; a cold retry
+succeeded. There was no evidence of two writers or data corruption.
+
+The frontend now ignores only completion/administrative wakes while feature or
+memory setup is incomplete, while retaining terminal gate checks. Real queue
+kicks still fail before setup. `host-wakeup-test.log` covers each partial setup
+and asserts no descriptor consumption. A two-process test with a real unconnected
+vhost service failed before the fix (`cold-service-before.log`, 30.69 s) and
+passed after it (`cold-service-after.log`, 1.20 s), verifying migrated bytes.
+Bulk operation failures are now logged in production, not only test builds.
+The harness also restarts A without frontend listeners and B with only the
+migrating image, so stopped clones do not leave unused timed listeners.
+
+The diagnostic Nix expression initially used an unfiltered path flake reference;
+that evaluation was canceled, then rebuilt successfully using `git+file://`.
+Diagnostic scripts/expressions, disk copies and logs remain under ignored
+`results/two-host/diagnose*`. They are diagnostic artifacts, not a runner mode.

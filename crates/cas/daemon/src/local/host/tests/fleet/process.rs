@@ -112,6 +112,7 @@ fn daemon_child() {
     };
     let mut guests = std::collections::BTreeMap::<u8, Local>::new();
     let mut id = 1;
+    let mut waiting = None;
     reply(json!({"ready":true}));
     for line in std::io::stdin().lock().lines() {
         let command: Value = serde_json::from_str(&line.unwrap()).unwrap();
@@ -125,6 +126,31 @@ fn daemon_child() {
                     guests.insert(image, local);
                 }
                 json!({"ok":ok})
+            }
+            "cold_backend" => {
+                let backend = host
+                    .attach_cold(
+                        [image; 16],
+                        crate::deadline::RECOVERY_TIMEOUT,
+                        crate::fault::Fault::default(),
+                    )
+                    .unwrap();
+                let service = crate::service::Service::new(
+                    backend,
+                    fs::File::create(root.join("cold-report.json")).unwrap(),
+                )
+                .unwrap();
+                let control = service.control().unwrap();
+                let path = root.join("cold.sock");
+                let socket = path.clone();
+                let worker = thread::spawn(move || service.serve(&socket));
+                waiting = Some((control, worker));
+                let until = Instant::now() + IO_DEADLINE;
+                while !path.exists() {
+                    assert!(Instant::now() < until);
+                    thread::sleep(Duration::from_millis(1));
+                }
+                json!({"ok":true})
             }
             "seed" => {
                 let local = guests.get_mut(&image).unwrap();
@@ -229,6 +255,11 @@ fn daemon_child() {
         };
         reply(result);
     }
+    if let Some((control, worker)) = waiting {
+        control.cancel("test listener cleanup").unwrap();
+        let _ = worker.join().unwrap();
+        drop(control);
+    }
     drop(guests);
     shutdown(host);
     reply(json!({"stopped":true}));
@@ -274,6 +305,24 @@ fn evidence(name: &str, value: &Value) {
         .unwrap();
     }
 }
+#[test]
+fn migration_from_a_cold_backend_before_frontend_connection_finishes() {
+    let roots = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+    let addresses = addresses();
+    let mut a = Daemon::start(roots[0].path(), 0, 2, addresses, "");
+    let mut b = Daemon::start(roots[1].path(), 1, 2, addresses, "");
+    attached(&mut a, 2);
+    a.command(json!({"op":"seed"}));
+    wait_chunks(&mut b, 64);
+    a.kill();
+    drop(a);
+    let mut a = Daemon::start(roots[0].path(), 0, 2, addresses, "");
+    assert_eq!(a.command(json!({"op":"cold_backend"}))["ok"], true);
+    transfer(addresses, fleet::Mode::Migration).unwrap();
+    attached(&mut b, 2);
+    b.command(json!({"op":"read"}));
+}
+
 #[test]
 fn two_daemon_provision_migrate_sync_and_sweep_verify_data() {
     for k in [1, 2] {

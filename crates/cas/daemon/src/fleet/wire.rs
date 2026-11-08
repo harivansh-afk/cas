@@ -348,7 +348,6 @@ fn serve(
         rx.fetch_add(HEADER as u64, Ordering::Relaxed);
         transfer(socket, &mut request[..h.bytes], false, rx, Some(stop))?;
         let result = handler.exchange(h.op, h.flow, &request[..h.bytes], response);
-        #[cfg(test)]
         if let Err(error) = &result {
             eprintln!("fleet op {}: {error}", h.op);
         }

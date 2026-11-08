@@ -275,13 +275,14 @@ class Agent:
             )
         )
 
-    def host(self, node, k, peer, cache, force=False):
+    def host(self, node, k, peer, cache, force=False, images=None):
         self.host_options = {
             "node": node,
             "k": k,
             "peer": peer,
             "cache": cache,
             "force": force,
+            "images": images,
         }
         reports = self.case / (
             "daemon" if self.host_generation == 0 else f"daemon-{self.host_generation}"
@@ -318,7 +319,7 @@ class Agent:
             ]
         if force:
             argv.append("--peer-force-remote")
-        for image in (IMAGE, CLONE) if k else (IMAGE,):
+        for image in ((IMAGE, CLONE) if k else (IMAGE,)) if images is None else images:
             argv += ["--image", f"{image}={self.socket(image)}"]
         self.spawn("host", argv, pin=self.node.get("cpus"))
         return {"pid": self.children["host"].pid}
@@ -339,7 +340,11 @@ class Agent:
             )
             source.rename(self.case / f"host-{self.host_generation}-{suffix}")
         self.host_generation += 1
-        return self.host(**self.host_options)
+        options = {
+            **self.host_options,
+            "images": [] if self.host_options["node"] == 0 else [IMAGE],
+        }
+        return self.host(**options)
 
     def socket(self, image):
         return str(Path(self.sockets.name) / f"{self.case.name}-{image}.sock")
