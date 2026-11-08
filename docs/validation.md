@@ -39,8 +39,10 @@ that became test-only; they were marked accordingly (`just-check-05.log`).
 `nix develop -c just check` then passed formatting, strict Clippy, 512 tests
 with 25 existing ignores, and whitespace checks (`just-check-06.log`).
 
-XFS fixture tests now use `--nocapture` so panic/assertion diagnostics survive
-an outer timeout. The capacity/readback result also records all 256 individual
+XFS fixture tests now use `--nocapture` and backtraces so panic/assertion
+diagnostics survive an outer timeout. Stderr goes to a separate retained
+`<module>.stderr.log`: merging uncaptured stderr would split libtest stdout
+lines and break the existing strict inventory verifier. The verifier is unchanged. The capacity/readback result also records all 256 individual
 1 MiB read durations, from admission attempt through completion (including
 buffer allocation); this distinguishes long individual waits from slow aggregate
 throughput. On `d40305a` plus this diagnostic change, `just check` passed
