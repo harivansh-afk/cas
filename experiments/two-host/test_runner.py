@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from agent import CLONE, IMAGE, Agent, fio_options
-from runner import classify, deltas, phases, rsync_bytes
+from runner import classify, deltas, has_overlap, phases, rsync_bytes
 
 
 def report(sent=0, memory=0, storage=0):
@@ -96,6 +96,14 @@ class MeasurementTests(unittest.TestCase):
             finally:
                 a.close()
                 b.close()
+
+    def test_inventory_bytes_alone_do_not_certify_put_contention(self):
+        sample = {"ship_bytes": 65536, "verified_gets": 20, "ship_chunks_acked": 0}
+        self.assertFalse(has_overlap([sample]))
+        sample["ship_chunks_acked"] = 1
+        self.assertTrue(has_overlap([sample]))
+        sample["verified_gets"] = 0
+        self.assertFalse(has_overlap([sample]))
 
     def test_fio_keeps_verification_and_direct_io_in_read_cohorts(self):
         for kind in ("random", "sequential", "verify"):

@@ -20,7 +20,10 @@ Boot-closure distribution is outside the measured transfer. QEMU
 live migration would additionally require validated vhost-user device and
 inflight-state migration, which this backend does not implement. Guest shutdown
 unmounts ext4 and issues FLUSH before QEMU exits; `cas-fleet migrate` still performs
-the persistent writer-generation handoff. The old guest is gone before B boots.
+the persistent writer-generation handoff. The daemon has one-shot image
+attachments; after both guests exit, the harness restarts both daemons in cold
+recovery mode before handing off. Recovery is included in `handoff_ns` and also
+reported as nested `cold_recovery_ns`. Flow counter deltas start after recovery. The old guest is gone before B boots.
 
 Downtime starts immediately before asking A to shut down and ends after B has
 booted, mounted the disk, verified the original file and acknowledged drift file,
@@ -36,7 +39,9 @@ Both guests independently create the same seeded drift file, wait for compaction
 and synchronize their stores. The measurement includes **background shipping and
 explicit sync separately**, starting before either writer. It does not mistake
 an already-repaired fleet for zero-cost synchronization. This is a reproducible
-synthetic drift workload, not a replay of package updates.
+synthetic drift workload, not a replay of package updates. Each explicit fleet
+operation also records `controller_elapsed_ns`, including CLI/RPC startup, so
+explicit sync duration stays separate from drift-and-background-repair time.
 
 The baseline uses raw virtio-blk images, direct host IO, and real `rsync
 --whole-file --ignore-times --no-compress --fsync --stats` transfers, including an
@@ -64,7 +69,7 @@ The default run executes:
   and zero service from the opposite source; otherwise the run fails.
 - QD1 4 KiB random reads and sequential 4 KiB reads at configured depths. Each
   repetition has a matched GET-under-compaction-shipping cohort. The writer runs
-  longer than the reader; sampled intervals must show both shipping bytes and
+  longer than the reader; sampled intervals must show both acknowledged PUT chunks and
   verified GET progress. Contention records the **actual** owner memory/store
   mix, since compaction may evict a warmed working set. Separate sockets do not
   imply immunity to shared CPU, cache, IO scheduler, or NIC contention.
@@ -93,7 +98,9 @@ same host-local monotonic clock. Cross-host wall clocks are never subtracted.
 Daemon flow bytes count each sender once (`A.sent + B.sent`). GET counters,
 controller traffic and rsync statistics remain separate. These are application
 bytes; SSH encryption, TCP/IP framing and retransmissions are not included.
-Per-host raw command logs and RPC responses live under the configured outputs and
+`put_acked_chunks` counts chunks only after a successful durable PUT ACK; HAS
+inventory bytes cannot satisfy the overlap check. A lost ACK may leave durable
+chunks uncounted. Per-host raw command logs and RPC responses live under the configured outputs and
 the coordinator output. Errors fail the run and preserve partial evidence.
 
 ## Run on two CloudLab nodes

@@ -45,6 +45,7 @@ impl Flow {
 pub struct Metrics {
     tx: [AtomicU64; 6],
     rx: [AtomicU64; 6],
+    put_acked_chunks: [AtomicU64; 6],
 }
 impl Metrics {
     pub fn report(&self) -> serde_json::Value {
@@ -58,7 +59,8 @@ impl Metrics {
         ];
         let mut result = serde_json::Map::new();
         for (i, name) in flows.iter().enumerate() {
-            result.insert((*name).into(), serde_json::json!({"sent":self.tx[i].load(Ordering::Relaxed), "received":self.rx[i].load(Ordering::Relaxed)}));
+            result.insert((*name).into(), serde_json::json!({"sent":self.tx[i].load(Ordering::Relaxed), "received":self.rx[i].load(Ordering::Relaxed),
+                "put_acked_chunks":self.put_acked_chunks[i].load(Ordering::Relaxed)}));
         }
         result.into()
     }
@@ -158,6 +160,11 @@ pub struct Client {
     metrics: Arc<Metrics>,
 }
 impl Client {
+    pub(crate) fn record_put_ack(&self, chunks: usize) {
+        self.metrics.put_acked_chunks[self.flow as usize]
+            .fetch_add(chunks as u64, Ordering::Relaxed);
+    }
+
     pub(crate) fn member(
         address: SocketAddr,
         flow: Flow,

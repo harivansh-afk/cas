@@ -9,7 +9,7 @@ let
   config = pkgs.writeText "cas-two-host-loopback.json" (
     builtins.toJSON {
       settings = {
-        seconds = 1;
+        seconds = 5;
         repeats = 1;
         depths = [
           1

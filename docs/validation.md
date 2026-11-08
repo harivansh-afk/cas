@@ -889,3 +889,31 @@ CloudLab result is implied.
   The early fixture attempts found missing VM-specific XFS mounts, the service's
   1,024-descriptor soft limit, unsupported zero-byte chunk cache configuration,
   and a slow TCG guest bootstrap. Those unsuccessful runs are not measurements.
+
+The first guest flow reached provisioning, identical independently written drift,
+synchronization, coordinated sweep and verified cold reads in `local-006`.
+Migration then failed after QEMU shutdown: the one-shot source attachment had
+been consumed. The harness now cold-restarts both daemons after guest shutdown,
+includes recovery in handoff downtime, and starts wire deltas after the counter
+reset. It does not change attachment, FLUSH, or fencing rules. This failed run's
+partial results remain in `local-006/run/results.json`; it is not a successful
+migration result. Earlier `local-004` and `local-005` retain TCG boot/first-SSH
+login deadline failures and their virtual disks. Readiness now allows 600 seconds
+for TCG boot and 120 seconds for its first authenticated SSH command; an owned
+persistent SSH master avoids repeated guest login setup.
+
+Follow-up to `0ed54d0`: PUT metrics now count chunks only after successful durable
+ACK, and contention requires PUT acknowledgments and verified GET progress in
+the same interval. Inventory HAS bytes cannot pass this check. The drift test
+checks ACK counts against actual transferred chunks; its focused run passed in
+`put-ack-test.log`. Seven Python tests pass (`python-final.log`), including the
+new inventory-only rejection. Observation follows fio until process exit so
+slow guest command startup cannot move all IO outside the sampling window.
+Local fixture cohorts now last five seconds. `nix fmt -- --ci` passed in
+`nix-format-final.log`. Final suite and QEMU rerun results follow below.
+
+`RUST_TEST_THREADS=3 CARGO_BUILD_JOBS=3 just check` passed again in
+`just-check-5.log` with 536 Rust tests passed, 27 ignored and seven Python tests
+passed. This covers the ACK counter change and all existing fleet crash/fencing
+regressions. The harness additionally records controller elapsed time for each
+explicit fleet command, separately from drift generation/background repair.

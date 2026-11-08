@@ -523,6 +523,17 @@ fn two_drifted_clones_send_only_the_other_owners_missing_chunks() {
             a.command(json!({"op":"report"})),
             b.command(json!({"op":"report"})),
         ];
+        for node in 0..2 {
+            assert_eq!(
+                after_first[node]["fleet"]["sync"]["put_acked_chunks"]
+                    .as_u64()
+                    .unwrap()
+                    - before[node]["fleet"]["sync"]["put_acked_chunks"]
+                        .as_u64()
+                        .unwrap(),
+                counts[node]
+            );
+        }
         assert_eq!(a.command(json!({"op":"sync_paused"}))["chunks"], 0);
         assert_eq!(b.command(json!({"op":"sync_paused"}))["chunks"], 0);
         a.command(json!({"op":"read","value":0x91,"second":0x92}));

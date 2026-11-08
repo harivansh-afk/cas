@@ -80,6 +80,10 @@ def classify(before, after, target):
     return counters
 
 
+def has_overlap(samples):
+    return any(s["ship_chunks_acked"] > 0 and s["verified_gets"] > 0 for s in samples)
+
+
 def phases(report, since):
     rows = []
     for record in report["peer"]["recent"]:
@@ -223,7 +227,10 @@ class Experiment:
         argv = [operation]
         for key, value in kwargs.items():
             argv += ["--" + key, str(value)]
-        return self.agents[0].call("fleet", argv=argv)
+        start = time.monotonic_ns()
+        result = self.agents[0].call("fleet", argv=argv)
+        result["controller_elapsed_ns"] = time.monotonic_ns() - start
+        return result
 
     def sync(self):
         return [
@@ -355,10 +362,19 @@ class Experiment:
         result["cold_read"] = self.fio(0, "source", "verify", "cold-read")
         result["cold_read_peer"] = peer_delta(before[0], self.report()[0])
         b.call("stop_guest", name="clone")
-        before = self.report()
         start = time.monotonic_ns()
         shutdown = a.call("stop_guest", name="source")
         cut = time.monotonic_ns()
+        parallel(self.agents, lambda agent: agent.call("restart_host"))
+
+        def recovered():
+            try:
+                return self.report()
+            except RuntimeError:
+                return False
+
+        before = wait_for(recovered, 120)
+        recovered_at = time.monotonic_ns()
         transfer = self.fleet(
             "migrate",
             source=self.config["nodes"][0]["bulk"],
@@ -378,6 +394,7 @@ class Experiment:
             "downtime_ns": end - start,
             "stop_ns": cut - start,
             "handoff_ns": boot - cut,
+            "cold_recovery_ns": recovered_at - cut,
             "boot_verify_continue_ns": end - boot,
             "shutdown": shutdown,
             "daemon": transfer,
@@ -394,17 +411,26 @@ class Experiment:
         samples = []
         self.agents[1].call("fio", guest="reader", kind=kind, name=name, depth=depth)
         started = time.monotonic()
-        while time.monotonic() - started < self.settings["seconds"]:
+        while True:
+            if time.monotonic() - started > self.settings["seconds"] + 180:
+                raise TimeoutError("fio observation deadline")
             time.sleep(min(0.5, self.settings["seconds"] / 4))
             current = self.report()
             samples.append(
                 {
                     "elapsed_ns": int((time.monotonic() - started) * 1e9),
                     "ship_bytes": deltas(last, current)["ship"],
+                    "ship_chunks_acked": sum(
+                        b["fleet"]["ship"]["put_acked_chunks"]
+                        - a["fleet"]["ship"]["put_acked_chunks"]
+                        for a, b in zip(last, current, strict=True)
+                    ),
                     "verified_gets": peer_delta(last[1], current[1])["verified"],
                 }
             )
             last = current
+            if not self.agents[1].call("fio_running", name=name):
+                break
         fio = self.agents[1].call("finish_fio", name=name)
         return fio, before, self.report(), samples
 
@@ -464,12 +490,9 @@ class Experiment:
                 depth=4,
             )
             fio, before, after, samples = self.observed_read("random", tag)
-            overlap = [
-                s for s in samples if s["ship_bytes"] > 4096 and s["verified_gets"] > 0
-            ]
-            if not overlap:
+            if not has_overlap(samples):
                 raise ValueError(
-                    "contention run has no observed overlap of PUT bytes and verified GETs"
+                    "contention run has no observed overlap of acknowledged PUT chunks and verified GETs"
                 )
             writer = a.call("finish_fio", name=tag + "-writer")
             since = max(

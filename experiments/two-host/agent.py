@@ -231,6 +231,7 @@ class Agent:
             raise ValueError("previous case still owned")
         if not name.replace("-", "").isalnum():
             raise ValueError("invalid case name")
+        self.host_generation = 0
         self.case = self.output / name
         self.case.mkdir()
         self.work = self.storage / name
@@ -265,7 +266,16 @@ class Agent:
         )
 
     def host(self, node, k, peer, cache, force=False):
-        reports = self.case / "daemon"
+        self.host_options = {
+            "node": node,
+            "k": k,
+            "peer": peer,
+            "cache": cache,
+            "force": force,
+        }
+        reports = self.case / (
+            "daemon" if self.host_generation == 0 else f"daemon-{self.host_generation}"
+        )
         reports.mkdir()
         argv = [
             self.build["host"],
@@ -302,6 +312,24 @@ class Agent:
             argv += ["--image", f"{image}={self.socket(image)}"]
         self.spawn("host", argv, pin=self.node.get("cpus"))
         return {"pid": self.children["host"].pid}
+
+    def restart_host(self):
+        # Guest shutdown consumes this daemon's one-shot image attachment.
+        # Cold recovery reconstructs it before the fenced handoff.
+        if any(name in self.children for name in self.guests):
+            raise ValueError("stop every guest before restarting its daemon")
+        stop(self.children.pop("host"))
+        for image in (IMAGE, CLONE):
+            Path(self.socket(image)).unlink(missing_ok=True)
+        for suffix in ("log", "command.json"):
+            source = (
+                self.case / f"host.{suffix}"
+                if suffix == "log"
+                else self.case / "host-command.json"
+            )
+            source.rename(self.case / f"host-{self.host_generation}-{suffix}")
+        self.host_generation += 1
+        return self.host(**self.host_options)
 
     def socket(self, image):
         return str(Path(self.sockets.name) / f"{self.case.name}-{image}.sock")
@@ -444,6 +472,10 @@ class Agent:
             "sha256": digest,
             "elapsed_ns": time.monotonic_ns() - start,
         }
+
+    def fio_running(self, name):
+        self.healthy()
+        return self.children[name].poll() is None
 
     def finish_fio(self, name):
         process = self.children.pop(name)
@@ -619,11 +651,13 @@ class Agent:
             "init",
             "host",
             "report",
+            "restart_host",
             "fleet",
             "boot",
             "shell",
             "fio",
             "finish_fio",
+            "fio_running",
             "drift",
             "stop_guest",
             "settle",

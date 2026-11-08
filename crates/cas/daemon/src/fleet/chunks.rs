@@ -116,6 +116,7 @@ pub(crate) fn ship(
         if client.exchange(PUT, &mut frame[..end + 32], &mut [])? != 0 {
             return Err(invalid());
         }
+        client.record_put_ack(count);
     }
     Ok(count)
 }
