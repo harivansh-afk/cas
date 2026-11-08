@@ -151,6 +151,25 @@ The comparison artifacts are under the owned VM's `results/isolated/`:
 `isolate-*-01/`, matching command receipts/logs, `resources.jsonl`, and
 `resource-summary.json`. These will be archived locally before VM deletion.
 
+At `849c6d0`, the corrected XFS fixture passed 72/72 runtime tests in 233.35 s
+(275.22 s for the logged wrapper). Unique-live readback took 19.819 s; median,
+p99 and maximum 1 MiB read times were 77.168, 86.399 and 95.650 ms. The two
+initial collections were followed by no collections during readback; releasing
+the obsolete root then triggered the asserted retry. CPU averaged 94.10% idle,
+maximum load was 1.327, and reported steal remained zero. Compared with the
+same-VM baseline, median latency is unchanged while repeated sweep pauses are
+removed. `just-check-03` and `nix-check-03` passed before fixture testing.
+
+The first program-image shared test (`isolate-shared-replacement-02`) passed
+cold attachment but failed an added fixture assertion before application IO:
+NixOS stacks two EROFS mounts at `/nix/store`, and plain `findmnt` returned
+`erofs` twice. The assertion now selects the effective mount using
+`--target --first-only` and still requires both EROFS and read-only mode.
+The fixture also retains the complete boot journal, including a separately
+observed Nix registration service failure whose detailed cause was not in the
+previous per-workload journal. No deadline or existing oracle changed. The
+remaining five focused cases and final suite were gated off after this failure.
+
 ## 2026-11-08 — C5 publication rerun and telemetry tail regression
 
 Spark/aarch64, host Linux 7.0.14, 128 GB unified memory, accessible KVM;

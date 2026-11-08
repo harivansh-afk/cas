@@ -6,8 +6,8 @@ phase=$(cat /results/phase)
 image=$(cat /results/image)
 uname -a > /results/kernel.log
 findmnt --json /nix/store > /results/programs-mount.json
-test "$(findmnt -n -o FSTYPE /nix/store)" = erofs
-case ",$(findmnt -n -o OPTIONS /nix/store)," in
+test "$(findmnt -n --first-only --target /nix/store -o FSTYPE)" = erofs
+case ",$(findmnt -n --first-only --target /nix/store -o OPTIONS)," in
   *,ro,*) ;;
   *) exit 1 ;;
 esac
