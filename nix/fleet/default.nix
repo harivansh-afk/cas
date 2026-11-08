@@ -28,13 +28,26 @@ let
           # or external network is needed for the host-forwarded SSH control.
           networking.useDHCP = false;
           networking.usePredictableInterfaceNames = false;
-          networking.interfaces.eth0.ipv4.addresses = [
-            {
-              address = "10.0.2.15";
-              prefixLength = 24;
-            }
-          ];
-          networking.defaultGateway = "10.0.2.2";
+          boot.kernelModules = [ "virtio_net" ];
+          systemd.services.fleet-network = {
+            wantedBy = [ "multi-user.target" ];
+            after = [ "systemd-modules-load.service" ];
+            before = [ "sshd.service" ];
+            path = [ pkgs.iproute2 ];
+            script = ''
+              ip link set dev eth0 up
+              ip address replace 10.0.2.15/24 dev eth0
+              ip route replace default via 10.0.2.2 dev eth0
+            '';
+            serviceConfig = {
+              Type = "oneshot";
+              RemainAfterExit = true;
+            };
+          };
+          systemd.services.sshd = {
+            requires = [ "fleet-network.service" ];
+            after = [ "fleet-network.service" ];
+          };
           networking.firewall.enable = false;
           systemd.services."serial-getty@ttyAMA0".enable = false;
           systemd.services.fleet-boot-evidence = {

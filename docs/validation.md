@@ -958,3 +958,25 @@ The diagnostic Nix expression initially used an unfiltered path flake reference;
 that evaluation was canceled, then rebuilt successfully using `git+file://`.
 Diagnostic scripts/expressions, disk copies and logs remain under ignored
 `results/two-host/diagnose*`. They are diagnostic artifacts, not a runner mode.
+
+
+`d49ab61` passed `just check` (`just-check-wakeup.log`: 538 Rust passed,
+27 ignored, eight Python passed). The fixed binary also passed first-attempt
+handoff from the retained pre-fence disks with a real dormant frontend
+(`diagnose-004`), where the prior binary logged feature-negotiation failure.
+Both release packages built (`nix-build-handoff.log`).
+
+`local-010` completed the entire k=1 guest flow with SHA verification and durable
+epoch continuation on B. Its migration downtime was 201.399 s: stop 2.348 s,
+recovery/handoff 0.626 s (cold recovery 0.336 s), boot/verification 198.425 s.
+The daemon transfer took 263.106 ms; its manifest was 294,912 bytes and tail 24
+bytes. Migration-flow traffic was 316,205 bytes, plus 25,623 background-shipping
+bytes during that window. Provisioning used 168,030 flow bytes plus 4,381 shipping
+bytes. These are application bytes on virtual disks with nested TCG, not paper
+performance. The raw run then failed in k=2 clone SSH readiness: the disk mounted,
+but device-triggered static network setup did not make eth0 reachable within the
+180-second probe deadline. The partial k=1 result is valid; the whole run is not
+certified. The isolated guest now loads virtio_net early and explicitly configures
+its one restricted user-network interface before sshd starts. Host networking is
+unchanged. This removes the device-unit ordering dependency rather than extending
+the readiness timeout again.
