@@ -8,6 +8,7 @@
   ...
 }:
 let
+  retain = import ./retain.nix { inherit pkgs; };
   build = pkgs.writeText "cas-shared-build.json" (
     builtins.toJSON {
       host = "${cas}/bin/cas-host";
@@ -32,6 +33,7 @@ let
     runtimeEnv = {
       CAS_HARNESS = "${cas}/bin/cas-harness";
       CAS_BUILD_INFO = "${build}";
+      CAS_RETAIN = lib.getExe retain;
     };
     text = builtins.readFile ./workload.sh;
   };

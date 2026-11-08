@@ -212,6 +212,35 @@ Spark `just-check-12` stopped at formatting after the helper signature cleanup;
 after formatting, `just-check-13` passed formatting, strict Clippy, 514 tests
 with 25 fixture ignores and whitespace checks on `838bc5e` plus this change.
 
+At `a2ea96e`, isolated builds, `just-check-06` and `nix-check-06` passed.
+The prepared-burst rerun still failed coverage: controller interval 1.268354 s
+(26.455 MB/s), calibration 33.852 MB/s, guest intervals 0.910267/0.951228 s.
+Guest 0 prepared its unchanged payload in 454.237 ms before readiness. Moving
+hash generation alone is therefore insufficient; do not attribute acceptance
+to it. The controller's interval also includes command/result propagation and
+sampling through the outer guest's `/results` 9p mount.
+
+The next fixture change puts shared control and result files at
+`/fixture/shared-results`, separate from `/fixture/store`, and copies them to
+the retained `/results/shared` after the harness exits. Inner guests still use
+9p, but that export now terminates on the outer guest's local XFS instead of
+crossing another 9p mount. CAS storage, guest geometry, offered bytes, measured
+controller interval and all assertions/deadlines are unchanged. A Nix regression
+checks evidence contents/executable mode and exit-status preservation for both
+success and failure. Both focused local Nix builds passed, followed by Nix
+format and whitespace checks (`fixture-local-results-*`). Runtime validation
+is pending.
+
+One setup probe used `builtins.getFlake` with an absolute path and started
+copying ignored target/results files. It was stopped, its two task-owned
+processes killed and its exact temporary store directory removed; free space
+returned to 36 GiB. This overlapped approximately the first minute of
+`isolate-guest-pressure-05` startup, not its burst interval. That startup is not
+claimed to be uncontended. The final suite is held until setup is finished.
+The probe and cleanup are recorded in `nix-probe-note.json`. Subsequent flake
+references must use Git filtering. Ubuntu's base Nix is 2.18.1 versus Spark's
+2.34.7; evaluator timing will be checked before releasing the full suite.
+
 ## 2026-11-08 — C5 publication rerun and telemetry tail regression
 
 Spark/aarch64, host Linux 7.0.14, 128 GB unified memory, accessible KVM;
