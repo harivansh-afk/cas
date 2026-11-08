@@ -430,3 +430,70 @@ vendor-hash corrections were needed.
 Raw command output is retained under ignored
 `results/deps-update-2026-10/` in the worktree. These checks do not establish CI,
 deployment, KVM fixture acceptance, power-loss safety, or performance results.
+
+## 2026-11-08 — Peer TCP implementation and native correctness
+
+Spark/aarch64 Linux, kernel `7.0.14`, ext4 checkout on `/dev/nvme0n1p3`,
+Rust 1.98.1. Worktree `.worktrees/peer-fetch`, branch `feat/peer-fetch`, based on
+`9c60e72676dfb001d14ab9b34583b03ea87f5182`. The tested working tree added the TCP
+protocol/service/client, local read and frontend timestamp hooks, config, a
+caller-supplied store read scratch API, native tests, and documentation. Runtime
+and transport unit tests are committed as `a8b76c3`; the native tests/docs were
+uncommitted during the checks below. No unrelated source changes were present.
+
+Commands: `cargo check -p cas-daemon`; focused `cargo test -p cas-daemon --lib
+peer -- --nocapture`; `cargo clippy --workspace --all-targets --locked -- -D
+warnings`; and `just check`. The final `just check` passed rustfmt, strict
+Clippy, 517 tests, and whitespace checks. It reported 26 ignored tests: 25
+existing fixture-dependent tests plus the new subprocess entry point, which the
+non-ignored parent integration test explicitly invokes. This does not run the
+existing ignored KVM/XFS inventory.
+
+The two-process test runs independent daemon Host/reactor runtimes over
+loopback, using the native admission/read harness. Both have 64 distinct 4 KiB
+chunks; the reader forces remote and does not cache fills. All 700 QD1 reads
+(100 warmup plus 600 measured) and four outstanding pipelined reads were checked
+byte for byte. The server reported 64 store reads and 640 memory hits. Stopping
+the server caused an error without published data. Separate native tests prove
+actual absent-index fetch, optional cache reuse, HAS durable-only missing bits,
+and local WAL precedence plus FLUSH while compaction is held. Peer-down,
+truncated payload, hash mismatch, and MISSING replies fail through the shared
+read gate without cache publication or changes to P/E. Transport tests cover
+framing/version/length/ID errors, fragmented replies, pipelining (four requests
+arrive before any response), deadlines, cancelled slot lifetimes, reconnect, and
+unchanged charged transport allocations across hot requests.
+
+Development failures/retries are retained. Initial compilation exposed private
+store-helper access and a result type annotation; the final API reuses aligned
+caller-owned scratch. Clippy identified fixed-chunk iteration and inline permit
+enum size; iteration was corrected, and the two enum expectations explicitly
+avoid adding a per-request boxing allocation. An initial seeded manifest tried
+to edit D=0 directly; the fixture now uses normal WAL append, FLUSH, and
+compaction. The initial QD16 native pipeline exceeded existing image read
+credits; the harness uses QD4 and retains admission retry/deadline handling.
+A mock writing responses in 37-byte fragments exceeded the two-second request
+deadline; the bounded fragmentation regression uses 1,023-byte fragments, and a
+separate stalled-peer test checks the deadline. An unnecessary unbounded connect
+in the first HAS bounds test was stopped and removed. `strace` was unavailable
+because ptrace was denied; no syscall-trace conclusion is claimed.
+
+Raw logs and debug reports are under ignored `results/peer-fetch/`, especially
+`just-check-final.log`, `peer-tests-final.log`, `host-tests-*.log`,
+`transport-tests*.log`, `pipeline-*.log`, and `debug-loopback-final/*.json`.
+Cargo initially resolved relative evidence paths under the crate; those files
+were moved into this ignored directory, and documented commands use absolute
+paths. Debug latency samples are development diagnostics only. Release-profile
+measurements are recorded separately below.
+
+The implemented setup is force-remote on complete local replicas; missing
+supposedly local durable dependencies still fail cold recovery. No disk format,
+durability prefix, WAL precedence, or recovery rule was relaxed. TCP uses a
+bounded nonblocking client worker and blocking service workers; an io_uring
+socket driver and busy-polling transport remain unimplemented. Peer failures use
+the existing fail-closed host gate, so restoring a peer does not automatically
+resume a failed guest attachment. See [peer reads](peer-fetch.md).
+
+These are local development checks. No CI, Nix package validation, QEMU guest
+run, CloudLab deployment, cross-host timing, local NVMe comparison, complete C5
+rerun, or physical power-loss acceptance was performed. Nothing was pushed or
+merged; the main checkout stayed on `main`.

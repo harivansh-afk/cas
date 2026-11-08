@@ -3,6 +3,8 @@
 Check off work only when its acceptance condition passes, with a record in
 [validation](docs/validation.md).
 
+- [x] Serve verified peer chunks over TCP and pass the two-process loopback
+  read/error fixture. [Validation](docs/validation.md#2026-11-08--peer-tcp-implementation-and-native-correctness)
 - [ ] Complete the runtime allocation audit, including reader-held buffers,
   compaction preparation, and diagnostic allocations; reconcile charged bytes
   with measured process memory.

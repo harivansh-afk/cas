@@ -8,6 +8,7 @@ mod allocation;
 mod cache;
 mod collection;
 mod initialization;
+mod peer;
 mod quiescence;
 mod recovery;
 mod rotation;

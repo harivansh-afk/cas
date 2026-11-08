@@ -1,4 +1,4 @@
-# Local storage architecture
+# Storage architecture
 
 CAS serves multiple private block images from one Linux host. Stock QEMU
 connects through vhost-user Unix sockets. The guest sees a virtio-blk device;
@@ -36,6 +36,11 @@ Three prefixes distinguish visibility from reclamation:
 
 While serving, `D <= E <= P`. Reads resolve newer data from staging and older
 data from the manifest/store. They retain source pins through completion.
+Settled chunks missing from the local index can be fetched by hash from one
+configured TCP peer. The receiver verifies BLAKE3 before publishing a read or
+filling the clean cache. WAL reads remain local and take precedence.
+[Peer reads](peer-fetch.md) documents framing, bounded resources, instrumentation,
+and the force-remote experiment mode.
 Independent reads can bypass capacity-blocked writes within bounded descriptor
 metadata; overlapping operations and FLUSH barriers still constrain ordering.
 This is not a bound on worst-case read latency.
@@ -68,8 +73,9 @@ regressions live beside the implementations and in `crates/harnesses/`.
 
 ## Limits
 
-The implementation is single-host, with one writable attachment per image.
-It has no remote-read service, replicated durability, ownership transfer, or
-migration protocol. The CLI lab fixes membership at creation. Native tests and
+Durability and recovery remain local, with one writable attachment per image.
+The optional static peer-read service does not provide replicated durability,
+ownership transfer, placement, remote-root recovery, or migration. The CLI lab
+fixes image membership at creation; peer endpoints are explicit serving options. Native tests and
 KVM crash fixtures are not physical power-loss tests or production readiness.
 See [current work](../TODO.md) and [validation](validation.md) for open acceptance.
