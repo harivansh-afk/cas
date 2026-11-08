@@ -76,6 +76,40 @@ corrected. The first regression compile also exposed an import inherited by
 the verifier module; its explicit import was restored before the red/green run.
 These setup failures are not test passes. No push, merge or deployment occurred.
 
+### Fresh-attachment queue rebase race
+
+Rebuilding the release package at telemetry-fix commit
+`8bcee174148821ec131d845187849b2a49754ae0` failed in
+`concurrent_retained_fd_replays_without_flush_and_ignores_consumed_available_slots`
+with `VhostUserProtocol(PartialMessage)` at queue re-enable. The exact release
+test reproduced the failure on repetitions 10 and 23 in separate probes.
+This was not dismissed as host contention or retried into acceptance.
+
+A deterministic regression exposed the ordering: a completion wake can activate
+a fresh retained attachment while its queue is disabled, between SET_VRING_BASE
+and SET_VRING_ENABLE. Queue configuration previously remembered the pending
+rebase only for an already-active attachment. If activation occurred between
+those messages, re-enable skipped the rebase and failed used-cursor validation,
+closing the frontend connection. Fresh queue configuration now also retains
+the rebase requirement. Used-cursor validation remains enforced. The socket
+test now prints daemon stderr/report evidence before cleanup on panic.
+
+On `8bcee17` plus this uncommitted lifecycle fix, its test and failure diagnostics,
+the deterministic test first failed with `memory replacement changed an active
+used cursor`, then passed after the fix. `nix develop -c just check` passed
+511 tests with 25 ignores. The original release socket test then passed all
+30 repetitions, including its crash cuts and ring-wrap cases. No deadline or
+assertion was loosened. Evidence: `build-checkpoints-02.log`,
+`lifecycle-release-repeat-01/`, `lifecycle-diagnostic-repeat-01/`,
+`lifecycle-red-01.log`, `lifecycle-green-01.log`, `just-check-03.log`, and
+`lifecycle-fixed-repeat-01/` under the same results root.
+
+The corrected syscall-traced pressure probe of the original binary reached
+the existing shared-readiness timeout without reproducing ENODATA. Its syscall
+logs are retained in `pressure-traced-02/`; they do not establish the original
+error's exact call site. The standalone 9p tail reproduction and regression
+above establish the telemetry reader defect independently.
+
 ## 2026-09-24 — Native KVM runner preparation
 
 On Spark, base `2d56108a2ab38b1985816448acbe6f08d8c29c3e` plus the native

@@ -71,6 +71,71 @@ fn fresh_queue_enable_waits_for_addresses_and_kick() {
 }
 
 #[test]
+fn fresh_disabled_queue_rebase_survives_attachment_activation() {
+    use vhost_user_backend::StateChange;
+    let directory = tempfile::tempdir().unwrap();
+    let mut backend = Backend::open_with_recovery(
+        &directory.path().join("log"),
+        BackendKind::LocalAsync,
+        Some(BLOCK_SIZE as u64),
+        true,
+        Fault::default(),
+    )
+    .unwrap();
+    backend
+        .create_attachment(&VhostUserInflight {
+            mmap_size: 0,
+            mmap_offset: 0,
+            num_queues: 1,
+            queue_size: 128,
+        })
+        .unwrap();
+    let (memory, vring) = super::super::tests::queue();
+    backend.update_memory(memory.clone()).unwrap();
+    backend.acked_features(backend.features());
+    let vrings = [vring];
+    let disable = StateChange::QueueEnable {
+        index: 0,
+        enabled: false,
+    };
+    backend.begin_change(disable, &vrings).unwrap();
+    vrings[0].set_enabled(false);
+    backend.end_change(disable, true, &vrings).unwrap();
+    let start = u16::MAX - 1;
+    memory
+        .memory()
+        .write_obj(start.to_le(), GuestAddress(0x2002))
+        .unwrap();
+    memory
+        .memory()
+        .write_obj(start.to_le(), GuestAddress(0x3002))
+        .unwrap();
+    backend
+        .begin_change(StateChange::QueueConfiguration(0), &vrings)
+        .unwrap();
+    vrings[0].set_queue_next_avail(start);
+    backend
+        .end_change(StateChange::QueueConfiguration(0), true, &vrings)
+        .unwrap();
+    assert!(backend.live.as_ref().unwrap().fresh());
+    // A completion wake can activate a fresh attachment between SET_VRING_BASE
+    // and SET_VRING_ENABLE, even though its queue is disabled.
+    backend.process(&vrings).unwrap();
+    assert!(backend.live.as_ref().unwrap().active());
+    let enable = StateChange::QueueEnable {
+        index: 0,
+        enabled: true,
+    };
+    backend.begin_change(enable, &vrings).unwrap();
+    vrings[0].set_enabled(true);
+    backend.end_change(enable, true, &vrings).unwrap();
+    assert_eq!(vrings[0].get_ref().get_queue().next_used(), start);
+    backend.process(&vrings).unwrap();
+    assert!(!backend.blocked_queues[0]);
+    assert!(backend.failure.is_none());
+}
+
+#[test]
 fn idle_frontend_deadline_fails_the_retained_attachment_without_guest_access() {
     let directory = tempfile::tempdir().unwrap();
     let mut backend = Backend::open_with_recovery(
