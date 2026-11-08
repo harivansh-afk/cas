@@ -55,6 +55,11 @@ nix develop -c result-checkpoints/bin/cas-checkpoints \
 result-cas/bin/cas-harness verify-suite --output results/c5-run
 ```
 
+The shared and pressure fixtures keep their inner guests on TCG. Their immutable
+program store is a prebuilt read-only EROFS disk, avoiding a second 9p hop during
+boot. It uses SCSI so the vhost-user workload disk remains `/dev/vda`. Results
+remain on 9p; guest workloads verify and record the program-store mount.
+
 The suite selects reference checks (C1), packed append (C2), concurrent
 recovery (C3), XFS store/collection (C4), and shared filesystem/pressure
 fixtures (C5). The harness binds evidence to exact sources and built binaries;

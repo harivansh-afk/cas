@@ -1,4 +1,5 @@
 {
+  config,
   lib,
   pkgs,
   modulesPath,
@@ -7,6 +8,31 @@
   ...
 }:
 let
+  # Build this before starting the daemon's recovery clock. A second 9p hop
+  # for every guest executable/metadata lookup can consume that clock in boot.
+  registration = pkgs.closureInfo { rootPaths = config.virtualisation.additionalPaths; };
+  programs = pkgs.closureInfo {
+    rootPaths = [
+      config.system.build.toplevel
+      registration
+    ];
+  };
+  programImage =
+    pkgs.runCommand "cas-guest-programs.erofs"
+      {
+        nativeBuildInputs = [
+          pkgs.gnutar
+          pkgs.erofs-utils
+        ];
+      }
+      ''
+        tar --create --absolute-names --verbatim-files-from \
+          --transform 'flags=rSh;s|/nix/store/||' \
+          --files-from ${programs}/store-paths | \
+          mkfs.erofs --quiet --force-uid=0 --force-gid=0 \
+            -L cas-programs -U 9cd4f673-0990-4ec0-a0b3-69ea967cdffb -T 0 \
+            --hard-dereference --tar=f "$out"
+      '';
   workload = pkgs.writeShellApplication {
     name = "cas-filesystem-workload";
     runtimeInputs = with pkgs; [
@@ -44,6 +70,13 @@ in
     cores = 1;
     graphics = false;
     writableStore = false;
+    mountHostNixStore = false;
+    fileSystems."/nix/store" = {
+      device = "/dev/disk/by-label/cas-programs";
+      fsType = "erofs";
+      neededForBoot = true;
+      options = [ "ro" ];
+    };
     useHostCerts = false;
     qemu = {
       forceAccel = false;
@@ -52,6 +85,10 @@ in
       options = [
         "-machine accel=tcg"
         "-no-reboot"
+        # SCSI keeps the vhost-user workload disk at /dev/vda.
+        "-device virtio-scsi-pci,id=programs"
+        "-drive if=none,id=programs,file=${programImage},format=raw,readonly=on"
+        "-device scsi-hd,drive=programs,bus=programs.0"
         ''-chardev "socket,id=cas,path=$CAS_VHOST_SOCKET,reconnect-ms=100"''
         "-device vhost-user-blk-pci,chardev=cas,num-queues=4,queue-size=256"
       ];
@@ -62,6 +99,10 @@ in
       securityModel = "none";
     };
   };
+  boot.initrd.availableKernelModules = [
+    "virtio_scsi"
+    "sd_mod"
+  ];
   systemd.services.cas-filesystem = {
     wantedBy = [ "multi-user.target" ];
     after = [

@@ -108,6 +108,40 @@ CPU user/system/idle/iowait/steal, load, memory and free disk are sampled every
 second. Build intervals are separate from experiment intervals. Physical-host
 load is not exposed by the provider and must not be claimed as measured.
 
+### Isolated comparison before the retry fix
+
+At `1fa06cd`, local-sync and async-io passed in 39.42 and 36.01 seconds.
+XFS passed in 280.99 seconds, including 72/72 runtime tests (239.20 seconds).
+The unique-live 256 MiB readback took 30.444 seconds with 19 collections;
+per-1-MiB read median/p99/max were 75.876/730.139/780.596 ms. The final sweep
+reclaimed nothing, with a 605.761 ms pause. This confirms repeated no-progress
+collections even away from Spark. XFS averaged 92.94% idle CPU, load 0.512
+(maximum 1.091), and zero reported steal. No concurrent task builds ran.
+
+The five shared-recovery variants and guest-pressure instead failed reproducibly
+on this host:
+`recovery deadline expired` at about 61 seconds after phase start, while inner
+TCG guests were still booting. Retained complete daemon reports show zero
+application reads/writes/flushes and no capacity admission denials; the host
+exited before the intended crash boundary. Thus the original failures cannot
+all be dismissed as Spark CPU contention. The inner guest's executable store
+uses two nested 9p hops, including during NixOS activation. A fixture correction
+is being tested: build its immutable program store into a read-only EROFS image
+before starting the daemon, attach it through SCSI (preserving CAS at `/dev/vda`),
+and assert the actual read-only EROFS mount before running the workload. This
+preserves TCG, the CAS data path, memory/CPU geometry, deadlines and all existing
+oracles. Failed scenarios averaged 64.76–67.06% idle CPU, with maximum load
+1.47–2.60 and zero reported steal. Pressure image reports name the same recovery
+deadline; its host report is truncated and is not treated as valid evidence.
+Runtime acceptance of this change is pending; it is not yet proof of
+which part of boot dominated. `fixture-eval-01` caught formatting differences;
+`fixture-eval-02` passed formatting and all-system Nix evaluation.
+The complete comparison ended 3/9 passing, 6/9 failing; all raw failures remain.
+
+The comparison artifacts are under the owned VM's `results/isolated/`:
+`isolate-*-01/`, matching command receipts/logs, `resources.jsonl`, and
+`resource-summary.json`. These will be archived locally before VM deletion.
+
 ## 2026-11-08 — C5 publication rerun and telemetry tail regression
 
 Spark/aarch64, host Linux 7.0.14, 128 GB unified memory, accessible KVM;

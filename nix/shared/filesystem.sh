@@ -5,6 +5,12 @@ exec > /results/workload.log 2>&1
 phase=$(cat /results/phase)
 image=$(cat /results/image)
 uname -a > /results/kernel.log
+findmnt --json /nix/store > /results/programs-mount.json
+test "$(findmnt -n -o FSTYPE /nix/store)" = erofs
+case ",$(findmnt -n -o OPTIONS /nix/store)," in
+  *,ro,*) ;;
+  *) exit 1 ;;
+esac
 lsblk --bytes --json > /results/disks.json
 test "$(blockdev --getsize64 /dev/vda)" = 536870912
 test "$(blockdev --getss /dev/vda)" = 4096
