@@ -148,6 +148,7 @@ fn unique_live_payload_reports_capacity_exhaustion_and_preserves_reads() {
     assert!(local.prepare(Kind::Write(BLOCK_SIZE)).unwrap().is_none());
     assert_eq!(local.admitted, 0);
     let reading = Instant::now();
+    let mut read_latency_micros = Vec::with_capacity(LIVE_BYTES / MAX_REQUEST_BYTES);
     let mut expected = vec![0; MAX_REQUEST_BYTES];
     for offset in (0..LIVE_BYTES).step_by(expected.len()) {
         for (index, block) in expected
@@ -158,7 +159,8 @@ fn unique_live_payload_reports_capacity_exhaustion_and_preserves_reads() {
         {
             block[..8].copy_from_slice(&((offset / BLOCK_SIZE + index + 1) as u64).to_le_bytes());
         }
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let request_started = Instant::now();
+        let deadline = request_started + Duration::from_secs(5);
         let permit = loop {
             if let Some(permit) = local.prepare(Kind::Read(expected.len())).unwrap() {
                 break permit;
@@ -177,6 +179,7 @@ fn unique_live_payload_reports_capacity_exhaustion_and_preserves_reads() {
             )
             .unwrap();
         let completion = completed(&mut local);
+        read_latency_micros.push(request_started.elapsed().as_micros());
         let CompletionData::Read(bytes) = completion.data else {
             panic!("read response");
         };
@@ -196,6 +199,8 @@ fn unique_live_payload_reports_capacity_exhaustion_and_preserves_reads() {
             serde_json::to_vec_pretty(
                 &serde_json::json!({"live_bytes":LIVE_BYTES, "read_bytes":LIVE_BYTES,
                 "seed_micros":seed_micros, "read_micros":read_micros,
+                "read_request_bytes": MAX_REQUEST_BYTES,
+                "read_latency_micros": read_latency_micros,
                 "initial":initial, "limits":limits, "after":after, "host":host.report(),
                 "admitted_mutations":local.admitted}),
             )

@@ -40,7 +40,12 @@ that became test-only; they were marked accordingly (`just-check-05.log`).
 with 25 existing ignores, and whitespace checks (`just-check-06.log`).
 
 XFS fixture tests now use `--nocapture` so panic/assertion diagnostics survive
-an outer timeout. Test selection, serialization and all deadlines are unchanged.
+an outer timeout. The capacity/readback result also records all 256 individual
+1 MiB read durations, from admission attempt through completion (including
+buffer allocation); this distinguishes long individual waits from slow aggregate
+throughput. On `d40305a` plus this diagnostic change, `just check` passed
+512 tests with 25 ignores (`just-check-07.log`). Test selection, serialization
+and all deadlines are unchanged.
 
 ### Isolated-host preparation
 
