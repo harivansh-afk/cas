@@ -53,7 +53,8 @@ publishing a copy-on-write manifest commit. Covered WAL payload is reclaimable
 only after relevant readers and retained replay identities release it.
 
 Snapshots capture manifest roots; clones have private manifests and share chunk
-content. Collection accounts for retained roots and readers. Physical space
+content. Collection accounts for retained roots and readers. Fleet collection requires both hosts to quiesce and exchange complete live sets;
+a standalone local sweep is refused on fleet stores. Physical space
 reservations protect output/progress capacity rather than assuming logical
 free space is immediately available to the filesystem.
 
@@ -74,8 +75,10 @@ regressions live beside the implementations and in `crates/harnesses/`.
 ## Limits
 
 Durability and recovery remain local, with one writable attachment per image.
-The optional static peer-read service does not provide replicated durability,
-ownership transfer, placement, remote-root recovery, or migration. The CLI lab
-fixes image membership at creation; peer endpoints are explicit serving options. Native tests and
+The optional [static two-host fleet](fleet.md) adds k=1/2 placement, chunk
+replication, manifest provisioning, fenced migration and coordinated collection.
+Its background replication does not strengthen local-class FLUSH or protect an
+unshipped WAL tail from host loss. The CLI lab fixes image membership at creation;
+fleet cold serving can wait for explicitly configured incoming image sockets. Native tests and
 KVM crash fixtures are not physical power-loss tests or production readiness.
 See [current work](../TODO.md) and [validation](validation.md) for open acceptance.

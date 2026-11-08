@@ -9,6 +9,9 @@ pub mod fault;
 mod snapshots;
 mod statistics;
 pub use snapshots::{SnapshotHandle, SnapshotReport};
+mod fleet;
+mod fleet_collection;
+mod fleet_image;
 pub mod initialize;
 pub mod recovery;
 #[cfg(test)]
@@ -59,6 +62,7 @@ impl Resources {
 }
 
 struct SharedHost {
+    fleet: Option<BudgetArc<fleet::Runtime>>,
     peer: Option<BudgetArc<crate::peer::Client>>,
     peer_metrics: Option<BudgetArc<crate::peer::metrics::Metrics>>,
     admission: BudgetArc<admission::Admission>,
@@ -103,9 +107,10 @@ pub struct Roots<I = Vec<(Log, Manifest)>, S = Vec<Snapshot>> {
 /// Embedding API for the catalog owner and the same native validation frontend.
 /// Inputs must be inspected/stabilized together and allocated from Resources.
 pub struct Host {
+    bulk_service: Option<crate::fleet::Server>,
     peer_service: Option<crate::peer::Server>,
     shared: BudgetArc<SharedHost>,
-    images: BudgetVec<Option<Attachment>, BudgetAllocator>,
+    images: Arc<Mutex<BudgetVec<Option<Attachment>, BudgetAllocator>>>,
     ready: Option<mailbox::Sender<Ready>>,
     worker: Option<JoinHandle<()>>,
 }
@@ -205,12 +210,21 @@ impl Host {
                 physical.validate_file(snapshot.view()?.file())?;
             }
         }
-        if images.as_ref().is_empty() {
+        if images.as_ref().is_empty() && resources.peer.fleet.placement()?.is_none() {
             return Err(io::Error::other("host requires an image"));
         }
         capacity::staging_geometry(images.as_ref(), staging_bytes)?;
-        let staging = cas_core::space::Staging::new(
-            staging_bytes,
+        let image_count = images.as_ref().len();
+        let slots = if resources.peer.fleet.placement()?.is_some() {
+            64
+        } else {
+            image_count
+        };
+        if image_count > slots {
+            return Err(io::Error::other("fleet host image slot limit exceeded"));
+        }
+        let mut quotas = reserved_vec(slots, &resources.metadata)?;
+        quotas.extend(
             images
                 .as_ref()
                 .iter()
@@ -218,17 +232,24 @@ impl Host {
                     allocated: log.status().allocated_bytes,
                     capacity: log.limits().staging_bytes,
                 }),
-            &resources.metadata,
-        )?;
-        let image_count = images.as_ref().len();
+        );
+        quotas.resize(
+            slots,
+            cas_core::space::StagingImage {
+                allocated: 0,
+                capacity: append::Limits::default().staging_bytes,
+            },
+        );
+        let staging =
+            cas_core::space::Staging::new(staging_bytes, quotas.into_iter(), &resources.metadata)?;
         if let Some(gates) = &context.gates {
             gates.validate(images.as_ref())?;
         }
-        let admission = admission::Admission::new(image_count, &resources.metadata)?;
+        let admission = admission::Admission::new(slots, &resources.metadata)?;
         let metadata = Arc::clone(&resources.metadata);
-        let fair = fair::Fair::new(image_count, admission.clone(), &metadata)?;
-        let mut compaction = reserved_vec(image_count, &metadata)?;
-        for _ in 0..image_count {
+        let fair = fair::Fair::new(slots, admission.clone(), &metadata)?;
+        let mut compaction = reserved_vec(slots, &metadata)?;
+        for _ in 0..slots {
             compaction.push(BudgetArc::try_new(
                 Mutex::new(statistics::Totals::default()),
                 &metadata,
@@ -258,14 +279,16 @@ impl Host {
                 )
             })
             .transpose()?;
+        let fleet = fleet::Runtime::open(&resources, &store, images.as_ref(), physical.as_ref())?;
         let shared = BudgetArc::try_new(
             SharedHost {
+                fleet,
                 peer,
                 peer_metrics,
                 admission,
                 fair,
                 io_scheduler: cas_core::scheduler::Scheduler::new(
-                    image_count
+                    slots
                         + if resources.peer.peer_listen.is_some() {
                             crate::peer::CONNECTIONS
                         } else {
@@ -302,19 +325,13 @@ impl Host {
         let mut endpoints =
             BudgetVec::new_in(BudgetAllocator::new(Arc::clone(&shared.resources.metadata)));
         attachments
-            .try_reserve_exact(image_count)
+            .try_reserve_exact(slots)
             .map_err(|_| io::Error::other("host image metadata exhausted"))?;
         endpoints
-            .try_reserve_exact(image_count)
+            .try_reserve_exact(slots)
             .map_err(|_| io::Error::other("host endpoint metadata exhausted"))?;
-        let (ready, input) = mailbox::bounded(image_count + 1, &shared.resources.metadata)?;
+        let (ready, input) = mailbox::bounded(slots + 5, &shared.resources.metadata)?;
         for (index, (log, manifest)) in images.into_iter().enumerate() {
-            let admission = capacity::Admission {
-                staging: shared.staging.clone(),
-                physical: shared.physical.clone(),
-                image: index,
-            };
-            let window = window::Window::new(&log, Some(admission), &shared.resources.metadata)?;
             let view = manifest.view()?;
             let identity = view.commit();
             if identity.store != store.config().store
@@ -329,56 +346,11 @@ impl Host {
                     "host image identity or stabilized root differs",
                 ));
             }
-            let health = match &context.gates {
-                Some(gates) => gates.images[index].1.clone(),
-                None => state::Gate::new(
-                    ImageState {
-                        durable: log.status().durable,
-                        ..ImageState::default()
-                    },
-                    Some(shared.gate.clone()),
-                    &metadata,
-                )?,
-            };
-            let wake = EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK)?;
-            let (output, events) = mailbox::bounded(1, &shared.resources.metadata)?;
-            let (reply, replies) = mailbox::bounded(1, &shared.resources.metadata)?;
-            endpoints.push(worker::Endpoint {
-                statistics: shared.compaction[index].clone(),
-                resources: Arc::clone(&shared.resources),
-                manifest,
-                quiescent: None,
-                #[cfg(test)]
-                control: Arc::clone(&shared.control),
-                health: health.clone(),
-                wake: wake.try_clone()?,
-                output,
-                replies,
-            });
-            attachments.push(Some(Attachment {
-                mode: context.mode,
-                image: identity.image,
-                log,
-                port: Port {
-                    index,
-                    shared: shared.clone(),
-                    health,
-                    ready: ready.clone(),
-                    events,
-                    reply,
-                    wake,
-                    active: None,
-                    granted: false,
-                    quiescence: None,
-                    oldest: None,
-                    retry: false,
-                    last_reclaim: Instant::now(),
-                    attached: false,
-                    rotation: None,
-                    rotation_retry: Instant::now(),
-                    window,
-                },
-            }));
+            let health = context.gates.as_ref().map(|g| g.images[index].1.clone());
+            let (attachment, endpoint) =
+                make_image(&shared, &ready, index, log, manifest, context.mode, health)?;
+            attachments.push(Some(attachment));
+            endpoints.push(endpoint);
         }
         let mut retained = reserved_vec(snapshots.as_ref().len(), &shared.resources.metadata)?;
         retained.extend(snapshots);
@@ -393,11 +365,15 @@ impl Host {
                     shared.cache.clone(),
                     &metadata,
                     shared.peer_metrics.as_ref().expect("peer metrics").clone(),
-                    (shared.io_scheduler.clone(), image_count),
+                    (shared.io_scheduler.clone(), slots),
                 )
             })
             .transpose()?;
+        let bulk_service = fleet::start(&shared, &ready)?;
+        let attachments = Arc::new(Mutex::new(attachments));
         let owner = worker::Owner {
+            incoming: None,
+            attachments: Arc::downgrade(&attachments),
             catalog: context.catalog,
             snapshots: retained,
             store,
@@ -409,6 +385,7 @@ impl Host {
             .name("cas-compactor".into())
             .spawn(move || owner.run())?;
         Ok(Self {
+            bulk_service,
             shared,
             peer_service,
             images: attachments,
@@ -443,8 +420,8 @@ impl Host {
     ) -> io::Result<crate::backend::Backend> {
         let deadline = crate::deadline::Deadline::after(timeout);
         deadline.check()?;
-        let attachment = self
-            .images
+        let images = self.images.lock().unwrap();
+        let attachment = images
             .iter()
             .flatten()
             .find(|a| a.image == image)
@@ -458,6 +435,7 @@ impl Host {
             ));
         }
         let config = attachment.log.config();
+        drop(images);
         let event = EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK)?;
         let local = self.local(image, &event)?;
         let mut backend = crate::backend::Backend::from_storage(
@@ -473,10 +451,16 @@ impl Host {
     }
 
     fn local(&mut self, image: [u8; 16], event: &EventFd) -> io::Result<Local> {
+        fleet::claim(&self.shared, image)?;
+        if let Some(fleet) = &self.shared.fleet
+            && !fleet.writable(image)?
+        {
+            return Err(io::Error::other("image writer is fenced by fleet root"));
+        }
         let _attachment =
             admission::Admission::enter(&self.shared.admission).ok_or(io::ErrorKind::WouldBlock)?;
-        let slot = self
-            .images
+        let mut images = self.images.lock().unwrap();
+        let slot = images
             .iter_mut()
             .find(|slot| slot.as_ref().is_some_and(|a| a.image == image))
             .ok_or_else(|| io::Error::other("unknown or already attached host image"))?;
@@ -519,10 +503,54 @@ impl Host {
         self.peer_service.as_ref().map(crate::peer::Server::address)
     }
 
+    pub fn bulk_address(&self) -> Option<std::net::SocketAddr> {
+        self.bulk_service
+            .as_ref()
+            .map(crate::fleet::Server::address)
+    }
+
+    pub(crate) fn fleet_attachable(&self, image: [u8; 16]) -> io::Result<bool> {
+        let runtime = self
+            .shared
+            .fleet
+            .as_ref()
+            .ok_or(io::ErrorKind::Unsupported)?;
+        let root = runtime.state.lock().unwrap().root(image)?;
+        if root
+            .as_ref()
+            .is_some_and(|r| r.phase == crate::fleet::state::Phase::Claiming)
+        {
+            match fleet::claim(&self.shared, image) {
+                Ok(()) => (),
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::ConnectionRefused
+                            | io::ErrorKind::TimedOut
+                            | io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    return Ok(false);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(runtime.writable(image)?
+            && !self.shared.admission.status().paused
+            && self
+                .images
+                .lock()
+                .unwrap()
+                .iter()
+                .flatten()
+                .any(|a| a.image == image))
+    }
+
     pub fn report(&self) -> serde_json::Value {
         serde_json::json!({ "failure": self.shared.gate.failure(), "store": self.store_status(),
             "admission": self.shared.admission.status(),
             "peer": self.shared.peer_metrics.as_ref().map(|metrics| metrics.report()),
+            "fleet": self.shared.fleet.as_ref().map(|fleet| fleet.metrics.report()),
             "cache": self.shared.cache.status(), "metadata_cache": self.shared.pages.status(),
             "fetches": self.shared.fetches.status(), "admission_scheduler":self.shared.fair.report(), "io_scheduler":self.shared.io_scheduler.status(),
             "collection": *self.shared.collection.lock().expect("collection status poisoned"),
@@ -547,11 +575,20 @@ impl Host {
         if let Some(service) = &mut self.peer_service {
             service.shutdown()?;
         }
+        if let Some(fleet) = &self.shared.fleet
+            && let Some(shipper) = fleet.shipper.get()
+        {
+            shipper.shutdown()?;
+        }
+        if let Some(service) = &mut self.bulk_service {
+            service.shutdown()?;
+        }
+        self.bulk_service.take();
         if let Some(peer) = &self.shared.peer {
             peer.shutdown()?;
         }
         self.peer_service.take();
-        self.images.clear();
+        self.images.lock().unwrap().clear();
         self.ready.take();
         if self
             .worker
@@ -573,6 +610,8 @@ impl Host {
 }
 
 enum Event {
+    Transfer(u64),
+    FenceWriter(u64),
     Quiesce(u64),
     Resume(u64),
     CompactQuiescent(u64),
@@ -586,6 +625,7 @@ enum Event {
 }
 
 enum Reply {
+    Transfer(append::Transfer),
     Quiesced(u64),
     Selected(Option<append::Selection>),
     Rotation(append::Rotation, cas_core::space::StagingPermit),
@@ -602,6 +642,7 @@ enum Turn {
 }
 
 enum Ready {
+    Fleet(fleet::Request),
     Image { index: usize, turn: Turn },
     Collect(collection::Request),
     Snapshot(snapshots::Request),
@@ -756,6 +797,22 @@ impl Port {
                 return Err(io::Error::other(error.clone()));
             }
             match event {
+                Event::Transfer(generation) => {
+                    if self.quiescence != Some((generation, true)) {
+                        return Err(io::Error::other("transfer requires quiescence"));
+                    }
+                    let tail = log
+                        .capture_transfer(self.shared.resources.read_memory())
+                        .map_err(io::Error::other)?;
+                    self.respond(Reply::Transfer(tail))?;
+                }
+                Event::FenceWriter(generation) => {
+                    if self.quiescence != Some((generation, true)) {
+                        return Err(io::Error::other("writer fence requires quiescence"));
+                    }
+                    self.quiescence = None;
+                    self.respond(Reply::Applied)?;
+                }
                 Event::Quiesce(generation) => {
                     if self.rotation == Some(append::RotationKind::FreshAttachment) {
                         self.respond(Reply::Deferred)?;
@@ -986,4 +1043,74 @@ impl Drop for Port {
             self.shared.attached.fetch_sub(1, Ordering::Release);
         }
     }
+}
+
+fn make_image(
+    shared: &BudgetArc<SharedHost>,
+    ready: &mailbox::Sender<Ready>,
+    index: usize,
+    log: Log,
+    manifest: Manifest,
+    mode: Option<recovery::Mode>,
+    health: Option<Health>,
+) -> io::Result<(Attachment, worker::Endpoint)> {
+    let admission = capacity::Admission {
+        staging: shared.staging.clone(),
+        physical: shared.physical.clone(),
+        image: index,
+    };
+    let window = window::Window::new(&log, Some(admission), &shared.resources.metadata)?;
+    let health = health.map(Ok).unwrap_or_else(|| {
+        state::Gate::new(
+            ImageState {
+                durable: log.status().durable,
+                ..ImageState::default()
+            },
+            Some(shared.gate.clone()),
+            &shared.resources.metadata,
+        )
+    })?;
+    let wake = EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK)?;
+    let (output, events) = mailbox::bounded(1, &shared.resources.metadata)?;
+    let (reply, replies) = mailbox::bounded(1, &shared.resources.metadata)?;
+    let image = manifest.current().image;
+    let endpoint = worker::Endpoint {
+        retired: false,
+        fleet: shared.fleet.clone(),
+        statistics: shared.compaction[index].clone(),
+        resources: shared.resources.clone(),
+        manifest,
+        quiescent: None,
+        #[cfg(test)]
+        control: shared.control.clone(),
+        health: health.clone(),
+        wake: wake.try_clone()?,
+        output,
+        replies,
+    };
+    let attachment = Attachment {
+        mode,
+        image,
+        log,
+        port: Port {
+            index,
+            shared: shared.clone(),
+            health,
+            ready: ready.clone(),
+            events,
+            reply,
+            wake,
+            active: None,
+            granted: false,
+            quiescence: None,
+            oldest: None,
+            retry: false,
+            last_reclaim: Instant::now(),
+            attached: false,
+            rotation: None,
+            rotation_retry: Instant::now(),
+            window,
+        },
+    };
+    Ok((attachment, endpoint))
 }

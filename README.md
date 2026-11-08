@@ -4,10 +4,11 @@ A content-addressed block backend for QEMU on Linux. One host process serves
 private VM disks backed by a shared chunk store, with local write-ahead logs,
 copy-on-write manifests, snapshots, and recovery through vhost-user.
 
-This is experimental software. Use disposable data. An opt-in static two-host
-TCP chunk-read service supports remote-read experiments. Replicated durability,
-placement, migration, and hardware power-loss validation are not implemented
-or established by local tests.
+This is experimental software. Use disposable data. An opt-in static two-host TCP fleet supports
+verified peer reads, k=1/2 placement, durable chunk replication, manifest
+provisioning, fenced block-image migration, synchronization and coordinated
+collection. FLUSH durability remains local; fleet-class journaling and hardware
+power-loss validation are not implemented or established by local tests.
 
 ## Build and test
 
@@ -43,6 +44,7 @@ The lab creates its own backing image rather than formatting a physical disk.
 - [Storage architecture and limits](docs/storage-design.md)
 - [On-disk format](docs/storage-format.md)
 - [Peer chunk reads and remote experiment setup](docs/peer-fetch.md)
+- [Two-host placement, provisioning, migration and collection](docs/fleet.md)
 - [Retained inflight metadata](docs/inflight-format.md)
 - [Builds and test fixtures](docs/testbed.md)
 - [Current work](TODO.md) and [validation](docs/validation.md)

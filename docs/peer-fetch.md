@@ -2,8 +2,9 @@
 
 `cas-host` can serve and fetch immutable 4 KiB chunks by BLAKE3 hash over
 kernel TCP. This is a static two-host read experiment, with local durability.
-It does not implement replication, remote writes, placement, migration, remote
-root recovery, authentication, or distributed garbage collection.
+The optional [fleet layer](fleet.md) adds placement, chunk replication,
+provisioning, fenced migration and coordinated collection. Authentication and
+fleet-class journal durability are not implemented.
 
 ## Configuration and experiment setup
 
@@ -29,8 +30,9 @@ through the written prefix. Verify `D = E = P` before measurement. Retain the
 local copy on A; restart A with `--peer-force-remote` and leave `--peer-cache`
 off. This disables A's local copy for settled reads without changing the disk
 format or weakening recovery checks. A missing local-index entry also triggers
-GET at runtime, but this change deliberately does not authorize a cold-open
-manifest with missing supposedly local durable dependencies.
+GET at runtime, while a cold-open manifest still requires every supposedly local durable
+dependency. The fleet layer additionally accepts persisted owner receipts for
+remote k=1 dependencies.
 
 With existing prepared roots, catalog image ID `02020202020202020202020202020202`,
 store ID `01010101010101010101010101010101`, and fresh report/socket directories
@@ -191,7 +193,8 @@ latencies, failures/retries, and limits. CloudLab still needs matched builds,
 private NIC binding/firewall configuration, prepared replicas, guest IO,
 cache-state verification, local NVMe controls, recorded NIC/IRQ/kernel settings,
 transport baselines, repeated runs, and cross-host latency/throughput/CPU data.
-PUT contention, placement, prefetch, and replicated durability are separate work.
+The fleet layer supplies placement and bulk PUT; their effect on GET tails still
+needs a measured contention experiment. Prefetch and fleet-class FLUSH remain open.
 Compare polling settings under controlled CPU affinity; shared-host contention
 can make bounded polling slower than the default path. Local correctness is not the paper's performance
 result.

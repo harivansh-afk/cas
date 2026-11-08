@@ -5,7 +5,10 @@ use cas_core::budget::{Budget, BudgetArc};
 use std::{
     io,
     ops::{Deref, DerefMut},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 #[derive(Default)]
@@ -34,6 +37,7 @@ impl HostGate {
 }
 
 pub struct Gate {
+    writer_fenced: AtomicBool,
     image: Mutex<ImageState>,
     host: Option<BudgetArc<HostGate>>,
 }
@@ -46,6 +50,7 @@ impl Gate {
     ) -> io::Result<BudgetArc<Self>> {
         BudgetArc::try_new(
             Self {
+                writer_fenced: AtomicBool::new(false),
                 image: Mutex::new(image),
                 host,
             },
@@ -68,6 +73,15 @@ impl Gate {
             image.fail(message.clone());
         }
         Ok(Guard { image, _host: host })
+    }
+
+    // Admission may already hold the completion gate. This terminal flag is
+    // published under quiescence and must never recursively acquire that gate.
+    pub fn writer_fenced(&self) -> bool {
+        self.writer_fenced.load(Ordering::Acquire)
+    }
+    pub fn fence_writer(&self) {
+        self.writer_fenced.store(true, Ordering::Release);
     }
 
     /// Lock, then refuse further work once the image has recorded a failure.

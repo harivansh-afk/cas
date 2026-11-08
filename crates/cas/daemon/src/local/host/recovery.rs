@@ -73,6 +73,20 @@ impl Inspection {
             Arc::clone(&resources.metadata),
             resources.read_memory(),
         )?;
+        resources.peer.validate()?;
+        let fleet = resources
+            .peer
+            .fleet
+            .placement()?
+            .map(|placement| {
+                crate::fleet::state::State::inspect(root, placement, &resources.metadata)
+            })
+            .transpose()?;
+        if fleet.is_none() && root.join("fleet/membership").exists() {
+            return Err(io::Error::other(
+                "fleet recovery requires persisted membership",
+            ));
+        }
         let image_count = catalog
             .contents()
             .entries()
@@ -82,7 +96,11 @@ impl Inspection {
         let mut snapshots =
             reserved_vec(catalog.contents().len() - image_count, &resources.metadata)?;
         let verify = |hash| {
-            if store.contains(&hash) {
+            if store.contains(&hash)
+                || fleet
+                    .as_ref()
+                    .is_some_and(|state| !state.placement.local(&hash) && state.remote(&hash))
+            {
                 Ok(())
             } else {
                 Err(io::Error::other(
@@ -129,7 +147,14 @@ impl Inspection {
                         log,
                         required: Prefix {
                             image: entry.id,
-                            published: 0,
+                            // A durable handoff is independent recovery evidence.
+                            // Cold restart must not silently accept a shorter tail.
+                            published: fleet
+                                .as_ref()
+                                .map(|s| s.root(entry.id))
+                                .transpose()?
+                                .flatten()
+                                .map_or(0, |r| r.durable),
                         },
                     });
                 }
@@ -170,7 +195,7 @@ impl Inspection {
                         "retained prefix image differs from catalog",
                     ));
                 }
-                image.required = required[index];
+                image.required.published = image.required.published.max(required[index].published);
             }
             image
                 .log
@@ -223,6 +248,41 @@ pub struct Checked {
 }
 
 impl Checked {
+    /// Native subprocess tests share a filesystem with unrelated jobs, so they
+    /// cannot use its global allocation delta as an exclusive output account.
+    #[cfg(test)]
+    pub(super) fn recover_test(self, staging_bytes: u64) -> io::Result<Host> {
+        assert!(self.cold);
+        let inspected = self.inspected;
+        let store = inspected.store.recover()?;
+        let mut images = Vec::new();
+        for image in inspected.images {
+            let manifest = image.manifest.recover()?;
+            let log = image
+                .log
+                .fresh(manifest.view()?, image.required.published)
+                .map_err(io::Error::other)?;
+            images.push((log, manifest));
+        }
+        let snapshots = inspected
+            .snapshots
+            .into_iter()
+            .map(|(_, s)| s.recover())
+            .collect::<io::Result<Vec<_>>>()?;
+        Host::build_owned(
+            inspected.resources,
+            store,
+            Roots { images, snapshots },
+            staging_bytes,
+            None,
+            Context {
+                catalog: Some(inspected.catalog.recover()?),
+                mode: Some(Mode::Cold),
+                gates: None,
+            },
+        )
+    }
+
     pub fn recover_cold(self, limits: cas_core::space::Limits) -> io::Result<Recovered> {
         if !self.cold {
             return Err(io::Error::new(

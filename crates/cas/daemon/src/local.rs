@@ -295,6 +295,9 @@ impl Shared {
     }
 
     fn admit(&self, kind: Kind) -> io::Result<pressure::Decision<Permit>> {
+        if self.health.writer_fenced() {
+            return Err(io::Error::other("image writer transferred to peer"));
+        }
         let entry = match &self.admission {
             Some(admission) => {
                 if admission.status().failed {

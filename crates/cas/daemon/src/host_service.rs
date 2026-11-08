@@ -114,7 +114,7 @@ fn outputs(
     resources: &Resources,
 ) -> io::Result<(BudgetVec<Output, BudgetAllocator>, File)> {
     config.endpoints.sort_by_key(|endpoint| endpoint.image);
-    if config.endpoints.is_empty()
+    if (config.endpoints.is_empty() && resources.peer.fleet.peer_node.is_none())
         || config.endpoints.iter().enumerate().any(|(i, endpoint)| {
             endpoint.image == [0; 16]
                 || config.endpoints[..i]
@@ -234,6 +234,7 @@ fn run(
     let mut ids = reserved_vec(outputs.len(), &resources.metadata)?;
     ids.extend(outputs.iter().map(|output| output.image));
     let staging_bytes = config.staging_bytes;
+    let fleet_cold = resources.peer.fleet.peer_node.is_some() && matches!(config.mode, Mode::Cold);
     let mut runtime = deadline.run(move || {
         let inspected = Inspection::scan(
             &config.root,
@@ -246,7 +247,7 @@ fn run(
             },
             worker_resources,
         )?;
-        if inspected.images().map(|(id, _)| id).ne(ids) {
+        if !fleet_cold && inspected.images().map(|(id, _)| id).ne(ids) {
             return Err(io::Error::other(
                 "configured endpoints differ from the complete catalog image set",
             ));
@@ -271,6 +272,9 @@ fn run(
             )?)),
         }
     })?;
+    if fleet_cold {
+        return run_fleet_services(outputs, &mut runtime, &resources.metadata, telemetry);
+    }
     let mut services = reserved_vec(outputs.len(), &resources.metadata)?;
     let mut controls = reserved_vec(outputs.len(), &resources.metadata)?;
     for output in outputs {
@@ -311,6 +315,80 @@ fn run(
         telemetry_error: result.telemetry_error,
         shutdown,
     })
+}
+
+/// Cold fleet members remain available as chunk/control servers even without a
+/// guest. Explicit future endpoints activate only after their durable root and
+/// complete imported dependency graph permit a local writer.
+fn run_fleet_services(
+    outputs: BudgetVec<Output, BudgetAllocator>,
+    runtime: &mut Runtime,
+    metadata: &Arc<Budget>,
+    mut telemetry: Option<Telemetry>,
+) -> io::Result<Outcome> {
+    let mut pending = reserved_vec(outputs.len(), metadata)?;
+    pending.extend(outputs.into_iter().map(Some));
+    type ImageWorker = ([u8; 16], JoinHandle<io::Result<()>>);
+    let mut workers: BudgetVec<Option<ImageWorker>, _> = reserved_vec(pending.len(), metadata)?;
+    let mut controls = reserved_vec(pending.len(), metadata)?;
+    loop {
+        let host = runtime
+            .host()?
+            .ok_or_else(|| io::Error::other("fleet cold host unavailable"))?;
+        if let Some(error) = host.failure() {
+            return Err(io::Error::other(error));
+        }
+        for slot in &mut pending {
+            let Some(output) = slot.as_ref() else {
+                continue;
+            };
+            if !host.fleet_attachable(output.image)? {
+                continue;
+            }
+            let output = slot.take().unwrap();
+            let backend = host.attach_cold(
+                output.image,
+                RECOVERY_TIMEOUT,
+                crate::fault::Fault::default(),
+            )?;
+            let service = Service::new(backend, output.report)?;
+            controls.push((output.image, service.control()?));
+            workers.push(Some((
+                output.image,
+                thread::Builder::new()
+                    .name("cas-fleet-image".into())
+                    .spawn(move || service.serve(&output.socket))?,
+            )));
+        }
+        for worker in &mut workers {
+            if worker.as_ref().is_some_and(|(_, w)| w.is_finished()) {
+                let (image, finished) = worker.take().unwrap();
+                let result = finished
+                    .join()
+                    .map_err(|_| io::Error::other("fleet socket panicked"))?;
+                if let Some(index) = controls.iter().position(|(id, _)| *id == image) {
+                    controls.remove(index);
+                }
+                // Fencing a migrated image ends its old service. The shared
+                // host remains alive for other images, GET and control RPCs.
+                if let Err(error) = result {
+                    eprintln!("cas-host: image service ended: {error}");
+                }
+            }
+        }
+        if let Some(sampler) = &mut telemetry
+            && let Err(error) = sampler.sample(runtime, &controls)
+        {
+            if !sampler.operational() {
+                return Err(error);
+            }
+            eprintln!("cas-host: operational telemetry stopped: {error}");
+            telemetry = None;
+        }
+        // A fleet member is a persistent service. Termination is performed by
+        // its process supervisor; subsequent startup uses explicit cold recovery.
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 struct ServiceOutcome {

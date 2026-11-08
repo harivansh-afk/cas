@@ -26,8 +26,8 @@ struct Serve {
     storage: Storage,
     #[arg(long, value_enum)]
     mode: Mode,
-    /// Repeat once for every catalog image: 32hex-image-id=socket-path.
-    #[arg(long = "image", required = true)]
+    /// Image sockets. Fleet cold mode also accepts IDs awaiting provisioning/migration.
+    #[arg(long = "image")]
     endpoints: Vec<Endpoint>,
     /// Existing directory on another filesystem; creates host.json and per-image reports.
     #[arg(long)]

@@ -673,3 +673,184 @@ strict Clippy, all workspace tests (519 passed, 26 ignored), and diff checks.
 13 tests plus the invoked child entry point (`inline-final.log`); the earlier
 15-test result included additional host coverage. The fixture headroom fix
 does not change the remote-read benchmark.
+
+## 2026-11-08 — Phase B: static fleet, transfers and crash recovery
+
+Base `ff0bcb0` (the separately committed Phase A) plus the Phase B changes
+committed with this entry, on `feat/peer-fetch` in `.worktrees/peer-fetch`.
+Spark/aarch64, Linux 7.0.14, Rust 1.98.1, ext4/O_DIRECT. The main checkout was
+not changed. No push, merge, CI, deployment or dedicated-filesystem acceptance
+was performed. The session continued the existing uncommitted fleet work;
+`results/fleet/base-revision.txt`, `worktree.txt`, the final patch and executable
+hash pin the evidence. Implementation and operational limits are in
+[fleet.md](fleet.md).
+
+Built k=1/2 rendezvous placement over stable two-member membership; a separate
+bounded TCP bulk/control service; hash-verified segment PUT with durable ACK and
+HAS-based repair; local surplus until coordinated sweep; manifest-only guest
+provisioning; (D,E] WRITE/ZERO tail transfer with writer-generation fences;
+missing-chunk sync; per-flow application wire counters; and `cas-fleet` commands.
+`cas-host` fleet cold mode can serve without guest endpoints and wait for an
+explicit incoming image socket. Local-class FLUSH, WAL-first reads and the
+existing durable-store/manifest publication order remain. Optional fleet-class
+JOURNAL/FLUSH was not added. Standard kernel sockets are used; no new dependency
+or io_uring TCP engine was introduced.
+
+The source fence is durable before destination Receiving, and destination Active
+follows a verified durable graph and catalog. A cold restart must cover the E
+recorded in the writer root, independently of attachment identity. Interrupted
+unpublished imports retain their old tickets under unreferenced image names;
+return migration retires the old fenced catalog entry before replacement.
+Persisted GC epochs prevent restart from silently thawing a partial sweep.
+Fenced source roots/WALs, receipts and rejected outputs remain conservative
+recovery artifacts; the live chunk-store figures below are not total physical
+fleet footprint or the paper's capacity acceptance.
+
+Validation commands (raw logs under ignored `results/fleet/`):
+
+```sh
+cargo test -p cas-core --lib transfer -- --nocapture
+cargo test -p cas-daemon --lib fleet -- --nocapture
+cargo test -p cas-daemon --lib backend:: -- --nocapture
+CARGO_BUILD_JOBS=3 just check
+CARGO_BUILD_JOBS=3 cargo test --release -p cas-daemon --lib --no-run --message-format=json
+uv run results/fleet/measure.py
+```
+
+The final full check is `just-check-3.log`: fmt, strict workspace Clippy, all
+workspace tests (**534 passed, 27 ignored**), and whitespace checks passed.
+The fleet filter passed 14 tests plus its ignored child entry, which the parent
+integration tests invoke in independent processes. The frontend regression
+filter passed 37 tests. Existing ordering, admission, FLUSH, ZERO/discard,
+collection and recovery suites also passed. The native fixture verifies every
+read against known bytes, including reads from remote owners and newer WAL data.
+It tests both placement modes, provisioning, migration and return, two clones
+with common and distinct drift, duplicate sync with no payloads, and local writes
+and FLUSH while the receiving peer is down.
+
+Real process-kill coverage includes PUT before insertion and after durable
+storage/before ACK; migration after source fence, destination Receiving, partial
+transfer, durable destination WAL, catalog publication, and Active publication;
+and collection after freeze and after sweep. Restart/retry checks writer
+exclusion and the acknowledged tail, then verifies new writes after activation
+through another cold restart. An intentionally shortened destination WAL below
+the root's E is rejected before repair. GET peer-down, short-read and wrong-hash
+IO-error regressions remain in the complete suite. These are daemon SIGKILL and
+logical-corruption tests, not physical power-loss or NIC/host-loss tests.
+
+Failures/retries are retained. The inherited WAL transfer test passed before
+continuation. Initial subprocess compilation needed corrected private imports
+and native attachment types. The first recovery fixture used filesystem-wide
+physical accounting on Spark's shared filesystem and hit `observed output
+exceeds its disk promise`; native process tests now use the same checked cold
+recovery with ungoverned allocation. This does **not** validate the physical
+capacity governor under multi-host load. The first GC restart attempt hit a
+startup freeze race; a distinct retryable-busy wire status and same-epoch
+collector retry fixed it (`gc-crash*.log`). Initial Clippy passes caught style
+and type issues. The first full check hung because the new admission fence check
+recursively locked a completion gate already held by the frontend; that test
+process was terminated, the terminal fence became atomic, and all 37 frontend
+regressions passed. The second full check passed the core/daemon tests and found
+a duplicate Clap `Config` group; naming the fleet group fixed the CLI parser.
+The third full check passed. No timed-out or failed attempt was counted as a
+passing performance sample.
+
+Release measurements used the exact executable in `release-build.jsonl`, hashed
+in `release-binary.sha256`. `measure.py` ran three repetitions each of the
+both-mode flow integration, both-mode drift integration and remote-read
+integration, with **both daemon process trees pinned to CPUs 5–8**, builds
+finished, and no other job's priority or affinity changed. All nine parent
+invocations passed. Raw per-run JSON, logs, `/proc/stat` and load averages are
+in `release-{flows,drift,read}-{0,1,2}/`; `release-summary.json` and
+`release-measure.log` retain arithmetic and results. CLI help smoke checks
+passed (`cas-{fleet,host}-help.txt`). The maintained code's WAL-transfer test also
+passed in the full core suite.
+
+**All timings below are development numbers potentially contaminated by shared
+Spark load.** The read runs recorded one-minute load averages 129.07, 129.79 and
+131.55. Pinning controlled our placement, not isolation from C5 and unrelated
+work. No system-wide scheduler permissions or other workloads were changed.
+The Phase A matched before/after comparison and perf/off-CPU evidence remain in
+the preceding entry; its p99 acceptance is still unproven.
+
+Final-code 4 KiB QD1 peer-memory reads, cache fills off on A, 100 warmups plus
+600 verified timed reads per run. Nanosecond records use nearest-rank quantiles;
+phase marginal quantiles do not sum to total quantiles:
+
+| Phase | p50 range (µs) | p99 range (µs) |
+| --- | ---: | ---: |
+| Receipt → send | 5.984–6.016 | 7.824–19.760 |
+| Send → first byte | 10.432–10.544 | 21.425–3059.452 |
+| First byte → verified | 2.016 | 2.112–5.360 |
+| Verified → harness completion | 5.008–5.184 | 7.808–36.497 |
+| Total | **23.505–23.664** | **51.488–3530.718** |
+
+Total p50/p99 by run: 23.585/184.785, 23.505/3530.718,
+23.664/51.488 µs. Every run also checked the four-request pipeline and peer-loss
+IO error. The median target remains met; these samples do not establish a sane
+isolated p99 or the peer-memory-versus-local-NVMe headline.
+
+The flow fixture has 64 distinct 4 KiB chunks (262,144 bytes). Before transfer,
+compaction/placement complete. All three runs in both modes transferred exactly:
+
+| Flow | Manifest bytes | Tail bytes | Inter-daemon application wire bytes |
+| --- | ---: | ---: | ---: |
+| Provision | 24,576 | 24 (empty tail envelope) | **28,503** |
+| Migrate | 24,576 | 4,152 (one 4 KiB WRITE plus framing) | **32,660** |
+
+Wire values sum the two daemons' **sent** counter deltas for that flow and include
+HAS, identity checks, framing, metadata and ACKs. Controller traffic is counted
+separately. These byte counts are about a manifest plus tail, rather than the
+256 KiB fixture payload. They do not predict arbitrary image manifest packing.
+
+Additive migration phase ranges across the three runs, in milliseconds:
+
+| Phase | k=1 | k=2 |
+| --- | ---: | ---: |
+| Freeze/drain/FLUSH | 0.026–1.024 | 0.028–0.888 |
+| Prepare/hash/check owners | 0.680–0.748 | 0.689–7.241 |
+| Source fence + destination Receiving | 24.355–25.240 | 27.686–30.900 |
+| File fragments | 0.159–0.187 | 0.137–0.180 |
+| Durable install + activation | 83.273–103.419 | 81.768–93.817 |
+| Source finalization | 0.031–0.034 | 0.030–0.038 |
+| Total | **108.789–129.284** | **113.998–132.003** |
+
+Each individual record's intervals sum exactly to its total; marginal ranges
+need not. Provision totals were 112.323–129.764 ms (k=1) and
+107.292–117.084 ms (k=2). These administrative paths include metadata/file sync,
+connection setup and bounded worker scheduling; no finer attribution or disk
+latency comparison was performed. They exclude QEMU/VM transfer and guest resume.
+
+Two separately drifted clones each wrote one common chunk and one distinct
+chunk. With k=2, the explicit synchronization sent exactly one distinct 4 KiB
+chunk in each direction: 8,192 payload bytes, 13,066 application bytes including
+inventory checks. Repeating sync sent no chunk payload and 4,674 control/check
+bytes. With k=1, the fixture's two distinct chunks happened to hash to their
+producing hosts; neither needed transfer, and both first/repeat sync used 1,092
+check bytes. Common content was already present at its owner. Separate k=1
+compaction/provision/sweep tests exercise actual remote-owner shipping and reads.
+Automatic shipping was paused for this comparison, and the test invokes the
+same bounded HAS/PUT primitive; the public sync command is exercised separately
+in the flow and peer-outage integrations. These are correctness byte counts,
+not sustained chunks/s or 100 GbE throughput results.
+
+After sweep, the retained-root fixture contained 66 unique hashes: k=1 kept
+39 on A and 27 on B, with 299,008 encoded store bytes in total; k=2 kept 66 on
+each, with 581,632 encoded bytes in total. Reported chunk-index allocations were
+6,280 + 1,576 bytes (k=1) and 6,280 + 6,280 (k=2); existing tables can retain
+capacity after sweep. Receipt metadata, manifests, WAL/archive files, filesystem
+allocation and temporary import files are additional. Native tests intentionally
+report physical allocated-before/after as unavailable. The sweep JSON records
+pause, copied bytes and removed segments. These tiny fixtures establish placement
+and safe surplus removal, not the paper's capacity or half-index hypothesis.
+
+For CloudLab: provision two exclusive storage filesystems and private 100 GbE
+interfaces, build this exact revision, configure opposite node IDs and equal k,
+and predeclare destination image sockets. Record NIC/firmware/MTU/kernel,
+CPU/IRQ/C-state placement and interference; verify cache residency. Run repeated
+peer-memory and local-NVMe arms through the real guest, GET/PUT contention,
+throughput/chunks-per-second and capacity workloads, and compare transfer bytes
+with raw-copy/ZFS/rsync baselines. Add QEMU freeze/device/RAM transfer and resume
+orchestration and measure full blackout. Exercise power loss and a physically
+dark peer separately from these SIGKILL tests. No CloudLab, KVM, Nix package,
+complete C5 rerun or paper performance/capacity gate is claimed.

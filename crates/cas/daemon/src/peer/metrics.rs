@@ -3,7 +3,10 @@ use allocator_api2::vec::Vec;
 use cas_core::budget::{Budget, BudgetAllocator, BudgetArc};
 use std::{
     io,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Instant,
 };
 
@@ -46,6 +49,8 @@ struct State {
     cursor: usize,
 }
 pub struct Metrics {
+    wire_sent: AtomicU64,
+    wire_received: AtomicU64,
     origin: Instant,
     state: Mutex<State>,
 }
@@ -53,6 +58,8 @@ impl Metrics {
     pub fn new(budget: &Arc<Budget>) -> io::Result<BudgetArc<Self>> {
         BudgetArc::try_new(
             Self {
+                wire_sent: AtomicU64::new(0),
+                wire_received: AtomicU64::new(0),
                 origin: Instant::now(),
                 state: Mutex::new(State {
                     counters: Counters::default(),
@@ -77,8 +84,17 @@ impl Metrics {
     pub fn report(&self) -> serde_json::Value {
         let state = self.state.lock().expect("peer metrics poisoned");
         serde_json::json!({"counters": state.counters, "recent": &*state.recent,
+            "get_wire":{"sent":self.wire_sent.load(Ordering::Relaxed),"received":self.wire_received.load(Ordering::Relaxed)},
             "retention": RETAIN, "next_slot": state.cursor,
             "clock": "nanoseconds since peer runtime start; monotonic, host local"})
+    }
+    pub(crate) fn wire(&self, sending: bool, bytes: usize) {
+        let count = if sending {
+            &self.wire_sent
+        } else {
+            &self.wire_received
+        };
+        count.fetch_add(bytes as u64, Ordering::Relaxed);
     }
     fn complete(&self, record: Record) {
         let mut state = self.state.lock().expect("peer metrics poisoned");

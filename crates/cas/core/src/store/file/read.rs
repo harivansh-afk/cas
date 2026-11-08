@@ -7,6 +7,18 @@ pub struct Reader {
 }
 
 impl Reader {
+    /// Bounded by the caller's metadata budget; a shipping pass owns a stable
+    /// inventory while insertions continue. This snapshot does not pin payloads.
+    pub fn inventory(&self, metadata: Arc<Budget>) -> io::Result<Vec<Hash, BudgetAllocator>> {
+        let state = self.shared.lock();
+        state.healthy()?;
+        let mut hashes = Vec::new_in(BudgetAllocator::new(metadata));
+        hashes
+            .try_reserve_exact(state.index.len())
+            .map_err(|_| io::ErrorKind::OutOfMemory)?;
+        hashes.extend(state.index.entries().map(|(hash, _, _)| *hash));
+        Ok(hashes)
+    }
     pub fn plan(&self, hash: Hash) -> io::Result<Option<Read>> {
         self.shared.plan(hash)
     }

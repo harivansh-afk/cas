@@ -10,6 +10,9 @@ mod segment;
 mod shared;
 mod submission;
 
+mod transfer;
+pub use transfer::Transfer;
+
 use allocator_api2::vec::Vec as BudgetVec;
 use std::fs::{self, File};
 use std::io;
@@ -215,7 +218,16 @@ impl Log {
         )?
         .sync_all()?;
         let directory = Directory::open(path)?;
-        let segment = segment::create(&directory, config, tickets.as_deref(), 0, None, 0, pins)?;
+        let preceding = base.as_ref().map_or(0, |view| view.commit().durable);
+        let segment = segment::create(
+            &directory,
+            config,
+            tickets.as_deref(),
+            0,
+            None,
+            preceding,
+            pins,
+        )?;
         let highest_segment = segment.header.number;
         let allocated_bytes = segment.allocated_bytes()?;
         if allocated_bytes > limits.staging_bytes {
@@ -230,8 +242,10 @@ impl Log {
             highest_segment,
             tickets,
             base,
-            0,
+            preceding,
         );
+        log.issued = preceding;
+        log.durable = preceding;
         log.segments = segments;
         log.segments.push(segment);
         log.encoded_bytes = BLOCK_SIZE as u64;

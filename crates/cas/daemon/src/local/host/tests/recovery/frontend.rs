@@ -42,6 +42,8 @@ fn first_cold_get_exports_the_recovered_epoch_without_an_extra_rotation() {
         .unwrap();
     let status = host
         .images
+        .lock()
+        .unwrap()
         .iter()
         .flatten()
         .find(|image| image.image == [2; 16])

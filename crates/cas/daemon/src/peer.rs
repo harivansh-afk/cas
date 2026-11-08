@@ -10,6 +10,8 @@ use std::{io, net::SocketAddr, time::Duration};
 
 #[derive(Clone, Debug, Default, clap::Args)]
 pub struct Config {
+    #[command(flatten)]
+    pub fleet: crate::fleet::Config,
     /// Opt-in TCP chunk service; use a private interface on an isolated testbed.
     #[arg(long)]
     pub peer_listen: Option<SocketAddr>,
@@ -28,6 +30,14 @@ pub struct Config {
 }
 impl Config {
     pub fn validate(&self) -> io::Result<()> {
+        if self.fleet.placement()?.is_some()
+            && (self.peer_listen.is_none() || self.peer_address.is_none())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "fleet requires GET addresses",
+            ));
+        }
         if self.peer_inline_us > 1000 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

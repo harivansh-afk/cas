@@ -314,7 +314,10 @@ impl Pool {
             }
             match socket.write(&self.request[self.sent..]) {
                 Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
-                Ok(n) => self.sent += n,
+                Ok(n) => {
+                    self.sent += n;
+                    metrics.wire(true, n);
+                }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e),
@@ -333,6 +336,7 @@ impl Pool {
                 match socket.read(&mut self.response[self.received..]) {
                     Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
                     Ok(n) => {
+                        metrics.wire(false, n);
                         self.last_receive = metrics.now();
                         if self.received == 0 {
                             self.first = self.last_receive;
