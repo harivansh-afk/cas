@@ -77,9 +77,7 @@ fn populated(
     // Keep an obsolete root alive across the exhaustion sweep. Releasing it
     // must re-enable automatic collection even though current reads do not.
     let old = manifest.view().unwrap();
-    let prepared = manifest
-        .prepare(&[], manifest.current().durable + 1)
-        .unwrap();
+    let prepared = manifest.prepare(&[], manifest.current().durable).unwrap();
     manifest.publish(prepared).unwrap();
     let log = Log::create_shared(
         tickets,

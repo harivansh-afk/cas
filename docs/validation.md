@@ -108,6 +108,15 @@ CPU user/system/idle/iowait/steal, load, memory and free disk are sampled every
 second. Build intervals are separate from experiment intervals. Physical-host
 load is not exposed by the provider and must not be claimed as measured.
 
+The first XFS run at `e6e9b64` caught an error in the new regression setup:
+creating an obsolete root advanced D before creating a WAL namespace, which
+correctly rejects `D != 0` (`new staging namespace requires D=0`). The test now
+publishes an empty successor root at the same D, which is valid and still tests
+last-old-pin release. The runtime retry fix is unchanged. The failed fixture
+and uncaptured assertion are retained as `isolate-xfs-fixed-01` (71/72 runtime
+tests passed). `just-check-10` caught the corresponding formatting change; after
+formatting, `just-check-11` passed all 513 tests with 25 fixture ignores.
+
 ### Isolated comparison before the retry fix
 
 At `1fa06cd`, local-sync and async-io passed in 39.42 and 36.01 seconds.
