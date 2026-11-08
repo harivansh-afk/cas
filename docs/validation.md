@@ -1,5 +1,81 @@
 # Validation
 
+## 2026-11-08 — C5 publication rerun and telemetry tail regression
+
+Spark/aarch64, host Linux 7.0.14, 128 GB unified memory, accessible KVM;
+checkout on ext4, disposable XFS images inside KVM guests. The packaged guest
+kernel is 6.18.57; shared fixtures use two TCG inner guests. This session uses
+`.worktrees/c5-rerun`, branch `validate/c5-rerun`, `CARGO_BUILD_JOBS=8`, and
+`NIX_CONFIG` settings `cores = 8`, `max-jobs = 2`. Other build/test jobs share
+the host. These are local development checks, not CI or paper measurements.
+
+### Baseline on current main
+
+Fetched origin/main was `9c60e72676dfb001d14ab9b34583b03ea87f5182`.
+The full-history worktree stayed clean throughout the source-bound suite.
+`nix develop -c just check` passed 506 tests with 25 fixture-dependent ignores.
+`nix build .#checkpoints --out-link result-checkpoints`,
+`nix build .#cas --out-link result-cas`, and
+`nix develop -c just nix-check` passed before the timed inventory. Builds used
+`--cores 8 --max-jobs 2 --print-build-logs`.
+
+```
+nix develop -c result-checkpoints/bin/cas-checkpoints \
+  --checkpoint C5 --checkout . --output results/c5-2026-11-08/suite-01
+result-cas/bin/cas-harness verify-suite --output results/c5-2026-11-08/suite-01
+```
+
+All 41 scenarios ran: **31 passed, 10 failed**. The suite exited 1 after
+55.9 minutes; independent verification also exited 1, rejecting the required
+`nix-check` failure. This is not C5 acceptance.
+
+| Failed scenario(s) | Retained failure |
+| --- | --- |
+| `nix-check` | Flake evaluation exceeded the unchanged 115-second command deadline; standalone preparation had passed. |
+| `xfs-store` | Guest exceeded its 285-second process deadline while the runtime test list was at `unique_live_payload_reports_capacity_exhaustion_and_preserves_reads`. |
+| `shared-replacement`, `shared-before-chunks`, `shared-after-chunks`, `shared-after-manifest`, `shared-after-d`, `shared-after-punch`, `shared-after-unlink` | Application readiness expired before the requested replacement/crash boundary; inner-guest logs show incomplete boot. |
+| `guest-pressure` | `shared readiness: No data available (os error 61)` before pressure workloads began. |
+
+Host CPU and IO pressure were substantial, with one-minute load exceeding 100.
+This is a confounder, not proof that every failure is caused by contention.
+The isolated unchanged XFS capacity/read test subsequently passed on real XFS:
+256 MiB seeded in 35.858 seconds and read back in 97.303 seconds; writes remained
+refused and all readback/allocation assertions passed. Total test time was
+137.53 seconds. That establishes progress in the isolated test, not acceptance
+of the timed full fixture. The five completed fio smoke records have maximum
+read completion latency up to 161.435 ms (concurrent IO, p99 9.503 ms).
+No pressure read-tail conclusion is available because those workloads did not run.
+
+### Telemetry fix and regression evidence
+
+A standalone growing-file reader in the same guest reproduced `ENODATA` on
+the `/results` 9p mount. An otherwise equivalent reader bounded to each
+observed file length passed, checking all 1,564 records / 51,249,152 bytes.
+The pressure monitor used the same unbounded tail-read pattern. Its reader now
+takes a file-length snapshot, consumes only complete records within that bound,
+and revisits partial records on the next poll. IO errors, malformed records,
+sample validation and the record-size limit still fail; truncation is rejected.
+No timeout, deadline, workload, assertion or daemon policy was relaxed.
+
+On base `9c60e72` plus the uncommitted telemetry-reader change and four tests,
+the EOF-error regression failed against the old behavior with errno 61, then
+all four regressions passed with the bounded reader. Tests also cover partial
+records, concurrent appends, and continued rejection of invalid records and IO
+errors. `nix develop -c just check` passed 510 tests with 25 ignores. A full
+source-bound inventory on the committed fix is required separately.
+
+All raw output remains under ignored `results/c5-2026-11-08/` in this worktree:
+command JSON/log pairs, `suite-01/` (including images, source and build identity),
+`inventory-01.json`, `read-latencies-01.json`, resource samples, isolated guest
+artifacts, and the failing/passing regression logs. No bulk artifacts were
+deleted. Diagnostic setup retries are retained: kernel-command-line injection
+did not launch the first XFS probe (that guest was stopped); a path-based Nix
+diagnostic build was interrupted and replaced with a Git flake reference; a
+Nix override-priority conflict and missing diagnostic scenario file were
+corrected. The first regression compile also exposed an import inherited by
+the verifier module; its explicit import was restored before the red/green run.
+These setup failures are not test passes. No push, merge or deployment occurred.
+
 ## 2026-09-24 — Native KVM runner preparation
 
 On Spark, base `2d56108a2ab38b1985816448acbe6f08d8c29c3e` plus the native

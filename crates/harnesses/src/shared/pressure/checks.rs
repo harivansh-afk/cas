@@ -2,6 +2,7 @@
 use super::*;
 use crate::evidence::{require, u64_at};
 use std::collections::BTreeSet;
+use std::io::{BufRead, BufReader};
 
 fn array<'a>(value: &'a Value, path: &str) -> io::Result<&'a Vec<Value>> {
     value

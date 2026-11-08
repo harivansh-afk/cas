@@ -2,9 +2,10 @@
 use super::*;
 use crate::pressure::{self, COMMAND_TIMEOUT, Completed, Request, Stage};
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+use std::io::Write;
 
 mod checks;
+mod telemetry;
 
 struct Samples {
     telemetry: File,
@@ -56,24 +57,11 @@ impl Samples {
         })
     }
     fn refresh(&mut self) -> io::Result<()> {
-        self.telemetry.seek(SeekFrom::Start(self.position))?;
-        let mut reader = BufReader::new(&self.telemetry);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            let bytes = reader.read_line(&mut line)?;
-            if bytes == 0 || !line.ends_with('\n') {
-                break;
-            }
-            if bytes > 1024 * 1024 {
-                return Err(io::Error::other("telemetry record exceeds cap"));
-            }
-            let value: Value = serde_json::from_str(&line)?;
+        telemetry::refresh(&mut self.telemetry, &mut self.position, |value| {
             checks::sample(&value)?;
             self.latest = Some(value);
-            self.position += bytes as u64;
-        }
-        Ok(())
+            Ok(())
+        })
     }
     fn capture(&mut self) -> io::Result<()> {
         if Instant::now() < self.next {
