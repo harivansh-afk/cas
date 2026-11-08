@@ -62,7 +62,7 @@ def ssh_ready(port):
     # Disk readiness and sshd's host key precede late interface configuration.
     # Probe the forwarded path; the authenticated master still checks the key.
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=1) as stream:
+        with socket.create_connection(("127.0.0.1", port), timeout=30) as stream:
             return stream.recv(128).startswith(b"SSH-2.0-")
     except OSError:
         return False

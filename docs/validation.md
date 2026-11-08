@@ -927,3 +927,8 @@ Readiness now probes the actual forwarded SSH banner before the owned master
 starts; pinned-key authentication remains mandatory. A loopback unit test
 rejects non-SSH banners and absent listeners. The authenticated handshake allows
 120 seconds under TCG scheduling interference.
+
+`local-008` was stopped during guest startup: a one-second banner probe repeatedly
+closed SSH sessions before their TCG-scheduled banners arrived. The probe now
+allows 30 seconds per attempt within the existing readiness deadline, avoiding
+that retry pressure. No storage/performance result is claimed from this attempt.

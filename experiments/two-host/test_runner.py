@@ -1,8 +1,8 @@
 """Fail-closed measurement rules; run with uv run --no-project python -m unittest."""
 
 import socket
-import threading
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
