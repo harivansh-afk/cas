@@ -54,6 +54,7 @@ impl Host {
 
 impl worker::Owner {
     pub fn collect(&mut self) -> io::Result<CollectionReport> {
+        self.exhausted_space = None;
         let started = Instant::now();
         let mut report =
             self.quiesced(|owner, generation, started| owner.collect_paused(generation, started))?;
@@ -176,6 +177,12 @@ impl worker::Owner {
             }
         }
         report.allocated_after = self.shared.physical.as_ref().map(|p| p.status().allocated);
+        if report.capacity_exhausted {
+            self.exhausted_space = self.shared.physical.as_ref().map(|physical| {
+                let status = physical.status();
+                (status.allocated, status.promised)
+            });
+        }
         Ok(report)
     }
 
@@ -247,6 +254,12 @@ impl worker::Owner {
     }
 
     fn sweep(&mut self, report: &mut CollectionReport) -> io::Result<()> {
+        // Sample before marking: releasing an old reader during this sweep
+        // must trigger another pass. Ordinary current-root reads do not.
+        for (index, endpoint) in self.endpoints.iter_mut().enumerate() {
+            endpoint.swept_roots = endpoint.manifest.roots_revision();
+            endpoint.swept_attached = self.shared.admission.attached(index);
+        }
         let metadata = &self.shared.resources.compaction;
         let mut collection = self.store.begin_collection()?;
         for endpoint in &mut self.endpoints {

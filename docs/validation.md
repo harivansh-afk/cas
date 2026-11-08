@@ -49,6 +49,46 @@ throughput. On `d40305a` plus this diagnostic change, `just check` passed
 512 tests with 25 ignores (`just-check-07.log`). Test selection, serialization
 and all deadlines are unchanged.
 
+### Recovered XFS assertion and retry-policy diagnosis
+
+The original `f05b47b` packaged runtime tests were repeated under KVM/XFS on
+shared Spark with uncaptured stderr and backtraces. At 21:14–21:20 UTC,
+`unique_live_payload_reports_capacity_exhaustion_and_preserves_reads` failed
+at the unchanged five-second admission assertion: `full store stranded a read`.
+The complete runtime filter subsequently exceeded its 270-second inner bound
+and the diagnostic runner its 300-second bound. This is failure evidence, not
+a passing fixture. Raw assertion, console, command and CPU/load samples are in
+`results/c5-2026-11-08/spark-runtime-nocapture-01/` and
+`results/c5-isolated-2026-11-08/spark-runtime-{nocapture-01,resources}.*`.
+Spark load was about 90; this reproduction alone cannot isolate contention.
+
+Earlier retained unique-live runs expose a runtime retry defect: the 97.303-second
+readback performed 31 collections; the 75.808-second readback performed 25.
+Their final sweeps reclaimed no bytes, performed no compaction and reported
+capacity exhaustion, yet the worker scheduled another globally quiescing sweep
+one second later. Final pauses were 1.958 and 1.472 seconds respectively. Physical
+pressure is persistent for unique live data; it is not evidence that another
+identical sweep can make progress. These observations explain repeated pauses,
+but do not establish that every second of aggregate read time was collection.
+
+The correction suppresses automatic repetition after a completed exhaustion
+sweep until retained manifest roots, attachment membership or allocated/promised
+capacity changes. Root-set revisions change on publication or final old-pin
+release, not ordinary current-root read activity, and are sampled before the
+sweep so concurrent release cannot be missed. Pending image work still runs;
+manifest advancement re-enables collection. Snapshot roots are immutable and
+retained for the host lifetime. Explicit collection always remains available.
+The owner refreshes delayed filesystem frees without quiescing readers. A
+failed/incomplete collection is not latched as exhaustion. No timeout or
+admission deadline changes. Regression coverage checks stable read activity,
+old-root release, explicit collection and resumed work after capacity relief.
+
+On `1fa06cd` plus this retry fix, `just-check-08` and the final
+`just-check-09` passed. The final check includes formatting, strict Clippy,
+513 passing tests, 25 existing ignored fixture tests and whitespace validation.
+The XFS-specific regressions await the isolated fixture; a workspace pass does
+not exercise them.
+
 ### Isolated-host preparation
 
 The provider rejected the requested 16-vCPU Ubuntu VM with `LIMIT_EXCEEDED`:

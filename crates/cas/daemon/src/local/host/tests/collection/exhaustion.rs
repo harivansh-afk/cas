@@ -7,7 +7,10 @@ const IMAGE: Identity = Identity {
     image: [2; 16],
 };
 
-fn populated(root: &Path, resources: &Resources) -> (Store, Vec<(Log, Manifest)>) {
+fn populated(
+    root: &Path,
+    resources: &Resources,
+) -> (Store, Vec<(Log, Manifest)>, cas_core::manifest::file::View) {
     let tickets = Tickets::open(root, Arc::clone(&resources.metadata)).unwrap();
     let store_config = Config {
         segment_bytes: 2 * MAX_REQUEST_BYTES as u64,
@@ -71,6 +74,13 @@ fn populated(root: &Path, resources: &Resources) -> (Store, Vec<(Log, Manifest)>
     manifest
         .reclaim_pages(Arc::clone(&resources.compaction))
         .unwrap();
+    // Keep an obsolete root alive across the exhaustion sweep. Releasing it
+    // must re-enable automatic collection even though current reads do not.
+    let old = manifest.view().unwrap();
+    let prepared = manifest
+        .prepare(&[], manifest.current().durable + 1)
+        .unwrap();
+    manifest.publish(prepared).unwrap();
     let log = Log::create_shared(
         tickets,
         append::Config {
@@ -85,7 +95,7 @@ fn populated(root: &Path, resources: &Resources) -> (Store, Vec<(Log, Manifest)>
     )
     .unwrap();
     assert_eq!(store.status().chunks, LIVE_BYTES / BLOCK_SIZE);
-    (store, vec![(log, manifest)])
+    (store, vec![(log, manifest)], old)
 }
 
 #[test]
@@ -94,7 +104,7 @@ fn unique_live_payload_reports_capacity_exhaustion_and_preserves_reads() {
     let root = tempfile::tempdir().unwrap();
     let resources = Arc::new(Resources::default());
     let started = Instant::now();
-    let (store, images) = populated(root.path(), &resources);
+    let (store, images, old) = populated(root.path(), &resources);
     let seed_micros = started.elapsed().as_micros();
     let initial = cas_core::space::Observation::inspect(store.tickets()).unwrap();
     let reserve = cas_core::space::Limits::new(
@@ -147,6 +157,14 @@ fn unique_live_payload_reports_capacity_exhaustion_and_preserves_reads() {
     );
     assert!(local.prepare(Kind::Write(BLOCK_SIZE)).unwrap().is_none());
     assert_eq!(local.admitted, 0);
+    // An explicit pass after attachment establishes an exact stable baseline.
+    // Exhaustion must not schedule another identical global pause every second.
+    host.collect()
+        .unwrap()
+        .wait(Duration::from_secs(5))
+        .unwrap();
+    let collections = host.report()["collection"]["completed"].as_u64().unwrap();
+    thread::sleep(Duration::from_millis(1100));
     let reading = Instant::now();
     let mut read_latency_micros = Vec::with_capacity(LIVE_BYTES / MAX_REQUEST_BYTES);
     let mut expected = vec![0; MAX_REQUEST_BYTES];
@@ -186,6 +204,11 @@ fn unique_live_payload_reports_capacity_exhaustion_and_preserves_reads() {
         assert_eq!(bytes.as_slice(), expected);
     }
     let read_micros = reading.elapsed().as_micros();
+    assert_eq!(
+        host.report()["collection"]["completed"],
+        collections,
+        "unchanged exhausted store repeated a global collection"
+    );
     let after = physical.status();
     assert!(after.pressured && !after.failed);
     assert!(u128::from(after.allocated) * 100 >= u128::from(limits.capacity) * 60);
@@ -207,6 +230,15 @@ fn unique_live_payload_reports_capacity_exhaustion_and_preserves_reads() {
             .unwrap(),
         )
         .unwrap();
+    }
+    drop(old);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while host.report()["collection"]["completed"].as_u64().unwrap() == collections {
+        assert!(
+            Instant::now() < deadline,
+            "old-root release did not retry collection"
+        );
+        thread::sleep(Duration::from_millis(1));
     }
     drop(local);
     shutdown(host);

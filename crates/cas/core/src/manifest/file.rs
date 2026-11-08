@@ -228,6 +228,13 @@ impl Manifest {
         self.failed
     }
 
+    /// Changes only when the retained root set changes, not for reads of an
+    /// already retained root. Observe before a sweep so concurrent pin release
+    /// remains visible as a reason to retry that conservative sweep.
+    pub fn roots_revision(&self) -> u64 {
+        self.pin.revision()
+    }
+
     pub fn pinned_roots(&mut self, metadata: Arc<Budget>) -> io::Result<Roots<'_>> {
         self.healthy()?;
         self.pin.capture(&self.file, metadata)

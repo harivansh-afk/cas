@@ -313,6 +313,8 @@ impl Host {
                 resources: Arc::clone(&shared.resources),
                 manifest,
                 quiescent: None,
+                swept_roots: 0,
+                swept_attached: false,
                 #[cfg(test)]
                 control: Arc::clone(&shared.control),
                 health: health.clone(),
@@ -348,6 +350,7 @@ impl Host {
         let mut retained = reserved_vec(snapshots.as_ref().len(), &shared.resources.metadata)?;
         retained.extend(snapshots);
         let owner = worker::Owner {
+            exhausted_space: None,
             catalog: context.catalog,
             snapshots: retained,
             store,
