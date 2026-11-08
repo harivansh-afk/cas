@@ -184,18 +184,34 @@ fn serve(
     loop {
         // Idle connections have no request deadline. Once a frame starts, slow
         // partial reads/writes cannot extend its absolute deadline.
-        match read(socket, &mut request[..1], stop, None) {
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
-            result => result?,
-        }
+        // Every legal request is at least HEADER + one hash. Read that
+        // prefix together: the common GET needs one receive, without consuming
+        // any bytes from a following pipelined request.
+        let mut received = loop {
+            check(stop, None)?;
+            match socket.read(&mut request[..HEADER + 32]) {
+                Ok(0) => return Ok(()),
+                Ok(n) => break n,
+                Err(e) if transient(&e) => (),
+                Err(e) => return Err(e),
+            }
+        };
         let deadline = Instant::now() + TIMEOUT;
-        read(socket, &mut request[1..HEADER], stop, Some(deadline))?;
+        if received < HEADER {
+            read(socket, &mut request[received..HEADER], stop, Some(deadline))?;
+            received = HEADER;
+        }
         let h = Header::decode(&request, false)?;
         if connection_op.is_some_and(|op| op != h.op) {
             return Err(invalid());
         }
         connection_op = Some(h.op);
-        read(socket, &mut request[HEADER..h.bytes], stop, Some(deadline))?;
+        read(
+            socket,
+            &mut request[received..h.bytes],
+            stop,
+            Some(deadline),
+        )?;
         let mut reply = Header { bytes: HEADER, ..h };
         if h.op == GET {
             let hash = request[HEADER..h.bytes].try_into().unwrap();

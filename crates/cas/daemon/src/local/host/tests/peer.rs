@@ -377,6 +377,11 @@ fn daemon_child() {
             ..Default::default()
         }
     };
+    let mut config = config;
+    config.peer_inline_us = std::env::var("CAS_PEER_INLINE_US")
+        .ok()
+        .map(|v| v.parse().unwrap())
+        .unwrap_or(0);
     let root = tempfile::tempdir().unwrap();
     let r = resources(config);
     let mut host = seeded(root.path(), r.clone(), true);
@@ -385,6 +390,9 @@ fn daemon_child() {
     for line in std::io::stdin().lock().lines() {
         match line.unwrap().as_str() {
             "measure" => {
+                for id in 700..700 + profile_reads() {
+                    get(&mut local, id, id as usize % BLOCKS);
+                }
                 for id in 0..100 {
                     get(&mut local, id, id as usize % BLOCKS);
                 }
@@ -426,6 +434,15 @@ fn daemon_child() {
     reply(serde_json::json!({"stopped":true}));
 }
 
+fn profile_reads() -> u64 {
+    let count = std::env::var("CAS_PEER_PROFILE_READS")
+        .ok()
+        .map(|s| s.parse().unwrap())
+        .unwrap_or(0);
+    assert!(count <= 1_000_000);
+    count
+}
+
 #[test]
 fn two_daemon_loopback_verifies_data_measures_phases_and_fails_on_peer_loss() {
     let mut b = Daemon::start(None);
@@ -434,9 +451,17 @@ fn two_daemon_loopback_verifies_data_measures_phases_and_fails_on_peer_loss() {
     let mut a = Daemon::start(Some(address));
     assert_eq!(a.reply()["ready"], true);
     let report = a.command("measure");
-    assert_eq!(report["peer"]["counters"]["verified"], 700);
+    assert_eq!(
+        report["peer"]["counters"]["verified"],
+        700 + profile_reads()
+    );
     assert_eq!(report["cache"]["resident_bytes"], 0);
-    let records = report["peer"]["recent"].as_array().unwrap();
+    let records: Vec<_> = report["peer"]["recent"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["id"].as_u64().unwrap() < 700)
+        .collect();
     assert_eq!(records.len(), 700);
     for r in records {
         let time = |v: &serde_json::Value| v.as_u64().unwrap();
@@ -447,10 +472,16 @@ fn two_daemon_loopback_verifies_data_measures_phases_and_fails_on_peer_loss() {
         assert_eq!(r["success"], true);
     }
     let pipeline = a.command("pipeline");
-    assert_eq!(pipeline["peer"]["counters"]["verified"], 704);
+    assert_eq!(
+        pipeline["peer"]["counters"]["verified"],
+        704 + profile_reads()
+    );
     let server = b.command("report");
     assert_eq!(server["peer"]["counters"]["server_store"], BLOCKS);
-    assert_eq!(server["peer"]["counters"]["server_memory"], 704 - BLOCKS);
+    assert_eq!(
+        server["peer"]["counters"]["server_memory"],
+        704 - BLOCKS + profile_reads() as usize
+    );
     b.command("stop");
     assert!(b.child.wait().unwrap().success());
     let failure = a.command("fail");

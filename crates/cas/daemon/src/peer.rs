@@ -22,9 +22,18 @@ pub struct Config {
     /// Cache verified remote chunks at the reader (off for remote latency runs).
     #[arg(long, requires = "peer_address")]
     pub peer_cache: bool,
+    /// Bounded reactor-local TCP polling before falling back to the IO worker.
+    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u32).range(0..=1000))]
+    pub peer_inline_us: u32,
 }
 impl Config {
     pub fn validate(&self) -> io::Result<()> {
+        if self.peer_inline_us > 1000 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "peer inline polling exceeds 1000 microseconds",
+            ));
+        }
         if (self.peer_force_remote || self.peer_cache) && self.peer_address.is_none() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

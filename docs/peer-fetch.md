@@ -7,7 +7,7 @@ root recovery, authentication, or distributed garbage collection.
 
 ## Configuration and experiment setup
 
-The service is disabled unless configured. The four serving options are:
+The service is disabled unless configured. The serving options are:
 
 | Option | Meaning |
 | --- | --- |
@@ -15,6 +15,7 @@ The service is disabled unless configured. The four serving options are:
 | `--peer-address IP:PORT` | The other host, contacted on a settled-chunk local index miss |
 | `--peer-force-remote` | Bypass the local settled chunk store and, by default, its cache |
 | `--peer-cache` | Admit verified remote fills into the existing bounded clean cache |
+| `--peer-inline-us N` | Additional reactor-local polling window (0–1000 µs, default 0) |
 
 Force-remote and caching require a peer address. There is no implicit discovery,
 address resolution, self-fetch, or forwarding. Both hosts may have a listener
@@ -94,10 +95,14 @@ is the bounded provisioning probe API.
 The first frame fixes a connection's operation; mixing HAS and GET closes it.
 GET has its own persistent connection, with multiple outstanding requests and
 ordered responses; it is independent of HAS connections. Both ends set
-`TCP_NODELAY`. The client uses one nonblocking TCP worker with `poll` for
-readiness and partial send/receive handling. This minimal implementation uses
-blocking service workers; it is not the spec's proposed io_uring socket driver
-or busy-polling arm. The image reactor waits on completion eventfds via io_uring,
+`TCP_NODELAY`. The reactor sends GET directly on an established nonblocking connection and
+consumes immediately available replies. With `--peer-inline-us N`, it additionally
+polls for at most N microseconds before yielding transport ownership. A reply
+completed there bypasses the eventfd/io_uring completion handoff. Slow replies
+use one TCP worker with `poll` for readiness and partial send/receive handling.
+Connection establishment stays on that worker, outside the shared mutex. This minimal implementation uses
+blocking service workers; it is not the spec's proposed io_uring socket driver.
+Bounded inline polling is an experimental arm, not continuous busy polling. The image reactor waits on completion eventfds via io_uring,
 so a blocked peer does not block WAL IO or the reactor thread.
 
 The client preallocates 1,024 slots, each with a 4 KiB payload and eventfd, using
@@ -139,7 +144,9 @@ The transport itself can reconnect, as checked independently of the host gate.
 When peer support is configured, `Host::report()` includes `peer`, also present
 in normal host reports and telemetry. Counters cover GETs, verification/errors,
 connections, peak outstanding GETs, server memory/store hits, missing chunks,
-HAS, and completed/failed remote reads. No JSON formatting or file writes occur
+HAS, direct/inline attempts and completions, and completed/failed remote reads.
+An inline attempt includes the default single nonblocking visit; it does not
+necessarily indicate that a busy-poll window was enabled. No JSON formatting or file writes occur
 on the IO path.
 
 A fixed ring retains the most recent 1,024 remote-read records. Nanosecond values
@@ -184,6 +191,7 @@ latencies, failures/retries, and limits. CloudLab still needs matched builds,
 private NIC binding/firewall configuration, prepared replicas, guest IO,
 cache-state verification, local NVMe controls, recorded NIC/IRQ/kernel settings,
 transport baselines, repeated runs, and cross-host latency/throughput/CPU data.
-PUT contention, placement, prefetch, replicated durability, and the busy-polling
-transport are separate work. Local correctness is not the paper's performance
+PUT contention, placement, prefetch, and replicated durability are separate work.
+Compare polling settings under controlled CPU affinity; shared-host contention
+can make bounded polling slower than the default path. Local correctness is not the paper's performance
 result.

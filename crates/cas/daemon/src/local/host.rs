@@ -248,10 +248,11 @@ impl Host {
             .peer_address
             .map(|address| {
                 BudgetArc::try_new(
-                    crate::peer::Client::new(
+                    crate::peer::Client::with_inline(
                         address,
                         &metadata,
                         peer_metrics.as_ref().expect("peer metrics").clone(),
+                        resources.peer.peer_inline_us,
                     )?,
                     &metadata,
                 )

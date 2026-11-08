@@ -25,6 +25,8 @@ pub struct Record {
 }
 #[derive(Default, Clone, Copy, serde::Serialize)]
 pub struct Counters {
+    pub inline_attempts: u64,
+    pub inline_completed: u64,
     pub gets: u64,
     pub verified: u64,
     pub errors: u64,

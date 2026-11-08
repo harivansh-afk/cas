@@ -560,3 +560,116 @@ QD/size sweeps, CPU/IOPS, guest tails, and loss/failure behavior. Long-run phase
 capture must account for the bounded 1,024-record ring; periodic telemetry is
 not lossless. PUT contention and busy-polling require additional implementation.
 No paper performance gate, CI, merge, push, or deployment is claimed.
+
+## 2026-11-08 — Phase A: direct reactor GET and bounded polling
+
+Tested base `7460d42` plus the Phase A worktree changes committed with this
+record: shared nonblocking transport engine, reactor-local send/fast completion,
+coalesced receive handling, single-receive server GET, bounded optional polling,
+and profiling harness. Spark, aarch64, kernel 7.0.14, Rust 1.98.1, ext4/O_DIRECT.
+No C5 or unrelated job affinity/priority was changed. All 20 CPUs were close to
+fully busy in the initial sample; C5 and unrelated builds/tests shared the host.
+Pinning our processes controls placement, **not isolation**.
+
+The default sends immediately from the image reactor on an established socket,
+then falls back to the existing worker for slow replies. `--peer-inline-us 20`
+adds a bounded polling window and can bypass both transport wakeups. It remains
+opt-in: spinning competed poorly with server scheduling in several trials.
+Connection setup never holds the reactor mutex. Partial frames, multiple
+outstanding GETs, cancelled slots, deadlines, and receiver verification remain.
+The server receives a common GET header/hash together; the client receives the
+reply header/payload together and retains coalesced short-error/next-frame bytes.
+No transport allocation was added per request, and the asynchronous path still
+holds the same admission/IO owners. No FLUSH or recovery format changed.
+
+Measurements use the existing native two-process Host harness, 4 KiB QD1,
+64 hashes, 100 warmups and 600 timed successful memory reads, reader fills off.
+`baseline-test` is the preserved release executable of `7460d42`. Three matched,
+interleaved runs of baseline, default direct GET, and 20 µs inline polling pinned
+both process trees to CPUs 5–8. Builds were complete before this comparison.
+The final counter-only adjustment counts every direct attempt, including the
+zero-polling-budget case; measured timing-path code is otherwise identical.
+Numbers are microseconds, medians and nearest-rank p99s; ranges span three runs.
+
+| Phase | Baseline p50 range | Direct GET p50 range | Baseline p99 range | Direct GET p99 range |
+| --- | ---: | ---: | ---: | ---: |
+| Receipt → send | 7.98–8.35 | 5.90–6.14 | 10.48–36.32 | 8.80–14.37 |
+| Send → first byte | 9.26–9.81 | 10.58–11.31 | 14.34–980.25 | 183.17–882.66 |
+| First byte → verified | 2.38–2.40 | 2.02 | 2.53–6.62 | 2.27–4.43 |
+| Verified → completion | 5.20–5.27 | 4.59–5.06 | 8.66–1190.84 | 8.02–17.01 |
+| Total | 25.54–26.11 | 23.39–24.30 | 37.68–3027.97 | 732.10–1193.83 |
+
+Default total p50 by run: 24.22, 24.30, 23.39; baseline: 25.54, 26.11,
+25.81. The 20 µs polling runs were 17.31/84.16, 61.14/808.56, and
+42.10/785.89 (total p50/p99); 491, 373, and 185 of 700 GETs completed
+inline. Default direct GET completed 116, 121, and 108 inline. Marginal phase
+quantiles do not add to the total. These development runs support a modest
+median reduction and a configurable fast completion path. They do not establish
+an uncontended p99 improvement or a paper result. The requested p50 <40 µs is
+met by the default in all three runs; the sane-p99 target remains unproven here.
+
+The earlier unpinned 112.24 µs median is not a matched code baseline. Three
+initial pinned baseline runs already measured 23.86–27.55 µs p50 and
+31.87–37.31 µs p99. Separating reader onto CPUs 5–6 and server onto 7–8
+produced highly variable 793.78–1059.61 µs baseline and 157.26–1986.81 µs
+inline medians. Earlier exploratory runs overlapped a build; retained as such,
+not used in the table. These experiments expose sensitivity to scheduling and
+interference rather than proving where each tail originated.
+
+Profiling used the Nix-store Linux 7.1 `perf` binary. `perf stat` with task-clock,
+context-switches, migrations, cycles and instructions worked. System-wide
+`perf sched record` was denied by root-only tracefs; permissions were unchanged.
+Per-process `perf record -e cpu-clock:u -F 999 --switch-events` worked. A longer
+20,000 verified warmup reads reduced startup/report-formatting dominance. Its
+244 user CPU samples include BLAKE3, manifest validation, atomics, memcpy and
+mutex contention; this is too few samples for fine-grained cost attribution.
+Switch OUT/IN pairs marked `preempt` measured off-CPU p50/p99/max respectively:
+GET worker 4/16/3046 µs, server 9/992/8445 µs, reactor 4/47/6274 µs. These
+include all lifecycle phases and are not scheduler wake-to-run measurements;
+voluntary sleeps are excluded from these figures. They demonstrate preemption
+in the measured processes, not causation for every request outlier.
+
+Commands/evidence (ignored `results/peer-latency/`): `compare-final.py` runs the
+matched processes and retains `final-{baseline,direct,inline}-{0,1,2}` JSON,
+CPU counters, load averages, logs, and executable paths. `compare.py` and
+`split-*` retain split-affinity trials. `interference.json`, perf probes and
+`profile-direct.{data,log}`, `profile-direct-{report,switches}.txt` retain the
+profiling evidence. Profiling command:
+
+```sh
+CAS_PEER_PROFILE_READS=20000 CAS_PEER_EVIDENCE="$PWD/results/peer-latency/profile-direct" \
+  perf record -e cpu-clock:u -F 999 --switch-events \
+  -o results/peer-latency/profile-direct.data -- taskset -c 5,6,7,8 \
+  target/release/deps/cas_daemon-30a087ee83203f63 --exact \
+  local::host::tests::peer::two_daemon_loopback_verifies_data_measures_phases_and_fails_on_peer_loss \
+  --nocapture
+```
+
+New regressions cover a coalesced MISSING frame followed by a successful GET and
+bounded inline polling that retains a delayed reply for worker completion. The
+release peer suite (inline budget 20) passed 15 tests; child entry point ignored
+but invoked by the integration. The first `just check` reached tests after fmt
+and strict Clippy passed, then an existing attachment test failed with `Capacity`
+at `local/tests.rs:605` under default concurrency. Retried with
+`RUST_TEST_THREADS=3 CARGO_BUILD_JOBS=3 just check`; final outcome recorded below.
+Both full attempts failed identically, and an isolated run of the preserved
+baseline executable reproduced the same failure: this was not caused by the
+peer changes. The epoch test reopens three retained 64 MiB WAL segments and
+allocates a fourth; its 256 MiB reopen limit left no allocation-overhead margin.
+The test now allows 320 MiB on reopen. Production limits and recovery accounting
+are unchanged. A final plain `just check` follows this fixture correction; logs
+retain every attempt.
+
+CloudLab still needs two idle hosts, private 100 GbE NIC binding, matched builds,
+separate recorded reactor/server/IRQ CPU placement, cache verification, repeated
+blocking/polling comparisons, transport baselines, and the controlled local NVMe
+arm. Loopback and native harness timestamps exclude guest/QEMU scheduling and
+cannot establish the peer-memory versus ~80 µs local-NVMe headline. No CI,
+CloudLab deployment, physical-power-loss test, push or merge occurred.
+
+Final Phase A validation: plain `CARGO_BUILD_JOBS=3 just check` passed fmt,
+strict Clippy, all workspace tests (519 passed, 26 ignored), and diff checks.
+`just-check-final.log` retains output. The final release peer filter passed
+13 tests plus the invoked child entry point (`inline-final.log`); the earlier
+15-test result included additional host coverage. The fixture headroom fix
+does not change the remote-read benchmark.

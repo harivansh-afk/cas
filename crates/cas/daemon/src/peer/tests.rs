@@ -205,3 +205,73 @@ fn failed_connection_is_replaced_for_the_next_request() {
     server.join().unwrap();
     assert_eq!(budget.usage().current, Amount::default());
 }
+
+#[test]
+fn coalesced_missing_and_success_frames_keep_their_own_payloads() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket.set_read_timeout(Some(TIMEOUT)).unwrap();
+        let first = request(&mut socket);
+        let second = request(&mut socket);
+        let mut joined = vec![0; HEADER + FRAME];
+        Header {
+            status: MISSING,
+            bytes: HEADER,
+            ..first
+        }
+        .encode(&mut joined);
+        joined[HEADER..].copy_from_slice(&response(second, &[7; BLOCK_SIZE]));
+        socket.write_all(&joined).unwrap();
+    });
+    let budget = memory();
+    let metrics = Metrics::new(&budget).unwrap();
+    let client = Client::with_inline(address, &budget, metrics.clone(), 20).unwrap();
+    let hash = *blake3::hash(&[7; BLOCK_SIZE]).as_bytes();
+    let first = client.fetch(hash).unwrap();
+    let second = client.fetch(hash).unwrap();
+    assert_eq!(
+        wait(&first).1.unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+    wait(&second).1.unwrap();
+    drop((first, second, client, metrics));
+    server.join().unwrap();
+    assert_eq!(budget.usage().current, Amount::default());
+}
+
+#[test]
+fn inline_get_has_a_bounded_poll_and_retains_slow_reply_ownership() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (release, released) = std::sync::mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let first = request(&mut socket);
+        socket
+            .write_all(&response(first, &[7; BLOCK_SIZE]))
+            .unwrap();
+        let second = request(&mut socket);
+        released.recv_timeout(TIMEOUT).unwrap();
+        socket
+            .write_all(&response(second, &[7; BLOCK_SIZE]))
+            .unwrap();
+    });
+    let budget = memory();
+    let metrics = Metrics::new(&budget).unwrap();
+    let client = Client::with_inline(address, &budget, metrics.clone(), 20).unwrap();
+    let hash = *blake3::hash(&[7; BLOCK_SIZE]).as_bytes();
+    let first = client.fetch(hash).unwrap();
+    wait(&first).1.unwrap();
+    drop(first);
+    let second = client.fetch(hash).unwrap();
+    // fetch returned before the peer is allowed to reply; no blocking read.
+    assert!(!second.ready());
+    assert_eq!(metrics.report()["counters"]["inline_attempts"], 1);
+    release.send(()).unwrap();
+    wait(&second).1.unwrap();
+    drop((second, client, metrics));
+    server.join().unwrap();
+    assert_eq!(budget.usage().current, Amount::default());
+}

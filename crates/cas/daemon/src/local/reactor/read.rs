@@ -239,6 +239,11 @@ impl Read {
                 .ok_or_else(|| io::Error::other("manifest references an unavailable chunk"))?;
             Stage::Remote(peer.fetch(hash)?)
         };
+        if matches!(&self.stage, Stage::Remote(ticket) if ticket.ready()) {
+            self.finish_remote()?;
+            self.stage = Stage::Done;
+            return Ok(false);
+        }
         Ok(true)
     }
 
@@ -337,6 +342,44 @@ impl Read {
         result
     }
 
+    fn finish_remote(&mut self) -> io::Result<()> {
+        let Stage::Remote(ticket) = &self.stage else {
+            unreachable!()
+        };
+        let fetched = self
+            .fetched
+            .as_mut()
+            .expect("remote fetch payload")
+            .get_mut()
+            .expect("unpublished fetch");
+        let (phases, result) = ticket.finish(fetched.bytes.as_mut_slice());
+        fetched.remote = Some(phases);
+        if let Some(trace) = &mut self.io.permit.remote {
+            trace.fetched(phases);
+        }
+        result?;
+        let fetched = self.fetched.take().expect("remote fetch payload");
+        if self.cache_remote
+            && let Some(cache) = &self.cache
+        {
+            match cache.fill(
+                self.chunk_hash.expect("remote hash"),
+                fetched.bytes.as_slice(),
+            ) {
+                Ok(_) => (),
+                Err(e) if e.kind() == io::ErrorKind::OutOfMemory => (),
+                Err(e) => return Err(e),
+            }
+        }
+        self.response_block()
+            .copy_from_slice(fetched.bytes.as_slice());
+        self.leader
+            .take()
+            .expect("fetch leader")
+            .complete(fetched)?;
+        Ok(())
+    }
+
     fn advance_inner(&mut self) -> io::Result<bool> {
         match &mut self.stage {
             Stage::Staging(index) => {
@@ -413,38 +456,8 @@ impl Read {
                 self.block += 1;
                 self.next_block()?;
             }
-            Stage::Remote(ticket) => {
-                let fetched = self
-                    .fetched
-                    .as_mut()
-                    .expect("remote fetch payload")
-                    .get_mut()
-                    .expect("unpublished fetch");
-                let (phases, result) = ticket.finish(fetched.bytes.as_mut_slice());
-                fetched.remote = Some(phases);
-                if let Some(trace) = &mut self.io.permit.remote {
-                    trace.fetched(phases);
-                }
-                result?;
-                let fetched = self.fetched.take().expect("remote fetch payload");
-                if self.cache_remote
-                    && let Some(cache) = &self.cache
-                {
-                    match cache.fill(
-                        self.chunk_hash.expect("remote hash"),
-                        fetched.bytes.as_slice(),
-                    ) {
-                        Ok(_) => (),
-                        Err(e) if e.kind() == io::ErrorKind::OutOfMemory => (),
-                        Err(e) => return Err(e),
-                    }
-                }
-                self.response_block()
-                    .copy_from_slice(fetched.bytes.as_slice());
-                self.leader
-                    .take()
-                    .expect("fetch leader")
-                    .complete(fetched)?;
+            Stage::Remote(_) => {
+                self.finish_remote()?;
                 self.block += 1;
                 self.next_block()?;
             }

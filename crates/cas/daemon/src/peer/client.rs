@@ -37,12 +37,23 @@ struct Pool {
     slots: Vec<Slot, BudgetAllocator>,
     free: Vec<usize, BudgetAllocator>,
     queued: Queue<usize>,
+    pending: Queue<usize>,
+    stream: Option<Arc<TcpStream>>,
+    sending: Option<usize>,
+    request: [u8; HEADER + 32],
+    sent: usize,
+    response: [u8; FRAME],
+    received: usize,
+    expected: usize,
+    first: u64,
+    last_receive: u64,
 }
 struct Shared {
     pool: Mutex<Pool>,
     wake: EventFd,
     stop: AtomicBool,
     metrics: BudgetArc<Metrics>,
+    inline: std::time::Duration,
 }
 pub struct Client {
     shared: BudgetArc<Shared>,
@@ -57,6 +68,14 @@ impl Client {
         address: SocketAddr,
         budget: &Arc<Budget>,
         metrics: BudgetArc<Metrics>,
+    ) -> io::Result<Self> {
+        Self::with_inline(address, budget, metrics, 0)
+    }
+    pub fn with_inline(
+        address: SocketAddr,
+        budget: &Arc<Budget>,
+        metrics: BudgetArc<Metrics>,
+        inline_us: u32,
     ) -> io::Result<Self> {
         let mut slots = crate::local::reserved_vec(SLOTS, budget)?;
         let mut free = crate::local::reserved_vec(SLOTS, budget)?;
@@ -79,18 +98,28 @@ impl Client {
                     slots,
                     free,
                     queued: Queue::with_capacity(SLOTS, budget)?,
+                    pending: Queue::with_capacity(SLOTS, budget)?,
+                    stream: None,
+                    sending: None,
+                    request: [0; HEADER + 32],
+                    sent: 0,
+                    response: [0; FRAME],
+                    received: 0,
+                    expected: HEADER,
+                    first: 0,
+                    last_receive: 0,
                 }),
                 wake: EventFd::new(libc::EFD_NONBLOCK | libc::EFD_CLOEXEC)?,
                 stop: AtomicBool::new(false),
                 metrics,
+                inline: std::time::Duration::from_micros(u64::from(inline_us)),
             },
             budget,
         )?;
-        let pending = Queue::with_capacity(SLOTS, budget)?;
         let owner = shared.clone();
         let worker = thread::Builder::new()
             .name("cas-peer-get".into())
-            .spawn(move || run(owner, address, pending))?;
+            .spawn(move || run(owner, address))?;
         Ok(Self {
             shared,
             worker: Mutex::new(Some(worker)),
@@ -127,8 +156,27 @@ impl Client {
         slot.queued = Instant::now();
         pool.queued.push_back(index);
         self.shared.metrics.count(|c| c.gets += 1);
-        // The live shared event cannot be closed while the worker owns it.
-        self.shared.wake.write(1)?;
+        // The image reactor may send and consume a fast reply itself. Bound
+        // polling so a slow peer cannot monopolize mutation/FLUSH processing.
+        if pool.stream.is_some() {
+            self.shared.metrics.count(|c| c.inline_attempts += 1);
+            let until = Instant::now() + self.shared.inline;
+            loop {
+                pool.drive(&self.shared.metrics);
+                if pool.slots[index].done || Instant::now() >= until {
+                    break;
+                }
+                std::hint::spin_loop();
+            }
+            if pool.slots[index].done {
+                self.shared.metrics.count(|c| c.inline_completed += 1);
+            }
+        }
+        // A completed inline GET needs no worker handoff. Slow replies and
+        // connection failures refresh the worker's socket/deadline snapshot.
+        if pool.active() || pool.stream.is_none() {
+            self.shared.wake.write(1)?;
+        }
         Ok(Ticket {
             shared: self.shared.clone(),
             index,
@@ -136,6 +184,9 @@ impl Client {
     }
 }
 impl Ticket {
+    pub fn ready(&self) -> bool {
+        self.shared.pool.lock().expect("peer pool poisoned").slots[self.index].done
+    }
     pub fn notification(&self) -> RawFd {
         self.shared.pool.lock().expect("peer pool poisoned").slots[self.index]
             .event
@@ -178,175 +229,184 @@ impl Drop for Client {
     }
 }
 
-fn finish(shared: &Shared, index: usize, bytes: &[u8], error: Option<io::ErrorKind>, first: u64) {
-    let mut pool = shared.pool.lock().expect("peer pool poisoned");
-    let slot = &mut pool.slots[index];
-    slot.phases.first_byte_ns = first;
-    let error = error.or_else(|| verify(&slot.hash, bytes).err().map(|e| e.kind()));
-    if error.is_none() {
-        slot.bytes.copy_from_slice(bytes);
-        slot.phases.verified_ns = shared.metrics.now();
+impl Pool {
+    fn finish(
+        &mut self,
+        metrics: &Metrics,
+        index: usize,
+        error: Option<io::ErrorKind>,
+        first: u64,
+    ) {
+        let slot = &mut self.slots[index];
+        slot.phases.first_byte_ns = first;
+        let bytes = &self.response[HEADER..self.expected.max(HEADER)];
+        let error = error.or_else(|| verify(&slot.hash, bytes).err().map(|e| e.kind()));
+        if error.is_none() {
+            slot.bytes.copy_from_slice(bytes);
+            slot.phases.verified_ns = metrics.now();
+        }
+        slot.error = error;
+        slot.done = true;
+        metrics.count(|c| {
+            c.verified += u64::from(error.is_none());
+            c.errors += u64::from(error.is_some());
+        });
+        if slot.owned {
+            let _ = slot.event.write(1);
+        } else {
+            self.free.push(index);
+        }
     }
-    slot.error = error;
-    slot.done = true;
-    shared.metrics.count(|c| {
-        c.verified += u64::from(error.is_none());
-        c.errors += u64::from(error.is_some());
-    });
-    if slot.owned {
-        let _ = slot.event.write(1);
-    } else {
-        pool.free.push(index);
+    fn next(&mut self) {
+        self.sending = self.queued.pop_front();
+        if let Some(index) = self.sending {
+            self.sent = 0;
+            Header {
+                op: GET,
+                status: OK,
+                id: index as u64 + 1,
+                count: 1,
+                bytes: self.request.len(),
+            }
+            .encode(&mut self.request);
+            self.request[HEADER..].copy_from_slice(&self.slots[index].hash);
+        }
+    }
+    fn active(&self) -> bool {
+        !self.queued.is_empty() || !self.pending.is_empty() || self.sending.is_some()
+    }
+    fn failed(&mut self, metrics: &Metrics, error: io::ErrorKind) {
+        self.stream = None;
+        if let Some(index) = self.sending.take() {
+            self.pending.push_back(index);
+        }
+        while let Some(index) = self.queued.pop_front() {
+            self.pending.push_back(index);
+        }
+        while let Some(index) = self.pending.pop_front() {
+            self.finish(metrics, index, Some(error), self.first);
+            self.first = 0;
+        }
+        self.received = 0;
+        self.expected = HEADER;
+    }
+    fn drive(&mut self, metrics: &Metrics) {
+        if let Err(error) = self.progress(metrics) {
+            self.failed(metrics, error.kind());
+        }
+    }
+    fn progress(&mut self, metrics: &Metrics) -> io::Result<()> {
+        let Some(socket) = self.stream.clone() else {
+            return Ok(());
+        };
+        let mut socket = &*socket;
+        if self.sending.is_none() {
+            self.next();
+        }
+        // Bound a visit as well as the inline time budget. Never wait for IO
+        // while holding this lock; connection establishment stays on the worker.
+        for _ in 0..64 {
+            let Some(index) = self.sending else {
+                break;
+            };
+            if self.sent == 0 && self.slots[index].phases.send_ns == 0 {
+                self.slots[index].phases.send_ns = metrics.now();
+            }
+            match socket.write(&self.request[self.sent..]) {
+                Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                Ok(n) => self.sent += n,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+            if self.sent == self.request.len() {
+                self.pending.push_back(index);
+                metrics.count(|c| c.max_inflight = c.max_inflight.max(self.pending.len()));
+                self.next();
+            }
+        }
+        for _ in 0..64 {
+            let Some(&index) = self.pending.front() else {
+                break;
+            };
+            if self.received < self.expected {
+                match socket.read(&mut self.response[self.received..]) {
+                    Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+                    Ok(n) => {
+                        self.last_receive = metrics.now();
+                        if self.received == 0 {
+                            self.first = self.last_receive;
+                        }
+                        self.received += n;
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+            if self.received < HEADER {
+                continue;
+            }
+            let h = Header::decode(&self.response, true)?;
+            if h.op != GET || h.id != index as u64 + 1 {
+                return Err(invalid());
+            }
+            self.expected = h.bytes;
+            if self.received < self.expected {
+                continue;
+            }
+            let error = match h.status {
+                OK => None,
+                MISSING => Some(io::ErrorKind::NotFound),
+                _ => Some(io::ErrorKind::Other),
+            };
+            self.finish(metrics, index, error, self.first);
+            self.pending.pop_front();
+            self.response.copy_within(self.expected..self.received, 0);
+            self.received -= self.expected;
+            self.expected = HEADER;
+            self.first = if self.received == 0 {
+                0
+            } else {
+                self.last_receive
+            };
+        }
+        if let Some(index) = self.pending.front().copied().or(self.sending)
+            && self.slots[index].queued.elapsed() >= TIMEOUT
+        {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        Ok(())
     }
 }
 
-fn run(shared: BudgetArc<Shared>, address: SocketAddr, mut pending: Queue<usize>) {
-    let mut stream: Option<TcpStream> = None;
-    let mut sending: Option<usize> = None;
-    let mut request = [0; HEADER + 32];
-    let mut sent = 0;
-    let mut response = [0; FRAME];
-    let mut received = 0;
-    let mut expected = HEADER;
-    let mut first = 0;
+fn run(shared: BudgetArc<Shared>, address: SocketAddr) {
     while !shared.stop.load(Ordering::Acquire) {
-        let outcome = (|| -> io::Result<()> {
-            if sending.is_none() {
-                sending = shared
-                    .pool
-                    .lock()
-                    .expect("peer pool poisoned")
-                    .queued
-                    .pop_front();
-                if let Some(index) = sending {
-                    sent = 0;
-                    let pool = shared.pool.lock().expect("peer pool poisoned");
-                    Header {
-                        op: GET,
-                        status: OK,
-                        id: index as u64 + 1,
-                        count: 1,
-                        bytes: request.len(),
-                    }
-                    .encode(&mut request);
-                    request[HEADER..].copy_from_slice(&pool.slots[index].hash);
-                }
-            }
-            if stream.is_none() && sending.is_some() {
+        let connect = {
+            let pool = shared.pool.lock().expect("peer pool poisoned");
+            pool.active() && pool.stream.is_none()
+        };
+        if connect {
+            let connected = (|| {
                 let socket = TcpStream::connect_timeout(&address, TIMEOUT)?;
                 socket.set_nodelay(true)?;
                 socket.set_nonblocking(true)?;
-                stream = Some(socket);
-                shared.metrics.count(|c| c.connections += 1);
+                Ok::<_, io::Error>(socket)
+            })();
+            let mut pool = shared.pool.lock().expect("peer pool poisoned");
+            match connected {
+                Ok(socket) => {
+                    pool.stream = Some(Arc::new(socket));
+                    shared.metrics.count(|c| c.connections += 1);
+                }
+                Err(e) => pool.failed(&shared.metrics, e.kind()),
             }
-            // Drain ready requests before blocking for a reply: true pipelining.
-            while let (Some(socket), Some(index)) = (&mut stream, sending) {
-                if sent == 0 {
-                    shared.pool.lock().expect("peer pool poisoned").slots[index]
-                        .phases
-                        .send_ns = shared.metrics.now();
-                }
-                match socket.write(&request[sent..]) {
-                    Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
-                    Ok(n) => sent += n,
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(e),
-                }
-                if sent != request.len() {
-                    continue;
-                }
-                pending.push_back(index);
-                shared
-                    .metrics
-                    .count(|c| c.max_inflight = c.max_inflight.max(pending.len()));
-                sending = shared
-                    .pool
-                    .lock()
-                    .expect("peer pool poisoned")
-                    .queued
-                    .pop_front();
-                if let Some(index) = sending {
-                    sent = 0;
-                    let pool = shared.pool.lock().expect("peer pool poisoned");
-                    Header {
-                        op: GET,
-                        status: OK,
-                        id: index as u64 + 1,
-                        count: 1,
-                        bytes: request.len(),
-                    }
-                    .encode(&mut request);
-                    request[HEADER..].copy_from_slice(&pool.slots[index].hash);
-                }
-            }
-            while let (Some(socket), Some(&index)) = (&mut stream, pending.front()) {
-                match socket.read(&mut response[received..expected]) {
-                    Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
-                    Ok(n) => {
-                        if received == 0 {
-                            first = shared.metrics.now();
-                        }
-                        received += n;
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(e),
-                }
-                if received < expected {
-                    continue;
-                }
-                let h = Header::decode(&response, true)?;
-                if h.op != GET || h.id != index as u64 + 1 {
-                    return Err(invalid());
-                }
-                if received == HEADER && h.bytes > HEADER {
-                    expected = h.bytes;
-                    continue;
-                }
-                let error = match h.status {
-                    OK => None,
-                    MISSING => Some(io::ErrorKind::NotFound),
-                    _ => Some(io::ErrorKind::Other),
-                };
-                finish(&shared, index, &response[HEADER..received], error, first);
-                pending.pop_front();
-                received = 0;
-                expected = HEADER;
-                first = 0;
-            }
-            let oldest = pending.front().copied().or(sending);
-            if let Some(index) = oldest
-                && shared.pool.lock().expect("peer pool poisoned").slots[index]
-                    .queued
-                    .elapsed()
-                    >= TIMEOUT
-            {
-                return Err(io::ErrorKind::TimedOut.into());
-            }
-            Ok(())
-        })();
-        if let Err(error) = outcome {
-            stream = None;
-            // Capture this failed batch before notifying any owner. A new
-            // request submitted after its error notification can reconnect.
-            if let Some(index) = sending.take() {
-                pending.push_back(index);
-            }
-            {
-                let mut pool = shared.pool.lock().expect("peer pool poisoned");
-                while let Some(index) = pool.queued.pop_front() {
-                    pending.push_back(index);
-                }
-            }
-            while let Some(index) = pending.pop_front() {
-                finish(&shared, index, &[], Some(error.kind()), first);
-                first = 0;
-            }
-            received = 0;
-            expected = HEADER;
-            first = 0;
         }
+        let (socket, active, writing) = {
+            let mut pool = shared.pool.lock().expect("peer pool poisoned");
+            pool.drive(&shared.metrics);
+            (pool.stream.clone(), pool.active(), pool.sending.is_some())
+        };
         let mut fds = [
             libc::pollfd {
                 fd: shared.wake.as_raw_fd(),
@@ -354,46 +414,41 @@ fn run(shared: BudgetArc<Shared>, address: SocketAddr, mut pending: Queue<usize>
                 revents: 0,
             },
             libc::pollfd {
-                fd: if pending.is_empty() && sending.is_none() {
-                    -1
+                fd: if active {
+                    socket.as_ref().map_or(-1, |s| s.as_raw_fd())
                 } else {
-                    stream.as_ref().map_or(-1, AsRawFd::as_raw_fd)
+                    -1
                 },
-                events: (if pending.is_empty() { 0 } else { libc::POLLIN })
-                    | (if sending.is_some() { libc::POLLOUT } else { 0 }),
+                events: libc::POLLIN | if writing { libc::POLLOUT } else { 0 },
                 revents: 0,
             },
         ];
-        // SAFETY: fds contains two live or ignored descriptors for this call.
+        // SAFETY: the Arc snapshot pins the socket even if an inline request
+        // discards the connection while this worker is asleep.
         unsafe {
             libc::poll(
                 fds.as_mut_ptr(),
                 fds.len() as libc::nfds_t,
-                if pending.is_empty() && sending.is_none() {
-                    -1
-                } else {
-                    50
-                },
+                if active { 50 } else { -1 },
             );
         }
         let _ = shared.wake.read();
+        if fds[1].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+            let mut pool = shared.pool.lock().expect("peer pool poisoned");
+            if !pool.active()
+                && pool
+                    .stream
+                    .as_ref()
+                    .zip(socket.as_ref())
+                    .is_some_and(|(a, b)| Arc::ptr_eq(a, b))
+            {
+                pool.stream = None;
+            }
+        }
     }
-    if let Some(index) = sending {
-        finish(&shared, index, &[], Some(io::ErrorKind::Interrupted), 0);
-    }
-    while let Some(index) = pending.pop_front() {
-        finish(&shared, index, &[], Some(io::ErrorKind::Interrupted), 0);
-    }
-    loop {
-        let index = shared
-            .pool
-            .lock()
-            .expect("peer pool poisoned")
-            .queued
-            .pop_front();
-        let Some(index) = index else {
-            break;
-        };
-        finish(&shared, index, &[], Some(io::ErrorKind::Interrupted), 0);
-    }
+    shared
+        .pool
+        .lock()
+        .expect("peer pool poisoned")
+        .failed(&shared.metrics, io::ErrorKind::Interrupted);
 }
