@@ -110,6 +110,36 @@ logs are retained in `pressure-traced-02/`; they do not establish the original
 error's exact call site. The standalone 9p tail reproduction and regression
 above establish the telemetry reader defect independently.
 
+### Release-build fixture failures after the runtime fixes
+
+Package builds on `69c57c43f2f5bbbb9eb008a906fa76c971cc88a2` exposed two
+additional failures, retained in `build-checkpoints-03.log` and
+`build-checkpoints-04.log`. The continuous-overwrite test missed its assertion
+that compaction has completed during an 1800 ms write stream. Twenty isolated
+release repetitions subsequently passed (`compaction-release-repeat-01/`).
+Its timing failure remains unexplained; host contention is a possible cause,
+not an established diagnosis. Its deadline and assertion remain unchanged.
+
+The fresh-attachment epoch test failed cold reopen with `Capacity`. A diagnostic
+release reproduction failed immediately and measured three 64 MiB segments,
+each with 67,112,960 bytes allocated: 4 KiB above its nominal size. Thus the
+fourth segment would exceed the 256 MiB staging limit. The fixture incorrectly
+assumed nominal sizes exactly exhaust the budget without filesystem allocation
+overhead. The epoch-ordering fixture now uses 8 MiB segments, preserving all
+three epochs, the cold reopen, exact data and monotonic mutation assertions.
+This changes test geometry, not the production capacity limit or its checks;
+no timeout was changed. The existing test is the failing/passing regression.
+On `69c57c4` plus this fixture change and record, the targeted release test
+passed, then `nix develop -c just check` passed 511 tests with 25 ignores
+(`just-check-04.log`).
+
+Evidence is in `capacity-diagnostic-build-01.log`,
+`capacity-diagnostic-repeat-02/001.log`, and `capacity-green-01.log` under the
+same results root. The first repeat wrapper rejected an ambiguous binary glob
+before running a test; the corrected wrapper selected the just-built binary.
+The second wrapper recorded the child failure in `results.json` but itself
+exited zero; the test log and child exit 101 are the authoritative failure.
+
 ## 2026-09-24 — Native KVM runner preparation
 
 On Spark, base `2d56108a2ab38b1985816448acbe6f08d8c29c3e` plus the native

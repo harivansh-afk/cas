@@ -574,7 +574,22 @@ fn pause_drains_prior_reads_and_writes_and_resume_restores_admission() {
 fn fresh_attachment_syncs_both_epochs_and_keeps_image_mutations_monotonic() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("log");
-    let mut local = concurrent(&path);
+    // Three attachment epochs plus cold reopen need four segments. Do not
+    // fill the staging budget exactly: st_blocks can include extent metadata.
+    let log = Log::create(
+        &path,
+        append::Config {
+            store: [1; 16],
+            image: [2; 16],
+            image_bytes: 8 * MAX_REQUEST_BYTES as u64,
+            segment_bytes: 8 * MAX_REQUEST_BYTES as u64,
+        },
+        append::Limits::default(),
+    )
+    .unwrap();
+    let shared = Shared::new(log.status()).unwrap();
+    let event = EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK).unwrap();
+    let mut local = Local::from_log(log, &event, Execution::Concurrent, shared).unwrap();
     for generation in 1..=3 {
         assert_eq!(local.status.epoch, generation);
         write(
