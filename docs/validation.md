@@ -1128,3 +1128,103 @@ changing its recorded NAR hash. The fleet launchers now set
 experiment source paths were removed; `nix store verify --no-trust` confirmed the
 original hash was restored (`bytecode-repair.log`). This was a deployment-artifact
 failure, not a CAS hash-verification failure. Transfer logs are retained.
+
+## 2026-11-09 — Freestyle guest, baseline and contention measurements
+
+Native runner revision `92e194c` (clean tree), x86_64 Freestyle VMs, each 8 vCPU /
+16 GiB, separate 16 GiB XFS scratch filesystems and private TCP. Daemons were
+pinned to vCPUs 0–3, two-vCPU KVM workload guests to 4–5. The persistent build VM
+was separate. Settings: 128 MiB image, 1 MiB seeded file plus 1 MiB deterministic
+drift, 5-second read windows, QD 1/4, 4 MiB/s requested shipping writer rate,
+50 µs inline polling. Native N=2 used three repetitions; these are development
+smoke measurements, not physical NVMe or 100 GbE evidence.
+
+On `cas-build`, `nix develop -c env CARGO_TARGET_DIR=/root/cas/target
+CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=2 just check` passed: 542 Rust passed,
+27 ignored, 13 Python passed; fmt and strict Clippy passed. Final `nix fmt -- --ci`
+and builds of `.#two-host` and `.#fleet-appliance` passed. Evidence:
+`measure-check.log`, `measure-format.log`, `measure-build.log`, and
+`appliance-final-build.log` under `/root/cas-results` on the persistent VM.
+All-systems evaluation also passed earlier in this session; no CI or deployment
+is inferred from these local-to-Freestyle checks.
+
+The complete N=2 native run (`native-n2-001`) passed all six native cases. Both
+placement modes provisioned and booted a verified clone, synchronized independent
+drift, swept surplus, cold-read verified data, and moved the running workload by
+clean shutdown, cold daemon recovery, fenced handoff and boot/verification on B.
+The destination verified both files and durably advanced epoch 0→1. The full-image
+rsync arm also verified the resynchronized destination by booting it.
+
+| Native arm | Provision flow bytes | Migration flow bytes | Guest downtime (s) | Recovery/handoff or copy (s) |
+| --- | ---: | ---: | ---: | ---: |
+| CAS k=1 | 122,796 | 217,772 | 24.888 | 0.341 |
+| CAS k=2 | 124,725 | 217,689 | 24.413 | 0.398 |
+| Full-image rsync | 134,250,639 | 134,250,639 | 26.067 | 1.487 |
+
+These are application bytes, not Ethernet/IP/SSH overhead. CAS background shipping
+is **additional**: provisioning 4,381 / 8,541 bytes and migration 21,370 / 86,941
+bytes for k=1 / k=2 respectively; control counters remain separate in JSON. Drift
+and repair used 608,650 ship + 14,440 explicit-sync bytes for k=1, and 1,195,764 +
+39,882 for k=2. Each full-image rsync sync moved 134,250,639 bytes. CAS assumes the
+content is already placed in the fleet before the manifest provisioning window.
+
+The actual common-base ZFS arm (`zfs-001`, revision `2e62822`) passed on two NixOS
+KVM appliances inside two other Freestyle VMs, with KVM workload guests. Its
+initial full stream established matching snapshot GUIDs and used 1,519,958
+application bytes. Subsequent provision, independent-drift sync and migration
+used 8,187, 1,229,206 and 7,875 bytes respectively, including stream handshake and
+ACK. The migration stream took 0.231 s; snapshot/control/receive took 1.067 s in
+the downtime decomposition. Total guest downtime was 124.754 s, dominated by
+122.097 s of boot/verification. **Do not compare this downtime directly with the
+native CAS/rsync rows:** the ZFS arm has an extra KVM layer and user-network
+forwarding. The byte comparison uses actual streams; hardware timing comparisons
+must run all arms natively on the same CloudLab pair. The common-base setup cost
+is recorded separately, not hidden or charged to every incremental operation.
+
+QD1 4 KiB fio total guest latency, range across three repetitions:
+
+| Source/load | p50 (ms) | p99 (ms) |
+| --- | ---: | ---: |
+| Peer memory, quiet | 0.733–0.774 | 2.056–4.080 |
+| Peer memory, concurrent shipping | 0.684–0.831 | 1.827–4.424 |
+| Peer store, quiet | 0.807–0.848 | 2.146–2.802 |
+| Peer store, concurrent shipping | 0.815–0.872 | 2.146–3.686 |
+| Local raw virtual storage | 0.127–0.138 | 0.289–0.342 |
+
+All read cohorts verified CRC32C. Quiet source labels required positive counters
+and zero service from the opposite source. Every contention repetition had
+6–8 sampled intervals with both verified GETs and durably acknowledged PUT chunks;
+no inventory-only interval was accepted as proof. These ranges do not establish a
+performance improvement under contention or the paper's peer-memory/NVMe target.
+Recent-ring diagnostic median phases for quiet peer memory, in microseconds,
+were receipt→send 49.45–65.75, send→first byte 356.68–429.91, first byte→verified
+3.73–4.22, verified→completion 81.48–106.51. This bounded final ring is not an
+unbiased whole-run sample; fio supplies the full-run percentiles. Raw JSON retains
+all repetitions, histograms, achieved queue depths, throughput, counter snapshots,
+wire flows, source revision, executable hashes and hardware inventory.
+
+N=2 allocated operational footprints at the capacity checkpoints were 32,976,896
+bytes for k=1, 35,414,016 for k=2, and 28,934,144 across independent stores. At this
+tiny workload, bootstrap catalogs, WALs and retained metadata dominate; the result
+does not establish a deduplication-capacity benefit. No metadata overhead is
+silently deducted, and the independent-store control is CAS, not ZFS/DDT.
+
+The final N=4 run (`native-n4-004`, `92e194c`) also passed all five selected cases:
+k=1/k=2 guest flows, both read-source contention arms, and independent stores.
+Guest downtime was 23.251 s / 22.875 s for k=1 / k=2; recovery/handoff was
+0.370 s / 0.531 s. Migration flow bytes were 220,204 / 229,426, with another
+55,313 / 139,830 shipping bytes. Both contention cohorts had eight overlapping
+GET/acknowledged-PUT sample intervals and verified all reads. N=4 allocation
+is not a matched four-guest capacity comparison; see the workload-count caveat.
+
+**Evidence interruption:** at approximately 01:26 UTC, all five task VM IDs,
+including the named persistent `cas-build`, disappeared from the provider
+inventory and returned 404. This agent issued no VM deletion calls. No snapshots
+were listed for those IDs. The archive had reached at least the first three host
+log archives and two failed-storage archives on `cas-build`, but was lost before
+export to Spark. Local summaries for N=2, N=4 and ZFS survive under
+`results/freestyle/*-summary.json`; the successful test/process outcomes above
+were observed directly. The latest full raw archives and build caches must not
+be claimed as retained. `disappearance.json` records the five 404s. Restoration
+and replacement raw evidence are in progress; pre-existing VMs remain untouched
+by this agent.

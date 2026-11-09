@@ -51,7 +51,8 @@ existing drifted destination for the full-image sync control. It deliberately
 forces every logical image byte onto the transfer stream, including zero ranges;
 it is a **full-image copy control**, not a claim about optimal rsync deltas or
 allocated-block ZFS send. It uses the same guest seed, filesystem size, shutdown,
-boot, checksum and continuation checks. Exact rsync sent+received statistics are
+boot, checksum and continuation checks; resynchronization also boots and verifies
+the destination clone. Exact rsync sent+received statistics are
 retained. The `zfs-incremental` arm uses real `zfs send -i` / `zfs receive -F`
 against a **common snapshot with a verified matching GUID**. Its initial full
 stream is recorded as `common_base_setup`, separately from incremental provision,
@@ -69,7 +70,7 @@ and receiver ACK. Per-stream commands and full setup bytes are retained. ZFS use
 are recorded explicitly. This is incremental block transfer, not a simulated
 hash-difference estimate. See the [OpenZFS send documentation](https://openzfs.github.io/openzfs-docs/man/master/8/zfs-send.8.html).
 
-The independent-store capacity arm uses two actual independent CAS
+The independent-store capacity arm uses N actual independent CAS
 stores; it must not be presented as two ZFS pools or a DDT measurement.
 
 ## Measurement cases
@@ -105,7 +106,13 @@ The default run executes:
 Fleet capacity is sampled after coordinated sweep; the independent-store control
 records settled allocation without a standalone collection pass. These are
 operational footprints at the recorded checkpoints, not normalized minimum-live-data
-capacity bounds. Retain the per-file breakdown when comparing them.
+capacity bounds. Retain the per-file breakdown when comparing them. Initialization
+requires an image on every root, so fleet storage-only members retain empty
+bootstrap image metadata/WALs in addition to the two workload guests. Those bytes
+are included, not silently subtracted. The page-03 matched guest-count comparison
+uses N=2: the fleet flow always runs two workload guests, while the independent
+control runs N. N=4 allocation totals describe placement and retention overhead;
+they are not a matched four-guest deduplication ratio.
 
 `settings.seconds` and `repeats` default to five 30-second runs. `depths` defaults
 to 1, 4, 16, 64. Set `inline_us` to 0 for the blocking control or 50 for the bounded
@@ -171,7 +178,7 @@ runner rejects revision mismatch across any member. For N=4, start from
 order used by both GET and bulk lists. The QEMU source/destination are nodes 0/1;
 all members participate in placement, repair, collection and capacity. Build from a clean committed tree for paper
 runs; dirty development runs record the Nix source path as well as `dirtyRev`.
-Archive the coordinator directory and both host output directories before reuse.
+Archive the coordinator directory and every host output directory before reuse.
 
 Before interpreting hardware latency, separately record/verify NIC firmware,
 100 GbE link speed, MTU, IRQ affinity, moderation, CPU frequency/C-states, drive

@@ -121,7 +121,10 @@ GET routes to a nonlocal rendezvous owner through a preallocated connection per
 member. A transport failure surfaces as guest IO error; automatic replica
 failover is not implemented. Idle EOF is observed before reusing a connection.
 GET has a separate listener/socket/worker pool from PUT and control traffic;
-background disk work uses the existing IO scheduler.
+background disk work uses the existing IO scheduler. Compaction and shipping
+share its background class: each waiting caller retains its own pending grant,
+and their combined share remains one opportunity per three ready demand
+submissions. An idle class lends its opportunities to the other.
 
 Sweep freezes every member with durable epoch records, drains compaction and
 shipping, verifies each complete sorted live-hash set with counts and digests, distributes
