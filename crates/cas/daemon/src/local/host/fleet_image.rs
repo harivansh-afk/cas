@@ -51,8 +51,17 @@ impl worker::Owner {
     pub fn export_image(&mut self, body: &[u8]) -> io::Result<protocol::ImageReport> {
         let request: wire::Request = serde_json::from_slice(body)?;
         let runtime = self.shared.fleet.as_ref().ok_or_else(invalid)?.clone();
-        if request.destination != self.shared.resources.peer.fleet.peer_bulk_address.unwrap()
-            || request.target == [0; 16]
+        let target = self
+            .shared
+            .resources
+            .peer
+            .fleet
+            .peers()?
+            .into_iter()
+            .find(|(_, address)| *address == request.destination)
+            .map(|(node, _)| node)
+            .ok_or_else(invalid)?;
+        if request.target == [0; 16]
             || (request.mode == Mode::Migration) != (request.target == request.source)
         {
             return Err(invalid());
@@ -72,7 +81,7 @@ impl worker::Owner {
         if !original.writable(node)
             && !(request.mode == Mode::Migration
                 && original.phase == Phase::Fenced
-                && original.writer == 1 - node)
+                && original.writer == target)
         {
             return Err(invalid());
         }
@@ -81,12 +90,13 @@ impl worker::Owner {
                 "image transfer requires catalog ownership",
             ));
         }
-        let mut peer = protocol::Client::member(
+        let mut peer = protocol::Client::member_at(
             request.destination,
             request.mode.flow(),
             runtime.metrics.clone(),
             runtime.state.lock().unwrap().placement,
             runtime.store,
+            target,
         )?;
         let started = Instant::now();
         self.quiesced(|owner, generation, _| {
@@ -166,6 +176,7 @@ impl worker::Owner {
             let meta = Metadata {
                 store: view.commit().store,
                 source: request.source,
+                sender: node,
                 image: request.target,
                 image_bytes: view.commit().image_bytes,
                 segment_bytes: owner.store.config().segment_bytes,
@@ -179,7 +190,7 @@ impl worker::Owner {
                 } else {
                     original.generation.checked_add(1).ok_or_else(invalid)?
                 },
-                writer: 1 - node,
+                writer: target,
                 manifest_bytes: view.end(),
                 manifest_hash: checksum(&manifest, view.end())?,
                 tail_bytes,
@@ -191,7 +202,7 @@ impl worker::Owner {
             let mut hashes = reserved_vec(0, &owner.shared.resources.compaction)?;
             view.tree()?.walk(|e| {
                 if let Some(hash) = e.hash
-                    && placement.remote(&hash)
+                    && placement.owns(&hash, target)
                 {
                     hashes
                         .try_reserve(1)
@@ -225,7 +236,7 @@ impl worker::Owner {
                     }
                     original.clone()
                 } else {
-                    original.handoff(node, cut, meta.digest()?)?
+                    original.handoff(node, target, cut, meta.digest()?)?
                 };
                 owner.root(&fenced)?;
                 #[cfg(test)]
@@ -233,6 +244,24 @@ impl worker::Owner {
             } else {
                 owner.root(&meta.root(Phase::Fenced)?)?;
             }
+            // Every non-participant remembers this identity and generation, so
+            // a later initial claim cannot create a second writer elsewhere.
+            for (witness, address) in owner.shared.resources.peer.fleet.peers()? {
+                if witness == target {
+                    continue;
+                }
+                let mut client = protocol::Client::member_at(
+                    address,
+                    meta.mode.flow(),
+                    runtime.metrics.clone(),
+                    placement,
+                    runtime.store,
+                    witness,
+                )?;
+                client.exchange(wire::WITNESS, &mut serde_json::to_vec(&meta)?, &mut [])?;
+            }
+            #[cfg(test)]
+            protocol::crash_point("source-witnessed");
             let mut begin = serde_json::to_vec(&meta)?;
             let mut status = [0];
             if peer.exchange(wire::IMPORT, &mut begin, &mut status)? != 1 {
@@ -307,12 +336,13 @@ impl worker::Owner {
     }
     fn proof(&self, meta: &Metadata) -> io::Result<()> {
         let runtime = self.shared.fleet.as_ref().unwrap();
-        let mut peer = protocol::Client::member(
-            self.shared.resources.peer.fleet.peer_bulk_address.unwrap(),
+        let mut peer = protocol::Client::member_at(
+            self.shared.resources.peer.fleet.address(meta.sender)?,
             meta.mode.flow(),
             runtime.metrics.clone(),
             runtime.state.lock().unwrap().placement,
             runtime.store,
+            meta.sender,
         )?;
         let mut output = [0; 4096];
         let mut image = meta.image;
@@ -332,6 +362,8 @@ impl worker::Owner {
         if meta.store != self.store.config().store
             || meta.segment_bytes != self.store.config().segment_bytes
             || meta.writer != placement.node
+            || meta.sender >= placement.members
+            || meta.sender == placement.node
             || meta.image == [0; 16]
             || meta.generation == 0
             || meta.e < meta.d
@@ -360,7 +392,7 @@ impl worker::Owner {
             && root.as_ref().is_some_and(|r| {
                 r.phase == Phase::Fenced
                     && r.writer != placement.node
-                    && r.generation.checked_add(1) == Some(meta.generation)
+                    && r.generation < meta.generation
             })
             && self
                 .catalog
@@ -635,21 +667,29 @@ impl worker::Owner {
             }
             remote.sort_unstable();
             remote.dedup();
-            let mut peer = protocol::Client::member(
-                self.shared.resources.peer.fleet.peer_bulk_address.unwrap(),
-                meta.mode.flow(),
-                runtime.metrics.clone(),
-                runtime.state.lock().unwrap().placement,
-                runtime.store,
-            )?;
             let mut frame = [0; 63 * 32];
             let mut missing = [0; 8];
-            for batch in remote.chunks(63) {
-                protocol::chunks::has(&mut peer, batch, &mut frame, &mut missing)?;
-                if (0..batch.len()).any(|i| missing[i / 8] & (1 << (i % 8)) != 0) {
-                    return Err(io::Error::other(
-                        "fleet is missing a provisioned dependency",
-                    ));
+            for (node, address) in self.shared.resources.peer.fleet.peers()? {
+                let mut owned = reserved_vec(remote.len(), &self.shared.resources.compaction)?;
+                owned.extend(remote.iter().filter(|h| placement.owns(h, node)).copied());
+                if owned.is_empty() {
+                    continue;
+                }
+                let mut peer = protocol::Client::member_at(
+                    address,
+                    meta.mode.flow(),
+                    runtime.metrics.clone(),
+                    placement,
+                    runtime.store,
+                    node,
+                )?;
+                for batch in owned.chunks(63) {
+                    protocol::chunks::has(&mut peer, batch, &mut frame, &mut missing)?;
+                    if (0..batch.len()).any(|i| missing[i / 8] & (1 << (i % 8)) != 0) {
+                        return Err(io::Error::other(
+                            "fleet is missing a provisioned dependency",
+                        ));
+                    }
                 }
             }
             runtime.state.lock().unwrap().confirm(&remote)?;

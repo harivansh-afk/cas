@@ -165,6 +165,7 @@ impl Client {
             .fetch_add(chunks as u64, Ordering::Relaxed);
     }
 
+    #[cfg(test)]
     pub(crate) fn member(
         address: SocketAddr,
         flow: Flow,
@@ -172,10 +173,23 @@ impl Client {
         placement: super::Placement,
         store: [u8; 16],
     ) -> io::Result<Self> {
+        Self::member_at(address, flow, metrics, placement, store, 1 - placement.node)
+    }
+    pub(crate) fn member_at(
+        address: SocketAddr,
+        flow: Flow,
+        metrics: Arc<Metrics>,
+        placement: super::Placement,
+        store: [u8; 16],
+        node: u8,
+    ) -> io::Result<Self> {
         let mut client = Self::connect(address, flow, metrics)?;
         let mut status = [0; 40];
         if client.exchange(super::collection::STATUS, &mut [], &mut status)? != status.len()
-            || status[0] != 1 - placement.node
+            || status[0] != node
+            || node >= placement.members
+            || node == placement.node
+            || status[4] != placement.members
             || status[1] != placement.k
             || status[24..] != store
         {
@@ -253,6 +267,7 @@ impl Server {
         handler: Arc<dyn Handler>,
         budget: &Arc<Budget>,
         metrics: Arc<Metrics>,
+        connections: usize,
     ) -> io::Result<Self> {
         let listener = TcpListener::bind(address)?;
         listener.set_nonblocking(true)?;
@@ -263,7 +278,7 @@ impl Server {
         };
         // Administrative transfer, background PUT and its independent proof
         // query may overlap. GET uses another listener and worker pool.
-        for _ in 0..4 {
+        for _ in 0..connections {
             let listener = listener.try_clone()?;
             let stop = server.stop.clone();
             let handler = handler.clone();

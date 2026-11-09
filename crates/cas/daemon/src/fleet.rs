@@ -1,4 +1,4 @@
-//! Static two-member placement and the separate, bounded bulk/control transport.
+//! Static membership placement and the separate, bounded bulk/control transport.
 pub(crate) mod chunks;
 pub(crate) mod collection;
 pub use collection::collect;
@@ -36,11 +36,11 @@ pub(crate) fn crash_point(point: &str) {
 #[derive(Clone, Debug, clap::Args)]
 #[group(id = "FleetConfig")]
 pub struct Config {
-    /// Stable member identity, 0 or 1. Enables two-host placement.
-    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=1))]
+    /// Stable member identity: index in the ordered membership list.
+    #[arg(long, value_parser = clap::value_parser!(u8))]
     pub peer_node: Option<u8>,
-    /// Owners per chunk: 1 partitions; 2 replicates on both static members.
-    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..=2))]
+    /// Owners per chunk: 1 partitions; N replicates on every member.
+    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..))]
     pub peer_k: u8,
     /// Dedicated bulk/control listener, separate from latency-sensitive GET.
     #[arg(long)]
@@ -48,6 +48,9 @@ pub struct Config {
     /// The other member's bulk/control listener.
     #[arg(long)]
     pub peer_bulk_address: Option<SocketAddr>,
+    /// Ordered bulk endpoints for all members, including this host (repeat per member).
+    #[arg(long)]
+    pub peer_bulk_member: Vec<SocketAddr>,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -56,27 +59,74 @@ impl Default for Config {
             peer_k: 2,
             peer_bulk_listen: None,
             peer_bulk_address: None,
+            peer_bulk_member: Vec::new(),
         }
     }
 }
 impl Config {
+    pub fn addresses(&self) -> io::Result<Vec<SocketAddr>> {
+        let node = self.peer_node.ok_or(io::ErrorKind::InvalidInput)?;
+        let addresses = if self.peer_bulk_member.is_empty() {
+            if node > 1 {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            let listen = self.peer_bulk_listen.ok_or(io::ErrorKind::InvalidInput)?;
+            let peer = self.peer_bulk_address.ok_or(io::ErrorKind::InvalidInput)?;
+            if node == 0 {
+                vec![listen, peer]
+            } else {
+                vec![peer, listen]
+            }
+        } else {
+            if self.peer_bulk_address.is_some() {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            self.peer_bulk_member.clone()
+        };
+        if !(2..=255).contains(&addresses.len())
+            || usize::from(node) >= addresses.len()
+            || addresses.iter().enumerate().any(|(i, a)| {
+                a.port() == 0 || a.ip().is_unspecified() || addresses[..i].contains(a)
+            })
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid or duplicate fleet member endpoint",
+            ));
+        }
+        Ok(addresses)
+    }
+    pub fn peers(&self) -> io::Result<Vec<(u8, SocketAddr)>> {
+        Ok(self
+            .addresses()?
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| Some(*i as u8) != self.peer_node)
+            .map(|(i, a)| (i as u8, a))
+            .collect())
+    }
+    pub fn address(&self, node: u8) -> io::Result<SocketAddr> {
+        self.addresses()?
+            .get(usize::from(node))
+            .copied()
+            .ok_or_else(|| io::ErrorKind::InvalidInput.into())
+    }
+
     pub fn placement(&self) -> io::Result<Option<Placement>> {
         if let Some(node) = self.peer_node {
-            let placement = Placement::new(node, self.peer_k)?;
-            let (Some(listen), Some(peer)) = (self.peer_bulk_listen, self.peer_bulk_address) else {
+            let addresses = self.addresses()?;
+            let placement = Placement::with_members(node, self.peer_k, addresses.len())?;
+            if self.peer_bulk_listen != Some(addresses[usize::from(node)]) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "fleet requires both bulk addresses",
-                ));
-            };
-            if listen == peer || peer.port() == 0 || peer.ip().is_unspecified() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "invalid fleet peer address",
+                    "local bulk address differs from membership",
                 ));
             }
             Ok(Some(placement))
-        } else if self.peer_bulk_listen.is_some() || self.peer_bulk_address.is_some() {
+        } else if self.peer_bulk_listen.is_some()
+            || self.peer_bulk_address.is_some()
+            || !self.peer_bulk_member.is_empty()
+        {
             Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "bulk service requires a stable member identity",
@@ -91,37 +141,56 @@ impl Config {
 pub struct Placement {
     pub node: u8,
     pub k: u8,
+    #[serde(default = "two_members")]
+    pub members: u8,
+}
+fn two_members() -> u8 {
+    2
 }
 impl Placement {
     pub fn new(node: u8, k: u8) -> io::Result<Self> {
-        if node > 1 || !(1..=2).contains(&k) {
+        Self::with_members(node, k, 2)
+    }
+    pub fn with_members(node: u8, k: u8, members: usize) -> io::Result<Self> {
+        if !(2..=255).contains(&members)
+            || usize::from(node) >= members
+            || k == 0
+            || usize::from(k) > members
+        {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        Ok(Self { node, k })
+        Ok(Self {
+            node,
+            k,
+            members: members as u8,
+        })
+    }
+    fn score(hash: &[u8; 32], member: u8) -> ([u8; 32], u8) {
+        let mut h = blake3::Hasher::new();
+        h.update(b"CAS rendezvous v1\0");
+        h.update(hash);
+        h.update(&[member]);
+        (*h.finalize().as_bytes(), member)
     }
     pub fn owns(self, hash: &[u8; 32], node: u8) -> bool {
-        if node > 1 {
+        if node >= self.members {
             return false;
         }
-        if self.k == 2 {
+        if self.k == self.members {
             return true;
         }
-        let score = |member: u8| {
-            let mut h = blake3::Hasher::new();
-            h.update(b"CAS rendezvous v1\0");
-            h.update(hash);
-            h.update(&[member]);
-            *h.finalize().as_bytes()
-        };
-        // Lexicographic digest score; stable member ID breaks even a full collision.
-        let winner = u8::from((score(1), 1u8) > (score(0), 0u8));
-        node == winner
+        let score = Self::score(hash, node);
+        (0..self.members)
+            .filter(|member| Self::score(hash, *member) > score)
+            .take(usize::from(self.k))
+            .count()
+            < usize::from(self.k)
     }
     pub fn local(self, hash: &[u8; 32]) -> bool {
         self.owns(hash, self.node)
     }
     pub fn remote(self, hash: &[u8; 32]) -> bool {
-        self.owns(hash, 1 - self.node)
+        (0..self.members).any(|node| node != self.node && self.owns(hash, node))
     }
 }
 
@@ -139,6 +208,29 @@ pub fn synchronize(address: SocketAddr, metrics: std::sync::Arc<Metrics>) -> io:
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn four_member_placement_has_exactly_k_stable_owners() {
+        for k in [1, 2, 4] {
+            let mut counts = [0; 4];
+            for n in 0u64..4096 {
+                let hash = *blake3::hash(&n.to_le_bytes()).as_bytes();
+                let p = Placement::with_members(0, k, 4).unwrap();
+                let owners: Vec<_> = (0..4).filter(|node| p.owns(&hash, *node)).collect();
+                assert_eq!(owners.len(), usize::from(k));
+                for node in owners {
+                    counts[usize::from(node)] += 1;
+                    assert!(Placement::with_members(node, k, 4).unwrap().local(&hash));
+                }
+            }
+            assert!(
+                counts
+                    .iter()
+                    .all(|n| (*n - 1024 * i32::from(k)).abs() < 150)
+            );
+        }
+        assert!(Placement::with_members(4, 1, 4).is_err());
+        assert!(Placement::with_members(0, 5, 4).is_err());
+    }
     #[test]
     fn rendezvous_is_identical_on_both_members_and_k_selects_exactly_k() {
         let a = Placement::new(0, 1).unwrap();

@@ -63,7 +63,7 @@ impl Resources {
 
 struct SharedHost {
     fleet: Option<BudgetArc<fleet::Runtime>>,
-    peer: Option<BudgetArc<crate::peer::Client>>,
+    peer: Option<BudgetArc<crate::peer::Router>>,
     peer_metrics: Option<BudgetArc<crate::peer::metrics::Metrics>>,
     admission: BudgetArc<admission::Admission>,
     fair: BudgetArc<fair::Fair>,
@@ -260,25 +260,32 @@ impl Host {
             None => state::HostGate::new(&metadata)?,
         };
         resources.peer.validate()?;
+        let peer_connections = resources
+            .peer
+            .fleet
+            .placement()?
+            .map_or(crate::peer::CONNECTIONS, |p| {
+                usize::from(p.members).max(crate::peer::CONNECTIONS)
+            });
         let peer_metrics = (resources.peer.peer_listen.is_some()
-            || resources.peer.peer_address.is_some())
+            || resources.peer.peer_address.is_some()
+            || !resources.peer.peer_get_member.is_empty())
         .then(|| crate::peer::metrics::Metrics::new(&metadata))
         .transpose()?;
-        let peer = resources
-            .peer
-            .peer_address
-            .map(|address| {
-                BudgetArc::try_new(
-                    crate::peer::Client::with_inline(
-                        address,
-                        &metadata,
-                        peer_metrics.as_ref().expect("peer metrics").clone(),
-                        resources.peer.peer_inline_us,
-                    )?,
+        let peer = if resources.peer.peer_address.is_some()
+            || !resources.peer.peer_get_member.is_empty()
+        {
+            Some(BudgetArc::try_new(
+                crate::peer::Router::new(
+                    &resources.peer,
                     &metadata,
-                )
-            })
-            .transpose()?;
+                    peer_metrics.as_ref().expect("peer metrics").clone(),
+                )?,
+                &metadata,
+            )?)
+        } else {
+            None
+        };
         let fleet = fleet::Runtime::open(&resources, &store, images.as_ref(), physical.as_ref())?;
         let shared = BudgetArc::try_new(
             SharedHost {
@@ -290,7 +297,7 @@ impl Host {
                 io_scheduler: cas_core::scheduler::Scheduler::new(
                     slots
                         + if resources.peer.peer_listen.is_some() {
-                            crate::peer::CONNECTIONS
+                            peer_connections
                         } else {
                             0
                         },
@@ -366,6 +373,7 @@ impl Host {
                     &metadata,
                     shared.peer_metrics.as_ref().expect("peer metrics").clone(),
                     (shared.io_scheduler.clone(), slots),
+                    peer_connections,
                 )
             })
             .transpose()?;
@@ -694,7 +702,7 @@ impl Port {
         cas_core::scheduler::Scheduler::port(&self.shared.io_scheduler, self.index)
     }
 
-    pub fn peer(&self) -> Option<BudgetArc<crate::peer::Client>> {
+    pub fn peer(&self) -> Option<BudgetArc<crate::peer::Router>> {
         self.shared.peer.clone()
     }
     pub fn peer_config(&self) -> &crate::peer::Config {

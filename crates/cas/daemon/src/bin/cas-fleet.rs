@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use std::{net::SocketAddr, sync::Arc};
 
 #[derive(Parser)]
-#[command(about = "Operate a static two-host CAS fleet over its bulk/control ports")]
+#[command(about = "Operate a static CAS fleet over its bulk/control ports")]
 struct Args {
     #[command(subcommand)]
     operation: Operation,
@@ -36,12 +36,15 @@ enum Operation {
         #[arg(long)]
         address: SocketAddr,
     },
-    /// Quiesce both hosts, exchange complete live sets, sweep, then release both.
+    /// Quiesce every member, exchange complete live sets, sweep, then release all.
     Sweep {
         #[arg(long)]
-        node0: SocketAddr,
+        node0: Option<SocketAddr>,
         #[arg(long)]
-        node1: SocketAddr,
+        node1: Option<SocketAddr>,
+        /// All bulk addresses in member-ID order (repeat).
+        #[arg(long, conflicts_with_all = ["node0", "node1"])]
+        member: Vec<SocketAddr>,
     },
     /// Read cumulative application wire bytes and current store/cache occupancy.
     Report {
@@ -80,8 +83,20 @@ fn main() -> std::io::Result<()> {
         Operation::Sync { address } => {
             serde_json::json!({"chunks_sent":fleet::synchronize(address, metrics.clone())?})
         }
-        Operation::Sweep { node0, node1 } => {
-            serde_json::to_value(fleet::collect([node0, node1], metrics.clone())?)?
+        Operation::Sweep {
+            node0,
+            node1,
+            member,
+        } => {
+            let addresses = if member.is_empty() {
+                vec![
+                    node0.ok_or(std::io::ErrorKind::InvalidInput)?,
+                    node1.ok_or(std::io::ErrorKind::InvalidInput)?,
+                ]
+            } else {
+                member
+            };
+            serde_json::to_value(fleet::collect(addresses, metrics.clone())?)?
         }
         Operation::Report { address } => fleet::report(address)?,
     };

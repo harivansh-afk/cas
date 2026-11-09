@@ -418,11 +418,9 @@ fn run(shared: BudgetArc<Shared>, address: SocketAddr) {
                 revents: 0,
             },
             libc::pollfd {
-                fd: if active {
-                    socket.as_ref().map_or(-1, |s| s.as_raw_fd())
-                } else {
-                    -1
-                },
+                // Observe EOF on idle connections as well. Otherwise a peer
+                // restart is discovered only by failing the next guest read.
+                fd: socket.as_ref().map_or(-1, |s| s.as_raw_fd()),
                 events: libc::POLLIN | if writing { libc::POLLOUT } else { 0 },
                 revents: 0,
             },
@@ -437,7 +435,7 @@ fn run(shared: BudgetArc<Shared>, address: SocketAddr) {
             );
         }
         let _ = shared.wake.read();
-        if fds[1].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+        if fds[1].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
             let mut pool = shared.pool.lock().expect("peer pool poisoned");
             if !pool.active()
                 && pool

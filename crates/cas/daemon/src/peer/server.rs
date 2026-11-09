@@ -31,15 +31,16 @@ impl Server {
         budget: &Arc<Budget>,
         metrics: BudgetArc<Metrics>,
         scheduler: (BudgetArc<cas_core::scheduler::Scheduler>, usize),
+        connections: usize,
     ) -> io::Result<Self> {
         let listener = TcpListener::bind(address)?;
         listener.set_nonblocking(true)?;
         let mut server = Self {
             address: listener.local_addr()?,
             stop: Arc::new(AtomicBool::new(false)),
-            workers: Vec::with_capacity(CONNECTIONS),
+            workers: Vec::with_capacity(connections),
         };
-        for index in 0..CONNECTIONS {
+        for index in 0..connections {
             let scheduling =
                 cas_core::scheduler::Scheduler::port(&scheduler.0, scheduler.1 + index)?;
             let listener = listener.try_clone()?;

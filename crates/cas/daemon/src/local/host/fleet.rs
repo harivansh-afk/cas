@@ -118,6 +118,7 @@ impl fleet::Handler for Gateway {
             let mut state = runtime.state.lock().unwrap();
             if proposed.generation != 1
                 || proposed.writer == state.placement.node
+                || proposed.writer >= state.placement.members
                 || proposed.phase != state::Phase::Fenced
                 || proposed.durable != 0
                 || proposed.manifest != [0; 32]
@@ -127,6 +128,46 @@ impl fleet::Handler for Gateway {
                 return Err(io::ErrorKind::InvalidInput.into());
             }
             let mut output = || state.put_root(&proposed);
+            match &self.shared.physical {
+                Some(p) => p
+                    .foreground(4096 + capacity::METADATA_MARGIN)?
+                    .run(output)?,
+                None => output()?,
+            }
+            return Ok(0);
+        }
+        if op == fleet::image::WITNESS {
+            let meta: fleet::image::Metadata = serde_json::from_slice(body)?;
+            let runtime = self.shared.fleet.as_ref().unwrap();
+            let placement = runtime.state.lock().unwrap().placement;
+            if meta.sender >= placement.members
+                || meta.sender == placement.node
+                || meta.writer >= placement.members
+                || meta.writer == placement.node
+                || meta.writer == meta.sender
+            {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            let mut source = fleet::Client::member_at(
+                self.shared.resources.peer.fleet.address(meta.sender)?,
+                meta.mode.flow(),
+                runtime.metrics.clone(),
+                placement,
+                runtime.store,
+                meta.sender,
+            )?;
+            let mut encoded = [0; 4096];
+            let mut image = meta.image;
+            let n = source.exchange(fleet::image::ROOT, &mut image, &mut encoded)?;
+            let proposed = meta.root(state::Phase::Fenced)?;
+            if serde_json::from_slice::<state::Root>(&encoded[..n])? != proposed {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            let mut state = runtime.state.lock().unwrap();
+            if state.epoch()?.is_some_and(|e| !e.released) {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            let mut output = || state.put_witness(&proposed);
             match &self.shared.physical {
                 Some(p) => p
                     .foreground(4096 + capacity::METADATA_MARGIN)?
@@ -156,6 +197,7 @@ impl fleet::Handler for Gateway {
             output[24..40].copy_from_slice(&runtime.store);
             output[0] = state.placement.node;
             output[1] = state.placement.k;
+            output[4] = state.placement.members;
             if let Some(epoch) = epoch {
                 output[2] = u8::from(!epoch.released);
                 output[3] = u8::from(epoch.swept);
@@ -223,7 +265,7 @@ pub(super) fn start(
     let config = &shared.resources.peer.fleet;
     let placement = runtime.state.lock().unwrap().placement;
     let shipper = chunks::Shipper::start(
-        config.peer_bulk_address.unwrap(),
+        config.peers()?,
         (placement, runtime.store),
         shared.reader.clone(),
         &shared.resources.metadata,
@@ -242,6 +284,7 @@ pub(super) fn start(
         }),
         &shared.resources.metadata,
         runtime.metrics.clone(),
+        usize::from(placement.members) + 2,
     )
     .map(Some)
 }
@@ -325,20 +368,23 @@ pub(super) fn claim(shared: &SharedHost, image: [u8; 16]) -> io::Result<()> {
     if root.phase != state::Phase::Claiming {
         return Ok(());
     }
-    let mut peer = fleet::Client::member(
-        shared.resources.peer.fleet.peer_bulk_address.unwrap(),
-        fleet::Flow::Provision,
-        runtime.metrics.clone(),
-        runtime.state.lock().unwrap().placement,
-        runtime.store,
-    )?;
     let mut proposed = root.clone();
     proposed.phase = state::Phase::Fenced;
-    peer.exchange(
-        fleet::image::CLAIM,
-        &mut serde_json::to_vec(&proposed)?,
-        &mut [],
-    )?;
+    for (node, address) in shared.resources.peer.fleet.peers()? {
+        let mut peer = fleet::Client::member_at(
+            address,
+            fleet::Flow::Provision,
+            runtime.metrics.clone(),
+            runtime.state.lock().unwrap().placement,
+            runtime.store,
+            node,
+        )?;
+        peer.exchange(
+            fleet::image::CLAIM,
+            &mut serde_json::to_vec(&proposed)?,
+            &mut [],
+        )?;
+    }
     let mut state = runtime.state.lock().unwrap();
     if state.root(image)? != Some(root.clone()) || state.epoch()?.is_some_and(|e| !e.released) {
         return Err(io::ErrorKind::WouldBlock.into());

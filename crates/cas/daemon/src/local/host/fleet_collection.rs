@@ -172,19 +172,22 @@ impl worker::Owner {
                             if !epoch.swept {
                                 return Err(invalid());
                             }
-                            let mut peer = protocol::Client::member(
-                                owner.shared.resources.peer.fleet.peer_bulk_address.unwrap(),
-                                protocol::Flow::Collection,
-                                runtime.metrics.clone(),
-                                placement,
-                                runtime.store,
-                            )?;
-                            let mut status = [0; 40];
-                            if peer.exchange(wire::STATUS, &mut [], &mut status)? != 40
-                                || u64::from_le_bytes(status[8..16].try_into().unwrap()) != id
-                                || status[3] == 0
-                            {
-                                return Err(invalid());
+                            for (node, address) in owner.shared.resources.peer.fleet.peers()? {
+                                let mut peer = protocol::Client::member_at(
+                                    address,
+                                    protocol::Flow::Collection,
+                                    runtime.metrics.clone(),
+                                    placement,
+                                    runtime.store,
+                                    node,
+                                )?;
+                                let mut status = [0; 40];
+                                if peer.exchange(wire::STATUS, &mut [], &mut status)? != 40
+                                    || u64::from_le_bytes(status[8..16].try_into().unwrap()) != id
+                                    || status[3] == 0
+                                {
+                                    return Err(invalid());
+                                }
                             }
                             epoch.released = true;
                             owner.epoch(&epoch)?;
@@ -253,25 +256,40 @@ impl worker::Owner {
                 remote.push(*hash);
             }
         }
-        let mut peer = protocol::Client::member(
-            self.shared.resources.peer.fleet.peer_bulk_address.unwrap(),
-            protocol::Flow::Collection,
-            runtime.metrics.clone(),
-            placement,
-            runtime.store,
-        )?;
         let mut confirmed = reserved_vec(remote.len(), &self.shared.resources.compaction)?;
+        confirmed.extend_from_slice(&remote);
         let mut frame = [0; 63 * 32];
         let mut missing = [0; 8];
-        for batch in remote.chunks(63) {
-            protocol::chunks::has(&mut peer, batch, &mut frame, &mut missing)?;
-            for (i, hash) in batch.iter().enumerate() {
-                if missing[i / 8] & (1 << (i % 8)) == 0 {
-                    confirmed.push(*hash);
-                } else if self.shared.reader.plan(*hash)?.is_some() {
-                    keep.push(*hash);
-                } else {
-                    return Err(io::Error::other("live chunk is absent from both members"));
+        for (node, address) in self.shared.resources.peer.fleet.peers()? {
+            let mut peer = protocol::Client::member_at(
+                address,
+                protocol::Flow::Collection,
+                runtime.metrics.clone(),
+                placement,
+                runtime.store,
+                node,
+            )?;
+            let mut owned = reserved_vec(remote.len(), &self.shared.resources.compaction)?;
+            owned.extend(
+                remote
+                    .iter()
+                    .filter(|hash| placement.owns(hash, node))
+                    .copied(),
+            );
+            for batch in owned.chunks(63) {
+                protocol::chunks::has(&mut peer, batch, &mut frame, &mut missing)?;
+                for (i, hash) in batch.iter().enumerate() {
+                    if missing[i / 8] & (1 << (i % 8)) != 0 {
+                        if self.shared.reader.plan(*hash)?.is_none() {
+                            return Err(io::Error::other(
+                                "live chunk lacks a durable owner copy; repair before sweep",
+                            ));
+                        }
+                        keep.push(*hash);
+                        if let Ok(index) = confirmed.binary_search(hash) {
+                            confirmed.remove(index);
+                        }
+                    }
                 }
             }
         }

@@ -1011,3 +1011,47 @@ validation runs on x86_64 Freestyle VMs. The provider rejected the requested
 32-vCPU VM with `LIMIT_EXCEEDED` (account maximum 8 vCPUs), so the persistent
 `cas-build` host uses 8 vCPUs / 16 GiB. Inventory and created-resource IDs are
 retained in ignored `results/freestyle/`; existing VMs are not modified.
+
+## 2026-11-09 — N-member protocol on Freestyle x86_64
+
+Tested `2574a8e` plus the N-member runtime/test changes, on the newly created
+persistent `cas-build` VM (8 vCPUs, 16 GiB, 64 GiB disk, AMD-V/KVM, Linux 6.1.102).
+The provider also rejected a 128 GiB disk resize; the persistent cache remains
+64 GiB. No existing VM was modified. The initial unchanged revision passed
+remote `nix develop -c env CARGO_BUILD_JOBS=6 just check` before these edits.
+
+Final runtime validation: `nix develop -c bash -c 'cargo fmt --all &&
+CARGO_TARGET_DIR=/root/cas/target CARGO_BUILD_JOBS=6 just check'` passed: 541 Rust
+passed, 27 ignored, eight Python tests passed, strict Clippy and formatting clean.
+Evidence: `results/freestyle/n-members-full-5.log`; earlier attempts and diagnostic
+backtraces remain under `/root/cas-results` on `cas-build`. This verifies native
+four-process loopback, not yet four-VM or QEMU/ZFS execution. The expanded runner
+and incremental ZFS arm are separate work in progress at this checkpoint.
+
+New N=4 tests cover k=1/k=2 exact owner counts after surplus collection, remote
+reads, provisioning, writes while a peer is down and HAS/PUT repair after restart,
+duplicate sync, migration through three writer locations, retained tail bytes,
+and kill/retry before the source fence, after witness publication and after
+receiver activation. A third-member witness is persisted separately from the
+retired local image root: remote writes must never raise that old local WAL's
+recovery floor. Restart of the old source before returning migration verifies
+this distinction. Initial identity claims require every member's acknowledgment.
+
+Failures resolved during this session:
+- A repeated read after peer restart failed with `UnexpectedEof`; the client now
+  observes idle socket EOF rather than leaving a stale connection for the next
+  guest request. The four-member flow reproduces and covers the fix.
+- Port-0 reservations could be stolen by outgoing connections before subprocess
+  listeners bound. Fleet tests now allocate distinct ports below the default
+  Linux ephemeral range. A peer-loss assertion also incorrectly expected remote
+  partitioned reads while their owner was down; data verification now follows
+  repair, while acknowledged writes are still issued during the outage.
+- Concurrent process tests exposed transient `WouldBlock` in existing recovery
+  inspection tests. Their helper now retries only lock contention for one second,
+  matching production opening's bounded contention handling. Persistent contention
+  and other errors still fail; no runtime recovery or durability rule changed.
+- Initial compilation caught an ambiguous integer and an immutable query buffer;
+  Clippy caught a redundant cast. All were fixed before the passing run.
+
+No latency conclusion is supported by this correctness run. Cross-VM QEMU flows,
+common-base ZFS stream measurements and the complete runner remain to validate.

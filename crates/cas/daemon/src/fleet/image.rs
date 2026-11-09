@@ -4,6 +4,7 @@ use super::{Client, Flow, Metrics};
 use std::{io, net::SocketAddr, sync::Arc};
 pub(crate) const ROOT: u8 = 4;
 pub(crate) const CLAIM: u8 = 5;
+pub(crate) const WITNESS: u8 = 8;
 pub(crate) const EXPORT: u8 = 20;
 pub(crate) const IMPORT: u8 = 23;
 pub(crate) const IMPORT_WRITE: u8 = 24;
@@ -32,6 +33,7 @@ pub(crate) struct Request {
 pub(crate) struct Metadata {
     pub store: [u8; 16],
     pub source: [u8; 16],
+    pub sender: u8,
     pub image: [u8; 16],
     pub image_bytes: u64,
     pub segment_bytes: u64,

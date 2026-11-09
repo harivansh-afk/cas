@@ -33,13 +33,13 @@ impl Root {
     pub fn writable(&self, node: u8) -> bool {
         self.writer == node && self.phase == Phase::Active
     }
-    pub fn handoff(&self, node: u8, cut: u64, digest: [u8; 32]) -> io::Result<Self> {
-        if !self.writable(node) || cut < self.durable {
+    pub fn handoff(&self, node: u8, target: u8, cut: u64, digest: [u8; 32]) -> io::Result<Self> {
+        if !self.writable(node) || target == node || cut < self.durable {
             return Err(invalid());
         }
         Ok(Self {
             generation: self.generation.checked_add(1).ok_or_else(invalid)?,
-            writer: 1 - node,
+            writer: target,
             phase: Phase::Fenced,
             durable: cut,
             manifest: digest,
@@ -168,16 +168,45 @@ impl State {
     }
     pub fn root(&self, image: [u8; 16]) -> io::Result<Option<Root>> {
         let value = load::<Root>(&self.directory.join(name(image)))?;
-        if value
-            .as_ref()
-            .is_some_and(|r| r.image != image || r.writer > 1 || r.generation == 0)
-        {
+        if value.as_ref().is_some_and(|r| {
+            r.image != image || r.writer >= self.placement.members || r.generation == 0
+        }) {
             return Err(invalid());
         }
         Ok(value)
     }
+    fn witness(&self, image: [u8; 16]) -> io::Result<Option<Root>> {
+        load(&self.directory.join(format!("witness-{}", name(image))))
+    }
+    pub fn put_witness(&mut self, root: &Root) -> io::Result<()> {
+        if root.phase != Phase::Fenced
+            || root.generation == 0
+            || root.writer >= self.placement.members
+            || root.writer == self.placement.node
+        {
+            return Err(invalid());
+        }
+        if self
+            .root(root.image)?
+            .is_some_and(|old| old.phase != Phase::Fenced || old.generation > root.generation)
+            || self.witness(root.image)?.is_some_and(|old| {
+                old.generation > root.generation
+                    || old.generation == root.generation && old != *root
+            })
+        {
+            return Err(invalid());
+        }
+        // Witnesses prevent identity reuse but do not raise the recovery floor
+        // of a retired local image: its old WAL never held later remote writes.
+        self.save(&format!("witness-{}", name(root.image)), root)
+    }
     pub fn put_root(&mut self, root: &Root) -> io::Result<()> {
-        if root.generation == 0 || root.writer > 1 {
+        if root.generation == 0
+            || root.writer >= self.placement.members
+            || self
+                .witness(root.image)?
+                .is_some_and(|w| w.generation >= root.generation)
+        {
             return Err(invalid());
         }
         if let Some(old) = self.root(root.image)? {
@@ -193,7 +222,7 @@ impl State {
                 && old.manifest == root.manifest
                 && matches!(old.phase, Phase::Receiving | Phase::Claiming)
                 && root.phase == Phase::Active;
-            let receiving = old.generation.checked_add(1) == Some(root.generation)
+            let receiving = old.generation < root.generation
                 && old.phase == Phase::Fenced
                 && old.writer != self.placement.node
                 && root.phase == Phase::Receiving
@@ -293,7 +322,7 @@ mod tests {
             manifest: [0; 32],
         };
         state.put_root(&a).unwrap();
-        let b = a.handoff(0, 17, [3; 32]).unwrap();
+        let b = a.handoff(0, 1, 17, [3; 32]).unwrap();
         state.put_root(&b).unwrap();
         state.put_root(&b).unwrap();
         assert!(state.put_root(&a).is_err());

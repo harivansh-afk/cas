@@ -138,7 +138,7 @@ pub(crate) struct Shipper {
 }
 impl Shipper {
     pub fn start(
-        address: SocketAddr,
+        addresses: std::vec::Vec<(u8, SocketAddr)>,
         membership: (Placement, [u8; 16]),
         reader: Reader,
         budget: &Arc<Budget>,
@@ -212,27 +212,54 @@ impl Shipper {
                         if rescan {
                             hashes = reader.inventory(budget.clone())?;
                         }
-                        hashes.retain(|h| placement.remote(h));
-                        if hashes.is_empty() {
-                            return Ok(0);
-                        }
                         let mut count = 0u64;
-                        let mut client =
-                            Client::member(address, flow, metrics.clone(), placement, store)?;
-                        for batch in hashes.chunks(MAX_CHUNKS) {
-                            if owner.stop.load(Ordering::Acquire)
-                                || owner.paused.load(Ordering::Acquire)
-                            {
-                                return Err(io::ErrorKind::Interrupted.into());
+                        let mut failed = None;
+                        for (node, address) in &addresses {
+                            let result = (|| -> io::Result<u64> {
+                                let mut selected =
+                                    Vec::new_in(BudgetAllocator::new(budget.clone()));
+                                selected
+                                    .try_reserve_exact(hashes.len())
+                                    .map_err(|_| io::ErrorKind::OutOfMemory)?;
+                                selected.extend(
+                                    hashes.iter().filter(|h| placement.owns(h, *node)).copied(),
+                                );
+                                if selected.is_empty() {
+                                    return Ok(0);
+                                }
+                                let mut client = Client::member_at(
+                                    *address,
+                                    flow,
+                                    metrics.clone(),
+                                    placement,
+                                    store,
+                                    *node,
+                                )?;
+                                let mut sent = 0;
+                                for batch in selected.chunks(MAX_CHUNKS) {
+                                    if owner.stop.load(Ordering::Acquire)
+                                        || owner.paused.load(Ordering::Acquire)
+                                    {
+                                        return Err(io::ErrorKind::Interrupted.into());
+                                    }
+                                    sent += ship(
+                                        &mut client,
+                                        &reader,
+                                        batch,
+                                        frame.as_mut_slice(),
+                                        page.as_mut_slice(),
+                                        payload.as_mut_slice(),
+                                    )? as u64;
+                                }
+                                Ok(sent)
+                            })();
+                            match result {
+                                Ok(sent) => count += sent,
+                                Err(error) => failed = Some(error),
                             }
-                            count += ship(
-                                &mut client,
-                                &reader,
-                                batch,
-                                frame.as_mut_slice(),
-                                page.as_mut_slice(),
-                                payload.as_mut_slice(),
-                            )? as u64;
+                        }
+                        if let Some(error) = failed {
+                            return Err(error);
                         }
                         Ok(count)
                     })();

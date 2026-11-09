@@ -2,23 +2,39 @@ use super::*;
 use crate::fleet::{self, Flow, Metrics};
 use std::net::{SocketAddr, TcpListener};
 mod process;
+fn addresses_for(count: usize) -> Vec<SocketAddr> {
+    // Reserve below Linux's ephemeral client range. Closing port-0 listeners
+    // before starting children allowed outgoing connections to steal their ports.
+    static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(17480);
+    let mut listeners = Vec::new();
+    while listeners.len() < count {
+        let port = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert!(port < 32768, "test port range exhausted");
+        if let Ok(listener) = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)) {
+            listeners.push(listener);
+        }
+    }
+    listeners.iter().map(|l| l.local_addr().unwrap()).collect()
+}
 fn addresses() -> [SocketAddr; 4] {
-    let listeners: Vec<_> = (0..4)
-        .map(|_| TcpListener::bind("127.0.0.1:0").unwrap())
-        .collect();
-    std::array::from_fn(|i| listeners[i].local_addr().unwrap())
+    addresses_for(4).try_into().unwrap()
 }
 fn resources(node: u8, k: u8, addresses: [SocketAddr; 4]) -> Arc<Resources> {
+    member_resources(node, k, &addresses)
+}
+fn member_resources(node: u8, k: u8, addresses: &[SocketAddr]) -> Arc<Resources> {
     let n = node as usize;
+    let count = addresses.len() / 2;
     Arc::new(Resources {
         peer: crate::peer::Config {
             peer_listen: Some(addresses[n]),
-            peer_address: Some(addresses[1 - n]),
+            peer_get_member: addresses[..count].to_vec(),
             fleet: fleet::Config {
                 peer_node: Some(node),
                 peer_k: k,
-                peer_bulk_listen: Some(addresses[2 + n]),
-                peer_bulk_address: Some(addresses[3 - n]),
+                peer_bulk_listen: Some(addresses[count + n]),
+                peer_bulk_member: addresses[count..].to_vec(),
+                ..crate::fleet::Config::default()
             },
             ..crate::peer::Config::default()
         },

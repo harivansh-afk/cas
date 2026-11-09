@@ -14,6 +14,9 @@ struct Daemon {
 }
 impl Daemon {
     fn start(root: &Path, node: u8, k: u8, addresses: [SocketAddr; 4], pause: &str) -> Self {
+        Self::start_members(root, node, k, &addresses, pause)
+    }
+    fn start_members(root: &Path, node: u8, k: u8, addresses: &[SocketAddr], pause: &str) -> Self {
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -103,8 +106,9 @@ fn daemon_child() {
     let root = std::path::PathBuf::from(std::env::var_os("CAS_FLEET_ROOT").unwrap());
     let node: u8 = std::env::var("CAS_FLEET_NODE").unwrap().parse().unwrap();
     let k = std::env::var("CAS_FLEET_K").unwrap().parse().unwrap();
-    let addresses = serde_json::from_str(&std::env::var("CAS_FLEET_ADDRESSES").unwrap()).unwrap();
-    let resources = resources(node, k, addresses);
+    let addresses: Vec<SocketAddr> =
+        serde_json::from_str(&std::env::var("CAS_FLEET_ADDRESSES").unwrap()).unwrap();
+    let resources = member_resources(node, k, &addresses);
     let mut host = if root.join("images").exists() {
         cold(&root, resources)
     } else {
@@ -688,4 +692,160 @@ fn get_progresses_and_verifies_while_compaction_put_waits_for_durable_ack() {
         thread::sleep(Duration::from_millis(1));
     }
     b.kill();
+}
+
+#[test]
+fn four_members_place_repair_sweep_provision_and_migrate_through_third_host() {
+    for k in [1, 2] {
+        let roots: Vec<_> = (0..4).map(|_| tempfile::tempdir().unwrap()).collect();
+        let addresses = addresses_for(8);
+        let start =
+            |node: usize| Daemon::start_members(roots[node].path(), node as u8, k, &addresses, "");
+        let mut hosts: Vec<_> = (0..4).map(start).collect();
+        attached(&mut hosts[0], 2);
+        hosts[0].command(json!({"op":"seed"}));
+        let metrics = Arc::new(Metrics::default());
+        for address in &addresses[4..] {
+            fleet::synchronize(*address, metrics.clone()).unwrap();
+        }
+        fleet::collect(&addresses[4..], metrics.clone()).unwrap();
+        let placement = fleet::Placement::with_members(0, k, 4).unwrap();
+        let hashes: Vec<_> = data()
+            .as_chunks::<BLOCK_SIZE>()
+            .0
+            .iter()
+            .map(|d| *blake3::hash(d).as_bytes())
+            .collect();
+        for (node, host) in hosts.iter_mut().enumerate() {
+            let expected = hashes
+                .iter()
+                .filter(|hash| placement.owns(hash, node as u8))
+                .count();
+            wait_chunks(host, expected);
+        }
+        hosts[0].command(json!({"op":"read"}));
+        fleet::transfer(
+            addresses[4],
+            addresses[7],
+            [2; 16],
+            [9; 16],
+            fleet::Mode::Provision,
+            metrics.clone(),
+        )
+        .unwrap();
+        attached(&mut hosts[3], 9);
+        hosts[3].command(json!({"op":"read","image":9}));
+        // A failed member prevents a destructive sweep; surviving copies stay.
+        hosts[1].kill();
+        assert!(fleet::collect(&addresses[4..], metrics.clone()).is_err());
+        let drift = (65..=255u8)
+            .find(|value| placement.owns(blake3::hash(&[*value; BLOCK_SIZE]).as_bytes(), 1))
+            .unwrap();
+        hosts[0].command(json!({"op":"tail","value":drift}));
+        hosts[0].command(json!({"op":"compact"}));
+        hosts[1] = start(1);
+        for address in &addresses[4..] {
+            fleet::synchronize(*address, metrics.clone()).unwrap();
+        }
+        hosts[0].command(json!({"op":"read","value":drift}));
+        assert_eq!(
+            fleet::synchronize(addresses[4], metrics.clone()).unwrap(),
+            0
+        );
+        // Retain an acknowledged uncompacted tail across three writer locations.
+        hosts[0].command(json!({"op":"tail","value":0x91}));
+        fleet::transfer(
+            addresses[4],
+            addresses[6],
+            [2; 16],
+            [2; 16],
+            fleet::Mode::Migration,
+            metrics.clone(),
+        )
+        .unwrap();
+        assert_eq!(hosts[0].command(json!({"op":"write_denied"}))["ok"], true);
+        attached(&mut hosts[2], 2);
+        hosts[2].command(json!({"op":"read","value":0x91}));
+        hosts[0].kill();
+        hosts[0] = start(0);
+        hosts[2].command(json!({"op":"tail","value":0x92}));
+        fleet::transfer(
+            addresses[6],
+            addresses[5],
+            [2; 16],
+            [2; 16],
+            fleet::Mode::Migration,
+            metrics.clone(),
+        )
+        .unwrap();
+        attached(&mut hosts[1], 2);
+        hosts[1].command(json!({"op":"read","value":0x92}));
+        // A remote witness must not demand later remote WAL bytes from this retired source.
+        hosts[0].kill();
+        hosts[0] = start(0);
+        fleet::transfer(
+            addresses[5],
+            addresses[4],
+            [2; 16],
+            [2; 16],
+            fleet::Mode::Migration,
+            metrics.clone(),
+        )
+        .unwrap();
+        attached(&mut hosts[0], 2);
+        hosts[0].command(json!({"op":"read","value":0x92}));
+        assert_eq!(hosts[1].command(json!({"op":"write_denied"}))["ok"], true);
+        hosts[3].command(json!({"op":"read","image":9}));
+    }
+}
+
+#[test]
+fn four_member_witness_handoff_survives_process_death() {
+    for point in ["source-fenced", "source-witnessed", "destination-active"] {
+        let roots: Vec<_> = (0..4).map(|_| tempfile::tempdir().unwrap()).collect();
+        let addresses = addresses_for(8);
+        let start = |node: usize, pause: &str| {
+            Daemon::start_members(roots[node].path(), node as u8, 2, &addresses, pause)
+        };
+        let paused = if point == "destination-active" { 2 } else { 0 };
+        let mut hosts: Vec<_> = (0..4)
+            .map(|n| start(n, if n == paused { point } else { "" }))
+            .collect();
+        attached(&mut hosts[0], 2);
+        hosts[0].command(json!({"op":"seed"}));
+        for address in &addresses[4..] {
+            fleet::synchronize(*address, Arc::new(Metrics::default())).unwrap();
+        }
+        hosts[0].command(json!({"op":"tail","value":0xa7}));
+        let pair = [addresses[4], addresses[6]];
+        let transfer = move || {
+            fleet::transfer(
+                pair[0],
+                pair[1],
+                [2; 16],
+                [2; 16],
+                fleet::Mode::Migration,
+                Arc::new(Metrics::default()),
+            )
+        };
+        let request = thread::spawn(transfer);
+        let until = Instant::now() + Duration::from_secs(40);
+        while !roots[paused].path().join("pause").exists() {
+            assert!(Instant::now() < until, "missing {point}");
+            thread::sleep(Duration::from_millis(5));
+        }
+        for host in &mut hosts {
+            host.kill();
+        }
+        hosts.clear();
+        assert!(request.join().unwrap().is_err());
+        hosts.extend((0..4).map(|n| start(n, "")));
+        assert_eq!(hosts[0].command(json!({"op":"attach"}))["ok"], false);
+        transfer().unwrap();
+        attached(&mut hosts[2], 2);
+        hosts[2].command(json!({"op":"read","value":0xa7}));
+        for n in [0, 1, 3] {
+            assert_eq!(hosts[n].command(json!({"op":"attach"}))["ok"], false);
+        }
+    }
 }

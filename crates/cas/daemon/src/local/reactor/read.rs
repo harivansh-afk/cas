@@ -35,7 +35,7 @@ pub(super) struct Read {
     stage: Stage,
     block: usize,
     shared_io: bool,
-    peer: Option<BudgetArc<crate::peer::Client>>,
+    peer: Option<BudgetArc<crate::peer::Router>>,
     force_remote: bool,
     cache_remote: bool,
 }
