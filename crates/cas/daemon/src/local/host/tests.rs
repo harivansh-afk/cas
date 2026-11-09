@@ -7,7 +7,9 @@ mod admission;
 mod allocation;
 mod cache;
 mod collection;
+mod fleet;
 mod initialization;
+mod peer;
 mod quiescence;
 mod recovery;
 mod rotation;
@@ -62,6 +64,7 @@ pub(crate) struct Pause {
 
 #[derive(Default)]
 pub(crate) struct Control {
+    pub defer_compaction: bool,
     pub compaction: Option<Pause>,
     pub fetch: Option<Pause>,
     pub before_fetch: Option<Pause>,
@@ -777,7 +780,7 @@ fn a_denied_attachment_keeps_the_image_attachable_without_a_stale_wake() {
     assert_eq!(error.kind(), io::ErrorKind::OutOfMemory);
     assert!(!host.shared.admission.attached(0));
     assert_eq!(host.shared.attached.load(Ordering::Acquire), 0);
-    assert!(host.images[0].is_some());
+    assert!(host.images.lock().unwrap()[0].is_some());
     drop(held);
     let mut local = attach(&mut host, 2);
     assert!(host.shared.admission.attached(0));

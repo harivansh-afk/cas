@@ -6,6 +6,8 @@ enum Grant {
 }
 
 pub(super) struct Endpoint {
+    pub retired: bool,
+    pub fleet: Option<BudgetArc<fleet::Runtime>>,
     pub statistics: BudgetArc<Mutex<statistics::Totals>>,
     pub manifest: Manifest,
     pub resources: Arc<Resources>,
@@ -22,7 +24,10 @@ pub(super) struct Endpoint {
 
 impl Endpoint {
     pub(super) fn healthy(&self) -> io::Result<()> {
-        if let Some(error) = &self.health.lock()?.failure {
+        let health = self.health.lock()?;
+        if let Some(error) = &health.failure
+            && !self.health.writer_fenced()
+        {
             return Err(io::Error::other(error.clone()));
         }
         Ok(())
@@ -72,6 +77,17 @@ impl Endpoint {
                 attempt.advance(statistics::Phase::Prepare);
                 let input_bytes = input.payload_bytes() as u64;
                 let prepared = input.prepare(&self.manifest)?;
+                let mut shipping = reserved_vec(
+                    if self.fleet.is_some() {
+                        prepared.chunk_count()
+                    } else {
+                        0
+                    },
+                    &self.resources.compaction,
+                )?;
+                if self.fleet.is_some() {
+                    shipping.extend(prepared.chunks().iter().map(|chunk| chunk.hash()));
+                }
                 {
                     let stats = prepared.manifest_stats();
                     let mut totals = self
@@ -137,6 +153,11 @@ impl Endpoint {
                                 &health,
                             )
                         })?;
+                    if let Some(fleet) = &self.fleet
+                        && let Some(shipper) = fleet.shipper.get()
+                    {
+                        shipper.enqueue(shipping.iter().copied());
+                    }
                     let Reply::Reclaim(reclaim) = self.exchange(Event::Published(receipt))? else {
                         return Err(io::Error::other("expected reclamation after D publication"));
                     };
@@ -270,6 +291,8 @@ impl Endpoint {
 
 pub(super) struct Owner {
     pub exhausted_space: Option<(u64, u64)>,
+    pub incoming: Option<fleet_image::Incoming>,
+    pub attachments: std::sync::Weak<Mutex<BudgetVec<Option<Attachment>, BudgetAllocator>>>,
     pub catalog: Option<cas_core::catalog::Catalog>,
     pub store: Store,
     pub snapshots: BudgetVec<Snapshot, BudgetAllocator>,
@@ -306,6 +329,10 @@ impl Owner {
             normal: false,
         };
         let mut next_collection = Instant::now();
+        if let Err(error) = self.resume_fleet_epoch() {
+            self.shared.gate.fail(error.to_string());
+            return;
+        }
         loop {
             if self.shared.collection_required() && Instant::now() >= next_collection {
                 // Delayed filesystem frees can reopen admission without a sweep.
@@ -333,6 +360,14 @@ impl Owner {
                 Err(mailbox::RecvTimeoutError::Disconnected) => break,
             };
             let (index, turn) = match ready {
+                Ready::Fleet(request) => {
+                    if request.op == crate::fleet::collection::FREEZE {
+                        self.freeze(request);
+                    } else {
+                        self.bulk(request);
+                    }
+                    continue;
+                }
                 Ready::Image { index, turn } => (index, turn),
                 Ready::Collect(request) => {
                     let result = self.collect();
@@ -356,6 +391,13 @@ impl Owner {
             let measurements = cas_core::io_metrics::Scope::enter();
             let result = match turn {
                 Turn::Compact => {
+                    #[cfg(test)]
+                    if self.shared.control.lock().unwrap().defer_compaction {
+                        if let Err(error) = endpoint.defer(None) {
+                            self.shared.gate.fail(error.to_string());
+                        }
+                        continue;
+                    }
                     endpoint.compact(&mut self.store, self.shared.physical.as_ref(), None)
                 }
                 Turn::Rotate => endpoint.rotate(self.shared.physical.as_ref()),

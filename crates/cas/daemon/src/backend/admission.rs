@@ -14,6 +14,10 @@ pub(super) struct Waiting {
     ticket: Option<local::host::fair::Ticket>,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Keep read credits and timestamps inline without an allocation per request"
+)]
 pub(super) enum Admission {
     Waiting,
     Accepted(Permit),

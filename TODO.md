@@ -3,6 +3,13 @@
 Check off work only when its acceptance condition passes, with a record in
 [validation](docs/validation.md).
 
+- [x] Serve verified peer chunks over TCP and pass the two-process loopback
+  read/error fixture. [Validation](docs/validation.md#2026-11-08--peer-tcp-implementation-and-native-correctness)
+- [x] Implement static k=1/2 placement, durable PUT/repair, provisioning, fenced
+  migration, sync and coordinated sweep; verify two-process data and crash/retry.
+  [Validation](docs/validation.md#2026-11-08--phase-b-static-fleet-transfers-and-crash-recovery)
+- [ ] Establish isolated remote-read p99 and GET/PUT contention results on the
+  two-host 100 GbE testbed; shared Spark medians are development evidence only.
 - [ ] Complete the runtime allocation audit, including reader-held buffers,
   compaction preparation, and diagnostic allocations; reconcile charged bytes
   with measured process memory.

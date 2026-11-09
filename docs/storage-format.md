@@ -193,3 +193,37 @@ fails recovery; torn/incomplete metadata transactions leave the prior root.
 The COW range editor detaches covered subtrees, copies boundary paths and
 splits bounded nodes. It enforces the C0 8H+8 per-mapping bound before emitting pages. Reserve transaction memory and disk extents before writing; no
 large ZERO operation may rebuild or walk the full map merely to erase it.
+
+## Optional fleet metadata
+
+Fleet membership and writer records are separate from unchanged v2 chunk/WAL
+and manifest encodings. See [fleet protocol](fleet.md) for ordering and limits.
+`fleet/membership`, `fleet/root-<32hex-image>` and `fleet/epoch` are 4096-byte
+records: `CASFLT01` at 0, JSON length u32 at 8, BLAKE3 of JSON at 12..44,
+JSON at 44, and zero padding. Publication writes a unique pending file, fsyncs,
+renames to its canonical name, then fsyncs the directory. Pending files are
+retained but never chosen during recovery. Unknown or corrupted canonical
+records fail closed. Membership records the stable node and k.
+
+A root contains image, generation, writer, phase, durable cut and transfer
+metadata digest. Claiming/Receiving/Fenced are non-writable; only Active for
+this node permits attachment. A handoff advances generation. Activation must
+match the exact receiving record; generation rollback is rejected. The root's
+durable cut is a minimum recovery prefix even on a cold restart. The epoch
+record contains ID, swept and released; an unreleased epoch must resume its
+coordinated freeze before serving.
+
+`fleet/remote` is `CASFLT01`, a 32-byte BLAKE3 digest, then sorted unique 32-byte
+hashes. It records verified owner durability before local surplus reclamation;
+it grants missing-local-dependency recovery only for k=1 nonowners. It does not
+authorize a missing chunk this host owns.
+
+Incoming manifest/tail spools use the image ID, writer generation and part in
+the filename. File fragments are checked against the metadata's complete BLAKE3
+digests. `CASTAIL1` logical tails begin with magic[8], D u64 and E u64. Each
+mutation has sequence u64, offset u64, length u64, kind u8 (WRITE=1, ZERO=2),
+seven reserved zero bytes, and WRITE bytes only. Sequences cover exactly (D,E];
+no trailing bytes are accepted. The receiver repacks them into normal v2 WAL
+batches under fresh local tickets and fences E before catalog publication.
+Rejected unpublished image directories remain under unused 32-hex names so
+the existing allocator still observes all rejected segment tickets.

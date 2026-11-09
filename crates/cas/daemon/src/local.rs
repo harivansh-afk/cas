@@ -3,7 +3,7 @@
 //! `Shared` holds the budgets, health gate and metrics that admission and the
 //! `Worker` (synchronous) or reactor (concurrent) execution both consult.
 pub(crate) mod host;
-mod pools;
+pub(crate) mod pools;
 pub(crate) mod pressure;
 mod reactor;
 mod state;
@@ -62,6 +62,8 @@ impl Execution {
 }
 
 pub struct Permit {
+    pub(crate) received: Option<Instant>,
+    pub(crate) remote: Option<crate::peer::metrics::Trace>,
     pub(crate) trace: Option<crate::read_trace::OwnedTrace>,
     _request: Credits,
     _read: Option<BudgetArc<Credits>>,
@@ -71,6 +73,7 @@ pub struct Permit {
 }
 
 struct Fetched {
+    remote: Option<crate::peer::metrics::Phases>,
     bytes: cas_core::aligned::AlignedBuffer,
     _credits: BudgetArc<Credits>,
 }
@@ -292,6 +295,9 @@ impl Shared {
     }
 
     fn admit(&self, kind: Kind) -> io::Result<pressure::Decision<Permit>> {
+        if self.health.writer_fenced() {
+            return Err(io::Error::other("image writer transferred to peer"));
+        }
         let entry = match &self.admission {
             Some(admission) => {
                 if admission.status().failed {
@@ -365,6 +371,8 @@ impl Shared {
         };
         Ok(Decision::Ready(Permit {
             trace: None,
+            received: None,
+            remote: None,
             _request: request,
             _read: read,
             window,
@@ -819,6 +827,7 @@ impl Local {
                 "local writes must gather directly into an append batch",
             ));
         }
+        permit.received.get_or_insert_with(Instant::now);
         if let Some(trace) = &mut permit.trace {
             trace.enqueued_ns = trace.at();
         }

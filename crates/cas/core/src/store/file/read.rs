@@ -7,6 +7,18 @@ pub struct Reader {
 }
 
 impl Reader {
+    /// Bounded by the caller's metadata budget; a shipping pass owns a stable
+    /// inventory while insertions continue. This snapshot does not pin payloads.
+    pub fn inventory(&self, metadata: Arc<Budget>) -> io::Result<Vec<Hash, BudgetAllocator>> {
+        let state = self.shared.lock();
+        state.healthy()?;
+        let mut hashes = Vec::new_in(BudgetAllocator::new(metadata));
+        hashes
+            .try_reserve_exact(state.index.len())
+            .map_err(|_| io::ErrorKind::OutOfMemory)?;
+        hashes.extend(state.index.entries().map(|(hash, _, _)| *hash));
+        Ok(hashes)
+    }
     pub fn plan(&self, hash: Hash) -> io::Result<Option<Read>> {
         self.shared.plan(hash)
     }
@@ -111,8 +123,17 @@ impl Read {
             BLOCK_SIZE,
             BudgetAllocator::new(Arc::clone(&self.metadata)),
         )?;
-        direct::read_bytes(&self.file, scratch.as_mut_slice(), self.header_offset())?;
-        self.payload(scratch.as_slice())?.load(destination)
+        self.load_with_scratch(scratch.as_mut_slice(), destination)
+    }
+
+    /// Reuse aligned caller-owned header scratch on a bounded service worker.
+    pub fn load_with_scratch(&self, scratch: &mut [u8], destination: &mut [u8]) -> io::Result<()> {
+        require(
+            scratch.len() == BLOCK_SIZE && destination.len() == BLOCK_SIZE,
+            "chunk scratch/destination size",
+        )?;
+        direct::read_bytes(&self.file, scratch, self.header_offset())?;
+        self.payload(scratch)?.load(destination)
     }
 }
 

@@ -8,6 +8,7 @@ use vhost::{
 
 fn config(root: &Path, transport: &Path, mode: Mode) -> ServiceConfig {
     ServiceConfig {
+        peer: crate::peer::Config::default(),
         cache_bytes: Resources::DEFAULT_CACHE_BYTES,
         telemetry: false,
         telemetry_rotate: false,

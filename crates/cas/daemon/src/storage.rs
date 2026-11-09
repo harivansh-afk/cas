@@ -25,6 +25,10 @@ use cas_core::{
 use io_uring::{IoUring, opcode, squeue, types};
 use vmm_sys_util::eventfd::EventFd;
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Keep read credits and timestamps inline without an allocation per request"
+)]
 pub enum Permit {
     Reference,
     Local { credits: local::Permit },

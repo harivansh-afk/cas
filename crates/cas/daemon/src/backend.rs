@@ -61,6 +61,7 @@ struct GuestCompletion {
 }
 
 struct Prepared {
+    received: Instant,
     queue: u16,
     available: u16,
     request: Request,
@@ -788,6 +789,13 @@ impl Backend {
                     None,
                     guard.as_deref_mut(),
                 )?;
+                if let Some(remote) = completed
+                    .permit
+                    .as_mut()
+                    .and_then(|permit| permit.remote.as_mut())
+                {
+                    remote.finish(false);
+                }
                 if let (Some(observer), Some(mut trace)) = (&mut self.read_trace, trace.take()) {
                     trace.finished_ns = trace.at();
                     observer.complete(*trace);
@@ -814,6 +822,13 @@ impl Backend {
                         trace.finished_ns = trace.at();
                         trace.success = true;
                         observer.complete(*trace);
+                    }
+                    if let Some(remote) = completed
+                        .permit
+                        .as_mut()
+                        .and_then(|permit| permit.remote.as_mut())
+                    {
+                        remote.finish(true);
                     }
                     self.counters.reads += 1;
                     self.counters.read_bytes += buffer.as_slice().len() as u64;
@@ -946,6 +961,7 @@ impl Backend {
             if let Some(observer) = &mut self.read_trace {
                 observer.head(queue, next_avail.wrapping_sub(1), Instant::now());
             }
+            let received = Instant::now();
             let request = decode_chain(mem, chain, self.capacity_bytes, &self.metadata)?
                 .negotiated(self.negotiated_features & self.features());
             let gate = self.storage.completion_gate();
@@ -977,6 +993,7 @@ impl Backend {
                 mem,
                 &mut state,
                 Prepared {
+                    received,
                     queue,
                     available: next_avail.wrapping_sub(1),
                     request,
@@ -1029,6 +1046,7 @@ impl Backend {
         mut health: Option<&mut local::ImageState>,
     ) -> io::Result<()> {
         let Prepared {
+            received,
             queue,
             available,
             request,
@@ -1095,6 +1113,7 @@ impl Backend {
         {
             if let Permit::Local { credits } = &mut permit {
                 credits.trace = trace;
+                credits.received = Some(received);
             }
             self.enqueue(
                 mem,
@@ -1333,6 +1352,20 @@ impl VhostUserBackendMut for Backend {
                         Err(error) if error.kind() == io::ErrorKind::WouldBlock => (),
                         Err(error) => return Err(error),
                     }
+                    // Host admission/collection wakes the frontend even before
+                    // QEMU connects. This is not a guest queue kick: no accepted
+                    // IO can exist before feature and memory setup complete.
+                    if self.negotiated_features & REQUIRED_FEATURES != REQUIRED_FEATURES
+                        || self.memory.is_none()
+                    {
+                        if let Some(failure) = &self.failure {
+                            return Err(io::Error::other(failure.clone()));
+                        }
+                        if let Some(gate) = self.storage.completion_gate() {
+                            gate.lock_checked()?;
+                        }
+                        return Ok(());
+                    }
                 }
                 timer
                     if self
@@ -1484,6 +1517,53 @@ mod tests {
             panic!("advertised maximum must decode as WRITE");
         };
         assert_eq!(request.len, MAX_REQUEST_BYTES);
+    }
+
+    #[test]
+    fn host_wakeup_before_negotiation_never_consumes_a_guest_queue() {
+        for setup in 0..3 {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("image.raw");
+            File::create(&path)
+                .unwrap()
+                .set_len(BLOCK_SIZE as u64)
+                .unwrap();
+            let mut backend = Backend::new(&path).unwrap();
+            let (memory, vring) = queue();
+            data_chain(
+                &memory.memory(),
+                virtio_bindings::bindings::virtio_blk::VIRTIO_BLK_T_IN,
+            );
+            memory
+                .memory()
+                .write_obj(1u16, GuestAddress(0x2002))
+                .unwrap();
+            if setup == 1 {
+                backend.acked_features(backend.features());
+            }
+            if setup == 2 {
+                backend.update_memory(memory).unwrap();
+            }
+            backend.completion_event.write(1).unwrap();
+            backend
+                .handle_event(
+                    backend.completion_token(),
+                    EventSet::IN,
+                    std::slice::from_ref(&vring),
+                    0,
+                )
+                .unwrap();
+            assert!(backend.failure().is_none());
+            assert_eq!(backend.pending_count(), 0);
+            assert_eq!(vring.queue_next_avail(), 0);
+            // Real guest IO still requires both negotiated features and memory.
+            assert!(
+                backend
+                    .handle_event(0, EventSet::IN, std::slice::from_ref(&vring), 0)
+                    .is_err()
+            );
+            assert_eq!(vring.queue_next_avail(), 0);
+        }
     }
 
     #[test]

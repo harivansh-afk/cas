@@ -51,7 +51,7 @@ impl Key for Hash {
 
 impl Cache {
     pub fn new(bytes: usize, metadata: &Arc<Budget>) -> io::Result<BudgetArc<Self>> {
-        if bytes == 0 || !bytes.is_multiple_of(BLOCK_SIZE) {
+        if !bytes.is_multiple_of(BLOCK_SIZE) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "invalid cache byte limit",
@@ -97,6 +97,10 @@ impl Cache {
         let mut state = self.state.lock().expect("cache poisoned");
         drop(wait);
         let _hold = crate::io_metrics::measure(0, |c| &mut c.chunk_cache_hold);
+        if self.capacity_bytes == 0 {
+            state.counters.refused += 1;
+            return Ok(None);
+        }
         if let Some(buffer) = state.buffer(&hash) {
             state.promote(hash);
             return Ok(Some(buffer));

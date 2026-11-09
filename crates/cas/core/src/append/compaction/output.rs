@@ -92,6 +92,10 @@ impl Prepared<'_> {
         self.chunks.len()
     }
 
+    pub fn chunks(&self) -> &[Chunk<'_>] {
+        &self.chunks
+    }
+
     pub fn manifest_bytes(&self) -> usize {
         self.manifest.bytes().len()
     }

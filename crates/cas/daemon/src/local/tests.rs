@@ -617,7 +617,16 @@ fn fresh_attachment_syncs_both_epochs_and_keeps_image_mutations_monotonic() {
     local.receive(true).unwrap().unwrap().result.unwrap();
     local.stop().unwrap();
     drop(local);
-    let mut log = Log::open(&path, append::Limits::default()).unwrap();
+    // Recovery allocates a fourth 64 MiB epoch. Leave room for filesystem
+    // allocation overhead instead of fitting exactly in the default 256 MiB.
+    let mut log = Log::open(
+        &path,
+        append::Limits {
+            staging_bytes: 320 * MAX_REQUEST_BYTES as u64,
+            ..append::Limits::default()
+        },
+    )
+    .unwrap();
     let mut bytes = AlignedBuffer::new(3 * BLOCK_SIZE);
     log.read_into(0, &mut bytes).unwrap();
     for (index, chunk) in bytes

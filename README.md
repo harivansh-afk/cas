@@ -4,9 +4,11 @@ A content-addressed block backend for QEMU on Linux. One host process serves
 private VM disks backed by a shared chunk store, with local write-ahead logs,
 copy-on-write manifests, snapshots, and recovery through vhost-user.
 
-This is experimental software. Use disposable data. Distributed storage,
-replication, migration, and hardware power-loss validation are not implemented
-or established by the local tests.
+This is experimental software. Use disposable data. An opt-in static N-member TCP fleet supports
+verified peer reads, k=1/2 placement, durable chunk replication, manifest
+provisioning, fenced block-image migration, synchronization and coordinated
+collection. FLUSH durability remains local; fleet-class journaling and hardware
+power-loss validation are not implemented or established by local tests.
 
 ## Build and test
 
@@ -41,6 +43,8 @@ The lab creates its own backing image rather than formatting a physical disk.
 
 - [Storage architecture and limits](docs/storage-design.md)
 - [On-disk format](docs/storage-format.md)
+- [Peer chunk reads and remote experiment setup](docs/peer-fetch.md)
+- [Two-host placement, provisioning, migration and collection](docs/fleet.md)
 - [Retained inflight metadata](docs/inflight-format.md)
 - [Builds and test fixtures](docs/testbed.md)
 - [Current work](TODO.md) and [validation](docs/validation.md)
@@ -83,3 +87,8 @@ Vendored dependencies retain their own licenses and notices under
 `crates/vendor/`; this grant does not relicense third-party material. The bundled
 Berkeley Mono font is not covered by the GPL grant; its separate redistribution
 terms have not been recorded here.
+
+The [multi-host experiment runner](docs/two-host-experiments.md) boots QEMU guests,
+measures fenced disk handoff against full-image rsync and common-base incremental
+ZFS controls, and collects
+remote-read, shipping-contention and capacity evidence over local or SSH agents.

@@ -96,17 +96,29 @@ fn open(root: &Path, resources: &Arc<Resources>, prefixes: Prefixes<'_>) -> io::
 }
 
 pub(super) fn scan(root: &Path, resources: &Arc<Resources>) -> io::Result<Inspection> {
-    Inspection::scan(
-        root,
-        OpenConfig {
-            store: Config {
-                segment_bytes: 2 * MAX_REQUEST_BYTES as u64,
-                ..STORE
+    // Parallel process tests can briefly retain inherited kernel file references
+    // after this thread closes its descriptor. Retry only lock contention, just
+    // as production opening does; persistent locks and all other errors fail.
+    let until = Instant::now() + Duration::from_secs(1);
+    loop {
+        let result = Inspection::scan(
+            root,
+            OpenConfig {
+                store: Config {
+                    segment_bytes: 2 * MAX_REQUEST_BYTES as u64,
+                    ..STORE
+                },
+                append: append::Limits::default(),
             },
-            append: append::Limits::default(),
-        },
-        Arc::clone(resources),
-    )
+            Arc::clone(resources),
+        );
+        match result {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < until => {
+                thread::sleep(Duration::from_millis(1))
+            }
+            result => return result,
+        }
+    }
 }
 
 pub(super) fn physical_limits(inspected: &Inspection) -> cas_core::space::Limits {

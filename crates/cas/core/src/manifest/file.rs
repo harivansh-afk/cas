@@ -484,3 +484,45 @@ fn select(
 
 #[cfg(test)]
 mod tests;
+
+impl Manifest {
+    /// Reidentify a private received copy before its first catalog publication.
+    /// The source root is preserved, while a provisioned clone starts at D=0.
+    /// Never call on a catalog member: existing views keep their original root.
+    pub fn into_provisioned(mut self, image: [u8; 16]) -> io::Result<Self> {
+        self.healthy()?;
+        require(
+            image != [0; 16] && image != self.current.image,
+            "provisioning requires a fresh image identity",
+        )?;
+        let current = Commit {
+            image,
+            generation: 1,
+            durable: 0,
+            ..self.current
+        };
+        let end = self
+            .end
+            .checked_add(BLOCK_SIZE as u64)
+            .ok_or_else(|| io::Error::other("provision manifest overflow"))?;
+        let pin = Pin::new(
+            SnapshotKey {
+                commit: current,
+                end,
+            },
+            self.metadata.clone(),
+        )?;
+        let mut bytes =
+            AlignedBuffer::try_new_in(BLOCK_SIZE, BudgetAllocator::new(self.metadata.clone()))?;
+        current.encode_into(bytes.as_mut_slice(), self.end)?;
+        self.failed = true;
+        direct::preallocate(&self.file, self.end, BLOCK_SIZE as u64)?;
+        direct::write_bytes(&self.file, bytes.as_slice(), self.end)?;
+        direct::sync_data(&self.file)?;
+        self.current = current;
+        self.end = end;
+        self.pin = pin;
+        self.failed = false;
+        Ok(self)
+    }
+}

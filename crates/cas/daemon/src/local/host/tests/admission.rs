@@ -4,8 +4,8 @@ use super::*;
 fn staging_reopen_wakes_a_blocked_frontend_without_an_io_credit_release() {
     let root = tempfile::tempdir().unwrap();
     let resources = Arc::new(Resources::default());
-    let mut host = create(root.path(), 1, Arc::clone(&resources));
-    let mut attachment = host.images[0].take().unwrap();
+    let host = create(root.path(), 1, Arc::clone(&resources));
+    let mut attachment = host.images.lock().unwrap()[0].take().unwrap();
     let frontend = EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK).unwrap();
     host.shared
         .admission

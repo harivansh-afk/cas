@@ -7,6 +7,7 @@ const SNAPSHOT_BYTES: usize =
     (CONCURRENT_QUEUES * CONCURRENT_QUEUE_SIZE + 1) * CONCURRENT_QUEUE_SIZE * size_of::<Segment>();
 
 pub(super) struct Discovered {
+    received: Instant,
     request: Request,
     available: u16,
     order: u64,
@@ -85,6 +86,7 @@ impl Frontier {
             return Err(io::Error::other("discovered queue exceeds capacity"));
         }
         queue.push(Discovered {
+            received: Instant::now(),
             request,
             available: identity.available,
             order,
@@ -161,7 +163,8 @@ impl Backend {
                 let Some(NextChain { chain, next_avail }) = peek(mem.clone(), &mut state)? else {
                     break;
                 };
-                let observed = self.read_trace.as_ref().map(|_| Instant::now());
+                let received = Instant::now();
+                let observed = self.read_trace.as_ref().map(|_| received);
                 let request = decode_chain(mem, chain, self.capacity_bytes, &frontier.spans)?
                     .negotiated(features);
                 let identity = request.inflight(queue, next_avail.wrapping_sub(1));
@@ -189,6 +192,7 @@ impl Backend {
                     );
                 }
                 frontier.restore(order, identity, request)?;
+                frontier.queues[index].last_mut().unwrap().received = received;
                 state.get_queue_mut().set_next_avail(next_avail);
             }
         }
@@ -272,6 +276,7 @@ impl Backend {
                 mem,
                 &mut state,
                 Prepared {
+                    received: discovered.received,
                     queue,
                     available: discovered.available,
                     request: discovered.request,

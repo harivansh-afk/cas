@@ -21,16 +21,18 @@ struct Storage {
 #[command(about = "Serve all catalog images from one governed local host")]
 struct Serve {
     #[command(flatten)]
+    peer: cas_daemon::peer::Config,
+    #[command(flatten)]
     storage: Storage,
     #[arg(long, value_enum)]
     mode: Mode,
-    /// Repeat once for every catalog image: 32hex-image-id=socket-path.
-    #[arg(long = "image", required = true)]
+    /// Image sockets. Fleet cold mode also accepts IDs awaiting provisioning/migration.
+    #[arg(long = "image")]
     endpoints: Vec<Endpoint>,
     /// Existing directory on another filesystem; creates host.json and per-image reports.
     #[arg(long)]
     reports: PathBuf,
-    /// Clean chunk-cache bytes; bounded by the default host cap.
+    /// Clean chunk-cache bytes; zero disables payload caching, bounded by the host cap.
     #[arg(long, default_value_t = cas_daemon::Resources::DEFAULT_CACHE_BYTES)]
     cache_bytes: usize,
     /// Sample every 500 ms; fail the run if telemetry exceeds 64 MiB or 4,096 samples.
@@ -98,6 +100,7 @@ fn main() -> std::io::Result<()> {
     }
     let args = Serve::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     host_service::serve(host_service::Config {
+        peer: args.peer,
         root: args.storage.root,
         store: args.storage.store,
         mode: args.mode,
