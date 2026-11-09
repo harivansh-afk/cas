@@ -23,6 +23,52 @@ use vmm_sys_util::eventfd::EventFd;
 
 // At most one remote chunk per admitted host read; slots outlive cancelled polls.
 const SLOTS: usize = crate::local::pools::HOST_REQUESTS;
+/// Slot completion eventfds plus the client's wake eventfd and TCP socket.
+pub(crate) const CLIENT_DESCRIPTORS: u64 = SLOTS as u64 + 2;
+/// Headroom for the rest of the host: stores, WALs, rings, listeners, guests.
+const HOST_DESCRIPTORS: u64 = 1024;
+
+/// Each GET client preallocates one eventfd per host request slot, so even a
+/// single client exceeds the common 1024-descriptor soft limit. Raise the soft
+/// limit to the hard limit before allocating (the daemon uses epoll/io_uring,
+/// never select), and fail clearly when the hard limit cannot cover `clients`.
+pub(crate) fn reserve_descriptors(clients: usize) -> io::Result<()> {
+    let required = (clients as u64)
+        .saturating_mul(CLIENT_DESCRIPTORS)
+        .saturating_add(HOST_DESCRIPTORS);
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit writes one initialized rlimit through a valid pointer.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if limit.rlim_cur == libc::RLIM_INFINITY || limit.rlim_cur >= required {
+        return Ok(());
+    }
+    if limit.rlim_max != libc::RLIM_INFINITY && limit.rlim_max < required {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{clients} peer GET client(s) need {required} descriptors; \
+                 hard RLIMIT_NOFILE is {}",
+                limit.rlim_max
+            ),
+        ));
+    }
+    limit.rlim_cur = if limit.rlim_max == libc::RLIM_INFINITY {
+        required
+    } else {
+        limit.rlim_max
+    };
+    // SAFETY: setrlimit reads one initialized rlimit; raising only the soft
+    // limit up to the hard limit needs no privilege.
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
 struct Slot {
     event: EventFd,
     owned: bool,
@@ -77,6 +123,7 @@ impl Client {
         metrics: BudgetArc<Metrics>,
         inline_us: u32,
     ) -> io::Result<Self> {
+        reserve_descriptors(1)?;
         let mut slots = crate::local::reserved_vec(SLOTS, budget)?;
         let mut free = crate::local::reserved_vec(SLOTS, budget)?;
         for index in 0..SLOTS {

@@ -275,3 +275,113 @@ fn inline_get_has_a_bounded_poll_and_retains_slow_reply_ownership() {
     server.join().unwrap();
     assert_eq!(budget.usage().current, Amount::default());
 }
+
+fn four_member_config() -> Config {
+    let get: Vec<std::net::SocketAddr> = (0..4)
+        .map(|i| format!("127.0.0.1:{}", 17_390 + i).parse().unwrap())
+        .collect();
+    let bulk: Vec<std::net::SocketAddr> = (0..4)
+        .map(|i| format!("127.0.0.1:{}", 17_394 + i).parse().unwrap())
+        .collect();
+    Config {
+        peer_listen: Some(get[0]),
+        peer_get_member: get,
+        fleet: crate::fleet::Config {
+            peer_node: Some(0),
+            peer_k: 1,
+            peer_bulk_listen: Some(bulk[0]),
+            peer_bulk_member: bulk,
+            ..crate::fleet::Config::default()
+        },
+        ..Config::default()
+    }
+}
+
+fn nofile() -> libc::rlimit {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit writes one initialized rlimit through a valid pointer.
+    let status = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) };
+    assert_eq!(status, 0);
+    limit
+}
+
+#[test]
+#[ignore = "subprocess entry point for the descriptor-limit regression"]
+fn descriptor_limit_child() {
+    let budget = memory();
+    let metrics = Metrics::new(&budget).unwrap();
+    let result = Router::new(&four_member_config(), &budget, metrics);
+    let limit = nofile();
+    let required = 3 * client::CLIENT_DESCRIPTORS + 1024;
+    match std::env::var("CAS_PEER_NOFILE_EXPECT").unwrap().as_str() {
+        "raised" => {
+            let router = result.unwrap();
+            assert!(limit.rlim_cur >= required, "{}", limit.rlim_cur);
+            assert!(limit.rlim_max == libc::RLIM_INFINITY || limit.rlim_cur == limit.rlim_max);
+            // Shutdown is nonblocking until each client worker has exited.
+            let until = Instant::now() + Duration::from_secs(10);
+            loop {
+                match router.shutdown() {
+                    Ok(()) => break,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < until, "peer workers did not stop");
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(e) => panic!("{e}"),
+                }
+            }
+        }
+        "rejected" => {
+            let error = result.err().expect("hard limit below requirement");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains("hard RLIMIT_NOFILE"), "{error}");
+            assert_eq!(limit.rlim_cur, 1024);
+        }
+        other => panic!("unknown expectation {other}"),
+    }
+}
+
+fn descriptor_child(soft: libc::rlim_t, hard: libc::rlim_t, expect: &str) -> bool {
+    use std::os::unix::process::CommandExt;
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "peer::tests::descriptor_limit_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("CAS_PEER_NOFILE_EXPECT", expect);
+    // SAFETY: the hook calls only async-signal-safe setrlimit before exec.
+    unsafe {
+        command.pre_exec(move || {
+            let limit = libc::rlimit {
+                rlim_cur: soft,
+                rlim_max: hard,
+            };
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command.status().unwrap().success()
+}
+
+/// Services commonly start with a 1024-descriptor soft limit, below even one
+/// GET client's preallocated eventfds. A four-member router must raise the
+/// soft limit itself, and fail clearly when the hard limit is too low.
+#[test]
+fn peer_clients_raise_the_default_descriptor_soft_limit() {
+    let hard = nofile().rlim_max;
+    let required = 3 * client::CLIENT_DESCRIPTORS + 1024;
+    assert!(
+        hard == libc::RLIM_INFINITY || hard >= required,
+        "test host hard RLIMIT_NOFILE {hard} cannot run a four-member fleet"
+    );
+    assert!(descriptor_child(1024, hard, "raised"));
+    assert!(descriptor_child(1024, 1024, "rejected"));
+}

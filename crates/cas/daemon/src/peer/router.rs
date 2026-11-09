@@ -15,6 +15,15 @@ impl Router {
         metrics: BudgetArc<Metrics>,
     ) -> io::Result<Self> {
         let placement = config.fleet.placement()?;
+        // Check the aggregate requirement before allocating any client.
+        super::client::reserve_descriptors(if config.peer_address.is_some() {
+            1
+        } else {
+            config
+                .peer_get_member
+                .len()
+                .saturating_sub(usize::from(placement.is_some()))
+        })?;
         let mut clients = crate::local::reserved_vec(config.peer_get_member.len().max(1), budget)?;
         if let Some(address) = config.peer_address {
             clients.push((

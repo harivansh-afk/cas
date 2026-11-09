@@ -118,6 +118,12 @@ Disk-backed service reads participate as demand sources in the existing IO
 scheduler, retaining its reserved background opportunities. The four-connection
 cap is shared by GET and HAS; this slice offers no bulk traffic priority proof.
 
+Each remote client therefore holds 1,026 descriptors (slot eventfds, its wake
+eventfd and socket), more than the common 1,024 soft `RLIMIT_NOFILE` default.
+Before creating clients, the host raises its soft limit to the hard limit and
+requires `1,026 × clients + 1,024` descriptors; a lower hard limit fails startup
+with an explicit error instead of a later `EMFILE`.
+
 A GET expires two seconds after entering its slot, including connection setup.
 Failed connections are discarded; subsequent requests can reconnect. A partial
 server frame has a two-second absolute deadline. Idle connections remain open;
