@@ -1234,3 +1234,141 @@ recordsize=4K, compression=off and atime=off, matching the source. Ordinary send
 streams do not guarantee transfer of dataset properties. The earlier stream
 preserved the existing file's blocks, but the destination dataset could otherwise
 inherit different settings; replacement runs record both ends' properties.
+
+## 2026-11-09 — Replacement Freestyle validation and retained raw evidence
+
+This record supersedes the preceding restoration-in-progress status. All three
+replacement suites passed and their complete controller/host archives were
+exported to `results/freestyle/restored/evidence/` before deleting any replacement
+test VM. The earlier lost archives remain unavailable; these are new executions,
+not reconstructed evidence. No builds, tests, formatters or fixtures ran on Spark
+after the owner's prohibition. Spark was used for editing, Git, provider SDK
+orchestration and processing downloaded evidence only.
+
+Native N=2/N=4 source: clean `13d4ecf4f518e51d6d6bf9c2b1aae15b77d42c78` (same
+runtime as `92e194c`). ZFS and final full check source: clean
+`367856b4d85cd44e164a6935d73f663416cd2ac1`. Subsequent edits only clarify ZFS
+permissions and record this validation. The provider rejected the requested
+larger shapes; all nine replacement VMs used x86_64, 8 vCPU, 16 GiB RAM and 64 GiB
+disk. N=2 used `10.172.61.2–3`, N=4 `.4–7`, and ZFS `.8–9`; `.1` was the separate
+persistent builder/controller. The suites ran concurrently on separate VM groups.
+Physical provider-host isolation is unknown. Each native member used its own
+16 GiB XFS scratch filesystem, daemon vCPUs 0–3 and KVM workload vCPUs 4–5.
+ZFS used two nested KVM NixOS appliances because the provider kernel lacks ZFS.
+
+Commands on the persistent VM (profile sourced first):
+
+```sh
+cd /root/cas-zfs
+nix develop -c env CARGO_TARGET_DIR=/root/cas/target \
+  CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=2 just check
+nix build .#two-host .#fleet-appliance --out-link /root/result-zfs --cores 4
+# Native build/check/format used /root/cas at 13d4ecf and /root/result-fleet.
+/root/result-fleet/bin/cas-two-host \
+  --config /root/cas-results/native-n2-recovered-001-config.json \
+  --output /root/cas-results/native-n2-recovered-001
+/root/result-fleet/bin/cas-two-host \
+  --config /root/cas-results/native-n4-recovered-001-config.json \
+  --output /root/cas-results/native-n4-recovered-001
+/root/result-zfs/bin/cas-two-host \
+  --config /root/cas-results/zfs-recovered-001-config.json \
+  --output /root/cas-results/zfs-recovered-001
+```
+
+Final `just check`: **542 Rust passed, 27 ignored, 13 Python passed**, with fmt
+and strict Clippy passing. The ignored environment-specific tests are not claimed
+as run. Passing process regressions include N=4 k=1/k=2 placement, PUT/HAS repair,
+surplus sweep, provisioning, sync and migrations through a third member and back;
+PUT kills before/after durability; kills at migration fence/witness boundaries;
+short required-tail rejection; peer loss; and verified GET progress while a PUT
+waits for durable acknowledgment. The final check includes the concurrent
+compactor/shipper scheduler regression. Native build/format and final ZFS package
+build/Python checks also exited zero. Earlier failed attempts and fixes are
+described above; these replacement suites required no retry. No CI, origin push,
+merge or physical-host power-loss result is implied.
+
+The workload remained 128 MiB logical image, 1 MiB data plus 1 MiB deterministic
+drift, requested shipping rate 4 MiB/s, five-second read windows, QD1/4 and 50 µs
+inline polling. N=2 used three read repetitions; N=4 one. Both fleet modes
+provisioned and booted a verified guest, synchronized independent drift, swept,
+verified cold reads, and migrated with original/drift checksums and durable epoch
+0→1. Rsync also boot-verified the resynchronized destination.
+
+| Native N=2 arm | Provision flow bytes | Migration flow bytes | Downtime (s) | Recovery/handoff or copy (s) |
+| --- | ---: | ---: | ---: | ---: |
+| CAS k=1 | 122,813 | 217,783 | 24.490 | 0.364 |
+| CAS k=2 | 126,815 | 217,699 | 22.291 | 0.427 |
+| Full-image rsync | 134,250,639 | 134,250,639 | 21.989 | 1.428 |
+
+CAS flow bytes exclude separately recorded background shipping and control.
+Provisioning additionally shipped 8,541 bytes in each mode; migration shipped
+38,232 / 86,908 bytes for k=1 / k=2. Provision flow elapsed time was 0.207 / 0.212 s.
+Drift-and-repair windows took 1.333 / 1.399 s and transferred 600,329 / 1,187,444
+shipping bytes plus 14,632 / 39,818 explicit-sync bytes. Explicit CLI timing,
+control bytes and raw counters remain separate in JSON. Rsync provision and sync
+took 1.510 / 1.212 s; both transferred 134,250,639 bytes. These are application
+bytes, excluding TCP/IP/SSH overhead. CAS assumes preplaced content; initial
+placement is outside the provisioning window. Cold boot dominates downtime, so
+these runs do not show a total-downtime advantage for CAS over rsync.
+
+Real common-base ZFS setup transferred **1,519,958 bytes**, separately recorded.
+Incremental provision, sync and migration transferred **8,187 / 1,229,206 / 7,875
+bytes**, with transfer times 0.284 / 0.341 / 0.259 s. Snapshot GUIDs, stream lengths
+and SHA256 matched. Both datasets recorded 4 KiB records and compression off;
+receive explicitly sets those properties and disables atime. Guest downtime was
+133.541 s: 0.881 s shutdown, 1.140 s snapshot/transfer/install and 131.520 s
+boot/verify/continue. The extra KVM layer and user-network forwarding prevent a
+fair timing comparison with native CAS/rsync; all arms must run natively on the
+same CloudLab pair. This validates a real incremental baseline, not a synthetic
+delta estimate, and shows its small marginal transfers when a common base exists.
+
+N=2 fio total guest latency for 4 KiB QD1, ranges across three repetitions:
+
+| Source/load | p50 (ms) | p99 (ms) |
+| --- | ---: | ---: |
+| Peer memory, quiet | 0.659–0.717 | 1.499–2.671 |
+| Peer memory, concurrent shipping | 0.668–0.684 | 1.581–1.761 |
+| Peer store, quiet | 0.799–0.864 | 1.860–2.179 |
+| Peer store, concurrent shipping | 0.815–0.922 | 2.023–3.064 |
+| Local raw virtual storage | 0.146–0.153 | 0.309–0.322 |
+
+All cohorts verified CRC32C; each contention repetition had 6–7 sampled intervals
+with both verified GET progress and acknowledged PUT chunks. Quiet source checks
+passed; contention retains the observed cache/store mix rather than assuming a
+warm cache under write load. Quiet peer-memory recent-ring median phases were
+receipt→send 46.94–50.45 µs, send→first byte 377.41–434.19 µs,
+first byte→verified 2.67–3.08 µs, verified→completion 71.84–76.39 µs. The ring is a
+bounded diagnostic sample, not the whole-run distribution. Sequential QD4
+throughput was 21.29–24.09 MiB/s from peer memory, 16.30–19.30 from peer store,
+and 64.69–65.35 from local raw virtual storage. These virtual results neither
+establish the sub-40 µs target nor characterize physical NVMe/100 GbE.
+
+N=4 k=1/k=2 guest downtime was 22.923 / 21.951 s, recovery/handoff 0.464 / 0.380 s,
+migration flow bytes 220,224 / 229,219, plus 51,310 / 151,458 shipping bytes.
+Memory/store contention had 7 / 8 overlapping GET/acknowledged-PUT intervals,
+p50 0.651 / 0.823 ms and p99 1.499 / 2.040 ms, with verified data. N=2 allocated
+footprints were 32,980,992 / 35,409,920 bytes for k=1/k=2 versus 28,942,336 across
+independent CAS stores. N=4 fleet footprints were 66,682,880 / 69,152,768 bytes.
+Metadata/WAL/bootstrap retention dominates this tiny workload; N=4 fleet runs two
+workload guests versus four independent-store guests. These are operational
+footprints, not a matched N=4 dedup ratio or a ZFS/DDT capacity comparison.
+
+Retained evidence under `results/freestyle/restored/evidence/`:
+
+- `checks.tgz`, `final-checks.tgz`: full remote build/check/format output and statuses.
+- `native-n2-recovered-001-controller.tgz` and `-host-{0,1}.tgz`.
+- `native-n4-recovered-001-controller.tgz` and `-host-{2,3,4,5}.tgz`.
+- `zfs-recovered-001-controller.tgz` and `-host-{6,7}.tgz`.
+- `SHA256SUMS`: digest manifest for every archive. Controller archives contain
+  exact configs, source revisions, executable hashes, raw JSON and RPC logs;
+  host archives contain guest/fio/daemon logs and recorded command lines.
+
+The final-check archive SHA256 is
+`542ff3307c0abc378f4f9440acefce22f1a18079fc9bf29715693f07988d5a6e`.
+All eight owned replacement test VMs were deleted only after matching each local
+archive digest against its remote copy; `results/freestyle/restored/deleted.jsonl`
+records their IDs and digests. Unrelated/pre-existing VMs were untouched. Retained
+`cas-build` (`vm-7ecd8e364c624bcb8654fa4dbd92767e`) has Nix/Cargo caches and raw
+results; its VPC and named cache backup snapshot are retained too. No fixture or
+build process remained on the builder at cleanup. CloudLab commands and
+prerequisites are in [the runner guide](two-host-experiments.md#run-on-two-cloudlab-nodes).

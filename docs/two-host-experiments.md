@@ -149,6 +149,9 @@ live on the OS filesystem. No command below partitions or formats a disk.
 
 The full suite additionally needs OpenZFS with compatible userspace/kernel tools,
 and a dedicated existing filesystem dataset such as `tank/cas-bench` on A and B.
+The agent account must be able to create, snapshot, send, receive, mount and
+destroy its child datasets; use an appropriately delegated account or root on
+these isolated test hosts.
 The runner creates/destroys only its fresh children; it never creates a physical
 pool. Allow `zfs_port` (17487 in the example) between these nodes. Incremental
 receive intentionally rolls back the owned destination's independent drift to
