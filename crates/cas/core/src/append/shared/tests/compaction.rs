@@ -1,5 +1,6 @@
 use super::*;
 use crate::append::{Compacted, Input, ReclaimStats};
+mod chunk16;
 mod planning;
 
 impl Fixture {
@@ -10,7 +11,7 @@ impl Fixture {
             .select_compaction(memory(), memory())
             .unwrap()
             .unwrap()
-            .load()
+            .load_with_store(&self.store.reader().unwrap())
             .unwrap()
     }
     fn output(&mut self, input: Input) -> Compacted {

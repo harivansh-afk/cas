@@ -34,6 +34,12 @@ impl Log {
         base: View,
     ) -> Result<Self> {
         identity(config, base.commit())?;
+        let (store, size) =
+            crate::store::file::Store::recorded_geometry(&tickets, Arc::clone(&metadata))?;
+        require(
+            store.store == config.store && size == base.chunk_size(),
+            "WAL manifest/store geometry differs",
+        )?;
         require(
             base.commit().durable == 0,
             "new staging namespace requires D=0",
@@ -57,6 +63,12 @@ impl Log {
         metadata: Arc<Budget>,
     ) -> Result<SharedRecovery> {
         let selected = manifest.selected();
+        let (store, size) =
+            crate::store::file::Store::recorded_geometry(&tickets, Arc::clone(&metadata))?;
+        require(
+            store.store == selected.commit.store && size == selected.chunk_size,
+            "recovery manifest/store geometry differs",
+        )?;
         let recovery = Self::inspect_in(
             &staging(&tickets, selected.commit.image),
             limits,

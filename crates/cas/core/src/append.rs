@@ -131,6 +131,8 @@ pub struct Status {
     pub index_nodes: usize,
     pub index_nodes_peak: usize,
     pub encoded_bytes: u64,
+    pub guest_bytes_written: u64,
+    pub wal_bytes: u64,
     pub allocated_bytes: u64,
     pub rejected_bytes: u64,
     pub alignment: Alignment,
@@ -159,6 +161,8 @@ pub struct Log {
     cohort: Option<submission::Cohort>,
     durable: u64,
     encoded_bytes: u64,
+    guest_bytes_written: u64,
+    wal_bytes: u64,
     allocated_bytes: u64,
     rejected_bytes: u64,
     failed: bool,
@@ -249,6 +253,7 @@ impl Log {
         log.segments = segments;
         log.segments.push(segment);
         log.encoded_bytes = BLOCK_SIZE as u64;
+        log.wal_bytes = BLOCK_SIZE as u64;
         log.allocated_bytes = allocated_bytes;
         Ok(log)
     }
@@ -286,6 +291,8 @@ impl Log {
             cohort: None,
             durable: 0,
             encoded_bytes: 0,
+            guest_bytes_written: 0,
+            wal_bytes: 0,
             allocated_bytes: 0,
             rejected_bytes: 0,
             failed: false,
@@ -336,6 +343,8 @@ impl Log {
             index_nodes,
             index_nodes_peak,
             encoded_bytes: self.encoded_bytes,
+            guest_bytes_written: self.guest_bytes_written,
+            wal_bytes: self.wal_bytes,
             allocated_bytes: self.allocated_bytes,
             rejected_bytes: self.rejected_bytes,
             alignment: self.current().alignment,

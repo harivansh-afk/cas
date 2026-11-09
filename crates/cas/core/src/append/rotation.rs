@@ -133,6 +133,7 @@ impl Log {
         self.fenced = false;
         self.rotating = false;
         self.encoded_bytes += BLOCK_SIZE as u64;
+        self.wal_bytes += BLOCK_SIZE as u64;
         Ok(())
     }
 }

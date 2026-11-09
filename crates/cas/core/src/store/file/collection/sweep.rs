@@ -27,6 +27,7 @@ impl Collection<'_> {
         require(
             SegmentHeader::decode(self.header.as_slice())?
                 == SegmentHeader {
+                    chunk_size: self.store.chunk_size(),
                     store: self.store.config.store,
                     number: victim.ticket,
                     capacity: self.store.config.segment_bytes,
@@ -120,6 +121,10 @@ impl Collection<'_> {
         let offset = u64::from(location.offset);
         direct::read_bytes(file, self.header.as_mut_slice(), offset)?;
         let header = Header::decode(self.header.as_slice())?;
+        require(
+            header.chunk_size() == location.chunk_size,
+            "collection chunk geometry",
+        )?;
         let batch_id = index as u64 + 1;
         require(
             batch_identity(&header, ticket, batch_id, offset, location.chunks),
@@ -141,7 +146,7 @@ impl Collection<'_> {
             )?;
             if state.index.marked_at(&descriptor.hash, address) {
                 let start = descriptor.payload_offset as usize;
-                let block = payload[start..start + BLOCK_SIZE].try_into().unwrap();
+                let block = &payload[start..start + header.chunk_size().bytes()];
                 let chunk =
                     Chunk::new(block).ok_or_else(|| io::Error::other("live chunk became zero"))?;
                 require(chunk.hash() == descriptor.hash, "live chunk hash changed")?;

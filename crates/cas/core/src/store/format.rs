@@ -2,7 +2,7 @@
 use crate::{
     BLOCK_SIZE,
     aligned::AlignedBuffer,
-    chunk::Chunk,
+    chunk::{Chunk, ChunkSize},
     chunk_index::{Hash, MAX_SEGMENT, MAX_SEGMENT_BYTES},
     encoding::{checksum, put16, put32, put64, require, u16_at, u32_at, u64_at},
 };
@@ -17,6 +17,7 @@ pub struct SegmentHeader {
     pub store: [u8; 16],
     pub number: u64,
     pub capacity: u64,
+    pub chunk_size: ChunkSize,
 }
 
 impl SegmentHeader {
@@ -45,12 +46,13 @@ impl SegmentHeader {
         self.validate()?;
         require(bytes.len() == BLOCK_SIZE, "chunk segment output size")?;
         bytes.fill(0);
-        bytes[..8].copy_from_slice(b"CASCHS02");
-        put32(bytes, 8, 2);
+        bytes[..8].copy_from_slice(b"CASCHS03");
+        put32(bytes, 8, 3);
         put32(bytes, 12, BLOCK_SIZE as u32);
         bytes[16..32].copy_from_slice(&self.store);
         put64(bytes, 56, self.number);
         put64(bytes, 64, self.capacity);
+        put32(bytes, 72, self.chunk_size.bytes() as u32);
         put32(bytes, 4092, checksum(bytes, 4092));
         Ok(())
     }
@@ -58,8 +60,8 @@ impl SegmentHeader {
     pub fn decode(bytes: &[u8]) -> io::Result<Self> {
         require(bytes.len() == BLOCK_SIZE, "chunk segment header size")?;
         require(
-            &bytes[..8] == b"CASCHS02"
-                && u32_at(bytes, 8) == 2
+            &bytes[..8] == b"CASCHS03"
+                && u32_at(bytes, 8) == 3
                 && u32_at(bytes, 12) == BLOCK_SIZE as u32,
             "chunk segment version",
         )?;
@@ -70,7 +72,7 @@ impl SegmentHeader {
         require(
             bytes[32..56]
                 .iter()
-                .chain(&bytes[72..4092])
+                .chain(&bytes[76..4092])
                 .all(|&b| b == 0),
             "chunk segment reserved bytes",
         )?;
@@ -78,6 +80,7 @@ impl SegmentHeader {
             store: bytes[16..32].try_into().unwrap(),
             number: u64_at(bytes, 56),
             capacity: u64_at(bytes, 64),
+            chunk_size: ChunkSize::from_bytes(u32_at(bytes, 72) as usize)?,
         };
         header.validate()?;
         Ok(header)
@@ -104,29 +107,29 @@ impl Descriptor {
 pub struct Header<'a> {
     bytes: &'a [u8],
     count: usize,
+    chunk_size: ChunkSize,
 }
 
 impl<'a> Header<'a> {
     pub fn decode(bytes: &'a [u8]) -> io::Result<Self> {
         require(bytes.len() == BLOCK_SIZE, "chunk batch header size")?;
         require(
-            &bytes[..8] == b"CASCHB02" && u16_at(bytes, 8) == 2 && u16_at(bytes, 10) == 1,
+            &bytes[..8] == b"CASCHB03" && u16_at(bytes, 8) == 3 && u16_at(bytes, 10) == 1,
             "chunk batch version/kind",
         )?;
         require(u32_at(bytes, 56) == checksum(bytes, 56), "chunk batch CRC")?;
         let count = usize::from(u16_at(bytes, 12));
+        let chunk_size = ChunkSize::from_bytes(u32_at(bytes, 60) as usize)?;
+        let size = chunk_size.bytes();
         require((1..=MAX_CHUNKS).contains(&count), "chunk descriptor count")?;
-        require(
-            u16_at(bytes, 14) == 0 && u32_at(bytes, 60) == 0,
-            "chunk envelope reserved bytes",
-        )?;
+        require(u16_at(bytes, 14) == 0, "chunk envelope reserved bytes")?;
         require(
             (1..=MAX_SEGMENT).contains(&u64_at(bytes, 16)) && u64_at(bytes, 24) != 0,
             "chunk batch identity",
         )?;
         require(
-            u32_at(bytes, 36) as usize == count * BLOCK_SIZE
-                && u32_at(bytes, 32) as usize == (count + 1) * BLOCK_SIZE,
+            u32_at(bytes, 36) as usize == count * size
+                && u32_at(bytes, 32) as usize == BLOCK_SIZE + count * size,
             "chunk batch length",
         )?;
         let first = u64_at(bytes, 40);
@@ -141,8 +144,7 @@ impl<'a> Header<'a> {
         )?;
         for (i, slot) in bytes[64..used].as_chunks::<64>().0.iter().enumerate() {
             require(
-                u32_at(slot, 32) as usize == i * BLOCK_SIZE
-                    && u32_at(slot, 36) as usize == BLOCK_SIZE,
+                u32_at(slot, 32) as usize == i * size && u32_at(slot, 36) as usize == size,
                 "chunk payload coverage",
             )?;
             require(
@@ -150,9 +152,16 @@ impl<'a> Header<'a> {
                 "chunk descriptor reserved bytes",
             )?;
         }
-        Ok(Self { bytes, count })
+        Ok(Self {
+            bytes,
+            count,
+            chunk_size,
+        })
     }
 
+    pub fn chunk_size(&self) -> ChunkSize {
+        self.chunk_size
+    }
     pub fn segment(&self) -> u64 {
         u64_at(self.bytes, 16)
     }
@@ -166,7 +175,7 @@ impl<'a> Header<'a> {
         u64_at(self.bytes, 48)
     }
     pub fn payload_bytes(&self) -> usize {
-        self.count * BLOCK_SIZE
+        self.count * self.chunk_size.bytes()
     }
     pub fn descriptors(&self) -> impl ExactSizeIterator<Item = Descriptor> + '_ {
         self.bytes[64..64 + 64 * self.count]
@@ -184,7 +193,7 @@ impl<'a> Header<'a> {
         for descriptor in self.descriptors() {
             let start = descriptor.payload_offset as usize;
             require(
-                crc32fast::hash(&payload[start..start + BLOCK_SIZE]) == descriptor.crc,
+                crc32fast::hash(&payload[start..start + self.chunk_size.bytes()]) == descriptor.crc,
                 "chunk payload CRC",
             )?;
         }
@@ -196,6 +205,7 @@ impl<'a> Header<'a> {
 pub struct Builder<A: Allocator = Global> {
     buffer: AlignedBuffer<A>,
     count: usize,
+    chunk_size: ChunkSize,
 }
 
 #[cfg(test)]
@@ -207,13 +217,25 @@ impl Builder {
 
 impl<A: Allocator> Builder<A> {
     pub fn try_new_in(capacity: usize, allocator: A) -> io::Result<Self> {
+        Self::try_new_sized_in(capacity, ChunkSize::K4, allocator)
+    }
+
+    pub fn try_new_sized_in(
+        capacity: usize,
+        chunk_size: ChunkSize,
+        allocator: A,
+    ) -> io::Result<Self> {
         require(
             (1..=MAX_CHUNKS).contains(&capacity),
             "chunk packing capacity",
         )?;
         Ok(Self {
-            buffer: AlignedBuffer::try_new_in((capacity + 1) * BLOCK_SIZE, allocator)?,
+            buffer: AlignedBuffer::try_new_in(
+                BLOCK_SIZE + capacity * chunk_size.bytes(),
+                allocator,
+            )?,
             count: 0,
+            chunk_size,
         })
     }
 
@@ -229,16 +251,20 @@ impl<A: Allocator> Builder<A> {
 
     pub fn push(&mut self, chunk: Chunk<'_>) -> io::Result<()> {
         require(
-            (self.count + 2) * BLOCK_SIZE <= self.allocated_bytes(),
+            self.count < MAX_CHUNKS
+                && BLOCK_SIZE + (self.count + 1) * self.chunk_size.bytes()
+                    <= self.allocated_bytes()
+                && chunk.bytes().len() == self.chunk_size.bytes(),
             "chunk batch full",
         )?;
         let bytes = self.buffer.as_mut_slice();
-        let offset = self.count * BLOCK_SIZE;
-        bytes[BLOCK_SIZE + offset..BLOCK_SIZE + offset + BLOCK_SIZE].copy_from_slice(chunk.bytes());
+        let offset = self.count * self.chunk_size.bytes();
+        bytes[BLOCK_SIZE + offset..BLOCK_SIZE + offset + self.chunk_size.bytes()]
+            .copy_from_slice(chunk.bytes());
         let slot = &mut bytes[64 + self.count * 64..128 + self.count * 64];
         slot[..32].copy_from_slice(&chunk.hash());
         put32(slot, 32, offset as u32);
-        put32(slot, 36, BLOCK_SIZE as u32);
+        put32(slot, 36, self.chunk_size.bytes() as u32);
         put32(slot, 40, crc32fast::hash(chunk.bytes()));
         self.count += 1;
         Ok(())
@@ -253,20 +279,26 @@ impl<A: Allocator> Builder<A> {
             .checked_add(self.count as u64 - 1)
             .ok_or_else(|| io::Error::other("chunk ordinals exhausted"))?;
         let bytes = &mut self.buffer.as_mut_slice()[..BLOCK_SIZE];
-        bytes[..8].copy_from_slice(b"CASCHB02");
-        put16(bytes, 8, 2);
+        bytes[..8].copy_from_slice(b"CASCHB03");
+        put16(bytes, 8, 3);
         put16(bytes, 10, 1);
         put16(bytes, 12, self.count as u16);
         put64(bytes, 16, segment);
         put64(bytes, 24, batch);
-        put32(bytes, 32, ((self.count + 1) * BLOCK_SIZE) as u32);
-        put32(bytes, 36, (self.count * BLOCK_SIZE) as u32);
+        put32(
+            bytes,
+            32,
+            (BLOCK_SIZE + self.count * self.chunk_size.bytes()) as u32,
+        );
+        put32(bytes, 36, (self.count * self.chunk_size.bytes()) as u32);
         put64(bytes, 40, first);
         put64(bytes, 48, last);
+        put32(bytes, 60, self.chunk_size.bytes() as u32);
         put32(bytes, 56, checksum(bytes, 56));
         Ok(Batch {
             buffer: self.buffer,
             count: self.count,
+            chunk_size: self.chunk_size,
         })
     }
 }
@@ -274,6 +306,7 @@ impl<A: Allocator> Builder<A> {
 pub struct Batch<A: Allocator = Global> {
     buffer: AlignedBuffer<A>,
     count: usize,
+    chunk_size: ChunkSize,
 }
 
 impl<A: Allocator> Batch<A> {
@@ -283,11 +316,12 @@ impl<A: Allocator> Batch<A> {
         Builder {
             buffer: self.buffer,
             count: 0,
+            chunk_size: self.chunk_size,
         }
     }
 
     pub fn bytes(&self) -> &[u8] {
-        &self.buffer.as_slice()[..(self.count + 1) * BLOCK_SIZE]
+        &self.buffer.as_slice()[..BLOCK_SIZE + self.count * self.chunk_size.bytes()]
     }
     pub fn allocated_bytes(&self) -> usize {
         self.buffer.as_slice().len()

@@ -80,6 +80,29 @@ impl Inspection {
 }
 
 impl Store {
+    pub fn inspect_recorded(
+        tickets: Arc<Tickets>,
+        metadata: Arc<Budget>,
+        io_memory: Arc<Budget>,
+    ) -> io::Result<Inspection> {
+        let (config, _) = geometry::config(&tickets, Arc::clone(&metadata))?;
+        Self::inspect(tickets, config, metadata, io_memory)
+    }
+
+    pub fn inspect_sized(
+        tickets: Arc<Tickets>,
+        config: Config,
+        expected: ChunkSize,
+        metadata: Arc<Budget>,
+        io_memory: Arc<Budget>,
+    ) -> io::Result<Inspection> {
+        require(
+            geometry::read(&tickets, config, Arc::clone(&metadata))? == expected,
+            "store chunk size differs from requested arm",
+        )?;
+        Self::inspect(tickets, config, metadata, io_memory)
+    }
+
     pub fn inspect(
         tickets: Arc<Tickets>,
         config: Config,
@@ -87,6 +110,7 @@ impl Store {
         io_memory: Arc<Budget>,
     ) -> io::Result<Inspection> {
         config.validate()?;
+        let chunk_size = geometry::read(&tickets, config, Arc::clone(&metadata))?;
         let directory = Directory::open(&tickets.root().join(DIRECTORY))?;
         let mut numbers = Vec::new_in(BudgetAllocator::new(Arc::clone(&metadata)));
         for entry in fs::read_dir(directory.path())? {
@@ -112,10 +136,10 @@ impl Store {
         let mut scratch =
             AlignedBuffer::try_new_in(BLOCK_SIZE, BudgetAllocator::new(Arc::clone(&metadata)))?;
         let mut payload = AlignedBuffer::try_new_in(
-            MAX_CHUNKS * BLOCK_SIZE,
+            MAX_CHUNKS * chunk_size.bytes(),
             BudgetAllocator::new(Arc::clone(&io_memory)),
         )?;
-        let mut store = Self::empty(directory, tickets, config, metadata, io_memory);
+        let mut store = Self::empty(directory, tickets, config, chunk_size, metadata, io_memory);
         let shared = Arc::get_mut(&mut store.shared).expect("private inspection owner");
         let state = shared.state.get_mut().expect("private inspection state");
         state.failed = true;
@@ -141,7 +165,8 @@ impl Store {
             require(
                 header.number == number
                     && header.store == config.store
-                    && header.capacity == config.segment_bytes,
+                    && header.capacity == config.segment_bytes
+                    && header.chunk_size == chunk_size,
                 "chunk segment identity/geometry mismatch",
             )?;
             require(
@@ -183,7 +208,8 @@ fn inspect_batches(
             break;
         };
         require(
-            header.segment() == segment.header.number
+            header.chunk_size() == segment.header.chunk_size
+                && header.segment() == segment.header.number
                 && header.batch() == segment.next_batch
                 && header.first() == segment.next_ordinal,
             "chunk batch identity/order mismatch",
@@ -218,6 +244,7 @@ fn inspect_batches(
         segment.batches.push(BatchLocation {
             offset: segment.end as u32,
             chunks: header.descriptors().len() as u16,
+            chunk_size: header.chunk_size(),
         });
         segment.end = end;
         segment.next_batch = segment
