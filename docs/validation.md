@@ -1083,3 +1083,13 @@ no attached guests could never satisfy the runner's settle predicate; the empty
 set now counts as settled. Thirteen remote Python tests pass, including both
 regressions (`runner-python-4.log`). Failed guest evidence is preserved on the
 owned VMs and controller; this attempt does not certify the full N=4 flow.
+
+`native-n4-002` reached k=1 provisioning, clone verification, independently
+verified drift, fleet sync and sweep, and cold-read verification, then found a
+harness restart regression: the new stderr separation created unused exclusive
+log files for every child, including a restarted daemon. Only fio now creates a
+separate stderr file; other children retain their original combined logs.
+Thirteen Python tests passed remotely again (`runner-python-5.log`).
+The first full check overlapped closure transfers/build IO and hit five short
+fixture deadlines, including a subprocess request timeout; the retry bounds
+Rust test concurrency to two and retains all earlier failures.

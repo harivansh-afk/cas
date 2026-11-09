@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 STORE = "01" * 16
@@ -166,13 +167,14 @@ class Agent:
             argv = ["taskset", "-c", pin, *argv]
         write_json(self.case / f"{name}-command.json", {"argv": argv, "env": env})
         with (self.case / f"{name}.log").open("x") as log, (
-            self.case / f"{name}.stderr.log"
-        ).open("x") as errors:
+            (self.case / f"{name}.stderr.log").open("x")
+            if separate_stderr else nullcontext(log)
+        ) as errors:
             process = subprocess.Popen(
                 argv,
                 stdin=subprocess.DEVNULL,
                 stdout=log,
-                stderr=errors if separate_stderr else log,
+                stderr=errors,
                 env={**os.environ, **(env or {})},
                 start_new_session=True,
                 pass_fds=pass_fds,
