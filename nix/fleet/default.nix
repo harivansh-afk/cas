@@ -87,5 +87,5 @@ pkgs.writeShellApplication {
     util-linux
     iproute2
   ];
-  text = ''exec python3 ${../../experiments/two-host}/runner.py --build-info ${build} "$@"'';
+  text = ''export PYTHONDONTWRITEBYTECODE=1; exec python3 ${../../experiments/two-host}/runner.py --build-info ${build} "$@"'';
 }

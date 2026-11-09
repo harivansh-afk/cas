@@ -1119,3 +1119,12 @@ controlled two-background-caller regression verifies both make progress with six
 demand grants and release all budget. All four scheduler tests pass remotely
 (`scheduler-fix.log`). Cross-VM contention is being rerun before acceptance.
 All-systems Nix evaluation passed (`runner-nix-eval.status=0`).
+
+Closure transfer for the corrected runner initially failed twice with
+`sized: unexpected end-of-file`. Explicit store export exposed the cause:
+root-run Python had created `__pycache__` within the Nix experiment source,
+changing its recorded NAR hash. The fleet launchers now set
+`PYTHONDONTWRITEBYTECODE=1`. Only generated `.pyc` cache directories in this task's
+experiment source paths were removed; `nix store verify --no-trust` confirmed the
+original hash was restored (`bytecode-repair.log`). This was a deployment-artifact
+failure, not a CAS hash-verification failure. Transfer logs are retained.
