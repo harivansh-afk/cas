@@ -54,6 +54,20 @@ impl Default for Resources {
 }
 
 impl Resources {
+    fn validate_chunk_size(&self, bytes: usize) -> io::Result<()> {
+        if bytes != BLOCK_SIZE
+            && (self.peer.peer_listen.is_some()
+                || self.peer.peer_address.is_some()
+                || self.peer.fleet.placement()?.is_some())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "16 KiB chunks support single-host mode only; peer wire remains 4 KiB",
+            ));
+        }
+        Ok(())
+    }
+
     pub const DEFAULT_CACHE_BYTES: usize = 256 * MAX_REQUEST_BYTES;
 
     pub fn read_memory(&self) -> Arc<Budget> {
@@ -198,12 +212,15 @@ impl Host {
         I: AsRef<[(Log, Manifest)]> + IntoIterator<Item = (Log, Manifest)>,
         S: AsRef<[Snapshot]> + IntoIterator<Item = Snapshot>,
     {
+        resources.validate_chunk_size(store.chunk_size().bytes())?;
         let Roots { images, snapshots } = roots;
         if let Some(physical) = &physical {
             capacity::validate(&store, images.as_ref(), physical)?;
         }
         for snapshot in snapshots.as_ref() {
-            if snapshot.key().commit.store != store.config().store {
+            if snapshot.key().commit.store != store.config().store
+                || snapshot.view()?.chunk_size() != store.chunk_size()
+            {
                 return Err(io::Error::other("snapshot belongs to another store"));
             }
             if let Some(physical) = &physical {
@@ -298,7 +315,11 @@ impl Host {
                 )?,
                 gate,
                 reader: store.reader()?,
-                cache: cas_core::cache::Cache::new(resources.cache_bytes, &metadata)?,
+                cache: cas_core::cache::Cache::new_sized(
+                    resources.cache_bytes,
+                    store.chunk_size(),
+                    &metadata,
+                )?,
                 pages: cas_core::manifest::file::PageCache::new(
                     resources.metadata_cache_bytes,
                     &metadata,
@@ -335,6 +356,7 @@ impl Host {
             let view = manifest.view()?;
             let identity = view.commit();
             if identity.store != store.config().store
+                || view.chunk_size() != store.chunk_size()
                 || !log.uses_tickets(store.tickets())
                 || !log.manifest().is_some_and(|base| base.same(&view))
                 || attachments

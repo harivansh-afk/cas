@@ -6,6 +6,7 @@ use std::{fs, path::Path};
 mod admission;
 mod allocation;
 mod cache;
+mod chunk16;
 mod collection;
 mod fleet;
 mod initialization;
@@ -134,10 +135,31 @@ fn create_images(
     limits: append::Limits,
     config: Config,
 ) -> (Store, Vec<(Log, Manifest)>) {
+    create_chunked_images(
+        root,
+        images,
+        resources,
+        image_bytes,
+        limits,
+        config,
+        cas_core::chunk::ChunkSize::K4,
+    )
+}
+
+fn create_chunked_images(
+    root: &Path,
+    images: u8,
+    resources: &Arc<Resources>,
+    image_bytes: u64,
+    limits: append::Limits,
+    config: Config,
+    size: cas_core::chunk::ChunkSize,
+) -> (Store, Vec<(Log, Manifest)>) {
     let tickets = Tickets::open(root, Arc::clone(&resources.metadata)).unwrap();
-    let store = Store::create(
+    let store = Store::create_sized(
         Arc::clone(&tickets),
         config,
+        size,
         Arc::clone(&resources.metadata),
         resources.read_memory(),
     )
@@ -147,12 +169,13 @@ fn create_images(
         .map(|image| {
             let directory = path(root, image);
             fs::create_dir(&directory).unwrap();
-            let manifest = Manifest::create(
+            let manifest = Manifest::create_sized(
                 &directory,
                 Identity {
                     image_bytes,
                     ..identity(image)
                 },
+                size,
                 Arc::clone(&resources.metadata),
             )
             .unwrap();
@@ -186,9 +209,8 @@ fn recovered_images(
     resources: &Arc<Resources>,
 ) -> (Store, Vec<(Log, Manifest)>) {
     let tickets = Tickets::open(root, Arc::clone(&resources.metadata)).unwrap();
-    let store = Store::inspect(
+    let store = Store::inspect_recorded(
         Arc::clone(&tickets),
-        runtime_store(),
         Arc::clone(&resources.metadata),
         resources.read_memory(),
     )

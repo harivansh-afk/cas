@@ -166,7 +166,7 @@ impl Read {
             if let Some(trace) = self.trace() {
                 trace.cache_hits += 1;
             }
-            self.response_block().copy_from_slice(bytes.as_slice());
+            self.copy_chunk(bytes.as_slice())?;
             return Ok(false);
         }
         match Registry::lookup(self.fetches.as_ref().expect("host fetch registry"), hash)? {
@@ -177,7 +177,8 @@ impl Read {
             }
             Some(Lookup::Leader(leader)) => {
                 self.leader = Some(leader);
-                let bytes = AlignedBuffer::try_new_in(BLOCK_SIZE, allocator_api2::alloc::Global)?;
+                let bytes =
+                    AlignedBuffer::try_new_in(self.chunk_bytes(), allocator_api2::alloc::Global)?;
                 self.fetched = Some(BudgetArc::try_new(
                     Fetched {
                         remote: None,
@@ -214,7 +215,7 @@ impl Read {
                 .bytes
                 .as_mut_slice()
                 .copy_from_slice(bytes.as_slice());
-            self.response_block().copy_from_slice(bytes.as_slice());
+            self.copy_chunk(bytes.as_slice())?;
             self.leader
                 .take()
                 .expect("fetch leader")
@@ -299,7 +300,7 @@ impl Read {
                     .bytes
                     .as_mut_slice()
                     .as_mut_ptr(),
-                BLOCK_SIZE,
+                read.bytes(),
                 read.offset(),
             ),
             Stage::Waiting(_) | Stage::Remote(_) => {
@@ -315,10 +316,33 @@ impl Read {
     pub fn expected_bytes(&self) -> usize {
         match self.stage {
             Stage::Staging(index) => self.plan.ranges()[index].input_bytes(),
-            Stage::Manifest { .. } | Stage::Header(_) | Stage::Payload(_) => BLOCK_SIZE,
+            Stage::Manifest { .. } | Stage::Header(_) => BLOCK_SIZE,
+            Stage::Payload(ref read) => read.bytes(),
             Stage::Waiting(_) | Stage::Remote(_) => libc::POLLIN as usize,
             Stage::Done => unreachable!("completed read has no CQE"),
         }
+    }
+
+    fn chunk_bytes(&self) -> usize {
+        self.plan
+            .manifest()
+            .map_or(BLOCK_SIZE, |view| view.chunk_size().bytes())
+    }
+
+    fn copy_chunk(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if bytes.len() != self.chunk_bytes() {
+            return Err(io::Error::other("fetched chunk geometry differs"));
+        }
+        let block = self.plan.offset() / BLOCK_SIZE as u64 + self.block as u64;
+        let offset = self
+            .plan
+            .manifest()
+            .expect("manifest chunk")
+            .chunk_size()
+            .offset(block);
+        self.response_block()
+            .copy_from_slice(&bytes[offset..offset + BLOCK_SIZE]);
+        Ok(())
     }
 
     fn response_block(&mut self) -> &mut [u8] {
@@ -371,8 +395,7 @@ impl Read {
                 Err(e) => return Err(e),
             }
         }
-        self.response_block()
-            .copy_from_slice(fetched.bytes.as_slice());
+        self.copy_chunk(fetched.bytes.as_slice())?;
         self.leader
             .take()
             .expect("fetch leader")
@@ -448,7 +471,7 @@ impl Read {
                         Err(error) => return Err(error),
                     }
                 }
-                self.response_block().copy_from_slice(bytes);
+                self.copy_chunk(bytes)?;
                 self.leader
                     .take()
                     .expect("fetch leader")
@@ -470,8 +493,7 @@ impl Read {
                 {
                     trace.fetched(phases);
                 }
-                self.response_block()
-                    .copy_from_slice(fetched.bytes.as_slice());
+                self.copy_chunk(fetched.bytes.as_slice())?;
                 self.block += 1;
                 self.next_block()?;
             }

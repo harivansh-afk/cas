@@ -71,7 +71,7 @@ impl Endpoint {
             Reply::Selected(Some(selection)) => {
                 let mut attempt = statistics::Attempt::new(&self.statistics);
                 self.healthy()?;
-                let input = selection.load()?;
+                let input = selection.load_with_store(&store.reader()?)?;
                 attempt.advance(statistics::Phase::Prepare);
                 let input_bytes = input.payload_bytes() as u64;
                 let prepared = input.prepare(&self.manifest)?;
@@ -98,7 +98,7 @@ impl Endpoint {
                     totals.manifest_allocated_bytes += stats.allocated_bytes as u64;
                 }
                 attempt.advance(statistics::Phase::Reserve);
-                let output_bytes = (prepared.chunk_count() * BLOCK_SIZE) as u64;
+                let output_bytes = prepared.chunk_bytes() as u64;
                 let bytes = capacity::compaction_bytes(&prepared, store.config().segment_bytes);
                 let permit = match self.background(physical, bytes)? {
                     Grant::Ready(permit) => permit,
