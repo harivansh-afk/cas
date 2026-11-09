@@ -5,11 +5,13 @@ import json
 import os
 import random
 import resource
+import secrets
 import shlex
 import shutil
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -155,8 +157,9 @@ class Agent:
         self.sockets = tempfile.TemporaryDirectory(prefix="cas-fleet-")
         self.serial = 0
         self.case = None
+        self.zfs_dataset = None
 
-    def spawn(self, name, argv, env=None, pin=None):
+    def spawn(self, name, argv, env=None, pin=None, pass_fds=()):
         if name in self.children:
             raise ValueError(f"child already exists: {name}")
         if pin:
@@ -170,6 +173,7 @@ class Agent:
                 stderr=log,
                 env={**os.environ, **(env or {})},
                 start_new_session=True,
+                pass_fds=pass_fds,
             )
         self.children[name] = process
         return process
@@ -270,16 +274,16 @@ class Agent:
                     "init",
                     *self.storage_args(),
                     "--image",
-                    f"{IMAGE if node == 0 else EMPTY}={self.settings['image_bytes']}",
+                    f"{IMAGE if node == 0 else (128 + node).to_bytes(16, 'big').hex()}={self.settings['image_bytes']}",
                 ]
             )
         )
 
-    def host(self, node, k, peer, cache, force=False, images=None):
+    def host(self, node, k, members, cache, force=False, images=None):
         self.host_options = {
             "node": node,
             "k": k,
-            "peer": peer,
+            "members": members,
             "cache": cache,
             "force": force,
             "images": images,
@@ -308,15 +312,18 @@ class Agent:
                 str(k),
                 "--peer-listen",
                 self.node["get"],
-                "--peer-address",
-                peer["get"],
                 "--peer-bulk-listen",
                 self.node["bulk"],
-                "--peer-bulk-address",
-                peer["bulk"],
                 "--peer-inline-us",
                 str(self.settings["inline_us"]),
             ]
+            for member in members:
+                argv += [
+                    "--peer-get-member",
+                    member["get"],
+                    "--peer-bulk-member",
+                    member["bulk"],
+                ]
         if force:
             argv.append("--peer-force-remote")
         for image in ((IMAGE, CLONE) if k else (IMAGE,)) if images is None else images:
@@ -342,7 +349,7 @@ class Agent:
         self.host_generation += 1
         options = {
             **self.host_options,
-            "images": [] if self.host_options["node"] == 0 else [IMAGE],
+            "images": [IMAGE] if self.host_options["node"] == 1 else [],
         }
         return self.host(**options)
 
@@ -643,11 +650,196 @@ class Agent:
             "argv": argv,
         }
 
+    def zfs_prepare(self, create=False):
+        parent = self.node.get("zfs_parent")
+        if not parent or any(c in parent for c in "@#\n\r"):
+            raise ValueError("zfs-incremental needs an existing dedicated zfs_parent")
+        if checked(["zfs", "list", "-H", "-o", "type", parent]).strip() != "filesystem":
+            raise ValueError("zfs_parent must be a filesystem")
+        dataset = parent + "/" + self.storage.name + "-" + self.case.name
+        exists = subprocess.run(
+            ["zfs", "list", "-H", "-o", "name", dataset],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if exists.returncode == 0:
+            raise ValueError("ZFS experiment dataset must be new")
+        self.zfs_dataset = dataset
+        if create:
+            checked(
+                [
+                    "zfs",
+                    "create",
+                    "-o",
+                    "mountpoint=" + str(self.work),
+                    "-o",
+                    "compression=off",
+                    "-o",
+                    "atime=off",
+                    "-o",
+                    "recordsize=4K",
+                    dataset,
+                ]
+            )
+        return {
+            "dataset": dataset,
+            "mountpoint": str(self.work),
+            "version": checked(["zfs", "version"]),
+        }
+
+    def zfs_snapshot(self, name, create=True):
+        if not name.isalnum():
+            raise ValueError("invalid snapshot name")
+        snapshot = self.zfs_dataset + "@" + name
+        if create:
+            checked(["zfs", "snapshot", snapshot])
+        return {
+            "name": name,
+            "snapshot": snapshot,
+            "guid": checked(
+                ["zfs", "get", "-Hp", "-o", "value", "guid", snapshot]
+            ).strip(),
+        }
+
+    def zfs_receiver(self, base=None, guid=None):
+        if any(name in self.children for name in self.guests):
+            raise ValueError("stop destination guests before receiving disk state")
+        if base:
+            if not base.isalnum() or not guid:
+                raise ValueError("incremental receive needs a common-base GUID")
+            actual = checked(
+                [
+                    "zfs",
+                    "get",
+                    "-Hp",
+                    "-o",
+                    "value",
+                    "guid",
+                    self.zfs_dataset + "@" + base,
+                ]
+            ).strip()
+            if actual != guid:
+                raise ValueError("ZFS incremental base GUID differs")
+        host = self.node["bulk"].rsplit(":", 1)[0].strip("[]")
+        bind = self.node.get("zfs_bind", host)
+        listener = socket.socket(socket.AF_INET6 if ":" in bind else socket.AF_INET)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind((bind, self.node.get("zfs_port", 0)))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        token = secrets.token_hex(32)
+        self.serial += 1
+        name = f"zfs-receive-{self.serial}"
+        result = self.case / (name + ".json")
+        argv = [
+            sys.executable,
+            str(Path(__file__).with_name("zfs_stream.py")),
+            "--mode",
+            "receive",
+            "--fd",
+            str(listener.fileno()),
+            "--token",
+            token,
+            "--result",
+            str(result),
+            "--",
+            "zfs",
+            "receive",
+            "-u",
+            *(["-F"] if base else []),
+            "-o",
+            "mountpoint=" + str(self.work),
+            self.zfs_dataset,
+        ]
+        try:
+            self.spawn(name, argv, pass_fds=(listener.fileno(),))
+        finally:
+            listener.close()
+        return {
+            "name": name,
+            "host": host,
+            "port": port,
+            "token": token,
+            "base_guid": guid,
+        }
+
+    def zfs_send(self, destination, snapshot, base=None):
+        if not snapshot.isalnum() or base and not base.isalnum():
+            raise ValueError("invalid snapshot name")
+        self.serial += 1
+        name = f"zfs-send-{self.serial}"
+        result = self.case / (name + ".json")
+        argv = [
+            sys.executable,
+            str(Path(__file__).with_name("zfs_stream.py")),
+            "--mode",
+            "send",
+            "--host",
+            destination["host"],
+            "--port",
+            str(destination["port"]),
+            "--token",
+            destination["token"],
+            "--result",
+            str(result),
+            "--",
+            "zfs",
+            "send",
+            *(["-i", self.zfs_dataset + "@" + base] if base else []),
+            self.zfs_dataset + "@" + snapshot,
+        ]
+        process = self.spawn(name, argv)
+        try:
+            if process.wait(timeout=900):
+                raise RuntimeError("ZFS send failed; inspect sender and receiver logs")
+        finally:
+            stop(process)
+            del self.children[name]
+        return json.loads(result.read_text())
+
+    def zfs_finish_receive(self, name):
+        if not name.startswith("zfs-receive-"):
+            raise ValueError("invalid owned receiver")
+        process = self.children[name]
+        try:
+            if process.wait(timeout=900):
+                raise RuntimeError("ZFS receive failed")
+        finally:
+            stop(process)
+            del self.children[name]
+        if (
+            checked(
+                ["zfs", "get", "-Hp", "-o", "value", "mounted", self.zfs_dataset]
+            ).strip()
+            == "no"
+        ):
+            checked(["zfs", "mount", self.zfs_dataset])
+        return json.loads((self.case / (name + ".json")).read_text())
+
+    def zfs_capacity(self):
+        return {
+            "dataset": self.zfs_dataset,
+            "properties": checked(
+                [
+                    "zfs",
+                    "get",
+                    "-Hp",
+                    "-r",
+                    "used,referenced,logicalused,usedbysnapshots,compressratio,recordsize,compression,guid",
+                    self.zfs_dataset,
+                ]
+            ),
+        }
+
     def end_case(self):
         for process in reversed(list(self.children.values())):
             stop(process)
         self.children.clear()
         self.guests.clear()
+        if self.zfs_dataset is not None:
+            checked(["zfs", "destroy", "-r", self.zfs_dataset])
+            self.zfs_dataset = None
         if self.work is not None:
             # Only this agent's freshly created case, never a caller-supplied existing root.
             shutil.rmtree(self.work)
@@ -662,6 +854,12 @@ class Agent:
 
     def dispatch(self, request):
         allowed = {
+            "zfs_prepare",
+            "zfs_snapshot",
+            "zfs_receiver",
+            "zfs_send",
+            "zfs_finish_receive",
+            "zfs_capacity",
             "configure",
             "start_case",
             "init",

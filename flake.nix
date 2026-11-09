@@ -172,6 +172,15 @@
           default = pkgs.cas;
           inherit (pkgs) cas;
           two-host = fleetRunner "kvm";
+          fleet-appliance = pkgs.callPackage ./nix/fleet/appliance-runner.nix {
+            guest = lib.nixosSystem {
+              specialArgs.runner = fleetRunner "kvm";
+              modules = [
+                ./nix/fleet/appliance.nix
+                { nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system; }
+              ];
+            };
+          };
           two-host-fixture = pkgs.callPackage ./nix/fleet/fixture-runner.nix {
             guest = lib.nixosSystem {
               specialArgs.runner = fleetRunner "tcg";

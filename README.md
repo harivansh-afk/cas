@@ -4,7 +4,7 @@ A content-addressed block backend for QEMU on Linux. One host process serves
 private VM disks backed by a shared chunk store, with local write-ahead logs,
 copy-on-write manifests, snapshots, and recovery through vhost-user.
 
-This is experimental software. Use disposable data. An opt-in static two-host TCP fleet supports
+This is experimental software. Use disposable data. An opt-in static N-member TCP fleet supports
 verified peer reads, k=1/2 placement, durable chunk replication, manifest
 provisioning, fenced block-image migration, synchronization and coordinated
 collection. FLUSH durability remains local; fleet-class journaling and hardware
@@ -88,6 +88,7 @@ Vendored dependencies retain their own licenses and notices under
 Berkeley Mono font is not covered by the GPL grant; its separate redistribution
 terms have not been recorded here.
 
-The [two-host experiment runner](docs/two-host-experiments.md) boots QEMU guests,
-measures fenced disk handoff against a full-image rsync control, and collects
+The [multi-host experiment runner](docs/two-host-experiments.md) boots QEMU guests,
+measures fenced disk handoff against full-image rsync and common-base incremental
+ZFS controls, and collects
 remote-read, shipping-contention and capacity evidence over local or SSH agents.

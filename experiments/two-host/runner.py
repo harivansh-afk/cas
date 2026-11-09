@@ -176,7 +176,7 @@ class Remote:
 
 
 def parallel(items, fn):
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=16) as executor:
         return list(executor.map(fn, items))
 
 
@@ -184,8 +184,8 @@ class Experiment:
     def __init__(self, config, build_info, output):
         self.config = config
         self.settings = {**DEFAULTS, **config.get("settings", {})}
-        if len(config["nodes"]) != 2:
-            raise ValueError("exactly two nodes required")
+        if not 2 <= len(config["nodes"]) <= 16:
+            raise ValueError("runner supports 2 through 16 nodes")
         if not (0 < self.settings["data_bytes"] < self.settings["image_bytes"] // 2):
             raise ValueError(
                 "data must fit the guest image with filesystem and drift headroom"
@@ -226,7 +226,8 @@ class Experiment:
     def fleet(self, operation, **kwargs):
         argv = [operation]
         for key, value in kwargs.items():
-            argv += ["--" + key, str(value)]
+            for item in value if isinstance(value, list) else [value]:
+                argv += ["--" + key, str(item)]
         start = time.monotonic_ns()
         result = self.agents[0].call("fleet", argv=argv)
         result["controller_elapsed_ns"] = time.monotonic_ns() - start
@@ -240,16 +241,19 @@ class Experiment:
     def start(self, name, k=None, cache=0, force=False):
         works = parallel(self.agents, lambda agent: agent.call("start_case", name=name))
         if k:
-            parallel(range(2), lambda n: self.agents[n].call("init", node=n))
             parallel(
-                range(2),
+                range(len(self.agents)), lambda n: self.agents[n].call("init", node=n)
+            )
+            parallel(
+                range(len(self.agents)),
                 lambda n: self.agents[n].call(
                     "host",
                     node=n,
                     k=k,
-                    peer=self.config["nodes"][1 - n],
+                    members=self.config["nodes"],
                     cache=cache if n == 0 else 0,
                     force=force and n == 1,
+                    images=None if n < 2 else [],
                 ),
             )
 
@@ -314,7 +318,7 @@ class Experiment:
         name = f"flows-k{k}"
         self.start(name, k=k)
         result = self.results["cases"][name] = {}
-        a, b = self.agents
+        a, b = self.agents[:2]
         digest = self.seed()
         result["provision"] = self.provision()
         start = time.monotonic_ns()
@@ -351,8 +355,7 @@ class Experiment:
             raise ValueError("drift oracle differs")
         result["sweep"] = self.fleet(
             "sweep",
-            node0=self.config["nodes"][0]["bulk"],
-            node1=self.config["nodes"][1]["bulk"],
+            member=[node["bulk"] for node in self.config["nodes"]],
         )
         result["capacity"] = {
             "hosts": self.report(),
@@ -438,12 +441,12 @@ class Experiment:
         name = "reads-" + target
         self.start(
             name,
-            k=2,
+            k=len(self.agents),
             cache=self.settings["cache_bytes"] if target == "memory" else 0,
             force=True,
         )
         result = self.results["cases"][name] = {"cohorts": []}
-        a, b = self.agents
+        a, b = self.agents[:2]
         digest = self.seed()
         result["provision"] = self.provision()
         b.call("boot", name="reader", image=CLONE)
@@ -516,8 +519,7 @@ class Experiment:
             self.sync()
             self.fleet(
                 "sweep",
-                node0=self.config["nodes"][0]["bulk"],
-                node1=self.config["nodes"][1]["bulk"],
+                member=[node["bulk"] for node in self.config["nodes"]],
             )
             self.fio(1, "reader", "verify", tag + "-rewarm")
         b.call("stop_guest", name="reader")
@@ -528,28 +530,30 @@ class Experiment:
         self.start("independent-stores")
         parallel(self.agents, lambda agent: agent.call("init", node=0))
         parallel(
-            range(2),
+            range(len(self.agents)),
             lambda n: self.agents[n].call(
-                "host", node=n, k=0, peer=self.config["nodes"][1 - n], cache=0
+                "host", node=n, k=0, members=self.config["nodes"], cache=0
             ),
         )
         parallel(
             self.agents, lambda agent: agent.call("boot", name="guest", format=True)
         )
-        parallel(range(2), lambda n: self.fio(n, "guest", "seed", "seed"))
+        parallel(
+            range(len(self.agents)), lambda n: self.fio(n, "guest", "seed", "seed")
+        )
         parallel(self.agents, lambda agent: agent.call("drift", guest="guest"))
         snapshots = parallel(self.agents, lambda agent: agent.call("settle"))
         self.results["cases"]["independent-stores"] = {
             "telemetry": snapshots,
             "capacity": parallel(self.agents, lambda agent: agent.call("capacity")),
-            "comparison": "two independent CAS stores, same seeded files, independent ext4 format metadata; not ZFS",
+            "comparison": "N independent CAS stores, same seeded files, independent ext4 format metadata; not ZFS",
         }
         parallel(self.agents, lambda agent: agent.call("stop_guest", name="guest"))
         self.end()
 
     def baseline(self):
         works = self.start("raw-rsync")
-        a, b = self.agents
+        a, b = self.agents[:2]
         result = self.results["cases"]["raw-rsync"] = {"cohorts": []}
         digest = self.seed("raw")
         for repeat in range(self.settings["repeats"]):
@@ -627,10 +631,125 @@ class Experiment:
         result["capacity"] = parallel(self.agents, lambda agent: agent.call("capacity"))
         self.end()
 
+    def zfs_transfer(self, snapshot, base=None):
+        a, b = self.agents[:2]
+        start = time.monotonic_ns()
+        receiver = b.call(
+            "zfs_receiver",
+            base=base["name"] if base else None,
+            guid=base["guid"] if base else None,
+        )
+        transfer = a.call(
+            "zfs_send",
+            destination=receiver,
+            snapshot=snapshot["name"],
+            base=base["name"] if base else None,
+        )
+        received = b.call("zfs_finish_receive", name=receiver["name"])
+        destination = b.call("zfs_snapshot", name=snapshot["name"], create=False)
+        if (
+            destination["guid"] != snapshot["guid"]
+            or transfer["stream_bytes"] != received["bytes"]
+        ):
+            raise ValueError("ZFS destination snapshot or received bytes differ")
+        return {
+            "controller_elapsed_ns": time.monotonic_ns() - start,
+            "source_snapshot": snapshot,
+            "destination_snapshot": destination,
+            "common_base": base,
+            "transfer": transfer,
+            "received": received,
+        }
+
+    def zfs_baseline(self):
+        self.start("zfs-incremental")
+        a, b = self.agents[:2]
+        result = self.results["cases"]["zfs-incremental"] = {}
+        result["datasets"] = [a.call("zfs_prepare", create=True), b.call("zfs_prepare")]
+        digest = self.seed("raw")
+        a.call("stop_guest", name="source")
+        base = a.call("zfs_snapshot", name="base")
+        # The full stream establishes an actual common snapshot, not independently
+        # generated files with coincidentally equal bytes. Account for it separately.
+        result["common_base_setup"] = self.zfs_transfer(base)
+        self.save()
+        a.call("boot", name="updated-source", backend="raw")
+        a.call("shell", guest="updated-source", script="fsfreeze -f /mnt/cas")
+        try:
+            provision = a.call("zfs_snapshot", name="provision")
+        finally:
+            a.call("shell", guest="updated-source", script="fsfreeze -u /mnt/cas")
+        result["provision"] = self.zfs_transfer(provision, base)
+        start = time.monotonic_ns()
+        b.call("boot", name="clone", image=IMAGE, backend="raw")
+        self.verify(1, "clone", digest)
+        result["provision"]["boot_verify_ns"] = time.monotonic_ns() - start
+        start = time.monotonic_ns()
+        result["drift"] = parallel(
+            range(2),
+            lambda n: self.agents[n].call(
+                "drift", guest="updated-source" if n == 0 else "clone"
+            ),
+        )
+        result["drift_ns"] = time.monotonic_ns() - start
+        hashes = parallel(
+            range(2),
+            lambda n: self.agents[n].call(
+                "shell",
+                guest="updated-source" if n == 0 else "clone",
+                script="cd /mnt/cas; sha256sum drift",
+            ),
+        )
+        if hashes[0] != hashes[1]:
+            raise ValueError("ZFS drift oracle differs")
+        b.call("stop_guest", name="clone")
+        a.call("shell", guest="updated-source", script="fsfreeze -f /mnt/cas")
+        try:
+            drift = a.call("zfs_snapshot", name="drift")
+        finally:
+            a.call("shell", guest="updated-source", script="fsfreeze -u /mnt/cas")
+        result["sync"] = self.zfs_transfer(drift, provision)
+        b.call("boot", name="synced", image=IMAGE, backend="raw")
+        self.verify(1, "synced", digest)
+        if (
+            b.call("shell", guest="synced", script="cd /mnt/cas; sha256sum drift")
+            != hashes[0]
+        ):
+            raise ValueError("ZFS sync lost drift data")
+        b.call("stop_guest", name="synced")
+        self.save()
+        start = time.monotonic_ns()
+        shutdown = a.call("stop_guest", name="updated-source")
+        cut = time.monotonic_ns()
+        handoff = a.call("zfs_snapshot", name="handoff")
+        transfer = self.zfs_transfer(handoff, drift)
+        boot = time.monotonic_ns()
+        b.call("boot", name="resumed", image=IMAGE, backend="raw")
+        self.verify(1, "resumed", digest, continue_work=True)
+        if (
+            b.call("shell", guest="resumed", script="cd /mnt/cas; sha256sum drift")
+            != hashes[0]
+        ):
+            raise ValueError("ZFS migration lost acknowledged drift data")
+        end = time.monotonic_ns()
+        result["migration"] = {
+            "downtime_ns": end - start,
+            "stop_ns": cut - start,
+            "copy_ns": boot - cut,
+            "boot_verify_continue_ns": end - boot,
+            "shutdown": shutdown,
+            "zfs": transfer,
+            "verified_sha256": digest,
+            "continued_epoch": 1,
+        }
+        b.call("stop_guest", name="resumed")
+        result["capacity"] = [a.call("zfs_capacity"), b.call("zfs_capacity")]
+        self.end()
+
     def run(self):
         try:
             identities = parallel(
-                range(2),
+                range(len(self.agents)),
                 lambda n: self.agents[n].call(
                     "configure",
                     node=self.config["nodes"][n],
@@ -642,13 +761,15 @@ class Experiment:
                 identity["build"]["source_revision"] for identity in identities
             ]
             if (
-                revisions[0] != revisions[1]
-                or not revisions[0]
-                or identities[0]["build"]["source_path"]
-                != identities[1]["build"]["source_path"]
+                not revisions[0]
+                or any(r != revisions[0] for r in revisions)
+                or any(
+                    i["build"]["source_path"] != identities[0]["build"]["source_path"]
+                    for i in identities
+                )
             ):
                 raise ValueError(
-                    "both hosts must run the same identified source revision"
+                    "all hosts must run the same identified source revision"
                 )
             self.results.update(source_revision=revisions[0], hosts=identities)
             self.save()
@@ -660,6 +781,7 @@ class Experiment:
                     "reads-memory",
                     "reads-storage",
                     "raw-rsync",
+                    "zfs-incremental",
                     "independent-stores",
                 ],
             ):
@@ -670,6 +792,8 @@ class Experiment:
                     self.reads(case.removeprefix("reads-"))
                 elif case == "raw-rsync":
                     self.baseline()
+                elif case == "zfs-incremental":
+                    self.zfs_baseline()
                 elif case == "independent-stores":
                     self.independent()
                 else:

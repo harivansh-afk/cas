@@ -2,7 +2,12 @@
   "settings": {
     "seconds": 30,
     "repeats": 5,
-    "depths": [1, 4, 16, 64],
+    "depths": [
+      1,
+      4,
+      16,
+      64
+    ],
     "image_bytes": 4294967296,
     "data_bytes": 8388608,
     "segment_bytes": 8388608,
@@ -17,7 +22,9 @@
       "get": "192.168.1.1:17483",
       "bulk": "192.168.1.1:17485",
       "cpus": "2-5",
-      "guest_cpus": "6-7"
+      "guest_cpus": "6-7",
+      "zfs_parent": "tank/cas-bench",
+      "zfs_port": 17487
     },
     {
       "ssh": "experiment@node-b",
@@ -27,7 +34,9 @@
       "get": "192.168.1.2:17483",
       "bulk": "192.168.1.2:17485",
       "cpus": "2-5",
-      "guest_cpus": "6-7"
+      "guest_cpus": "6-7",
+      "zfs_parent": "tank/cas-bench",
+      "zfs_port": 17487
     }
   ]
 }

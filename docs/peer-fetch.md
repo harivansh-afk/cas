@@ -1,7 +1,8 @@
 # Peer chunk reads
 
 `cas-host` can serve and fetch immutable 4 KiB chunks by BLAKE3 hash over
-kernel TCP. This is a static two-host read experiment, with local durability.
+kernel TCP. These examples use two hosts with local durability; the [fleet layer](fleet.md)
+also supports static N-member placement.
 The optional [fleet layer](fleet.md) adds placement, chunk replication,
 provisioning, fenced migration and coordinated collection. Authentication and
 fleet-class journal durability are not implemented.

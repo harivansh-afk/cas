@@ -1031,7 +1031,7 @@ and incremental ZFS arm are separate work in progress at this checkpoint.
 New N=4 tests cover k=1/k=2 exact owner counts after surplus collection, remote
 reads, provisioning, writes while a peer is down and HAS/PUT repair after restart,
 duplicate sync, migration through three writer locations, retained tail bytes,
-and kill/retry before the source fence, after witness publication and after
+and kill/retry after the source fence, after witness publication and after
 receiver activation. A third-member witness is persisted separately from the
 retired local image root: remote writes must never raise that old local WAL's
 recovery floor. Restart of the old source before returning migration verifies
@@ -1055,3 +1055,22 @@ Failures resolved during this session:
 
 No latency conclusion is supported by this correctness run. Cross-VM QEMU flows,
 common-base ZFS stream measurements and the complete runner remain to validate.
+
+## 2026-11-09 — N-host runner and real incremental ZFS baseline
+
+Tested `37d92f1` plus the runner/appliance changes on Freestyle `cas-build`.
+`nix develop -c` Ruff formatting/check and Python unittest discovery passed
+(11 tests), including real TCP stream/receiver acknowledgment and subprocess CLI
+coverage. `nix build .#two-host .#fleet-appliance --cores 6 --option http2 false
+--option stalled-download-timeout 30` passed. Logs are retained on the persistent
+VM under `/root/cas-results/runner-python-3.log` and `runner-build-3.log`.
+The previous build encountered repeated cache HTTP/2 framing/partial-file errors
+and stalled downloading; it was interrupted and retried with HTTP/1, preserving
+completed cache entries. The initial closure-copy command failed because its
+non-login shell lacked Nix in PATH; the retry explicitly sources its profile.
+
+The ZFS arm sends actual streams from a common GUID-verified snapshot, counts
+setup separately, and requires receiver success and checksum/length agreement.
+The optional KVM appliance supplies a ZFS-capable kernel because native Freestyle
+has no loadable ZFS module. At this commit, cross-VM guest execution remains to
+validate; successful package builds and unit tests do not certify those flows.

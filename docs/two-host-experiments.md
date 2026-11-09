@@ -1,7 +1,7 @@
-# Two-host guest and storage experiments
+# Multi-host guest and storage experiments
 
 `nix build .#two-host` builds `cas-two-host`, an SSH coordinator and host agent
-using the same `cas-host`, `cas-fleet`, and pinned QEMU guests on both nodes.
+using the same `cas-host`, `cas-fleet`, and pinned QEMU guests on every node.
 The agent owns its children; EOF, interruption, and errors terminate its process
 groups. Storage and evidence paths must be new. Each storage parent must be an
 already-mounted, dedicated XFS filesystem. Evidence and Unix sockets stay outside
@@ -52,19 +52,36 @@ forces every logical image byte onto the transfer stream, including zero ranges;
 it is a **full-image copy control**, not a claim about optimal rsync deltas or
 allocated-block ZFS send. It uses the same guest seed, filesystem size, shutdown,
 boot, checksum and continuation checks. Exact rsync sent+received statistics are
-retained. ZFS send/receive is not implemented; it requires a separate baseline on
-ZFS pools. The independent-store capacity arm uses two actual independent CAS
+retained. The `zfs-incremental` arm uses real `zfs send -i` / `zfs receive -F`
+against a **common snapshot with a verified matching GUID**. Its initial full
+stream is recorded as `common_base_setup`, separately from incremental provision,
+drift synchronization and migration. Report that setup cost alongside marginal
+operation bytes; it is not free placement. Each destination is a newly created,
+owned child of the configured existing `zfs_parent`; only that child may be rolled
+back or destroyed. Receiving requires stopped destination guests. Source snapshots
+use clean shutdown or guest fsfreeze. All arms use the same data/drift workload.
+
+The ZFS stream crosses its own TCP connection. SHA256 and exact stream length are
+checked end to end, and completion requires successful `zfs receive` plus a
+matching received snapshot GUID. Counts include the stream, its one-use handshake
+and receiver ACK. Per-stream commands and full setup bytes are retained. ZFS uses
+4 KiB records, compression off and retained snapshots; its allocation properties
+are recorded explicitly. This is incremental block transfer, not a simulated
+hash-difference estimate. See the [OpenZFS send documentation](https://openzfs.github.io/openzfs-docs/man/master/8/zfs-send.8.html).
+
+The independent-store capacity arm uses two actual independent CAS
 stores; it must not be presented as two ZFS pools or a DDT measurement.
 
 ## Measurement cases
 
+The runner accepts 2–16 static members (N=2 and N=4 are the validation targets).
 The default run executes:
 
 - `flows-k1`, `flows-k2`: provision, independently drift, sync, sweep, capacity,
   verified cold direct reads, and guest migration. File allocation and chunk/index
   occupancy are both recorded. Fenced roots, manifests, WAL and filesystem
   overhead are not silently subtracted from physical capacity.
-- `reads-memory`, `reads-storage`: replicated content on both members, forced
+- `reads-memory`, `reads-storage`: replicated content on every member (k=N), forced
   remote settled reads on B, reader cache fills disabled, owner cache warmed or
   disabled respectively. WAL reads retain their normal precedence. Every fio read
   verifies CRC32C. Quiet memory/storage labels require positive server counters
@@ -77,7 +94,9 @@ The default run executes:
   imply immunity to shared CPU, cache, IO scheduler, or NIC contention.
 - `raw-rsync`: direct raw-image local-media latency and sequential throughput,
   full-image provisioning, guest migration, full-image resync, and file allocation.
-- `independent-stores`: two non-networked CAS stores with the same seeded data and
+- `zfs-incremental`: common-base setup and incremental provisioning, drift sync,
+  verified guest migration, downtime and actual stream bytes.
+- `independent-stores`: N non-networked CAS stores with the same seeded data and
   drift files, separately formatted ext4 metadata, and measured allocation/index
   occupancy. The workload and file sizes match; fio write-timestamp headers and filesystem
   UUIDs/format metadata differ. This is a workload-matched capacity control, not
@@ -104,7 +123,7 @@ whole-run latency sample. Use fio's full-run distribution for p50/p99/p99.9 and
 use the ring only for daemon phase diagnosis. Timings within each read use the
 same host-local monotonic clock. Cross-host wall clocks are never subtracted.
 
-Daemon flow bytes count each sender once (`A.sent + B.sent`). GET counters,
+Daemon flow bytes count each sender once (the sum of each member's sent bytes). GET counters,
 controller traffic and rsync statistics remain separate. These are application
 bytes; SSH encryption, TCP/IP framing and retransmissions are not included.
 `put_acked_chunks` counts chunks only after a successful durable PUT ACK; HAS
@@ -121,6 +140,13 @@ ports only on the isolated experiment link. Reserve enough space for the writer
 cohort (at least 16 GiB per store for the default small run). Source and results
 live on the OS filesystem. No command below partitions or formats a disk.
 
+The full suite additionally needs OpenZFS with compatible userspace/kernel tools,
+and a dedicated existing filesystem dataset such as `tank/cas-bench` on A and B.
+The runner creates/destroys only its fresh children; it never creates a physical
+pool. Allow `zfs_port` (17487 in the example) between these nodes. Incremental
+receive intentionally rolls back the owned destination's independent drift to
+its recorded common base before applying A's stream.
+
 On **each** node in the source checkout:
 
 ```sh
@@ -128,7 +154,7 @@ nix build .#two-host --out-link result-two-host --cores 4
 ```
 
 On **A**, edit the checked-in example: B's SSH target and absolute wrapper path,
-private NIC addresses, CPU sets, fresh storage and output paths. The `runner` path
+private NIC addresses, CPU sets, fresh storage and output paths, and `zfs_parent`. The `runner` path
 must exist on B; the local A agent uses the invoking build automatically.
 
 ```sh
@@ -140,7 +166,10 @@ $EDITOR /var/tmp/fleet-001.json
 
 To repeat with the blocking path, use new paths on **both** nodes and a new
 coordinator output, set `settings.inline_us` to 0, and run the same command. The
-runner rejects revision mismatch. Build from a clean committed tree for paper
+runner rejects revision mismatch across any member. For N=4, start from
+`experiments/two-host/cloudlab-four.example.json`; member order is the stable ID
+order used by both GET and bulk lists. The QEMU source/destination are nodes 0/1;
+all members participate in placement, repair, collection and capacity. Build from a clean committed tree for paper
 runs; dirty development runs record the Nix source path as well as `dirtyRev`.
 Archive the coordinator directory and both host output directories before reuse.
 
@@ -152,12 +181,13 @@ kernel/CPU/block topology/link state and interrupts, not all firmware and switch
 settings. Pin CPU/IRQ policy on the dedicated testbed, repeat and report spread.
 Do not label a virtual disk or page-cache effect as NVMe service latency.
 
-## Unprivileged local validation
+## Legacy unprivileged TCG fixture
 
 The local fixture runs two actual production daemons with **separate XFS virtual
-disks** inside an outer KVM VM and boots workload QEMUs using TCG. This works on
-Spark without loop mounts, sudo, or nested KVM. The same coordinator and agents
-run over loopback, including the rsync copy. Its numbers are development evidence
+disks** inside an outer KVM VM and boots workload QEMUs using TCG. This is available on isolated
+hosts without loop mounts, sudo, or nested KVM; do not run it on shared Spark. The same coordinator and agents
+run over loopback, including the rsync copy. This XFS-only fixture explicitly
+excludes `zfs-incremental`; the KVM appliance validates that arm. Its numbers are development evidence
 only, especially guest boot downtime and media latency.
 
 ```sh
@@ -196,3 +226,31 @@ IO or peer protocol deadlines. `host-pressure.jsonl` samples the physical
 launcher's CPU, IO and memory pressure and load every five seconds, since guest
 load alone cannot reveal competing work on Spark. The isolated guest explicitly
 loads its virtio network driver and configures its one interface before sshd.
+
+## Freestyle validation
+
+Do not run builds, tests or fixtures on shared Spark. The persistent `cas-build`
+VM retains Nix/Cargo caches; disposable x86_64 VMs run the experiments. Transfer a
+git bundle or the worktree, build there, and record both source revision and any
+uncommitted patch. The account currently rejects more than 8 vCPUs or 64 GiB disk
+per VM; do not confuse that limit with available credits. Existing unrelated VMs
+must remain untouched.
+
+Freestyle's kernel exposes nested KVM but has no loadable ZFS module. The optional
+`nix build .#fleet-appliance` produces an owned KVM NixOS host with a disposable
+XFS disk and ZFS pool. It runs on a Freestyle VM and serves SSH on 17422 and the ZFS
+stream on 17487, bound to `--bind`. Its inner workload guests also request KVM.
+The standard runner is unchanged; configure its SSH target to this appliance,
+`storage` beneath `/fleet`, `output` beneath `/results`, `zfs_parent=cas-zfs/runs`,
+`zfs_bind=0.0.0.0`, and `zfs_port=17487`. Use fresh paths. Example launcher:
+
+```sh
+./result-appliance/bin/cas-fleet-appliance \
+  --output /root/appliance-001 --authorized-key /root/controller.pub \
+  --bind 10.172.61.2
+```
+
+Run `--cases zfs-incremental` against two such hosts. Appliance networking adds
+QEMU user-network forwarding; it validates the baseline, not a physical network
+latency claim. Native Freestyle hosts run the CAS multi-VM cases against separate
+XFS scratch mounts. CloudLab runs all arms natively on its configured filesystems.
