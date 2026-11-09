@@ -203,46 +203,70 @@ fn reopen(root: &Path, images: u8, resources: Arc<Resources>) -> Host {
     start(resources, store, images)
 }
 
+/// Parallel tests in this binary spawn subprocesses. Between fork and exec a
+/// child shares every open file description, including flock-held store files
+/// another test thread has just closed. Retry only that lock contention for one
+/// second, as production opening does; persistent locks and other errors fail.
+fn contended<T>(mut open: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let until = Instant::now() + Duration::from_secs(1);
+    loop {
+        match open() {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < until => {
+                thread::sleep(Duration::from_millis(1))
+            }
+            result => return result,
+        }
+    }
+}
+
 fn recovered_images(
     root: &Path,
     images: u8,
     resources: &Arc<Resources>,
 ) -> (Store, Vec<(Log, Manifest)>) {
-    let tickets = Tickets::open(root, Arc::clone(&resources.metadata)).unwrap();
+    contended(|| try_recovered_images(root, images, resources)).unwrap()
+}
+
+fn try_recovered_images(
+    root: &Path,
+    images: u8,
+    resources: &Arc<Resources>,
+) -> io::Result<(Store, Vec<(Log, Manifest)>)> {
+    let tickets = Tickets::open(root, Arc::clone(&resources.metadata))?;
     let store = Store::inspect_recorded(
         Arc::clone(&tickets),
         Arc::clone(&resources.metadata),
         resources.read_memory(),
-    )
-    .unwrap();
-    let inspected: Vec<_> = (2..2 + images)
-        .map(|image| {
-            let manifest = Manifest::inspect(
-                &path(root, image),
-                identity(image),
-                0,
-                Arc::clone(&resources.metadata),
-                |hash| {
-                    if store.contains(&hash) {
-                        Ok(())
-                    } else {
-                        Err(io::Error::other("missing chunk"))
-                    }
-                },
-            )
-            .unwrap();
-            let log = Log::inspect_shared(
-                Arc::clone(&tickets),
-                &manifest,
-                append::Limits::default(),
-                Arc::clone(&resources.metadata),
-            )
-            .unwrap();
-            log.require_prefix(0).unwrap();
-            (log, manifest)
-        })
-        .collect();
-    let store = store.recover().unwrap();
+    )?;
+    let mut inspected = Vec::new();
+    for image in 2..2 + images {
+        let manifest = Manifest::inspect(
+            &path(root, image),
+            identity(image),
+            0,
+            Arc::clone(&resources.metadata),
+            |hash| {
+                if store.contains(&hash) {
+                    Ok(())
+                } else {
+                    Err(io::Error::other("missing chunk"))
+                }
+            },
+        )?;
+        let log = Log::inspect_shared(
+            Arc::clone(&tickets),
+            &manifest,
+            append::Limits::default(),
+            Arc::clone(&resources.metadata),
+        )
+        .map_err(|error| match error {
+            append::Error::Io(error) => error,
+            error => io::Error::other(error),
+        })?;
+        log.require_prefix(0).unwrap();
+        inspected.push((log, manifest));
+    }
+    let store = store.recover()?;
     let images = inspected
         .into_iter()
         .map(|(log, manifest)| {
@@ -251,7 +275,7 @@ fn recovered_images(
             (log, manifest)
         })
         .collect();
-    (store, images)
+    Ok((store, images))
 }
 
 fn attach(host: &mut Host, image: u8) -> Local {
@@ -811,4 +835,35 @@ fn a_denied_attachment_keeps_the_image_attachable_without_a_stale_wake() {
     drop(local);
     shutdown(host);
     assert_eq!(resources.metadata.usage().current, Amount::default());
+}
+
+/// A forked test subprocess can briefly share the flock-held root description
+/// after the host closes it. Reopening must wait for that release, while a
+/// lock that persists beyond the bound still fails as contention.
+#[test]
+fn reopen_retries_only_transient_inherited_lock_contention() {
+    let root = tempfile::tempdir().unwrap();
+    let resources = Arc::new(Resources::default());
+    shutdown(create_sized(
+        root.path(),
+        1,
+        Arc::clone(&resources),
+        IMAGE_BYTES,
+    ));
+    let inherited = fs::File::open(root.path()).unwrap();
+    inherited.try_lock().unwrap();
+    let release = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(100));
+        drop(inherited);
+    });
+    let started = Instant::now();
+    shutdown(reopen(root.path(), 1, Arc::clone(&resources)));
+    assert!(started.elapsed() >= Duration::from_millis(100));
+    release.join().unwrap();
+    let held = fs::File::open(root.path()).unwrap();
+    held.try_lock().unwrap();
+    let error = contended(|| try_recovered_images(root.path(), 1, &resources))
+        .err()
+        .expect("persistent lock");
+    assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
 }

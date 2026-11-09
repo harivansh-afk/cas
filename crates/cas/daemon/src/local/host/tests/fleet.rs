@@ -109,18 +109,19 @@ fn compaction_ships_durable_chunks_and_retries_without_duplicate_payloads() {
     // A receiver's ACK was followed by shutdown; independent cold inspection
     // must still recover the advertised bytes, with no manifest on B naming it.
     let r = resources(1, 2, addresses);
-    let tickets = Tickets::open(roots[1].path(), r.metadata.clone()).unwrap();
-    let store = Store::inspect(
-        tickets,
-        Config {
-            segment_bytes: 2 * MAX_REQUEST_BYTES as u64,
-            ..STORE
-        },
-        r.metadata.clone(),
-        r.read_memory(),
-    )
-    .unwrap()
-    .recover()
+    let tickets = contended(|| Tickets::open(roots[1].path(), r.metadata.clone())).unwrap();
+    let store = contended(|| {
+        Store::inspect(
+            tickets.clone(),
+            Config {
+                segment_bytes: 2 * MAX_REQUEST_BYTES as u64,
+                ..STORE
+            },
+            r.metadata.clone(),
+            r.read_memory(),
+        )?
+        .recover()
+    })
     .unwrap();
     let mut bytes = AlignedBuffer::new(BLOCK_SIZE);
     store
@@ -172,11 +173,13 @@ fn partitioned_sweep_keeps_peer_roots_releases_surplus_and_reads_remote() {
     drop(guest);
     shutdown(a);
     shutdown(b);
-    let state = crate::fleet::state::State::inspect(
-        roots[0].path(),
-        placement,
-        &Resources::default().metadata,
-    )
+    let state = contended(|| {
+        crate::fleet::state::State::inspect(
+            roots[0].path(),
+            placement,
+            &Resources::default().metadata,
+        )
+    })
     .unwrap();
     for hash in &hashes {
         assert_eq!(state.remote(hash), placement.remote(hash));
