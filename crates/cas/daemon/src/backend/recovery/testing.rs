@@ -10,11 +10,19 @@ pub(crate) struct Frontend {
 }
 enum Pending {
     Write(u8),
-    Zero { kind: u32, flags: u32 },
+    /// Discovered (retained before avail advanced) but never admitted.
+    Discovered(u8),
+    Zero {
+        kind: u32,
+        flags: u32,
+    },
 }
 impl Frontend {
     pub(crate) fn write(backend: Backend, byte: u8) -> Self {
         Self::new(backend, Pending::Write(byte))
+    }
+    pub(crate) fn discovered_write(backend: Backend, byte: u8) -> Self {
+        Self::new(backend, Pending::Discovered(byte))
     }
     pub(crate) fn zero_after_write(backend: Backend, kind: u32, flags: u32) -> Self {
         Self::new(backend, Pending::Zero { kind, flags })
@@ -46,7 +54,7 @@ impl Frontend {
             virtio_bindings::bindings::virtio_blk::VIRTIO_BLK_T_OUT,
         );
         let byte = match pending {
-            Pending::Write(byte) => byte,
+            Pending::Write(byte) | Pending::Discovered(byte) => byte,
             Pending::Zero { .. } => 0x55,
         };
         mem.write_slice(&[byte; BLOCK_SIZE], GuestAddress(0x5000))
@@ -58,8 +66,14 @@ impl Frontend {
             0,
         );
         let request = decode_chain(&mem, chain, backend.capacity_bytes, &backend.metadata).unwrap();
-        let first = carrier.admit(request.inflight(0, 0)).unwrap();
+        if let Pending::Discovered(_) = pending {
+            assert_eq!(prefix, 0);
+            carrier.discover(request.inflight(0, 0)).unwrap();
+        }
+        let first = (!matches!(pending, Pending::Discovered(_)))
+            .then(|| carrier.admit(request.inflight(0, 0)).unwrap());
         if let Pending::Zero { kind, flags } = pending {
+            let first = first.unwrap();
             // Reconstruct the completed WRITE's carrier history, matching the
             // actual seeded WAL identity before admitting a pending ZERO.
             assert_eq!(prefix, 1);
@@ -83,7 +97,7 @@ impl Frontend {
             let request =
                 decode_chain(&mem, chain, backend.capacity_bytes, &backend.metadata).unwrap();
             carrier.admit(request.inflight(0, 1)).unwrap();
-        } else {
+        } else if let Pending::Write(_) = pending {
             assert_eq!(prefix, 0);
         }
         mem.write_obj(carrier.available(0).unwrap().to_le(), GuestAddress(0x2002))
@@ -122,6 +136,15 @@ impl Frontend {
         self.backend.begin_change(change, &self.vrings).unwrap();
         self.vrings[1].set_enabled(true);
         self.backend.end_change(change, true, &self.vrings).unwrap();
+    }
+    pub(crate) fn process(&mut self) -> io::Result<()> {
+        self.backend.process(&self.vrings)
+    }
+    pub(crate) fn frontier_is_empty(&self) -> bool {
+        self.backend
+            .frontier
+            .as_ref()
+            .is_none_or(|frontier| frontier.is_empty())
     }
     pub(crate) fn change_captured_queue(&mut self) -> io::Result<()> {
         self.backend.begin_change(

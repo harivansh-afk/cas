@@ -253,6 +253,67 @@ fn retained_frontends_share_one_recovery_barrier_and_keep_their_carriers() {
     assert_eq!(resources.metadata.usage().current.bytes, 0);
 }
 
+/// A guest descriptor discovered but not admitted before the crash is restored
+/// into the frontier while shared recovery waits. QEMU may still enable a queue
+/// outside the replay then; that change must not try to admit the restored
+/// descriptor before storage activation (C5 shared-after-* failure:
+/// "QueueEnable { index: 1, enabled: true }: admission before recovery").
+#[test]
+#[ignore = "requires the exclusive XFS allocation fixture"]
+fn unused_queue_enable_leaves_restored_discoveries_until_shared_activation() {
+    use crate::backend::recovery::testing::Frontend as RetainedFrontend;
+    let root = tempfile::tempdir().unwrap();
+    let resources = Arc::new(Resources::default());
+    setup(root.path(), &resources, SnapshotFixture::Present);
+    let mut host = retained(root.path(), &resources, Duration::from_secs(60));
+    let mut first = RetainedFrontend::discovered_write(
+        host.attach([2; 16], crate::fault::Fault::default())
+            .unwrap(),
+        2,
+    );
+    let mut second = RetainedFrontend::write(
+        host.attach([3; 16], crate::fault::Fault::default())
+            .unwrap(),
+        3,
+    );
+    assert!(!first.activate().unwrap());
+    assert!(!first.frontier_is_empty());
+    first.enable_unused_queue();
+    assert!(!first.frontier_is_empty());
+    assert!(!first.activate().unwrap());
+    assert!(!second.activate().unwrap());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    for frontend in [&mut first, &mut second] {
+        while !frontend.activate().unwrap() {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+    assert!(first.carrier.queue_initialized(1).unwrap());
+    // The restored discovery is admitted only now and completes normally.
+    while first.used() != 1 {
+        first.process().unwrap();
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(first.status(), 0);
+    assert!(first.frontier_is_empty());
+    read(first.local(), 0, &[2; BLOCK_SIZE]);
+    read(second.local(), 0, &[3; BLOCK_SIZE]);
+    drop((first, second));
+    loop {
+        if let Some(host) = host.host().unwrap() {
+            match host.shutdown() {
+                Ok(()) => break,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => (),
+                Err(error) => panic!("shutdown: {error}"),
+            }
+        }
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
 #[test]
 fn retained_captured_queue_changes_fail_before_repair() {
     use crate::backend::recovery::testing::Frontend as RetainedFrontend;
