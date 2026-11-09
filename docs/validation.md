@@ -1,5 +1,244 @@
 # Validation
 
+## 2026-11-09 — Integration of C5, peer fetch and 16 KiB chunks
+
+Branch `integration/2026-11-09` from `main` (`9c60e72`), merged in order:
+`validate/c5-rerun` at `eee52a2` (the 41/41 C5 revision; receipt `e7953c2`
+and later commits, including `387757c`, are excluded), `feat/peer-fetch` at
+`6f01dca`, and `feat/chunk-16k` at `fdda8ba` (branched from `d49ab61`;
+merged rather than rebased). **Tested revision:
+`5a1a25e437d40661306978b0b871f2cf94b6128e`**, clean on every test checkout.
+This record is a later documentation-only commit. Nothing was pushed or
+merged into `main`. These are Freestyle development checks, not CI, paper
+or native-hardware results.
+
+### Merge resolution
+
+- Peer fetch × C5: `host.rs`, `worker.rs` and `collection.rs` conflicted.
+  Peer fetch moved image construction into `make_image` (also used by fleet
+  imports); C5's no-progress collection retry added `Endpoint::swept_roots`,
+  `swept_attached` and `Owner::exhausted_space`. `make_image` initializes the
+  C5 fields and `Owner` keeps both sides' fields. `Owner::collect` clears the
+  exhaustion latch, then refuses local collection on fleet stores, so fleet
+  sweeps never latch exhaustion and behave as on `feat/peer-fetch`. Endpoint
+  indexes still equal admission slots for imported images.
+- 16 KiB chunks: only `storage-design.md` and this file conflicted; both
+  sides' text was kept. Its peer/fleet refusal still covers N-member
+  configurations: member lists require `--peer-listen`, which it rejects.
+
+### Hosts and commands
+
+No build, test or fixture ran on Spark; Spark handled Git, bundles, provider
+calls and evidence reading only. Freestyle x86_64 VMs (Linux 6.1.102,
+8 vCPU, 16 GiB, 64 GiB disk, nested KVM):
+
+- `cas-build` (`vm-7ecd8e364c624bcb8654fa4dbd92767e`, retained, reused):
+  builds, `just check`, diagnostics, multi-host controller.
+- `cas-int-1109-c5` (`vm-18c13982cdb7466ca4f5ebaff7c57433`, task-owned):
+  isolated C5 as user `cas` following the accepted procedure (Ubuntu Nix,
+  then pinned Nix 2.34.9 from the flake's nixpkgs, `CARGO_BUILD_JOBS=8`,
+  Nix `cores=8`, `max-jobs=2`, systemd units); afterwards multi-host member.
+- `cas-int-1109-member` (`vm-25335f9da539492cb21febfc7ec9fd89`, task-owned):
+  multi-host member.
+
+```sh
+nix develop -c just check                              # cas-build and C5 VM
+nix build .#checkpoints --out-link result-checkpoints  # C5 VM
+nix build .#cas --out-link result-cas
+nix develop -c result-checkpoints/bin/cas-checkpoints \
+  --checkpoint C5 --checkout . --output results/int/suite-03
+result-cas/bin/cas-harness verify-suite --output results/int/suite-03
+nix build .#two-host --out-link /root/result-int4-two-host   # cas-build
+cas-two-host --config int-n2-002-config.json --output int-n2-002
+cas-two-host --config int-n4-001-config.json --output int-n4-001
+```
+
+### Outcomes on `5a1a25e`
+
+- `just check` on `cas-build`: **pass** — formatting, strict Clippy, 572 Rust
+  tests passed with 30 fixture/subprocess ignores, 13 Python tests, whitespace.
+  The C5 VM's own `just check` also passed (572/30).
+- **C5: 41/41 passed; independent verifier passed.** Suite 21:06:11–22:01:32
+  UTC (3320.8 s, exit 0); verifier 22:01:32–22:02:14 (41.6 s, exit 0). No
+  scenario was retried within this run.
+
+| Scenario | Result | Seconds |
+|---|---|---:|
+| `async-after-active` | PASS | 17.04 |
+| `async-after-append-cqe` | PASS | 17.14 |
+| `async-after-prepared` | PASS | 17.20 |
+| `async-after-status` | PASS | 16.76 |
+| `async-after-storage` | PASS | 16.80 |
+| `async-after-sync` | PASS | 16.96 |
+| `async-after-used` | PASS | 16.78 |
+| `async-before-submit` | PASS | 16.78 |
+| `async-before-sync` | PASS | 16.94 |
+| `async-device-reset` | PASS | 19.04 |
+| `async-fresh-recovery` | PASS | 38.51 |
+| `async-io` | PASS | 39.39 |
+| `async-repeat-after-fence` | PASS | 16.96 |
+| `async-repeat-before-fence` | PASS | 17.28 |
+| `async-repeat-replay` | PASS | 16.38 |
+| `clippy` | PASS | 0.18 |
+| `diff-check` | PASS | 0.02 |
+| `fresh-recovery` | PASS | 36.06 |
+| `guest-pressure` | PASS | 479.34 |
+| `live-after-status` | PASS | 17.53 |
+| `live-after-storage` | PASS | 18.39 |
+| `live-after-used` | PASS | 19.42 |
+| `live-before-submit` | PASS | 18.07 |
+| `local-fresh-recovery` | PASS | 39.10 |
+| `local-sync` | PASS | 42.53 |
+| `nix-check` | PASS | 172.63 |
+| `nix-format` | PASS | 2.57 |
+| `persistence-model` | PASS | 11.49 |
+| `raw-daemon` | PASS | 23.47 |
+| `raw-qemu` | PASS | 18.39 |
+| `rust-format` | PASS | 0.88 |
+| `rust-tests` | PASS | 52.86 |
+| `shared-after-chunks` | PASS | 239.76 |
+| `shared-after-d` | PASS | 251.40 |
+| `shared-after-manifest` | PASS | 248.94 |
+| `shared-after-punch` | PASS | 256.62 |
+| `shared-after-unlink` | PASS | 234.72 |
+| `shared-before-chunks` | PASS | 220.73 |
+| `shared-replacement` | PASS | 224.95 |
+| `staging` | PASS | 25.81 |
+| `xfs-store` | PASS | 277.31 |
+
+guest-pressure counted 4 staging stops; 3 of its 617 one-second samples
+caught `stopped`.
+
+Multi-host suites (`cas-two-host`, controller `cas-build`, runner
+`/nix/store/ghgzr9b6mji6h817418nqba8msamhjjc-cas-two-host`, all hosts at
+`5a1a25e`). Settings as in the previous Freestyle runs: 128 MiB image, 1 MiB
+data plus 1 MiB drift, 4 MiB/s shipping, 5 s read windows, QD 1/4.
+
+- **N=2 `int-n2-002`: pass, all six cases** (`flows-k1`, `flows-k2`,
+  `reads-memory`, `reads-storage`, `raw-rsync`, `independent-stores`),
+  22:17:15–22:27:32 UTC, members `10.172.61.2/.3`, daemon vCPUs 0–3, guests
+  4–5. k=1/k=2 provisioning, drift sync, sweep, cold reads and migration
+  verified data and continued the epoch 0→1; downtime 20.8/20.1 s, handoff
+  0.30/0.29 s, migration flow 217,781/217,694 bytes. The first attempt
+  `int-n2-001` passed its four CAS cases, then `raw-rsync` failed with
+  `Host key verification failed`: the documented A→B SSH prerequisite had not
+  been provisioned on the new VMs. It was added and the whole suite rerun.
+- **N=4 `int-n4-001`: pass, all five cases** (`flows-k1`, `flows-k2`,
+  `reads-memory`, `reads-storage`, `independent-stores`), 22:11:38–22:17:07
+  UTC. With a two-VM budget, each VM hosted two members on separate 16 GiB XFS
+  loop mounts (members 0/2 on `.2`, 1/3 on `.3`; ports 17483/17485 and
+  17493/17495; daemons share vCPUs 0–3; guests on 4–5 and 6–7). This checks
+  four-member protocol and placement across two kernels, not four-host
+  isolation. Downtime 19.9/22.2 s, handoff 0.42/0.42 s, migration flow
+  220,208/229,586 bytes.
+
+Timings are virtual development observations, not performance results. The
+ZFS arm (`zfs-incremental`, needing the KVM appliance on two more VMs) was not
+run.
+
+### Failures, root causes and fixes
+
+Each fix is a separate commit with a regression test. No timeout, deadline,
+admission bound or correctness check was loosened.
+
+1. **Descriptor limit (from `feat/peer-fetch`), `c4df824`.** Each GET client
+   preallocates 1,024 slot eventfds plus wake and socket, so one peer host
+   exceeds the common 1,024 soft `RLIMIT_NOFILE`. With soft 1024/hard 524288,
+   the fleet tests run outside `nix develop` failed with `EMFILE` building a
+   single host (measured peak 1,046 descriptors, 1,035 eventfds). `nix develop`
+   raises the soft limit itself, which hid this; the chunk-16k session hit it.
+   The host now raises the soft limit to the hard limit before creating
+   clients and fails startup clearly below `1,026 × clients + 1,024`. All
+   daemon library tests then passed run directly at soft 1024; the subprocess
+   regression fails with `EMFILE` without the change.
+2. **Lock contention after shutdown (test race from `feat/peer-fetch`),
+   `839a62a`.** The Nix `cas` package check (first C5 preparation, on
+   `c4df824`) failed once: `Store::inspect` returned `WouldBlock` right after
+   host shutdown in a fleet test. Store files are flock-held and this binary
+   spawns subprocesses; between fork and exec a child shares every open file
+   description. Peer fetch had fixed this only in the recovery scan helper.
+   The remaining post-shutdown reopen/inspect helpers now retry only lock
+   contention for one second, as production opening does. 8+8 repeated
+   library runs passed before/after; the deterministic regression fails
+   without the retry.
+3. **Reflink snapshot test without a store (from `feat/chunk-16k`),
+   `de4ef19`.** C5 attempt 1 `xfs-store`: an XFS-only test failed with
+   `NotFound` because v3 `Log::create_shared` checks the store's recorded
+   geometry and the test created no store. Bisected on XFS: passes at
+   `6f01dca`, fails at `fdda8ba`. The test now creates the store first, as
+   production initialization does.
+4. **XFS runtime selection (from `feat/peer-fetch`), `a5b3c20`.** The fixture
+   runs `local::host::tests` with `--include-ignored`; peer fetch added
+   fleet/peer modules there, including ignored `daemon_child` subprocess
+   entries that fail standalone, and loopback tests that do not use the XFS
+   allocation domain. Replayed on `cas-build` XFS: 95 tests in 298 s with two
+   failures, versus 76 tests in 260 s without those modules, against the
+   unchanged 270 s guest service bound. Both modules are skipped in the
+   fixture's list and run; `rust-tests` still runs all of them.
+5. **Queue change during shared recovery (pre-existing at `eee52a2`),
+   `5aae155`.** Attempt 1 failed `shared-after-manifest` and
+   `shared-after-unlink` with `frontend QueueEnable { index: 1, enabled: true
+   }: admission before recovery` — the same message as the three `387757c`
+   failures. Cause: while retained shared recovery waits, the frontier holds
+   restored discovered descriptors and storage is still `Opening`;
+   `permits_change` allows queues outside the replay to be configured or
+   enabled, and `finish_attachment` handles them, but `begin_change` still
+   drained the frontier through admission. It triggers only when a completion
+   wake starts replay before QEMU's remaining queue messages, so it is
+   timing-dependent; the backend files are unchanged since `eee52a2`. The
+   drain is now skipped in that phase (admitted IO there is rejected). The
+   XFS regression fails with this exact error on both `eee52a2` and the
+   integration without the fix and passes with it. `387757c`'s failures were
+   therefore not shown to be caused by read batching.
+6. **Sampled pressure assertion (pre-existing fixture), `5a1a25e`.** Attempt 2
+   failed only `guest-pressure`: `no recorded staging backpressure`. The check
+   required the transient host `stopped` flag in a one-second sample. The
+   accepted `eee52a2` run caught 1 stopped sample of 568; attempts 1 and 2
+   caught 1 of 637 and 0 of 566, with no runtime change on this path between
+   them. Staging usage now carries a monotonic `stops` count; the check
+   requires a counted stop, a non-decreasing count and a count for any
+   stopped sample. Watermarks, workload and deadlines are unchanged.
+
+### Attempts and retained evidence
+
+- First C5 preparation on `c4df824`: `.#checkpoints` failed in the package
+  test phase (failure 2); no scenarios ran.
+- Attempt 1 (`839a62a`, `suite-01`): 38/41, verifier failed (failures 3 and 5).
+- Attempt 2 (`5aae155`, `suite-02`): 40/41, verifier failed (failure 6).
+- Attempt 3 (`5a1a25e`, `suite-03`): 41/41, verifier passed.
+
+Ignored local root `results/integration-1109/`: `evidence/` holds
+`int1109-c5vm.tgz` (all three C5 suites, run receipts, `vmstat` samples),
+`int1109-member.tgz` and `int1109-builder.tgz` (checks, diagnostics,
+bisect/backport/replay logs and multi-host controller output) with
+`SHA256SUMS` matching the remote digests; disk images and WAL segments were
+excluded. `scripts/` holds launchers and patches; `freestyle/` holds the
+pre-existing inventory, creation records, `deleted.jsonl` and the post-cleanup
+inventory.
+
+The two task-owned VMs were deleted at 22:30 UTC after export; the readback
+lists exactly the ten pre-existing VMs. `cas-build` is retained with its caches
+(`/root/cas-int`, `/root/int-target`, `/root/int-results`); this task added
+`.2`/`.3` host keys to its `known_hosts` and removed its own XFS scratch file.
+No other VM was modified.
+
+### Dynamic image membership (code reading)
+
+A running host cannot add or remove ordinary images: membership is fixed at
+start except for fleet provisioning/migration. `host_service::run` requires the
+configured endpoints to equal the complete catalog image set (outside fleet
+cold mode) and attaches each endpoint once; `Host::from_roots` sizes
+admission, fairness, staging quotas and compaction statistics to that image
+count; `attach`/`attach_cold` take a one-shot attachment. `Host::snapshot`
+adds only immutable snapshot roots at runtime. In fleet cold mode,
+`Owner::import_image`/`install` (`local/host/fleet_image.rs`) publish a
+provisioned or migrated image into the catalog, build it with `make_image` and
+push its attachment and endpoint into one of 64 preallocated slots;
+`run_fleet_services` serves it only if its `--image ID=SOCKET` was declared at
+start. A migrated-away image is fenced, and a returning migration retires the
+old endpoint and removes its catalog entry, but slots are not reclaimed until
+restart. There is no general add/remove-image operation.
+
 ## 2026-11-08 — C5 isolated-host continuation
 
 Continuation from `4e3cfb0338810a2330dc14719e01fba36f0557c8` on
