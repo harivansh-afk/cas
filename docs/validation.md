@@ -1103,3 +1103,19 @@ that remote formatter output is retained in the tree. The raw rsync sync arm now
 also boots the synchronized clone and verifies original and drift checksums,
 matching the incremental arm's destination checks. Ruff formatting/lint and all
 13 Python tests pass for this revision (`runner-python-7.log`).
+
+`native-n4-003` at `a076b84` passed guest provisioning/migration, drift sync,
+sweep and verified reads for both k=1 and k=2. The first GET/PUT contention arm
+then exposed a real scheduler invariant violation: `cas-host` closed the writer
+with `more than one compaction IO owner`, and fio saw guest IO errors. The
+compactor and shipper both use the same background class, but that class tracked
+only a boolean waiter and rejected a concurrent caller. This was not a network
+latency result or a capacity failure. The failed run/logs are retained.
+
+The scheduler now counts pending background callers, consuming exactly one on
+each grant or timeout. Its existing one-background/three-demand opportunity
+policy, deadlines, IO ownership and allocation behavior remain unchanged. A
+controlled two-background-caller regression verifies both make progress with six
+demand grants and release all budget. All four scheduler tests pass remotely
+(`scheduler-fix.log`). Cross-VM contention is being rerun before acceptance.
+All-systems Nix evaluation passed (`runner-nix-eval.status=0`).
