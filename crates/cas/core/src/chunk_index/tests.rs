@@ -30,25 +30,30 @@ fn address_boundaries_do_not_alias_on_overflow_or_unaligned_offsets() {
 fn denied_growth_keeps_entries_and_charges_both_tables_when_permitted() {
     let mut probe = Index::new(budget(usize::MAX));
     probe.reserve(1).unwrap();
-    let old_bytes = probe.allocated_bytes();
     let capacity = probe.table.capacity();
     probe.reserve(capacity + 1).unwrap();
-    let new_bytes = probe.allocated_bytes();
-    assert!(new_bytes > old_bytes);
+    let new_layout = probe.memory().layout_bytes;
     drop(probe);
 
-    for (limit, succeeds) in [(new_bytes, false), (new_bytes + old_bytes, true)] {
+    // Usable-size slack can differ for equal layouts. The denied budget cannot
+    // fit even the new layout while the old table lives; the permitted case
+    // checks exact overlap using the actual allocations from that attempt.
+    for (limit, succeeds) in [(new_layout, false), (128 * 1024, true)] {
         let credits = budget(limit);
         let mut index = Index::new(Arc::clone(&credits));
         index.insert([7; 32], address(1)).unwrap();
-        assert_eq!(index.allocated_bytes(), old_bytes);
+        let old_bytes = index.allocated_bytes();
         assert_eq!(index.reserve(capacity + 1).is_ok(), succeeds);
         assert_eq!(index.get(&[7; 32]), Some(address(1)));
         assert_eq!(index.len(), 1);
         assert_eq!(credits.usage().current.bytes, index.allocated_bytes());
         assert_eq!(
             credits.usage().peak.bytes,
-            if succeeds { limit } else { old_bytes }
+            if succeeds {
+                old_bytes + index.allocated_bytes()
+            } else {
+                old_bytes
+            }
         );
         if !succeeds {
             assert_eq!(credits.usage().rejected, 1);
