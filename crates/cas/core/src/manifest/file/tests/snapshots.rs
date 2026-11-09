@@ -235,9 +235,22 @@ fn reflink_snapshot_captures_exact_old_root_and_clone_gets_a_private_namespace()
     assert_eq!(clone.pinned_roots(metadata()).unwrap().keys(), [clone_key]);
     model(&clone.view().unwrap(), &[]);
     {
-        use crate::{append, segments::Tickets};
+        use crate::{append, segments::Tickets, store::file::Store};
+        // Production initialization creates the shared store before any
+        // image WAL; v3 WAL creation checks the store's recorded geometry.
+        let tickets = Tickets::open(root.path(), metadata()).unwrap();
+        let _store = Store::create(
+            Arc::clone(&tickets),
+            crate::store::file::Config {
+                store: CLONE.store,
+                segment_bytes: 2 * crate::MAX_REQUEST_BYTES as u64,
+            },
+            metadata(),
+            metadata(),
+        )
+        .unwrap();
         let log = append::Log::create_shared(
-            Tickets::open(root.path(), metadata()).unwrap(),
+            tickets,
             append::Config {
                 store: CLONE.store,
                 image: CLONE.image,
