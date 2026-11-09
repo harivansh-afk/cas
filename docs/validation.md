@@ -1089,7 +1089,17 @@ verified drift, fleet sync and sweep, and cold-read verification, then found a
 harness restart regression: the new stderr separation created unused exclusive
 log files for every child, including a restarted daemon. Only fio now creates a
 separate stderr file; other children retain their original combined logs.
-Thirteen Python tests passed remotely again (`runner-python-5.log`).
+The first retry could not find Ruff in the development shell (`runner-python-5.log`);
+using `uvx ruff` explicitly passed formatting, lint and all thirteen Python tests
+(`runner-python-6.log`).
 The first full check overlapped closure transfers/build IO and hit five short
 fixture deadlines, including a subprocess request timeout; the retry bounds
 Rust test concurrency to two and retains all earlier failures.
+
+`RUST_TEST_THREADS=2 CARGO_BUILD_JOBS=6 just check` passed remotely (541 Rust
+passed, 27 ignored; 13 Python passed) at `fdc27a1` plus the separate-log fix.
+The Nix formatting check found the explicit fixture case list needed formatting;
+that remote formatter output is retained in the tree. The raw rsync sync arm now
+also boots the synchronized clone and verifies original and drift checksums,
+matching the incremental arm's destination checks. Ruff formatting/lint and all
+13 Python tests pass for this revision (`runner-python-7.log`).

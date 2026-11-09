@@ -166,10 +166,14 @@ class Agent:
         if pin:
             argv = ["taskset", "-c", pin, *argv]
         write_json(self.case / f"{name}-command.json", {"argv": argv, "env": env})
-        with (self.case / f"{name}.log").open("x") as log, (
-            (self.case / f"{name}.stderr.log").open("x")
-            if separate_stderr else nullcontext(log)
-        ) as errors:
+        with (
+            (self.case / f"{name}.log").open("x") as log,
+            (
+                (self.case / f"{name}.stderr.log").open("x")
+                if separate_stderr
+                else nullcontext(log)
+            ) as errors,
+        ):
             process = subprocess.Popen(
                 argv,
                 stdin=subprocess.DEVNULL,
@@ -477,7 +481,9 @@ class Agent:
         )
         if kind == "ship":
             options += ["--rate=" + str(self.settings["ship_rate_bytes"])]
-        self.spawn(name, [*self.guests[guest], shlex.join(options)], separate_stderr=True)
+        self.spawn(
+            name, [*self.guests[guest], shlex.join(options)], separate_stderr=True
+        )
         return {"started_ns": time.monotonic_ns()}
 
     def drift(self, guest):

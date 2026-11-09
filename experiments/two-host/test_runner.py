@@ -45,11 +45,25 @@ class MeasurementTests(unittest.TestCase):
             try:
                 agent.case = Path(directory)
                 agent.settings = {"seconds": 1}
-                result = {"jobs": [{"error": 0, "read": {"io_bytes": 4096}, "write": {"io_bytes": 0}}]}
-                script = "import sys; print('SSH warning', file=sys.stderr); print(" + repr(json.dumps(result)) + ")"
+                result = {
+                    "jobs": [
+                        {
+                            "error": 0,
+                            "read": {"io_bytes": 4096},
+                            "write": {"io_bytes": 0},
+                        }
+                    ]
+                }
+                script = (
+                    "import sys; print('SSH warning', file=sys.stderr); print("
+                    + repr(json.dumps(result))
+                    + ")"
+                )
                 agent.spawn("fio", [sys.executable, "-c", script], separate_stderr=True)
                 self.assertEqual(agent.finish_fio("fio"), result)
-                self.assertIn("SSH warning", (agent.case / "fio.stderr.log").read_text())
+                self.assertIn(
+                    "SSH warning", (agent.case / "fio.stderr.log").read_text()
+                )
             finally:
                 agent.close()
 
@@ -60,7 +74,9 @@ class MeasurementTests(unittest.TestCase):
                 agent.case = Path(directory)
                 (agent.case / "daemon").mkdir()
                 value = {"images": []}
-                (agent.case / "daemon/telemetry.jsonl").write_text(json.dumps(value) + "\n")
+                (agent.case / "daemon/telemetry.jsonl").write_text(
+                    json.dumps(value) + "\n"
+                )
                 with patch("agent.time.sleep"):
                     self.assertEqual(agent.settle(), value)
             finally:

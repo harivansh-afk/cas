@@ -9,7 +9,14 @@ let
   config = pkgs.writeText "cas-two-host-loopback.json" (
     builtins.toJSON {
       # Legacy TCG fixture has XFS only; the KVM appliance validates ZFS.
-      cases = [ "flows-k1" "flows-k2" "reads-memory" "reads-storage" "raw-rsync" "independent-stores" ];
+      cases = [
+        "flows-k1"
+        "flows-k2"
+        "reads-memory"
+        "reads-storage"
+        "raw-rsync"
+        "independent-stores"
+      ];
       settings = {
         seconds = 5;
         repeats = 1;

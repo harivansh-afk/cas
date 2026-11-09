@@ -628,6 +628,16 @@ class Experiment:
         b.call("stop_guest", name="resumed")
         # Explicit full-image resynchronization control; --ignore-times prevents quick-check skipping.
         result["sync_full_image"] = a.call("rsync", destination=dest, target=CLONE)
+        start = time.monotonic_ns()
+        b.call("boot", name="resynced", image=CLONE, backend="raw")
+        self.verify(1, "resynced", digest)
+        if (
+            b.call("shell", guest="resynced", script="cd /mnt/cas; sha256sum drift")
+            != hashes[0]
+        ):
+            raise ValueError("rsync synchronization lost drift data")
+        result["sync_full_image"]["boot_verify_ns"] = time.monotonic_ns() - start
+        b.call("stop_guest", name="resynced")
         result["capacity"] = parallel(self.agents, lambda agent: agent.call("capacity"))
         self.end()
 
