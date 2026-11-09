@@ -59,7 +59,7 @@ pub(crate) fn bucket(hash: &Hash) -> u64 {
 impl Index {
     pub fn new(metadata: Arc<Budget>) -> Self {
         Self {
-            table: HashTable::new_in(BudgetAllocator::new(metadata)),
+            table: HashTable::new_in(BudgetAllocator::tracked(Budget::child(&metadata))),
         }
     }
 
@@ -70,7 +70,27 @@ impl Index {
         self.table.is_empty()
     }
     pub fn allocated_bytes(&self) -> usize {
-        self.table.allocation_size()
+        self.table.allocator().charged_bytes()
+    }
+
+    pub fn memory(&self) -> Memory {
+        let layout_bytes = self.table.allocation_size();
+        let allocated_bytes = self.allocated_bytes();
+        Memory {
+            chunks: self.len(),
+            entry_bytes: size_of::<Entry>(),
+            capacity: self.table.capacity(),
+            live_entry_bytes: self.len() * size_of::<Entry>(),
+            layout_bytes,
+            table_overhead_bytes: layout_bytes - self.len() * size_of::<Entry>(),
+            allocator_slack_bytes: allocated_bytes - layout_bytes,
+            allocated_bytes,
+            bytes_per_chunk: if self.is_empty() {
+                None
+            } else {
+                Some(allocated_bytes as f64 / self.len() as f64)
+            },
+        }
     }
 
     /// Reserve before writing corresponding new store data. The allocator also
@@ -169,3 +189,17 @@ impl Index {
 
 #[cfg(test)]
 mod tests;
+
+/// Exact heap table charge. Empty tables have no per-chunk denominator.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct Memory {
+    pub chunks: usize,
+    pub entry_bytes: usize,
+    pub capacity: usize,
+    pub live_entry_bytes: usize,
+    pub layout_bytes: usize,
+    pub table_overhead_bytes: usize,
+    pub allocator_slack_bytes: usize,
+    pub allocated_bytes: usize,
+    pub bytes_per_chunk: Option<f64>,
+}

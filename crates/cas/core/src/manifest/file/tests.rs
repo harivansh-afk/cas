@@ -30,6 +30,31 @@ fn change(block: u64, value: u8) -> Extent {
     }
 }
 
+#[test]
+fn geometry_rejects_empty_and_cross_chunk_mappings_before_io() {
+    for size in [ChunkSize::K4, ChunkSize::K16] {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = Manifest::create_sized(dir.path(), ID, size, metadata()).unwrap();
+        let original = bytes(dir.path());
+        for (start, end) in [(0, 0), (4, 3), (0, size.blocks() + 1)] {
+            assert!(
+                manifest
+                    .prepare(
+                        &[Extent {
+                            start,
+                            end,
+                            hash: Some([7; 32])
+                        }],
+                        1
+                    )
+                    .is_err()
+            );
+        }
+        assert_unchanged(dir.path(), &original);
+        assert!(!manifest.failed());
+    }
+}
+
 fn inspect(path: &Path, required: u64) -> io::Result<Inspection> {
     Manifest::inspect(path, ID, required, metadata(), |_| Ok(()))
 }

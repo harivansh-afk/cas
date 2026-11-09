@@ -78,14 +78,20 @@ impl Fixture {
     }
 
     fn with_config(config: Config) -> Self {
-        let root = tempfile::tempdir().unwrap();
+        Self::sized(config, crate::chunk::ChunkSize::K4)
+    }
+    fn sized(config: Config, size: crate::chunk::ChunkSize) -> Self {
+        Self::sized_in(config, size, tempfile::tempdir().unwrap())
+    }
+    fn sized_in(config: Config, size: crate::chunk::ChunkSize, root: tempfile::TempDir) -> Self {
         let tickets = Tickets::open(root.path(), memory()).unwrap();
-        let store = Store::create(
+        let store = Store::create_sized(
             Arc::clone(&tickets),
             chunk_file::Config {
                 store: config.store,
-                segment_bytes: 128 * BLOCK_SIZE as u64,
+                segment_bytes: (128 * size.bytes()) as u64,
             },
+            size,
             memory(),
             memory(),
         )
@@ -96,13 +102,14 @@ impl Fixture {
             .unwrap()
             .sync_all()
             .unwrap();
-        let manifest = Manifest::create(
+        let manifest = Manifest::create_sized(
             &image,
             Identity {
                 store: config.store,
                 image: config.image,
                 image_bytes: config.image_bytes,
             },
+            size,
             memory(),
         )
         .unwrap();

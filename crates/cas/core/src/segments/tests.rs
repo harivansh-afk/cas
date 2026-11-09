@@ -12,6 +12,7 @@ fn open(root: &Path) -> io::Result<Arc<Tickets>> {
 
 fn durable_header(directory: &Path, ticket: u64) -> io::Result<()> {
     let header = SegmentHeader {
+        chunk_size: crate::chunk::ChunkSize::K4,
         store: [1; 16],
         number: ticket,
         capacity: 64 * 1024,

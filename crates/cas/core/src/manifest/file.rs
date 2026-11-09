@@ -8,6 +8,7 @@ use crate::{
     BLOCK_SIZE,
     aligned::AlignedBuffer,
     budget::{Budget, BudgetAllocator},
+    chunk::ChunkSize,
     chunk_index::Hash,
     direct,
     directory::Directory,
@@ -57,6 +58,8 @@ impl Identity {
 }
 
 pub struct Manifest {
+    bytes_written: u64,
+    chunk_size: ChunkSize,
     directory: Directory,
     file: Arc<File>,
     current: Commit,
@@ -70,6 +73,7 @@ pub struct Manifest {
 /// Construction is restricted to a healthy manifest after sync.
 #[derive(Clone)]
 pub struct View {
+    chunk_size: ChunkSize,
     file: Arc<File>,
     commit: Commit,
     end: u64,
@@ -78,6 +82,9 @@ pub struct View {
 }
 
 impl View {
+    pub fn chunk_size(&self) -> ChunkSize {
+        self.chunk_size
+    }
     /// Equality includes the actual pinned file owner, exact COMMIT and end.
     pub fn same(&self, other: &Self) -> bool {
         self.commit == other.commit && self.end == other.end && self.owns(&other.file)
@@ -166,9 +173,16 @@ impl Read {
 }
 
 impl Manifest {
+    pub fn chunk_size(&self) -> ChunkSize {
+        self.chunk_size
+    }
+    pub fn bytes_written(&self) -> u64 {
+        self.bytes_written
+    }
     pub fn view(&self) -> io::Result<View> {
         self.healthy()?;
         Ok(View {
+            chunk_size: self.chunk_size,
             file: Arc::clone(&self.file),
             commit: self.current,
             end: self.end,
@@ -180,6 +194,15 @@ impl Manifest {
     /// The directory already exists. Catalog publication follows this file and
     /// directory sync; an error leaves any created file for explicit recovery.
     pub fn create(path: &Path, identity: Identity, metadata: Arc<Budget>) -> io::Result<Self> {
+        Self::create_sized(path, identity, ChunkSize::K4, metadata)
+    }
+
+    pub fn create_sized(
+        path: &Path,
+        identity: Identity,
+        chunk_size: ChunkSize,
+        metadata: Arc<Budget>,
+    ) -> io::Result<Self> {
         let current = identity.initial();
         current.validate(BLOCK_SIZE as u64)?;
         let end = (2 * BLOCK_SIZE) as u64;
@@ -193,6 +216,7 @@ impl Manifest {
         let mut buffer =
             AlignedBuffer::try_new_in(2 * BLOCK_SIZE, BudgetAllocator::new(Arc::clone(&metadata)))?;
         FileHeader {
+            chunk_size,
             store: identity.store,
             image_bytes: identity.image_bytes,
         }
@@ -206,6 +230,8 @@ impl Manifest {
         direct::sync_all(&file)?;
         directory.sync()?;
         Ok(Self {
+            bytes_written: (2 * BLOCK_SIZE) as u64,
+            chunk_size,
             directory,
             file: Arc::new(file),
             current,
@@ -280,6 +306,9 @@ impl Manifest {
         metadata: Arc<Budget>,
     ) -> io::Result<Prepared> {
         self.healthy()?;
+        for extent in changes {
+            validate_extent(*extent, self.chunk_size)?;
+        }
         Prepared::build(
             self.file.as_ref(),
             self.current,
@@ -306,6 +335,7 @@ impl Manifest {
         self.failed = true;
         direct::preallocate(&self.file, self.end, prepared.bytes().len() as u64)?;
         direct::write_bytes(&self.file, prepared.bytes(), self.end)?;
+        self.bytes_written += prepared.bytes().len() as u64;
         direct::sync_data(&self.file)?;
         self.end = end;
         self.current = prepared.commit();
@@ -329,6 +359,7 @@ impl Manifest {
         direct::Alignment::query(&file)?;
         let selected = select(&file, identity, required_durable, Arc::clone(&metadata))?;
         Tree::new(&file, selected.commit, selected.end, Arc::clone(&metadata))?.walk(|extent| {
+            validate_extent(extent, selected.chunk_size)?;
             if let Some(hash) = extent.hash {
                 verify_chunk(hash)?;
             }
@@ -343,6 +374,8 @@ impl Manifest {
         )?;
         Ok(Inspection {
             manifest: Self {
+                bytes_written: 0,
+                chunk_size: selected.chunk_size,
                 directory,
                 file: Arc::new(file),
                 current: selected.commit,
@@ -358,6 +391,7 @@ impl Manifest {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Selected {
+    pub chunk_size: ChunkSize,
     pub commit: Commit,
     pub end: u64,
     pub file_bytes: u64,
@@ -463,6 +497,7 @@ fn select(
                     "manifest below required D",
                 )?;
                 return Ok(Selected {
+                    chunk_size: header.chunk_size,
                     commit,
                     end,
                     file_bytes,
@@ -518,6 +553,7 @@ impl Manifest {
         self.failed = true;
         direct::preallocate(&self.file, self.end, BLOCK_SIZE as u64)?;
         direct::write_bytes(&self.file, bytes.as_slice(), self.end)?;
+        self.bytes_written += bytes.as_slice().len() as u64;
         direct::sync_data(&self.file)?;
         self.current = current;
         self.end = end;
@@ -525,4 +561,13 @@ impl Manifest {
         self.failed = false;
         Ok(self)
     }
+}
+
+fn validate_extent(extent: Extent, size: ChunkSize) -> io::Result<()> {
+    require(
+        extent.start < extent.end
+            && (extent.hash.is_none()
+                || extent.start / size.blocks() == (extent.end - 1) / size.blocks()),
+        "manifest extent crosses a chunk boundary",
+    )
 }

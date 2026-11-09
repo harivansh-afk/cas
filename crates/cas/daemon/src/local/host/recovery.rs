@@ -74,6 +74,7 @@ impl Inspection {
             resources.read_memory(),
         )?;
         resources.peer.validate()?;
+        resources.validate_chunk_size(store.status().chunk_bytes)?;
         let fleet = resources
             .peer
             .fleet
@@ -158,10 +159,18 @@ impl Inspection {
                         },
                     });
                 }
-                catalog::Kind::Snapshot(key) => snapshots.push((
-                    entry.id,
-                    Snapshot::inspect(&directory, key, Arc::clone(&resources.metadata), verify)?,
-                )),
+                catalog::Kind::Snapshot(key) => {
+                    let snapshot = Snapshot::inspect(
+                        &directory,
+                        key,
+                        Arc::clone(&resources.metadata),
+                        verify,
+                    )?;
+                    if snapshot.chunk_size().bytes() != store.status().chunk_bytes {
+                        return Err(io::Error::other("snapshot/store chunk geometry differs"));
+                    }
+                    snapshots.push((entry.id, snapshot));
+                }
             }
         }
         Ok(Self {

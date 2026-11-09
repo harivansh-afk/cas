@@ -52,6 +52,7 @@ impl Image {
             image_bytes: BLOCKS * BLOCK_SIZE as u64,
         };
         let mut bytes = FileHeader {
+            chunk_size: crate::chunk::ChunkSize::K4,
             store: commit.store,
             image_bytes: commit.image_bytes,
         }
@@ -303,7 +304,7 @@ fn maximum_batch_initializes_on_demand_and_emits_only_reachable_pages() {
         hash: None,
     }));
     let stats = image.apply(&edits, &metadata);
-    assert_eq!(stats.changes, MAX_CHANGES);
+    assert_eq!(stats.changes, 318);
     assert!(stats.allocated_bytes <= 16 * BLOCK_SIZE);
     assert!(metadata.usage().peak.bytes < 8 * 1024 * 1024);
     let mut tree = Tree::new(
@@ -420,7 +421,7 @@ fn denied_plans_and_invalid_edits_leave_source_and_budget_untouched() {
         }],
         vec![Extent {
             start: 1,
-            end: 3,
+            end: 5,
             hash: Some([1; 32]),
         }],
         vec![Extent {

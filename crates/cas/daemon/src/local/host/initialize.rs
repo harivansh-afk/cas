@@ -40,10 +40,17 @@ pub struct Config {
 
 /// Bounded waiting never transfers running IO or its root lock to another owner.
 pub fn create(config: Config) -> io::Result<serde_json::Value> {
+    create_sized(config, cas_core::chunk::ChunkSize::K4)
+}
+
+pub fn create_sized(
+    config: Config,
+    chunk_size: cas_core::chunk::ChunkSize,
+) -> io::Result<serde_json::Value> {
     let deadline = Deadline::after(RECOVERY_TIMEOUT);
     let resources = Arc::new(Resources::default());
     let report_resources = Arc::clone(&resources);
-    let result = deadline.run(move || initialize(config, resources, deadline));
+    let result = deadline.run(move || initialize_sized(config, chunk_size, resources, deadline));
     // Build diagnostic JSON only after the operation, outside storage admission.
     match result {
         Ok(mut report) => {
@@ -55,8 +62,18 @@ pub fn create(config: Config) -> io::Result<serde_json::Value> {
     }
 }
 
+#[cfg(test)]
 pub(super) fn initialize(
+    config: Config,
+    resources: Arc<Resources>,
+    deadline: Deadline,
+) -> io::Result<serde_json::Value> {
+    initialize_sized(config, cas_core::chunk::ChunkSize::K4, resources, deadline)
+}
+
+fn initialize_sized(
     mut config: Config,
+    chunk_size: cas_core::chunk::ChunkSize,
     resources: Arc<Resources>,
     deadline: Deadline,
 ) -> io::Result<serde_json::Value> {
@@ -120,9 +137,10 @@ pub(super) fn initialize(
     let permit = physical.foreground(output)?;
     let (store, catalog) = permit.run(|| {
         deadline.check()?;
-        let store = Store::create(
+        let store = Store::create_sized(
             Arc::clone(&tickets),
             config.store,
+            chunk_size,
             Arc::clone(&resources.metadata),
             resources.read_memory(),
         )?;
@@ -137,13 +155,14 @@ pub(super) fn initialize(
             let directory = super::recovery::path(&config.root, entry);
             fs::create_dir(&directory)?;
             File::open(config.root.join("images"))?.sync_all()?;
-            let manifest = Manifest::create(
+            let manifest = Manifest::create_sized(
                 &directory,
                 Identity {
                     store: config.store.store,
                     image: entry.id,
                     image_bytes,
                 },
+                chunk_size,
                 Arc::clone(&resources.metadata),
             )?;
             let log = Log::create_shared(

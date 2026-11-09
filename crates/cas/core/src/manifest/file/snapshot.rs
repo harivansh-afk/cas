@@ -18,7 +18,7 @@ impl SnapshotKey {
         self.commit.validate(self.end - BLOCK_SIZE as u64)
     }
 
-    fn verify(self, file: &File, scratch: &mut [u8]) -> io::Result<()> {
+    fn verify(self, file: &File, scratch: &mut [u8]) -> io::Result<ChunkSize> {
         self.validate()?;
         require(
             file.metadata()?.len() == self.end,
@@ -36,7 +36,8 @@ impl SnapshotKey {
         require(
             commit == self.commit,
             "snapshot COMMIT differs from its catalog key",
-        )
+        )?;
+        Ok(header.chunk_size)
     }
 }
 
@@ -90,6 +91,7 @@ impl Snapshot {
             _directory: directory,
             failed: false,
             view: View {
+                chunk_size: source.chunk_size,
                 file,
                 commit: source.commit,
                 end: source.end,
@@ -113,9 +115,10 @@ impl Snapshot {
         let directory = Directory::open(path)?;
         let file = direct::open(&path.join(NAME), false)?;
         direct::Alignment::query(&file)?;
-        key.verify(&file, scratch.as_mut_slice())?;
+        let chunk_size = key.verify(&file, scratch.as_mut_slice())?;
         drop(scratch);
         Tree::new(&file, key.commit, key.end, Arc::clone(&metadata))?.walk(|extent| {
+            validate_extent(extent, chunk_size)?;
             if let Some(hash) = extent.hash {
                 verify_chunk(hash)?;
             }
@@ -123,6 +126,7 @@ impl Snapshot {
         })?;
         let pin = Pin::new(key, Arc::clone(&metadata))?;
         Ok(SnapshotInspection {
+            chunk_size,
             directory,
             file: Arc::new(file),
             key,
@@ -133,6 +137,7 @@ impl Snapshot {
 }
 
 pub struct SnapshotInspection {
+    chunk_size: ChunkSize,
     directory: Directory,
     file: Arc<File>,
     key: SnapshotKey,
@@ -141,6 +146,10 @@ pub struct SnapshotInspection {
 }
 
 impl SnapshotInspection {
+    pub fn chunk_size(&self) -> ChunkSize {
+        self.chunk_size
+    }
+
     pub fn validate_recovery(&self, repair: crate::space::Recovery<'_>) -> io::Result<()> {
         repair.validate_file(&self.file)?;
         repair.validate_output(0)
@@ -157,6 +166,7 @@ impl SnapshotInspection {
             _directory: self.directory,
             failed: false,
             view: View {
+                chunk_size: self.chunk_size,
                 file: self.file,
                 commit: self.key.commit,
                 end: self.key.end,
@@ -207,6 +217,8 @@ impl Manifest {
         direct::write_bytes(&copy.file, scratch.as_slice(), key.end)?;
         let (directory, file) = copy.sync()?;
         Ok(Self {
+            bytes_written: BLOCK_SIZE as u64,
+            chunk_size: source.view.chunk_size,
             directory,
             file,
             current,

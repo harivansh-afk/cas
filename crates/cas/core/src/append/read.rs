@@ -122,14 +122,16 @@ impl ReadPlan {
             && (0..self.bytes / BLOCK_SIZE).any(|block| !self.staged(block))
         {
             let mut tree = base.tree()?;
+            let size = base.chunk_size();
+            let mut chunk = AlignedBuffer::new(size.bytes());
             for block in 0..self.bytes / BLOCK_SIZE {
                 if !self.staged(block)
                     && let Some(hash) = tree.get(self.offset / BLOCK_SIZE as u64 + block as u64)?
                 {
-                    load(
-                        hash,
-                        &mut buffer.as_mut_slice()[block * BLOCK_SIZE..(block + 1) * BLOCK_SIZE],
-                    )?;
+                    load(hash, chunk.as_mut_slice())?;
+                    let offset = size.offset(self.offset / BLOCK_SIZE as u64 + block as u64);
+                    buffer.as_mut_slice()[block * BLOCK_SIZE..(block + 1) * BLOCK_SIZE]
+                        .copy_from_slice(&chunk.as_slice()[offset..offset + BLOCK_SIZE]);
                 }
             }
         }

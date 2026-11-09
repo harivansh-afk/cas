@@ -170,6 +170,8 @@ impl Log {
         }
         self.publish(&header, Arc::clone(&submission.segment), submission.offset);
         self.pending_descriptors -= envelope.descriptors;
+        self.guest_bytes_written += envelope.payload_bytes as u64;
+        self.wal_bytes += submission.batch.bytes().len() as u64;
         Ok(())
     }
 
@@ -208,6 +210,7 @@ impl Log {
         if !self.ready_to_sync(fence)? {
             return Err(Error::Pending);
         }
+        self.wal_bytes += BLOCK_SIZE as u64;
         self.durable = fence.batch.envelope().last;
         self.fenced = true;
         self.cohort = None;

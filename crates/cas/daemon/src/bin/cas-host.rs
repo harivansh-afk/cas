@@ -58,6 +58,9 @@ struct Serve {
     about = "Initialize an empty dedicated storage root; retain all output on error"
 )]
 struct Init {
+    /// Fixed store chunk bytes; guest blocks remain 4096 bytes.
+    #[arg(long, default_value_t = 4096)]
+    chunk_bytes: usize,
     #[command(flatten)]
     storage: Storage,
     /// Repeat for each initial image: 32hex-image-id=size-in-bytes.
@@ -76,16 +79,20 @@ fn main() -> std::io::Result<()> {
     let matches = command().get_matches();
     if let Some(("init", matches)) = matches.subcommand() {
         let args = Init::from_arg_matches(matches).unwrap_or_else(|error| error.exit());
-        let result = initialize::create(initialize::Config {
-            root: args.storage.root,
-            store: cas_core::store::file::Config {
-                store: args.storage.store,
-                segment_bytes: args.storage.segment_bytes,
+        let size = cas_core::chunk::ChunkSize::from_bytes(args.chunk_bytes)?;
+        let result = initialize::create_sized(
+            initialize::Config {
+                root: args.storage.root,
+                store: cas_core::store::file::Config {
+                    store: args.storage.store,
+                    segment_bytes: args.storage.segment_bytes,
+                },
+                append: cas_core::append::Limits::default(),
+                staging_bytes: args.storage.staging_bytes,
+                images: args.images,
             },
-            append: cas_core::append::Limits::default(),
-            staging_bytes: args.storage.staging_bytes,
-            images: args.images,
-        });
+            size,
+        );
         match &result {
             Ok(report) => println!("{report:#}"),
             Err(error) => println!(

@@ -1,4 +1,5 @@
 use super::*;
+use crate::BLOCK_SIZE;
 
 fn metadata() -> Arc<Budget> {
     Budget::new(Amount {

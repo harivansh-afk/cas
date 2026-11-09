@@ -18,7 +18,16 @@ struct Charged<T> {
 
 impl<T> BudgetArc<T> {
     pub fn try_new(value: T, budget: &Arc<Budget>) -> io::Result<Self> {
-        let (layout, _) = Layout::new::<[AtomicUsize; 2]>()
+        Self::create(value, budget, false)
+    }
+
+    /// Pinned System/Arc layout, verified by the shared-allocation test.
+    pub fn try_new_tracked(value: T, budget: &Arc<Budget>) -> io::Result<Self> {
+        Self::create(value, budget, true)
+    }
+
+    fn create(value: T, budget: &Arc<Budget>, tracked: bool) -> io::Result<Self> {
+        let (layout, offset) = Layout::new::<[AtomicUsize; 2]>()
             .extend(Layout::new::<Charged<T>>())
             .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
         let lease = budget
@@ -27,10 +36,33 @@ impl<T> BudgetArc<T> {
                 requests: 0,
             })
             .ok_or(io::ErrorKind::OutOfMemory)?;
-        Ok(Self(Some(Arc::new(Charged {
+        let mut owner = Arc::new(Charged {
             value,
             _lease: lease,
-        }))))
+        });
+        if tracked {
+            // SAFETY: the pinned std Arc allocation puts its two counters before
+            // Charged<T> with this computed alignment. CAS uses System globally.
+            let base = unsafe { Arc::as_ptr(&owner).cast::<u8>().sub(offset).cast_mut() };
+            // SAFETY: base is the live System allocation base described above.
+            let bytes = unsafe { super::allocator::usable(base, layout.pad_to_align()) };
+            let slack = Amount {
+                bytes: bytes - layout.pad_to_align().size(),
+                requests: 0,
+            };
+            if !budget.claim_extra(slack) {
+                // Follow the same deallocation-before-credit-release ordering
+                // as every published BudgetArc, including this rejected owner.
+                drop(Self(Some(owner)));
+                return Err(io::ErrorKind::OutOfMemory.into());
+            }
+            Arc::get_mut(&mut owner)
+                .expect("private owner")
+                ._lease
+                .amount
+                .bytes += slack.bytes;
+        }
+        Ok(Self(Some(owner)))
     }
 
     fn arc(&self) -> &Arc<Charged<T>> {

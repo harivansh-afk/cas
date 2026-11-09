@@ -230,5 +230,41 @@ fn actual_layout_credit_order_concurrent_final_drops_and_unwind() {
     assert_eq!(account.usage().current, retained_charge);
     drop(unique);
     assert_eq!(account.usage().current, Amount::default());
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        reset(&account);
+        WATCH.set(true);
+        let tracked = BudgetArc::try_new_tracked([7u8; 1234], &account).unwrap();
+        WATCH.set(false);
+        assert_eq!(ALLOCATIONS.load(SeqCst), 1);
+        // SAFETY: the recorder retains the live System allocation base.
+        let actual = unsafe { libc::malloc_usable_size(ALLOCATION.load(SeqCst).cast()) };
+        assert_eq!(account.usage().current.bytes, actual);
+        assert!(actual >= SIZE.load(SeqCst));
+        let other = tracked.clone();
+        drop(tracked);
+        assert_eq!(account.usage().current.bytes, actual);
+        drop(other);
+        assert_eq!(BEFORE_DEALLOCATION.load(SeqCst), actual);
+        assert_eq!(account.usage().current.bytes, 0);
+        assert!(DEALLOCATED.load(SeqCst));
+        let layout_bytes = SIZE.load(SeqCst);
+        assert!(actual > layout_bytes);
+        let denied = Budget::new(Amount {
+            bytes: layout_bytes,
+            requests: 0,
+        });
+        reset(&denied);
+        WATCH.set(true);
+        let result = BudgetArc::try_new_tracked([7u8; 1234], &denied);
+        WATCH.set(false);
+        assert_eq!(
+            result.err().unwrap().kind(),
+            std::io::ErrorKind::OutOfMemory
+        );
+        assert!(DEALLOCATED.load(SeqCst));
+        assert_eq!(BEFORE_DEALLOCATION.load(SeqCst), layout_bytes);
+        assert_eq!(denied.usage().current.bytes, 0);
+    }
     ACCOUNT.store(ptr::null_mut(), SeqCst);
 }

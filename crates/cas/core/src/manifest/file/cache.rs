@@ -38,20 +38,21 @@ pub struct PageCache {
 
 impl PageCache {
     pub fn new(bytes: usize, metadata: &Arc<Budget>) -> io::Result<BudgetArc<Self>> {
+        let metadata = Budget::child(metadata);
         if bytes == 0 || !bytes.is_multiple_of(BLOCK_SIZE) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "invalid page-cache byte limit",
             ));
         }
-        BudgetArc::try_new(
+        BudgetArc::try_new_tracked(
             Self {
-                state: Mutex::new(Lru::new(bytes / BLOCK_SIZE, metadata)?),
+                state: Mutex::new(Lru::new(bytes / BLOCK_SIZE, &metadata)?),
                 capacity_bytes: bytes,
                 pages: Budget::new(Amount { bytes, requests: 0 }),
-                metadata: Arc::clone(metadata),
+                metadata: Arc::clone(&metadata),
             },
-            metadata,
+            &metadata,
         )
     }
 
@@ -86,7 +87,7 @@ impl PageCache {
                 return Ok(());
             }
         };
-        let page = BudgetArc::try_new(
+        let page = BudgetArc::try_new_tracked(
             CachedPage {
                 bytes,
                 _credit: credit,
@@ -108,6 +109,7 @@ impl PageCache {
         let _hold = crate::io_metrics::measure(0, |c| &mut c.page_cache_hold);
         let payload = self.pages.usage();
         let resident_bytes = state.len() * BLOCK_SIZE;
+        let metadata_bytes = self.metadata.usage().current.bytes;
         Status {
             capacity_bytes: self.capacity_bytes,
             counters: state.counters,
@@ -115,6 +117,8 @@ impl PageCache {
             reader_held_bytes: payload.current.bytes - resident_bytes,
             payload,
             table_bytes: state.table_bytes(),
+            metadata_bytes,
+            allocated_bytes: metadata_bytes,
         }
     }
 }

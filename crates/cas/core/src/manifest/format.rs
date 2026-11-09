@@ -3,6 +3,7 @@
 use crate::aligned::AlignedBuffer;
 use crate::{
     BLOCK_SIZE,
+    chunk::ChunkSize,
     chunk_index::Hash,
     encoding::{checksum, put16, put32, put64, require, u16_at, u32_at, u64_at},
 };
@@ -65,6 +66,7 @@ pub struct Commit {
 pub struct FileHeader {
     pub store: [u8; 16],
     pub image_bytes: u64,
+    pub chunk_size: ChunkSize,
 }
 
 fn page_offset(offset: u64) -> bool {
@@ -81,7 +83,7 @@ impl<'a> Page<'a> {
     pub fn decode(bytes: &'a [u8], offset: u64, image_bytes: u64) -> io::Result<Self> {
         require(bytes.len() == BLOCK_SIZE, "manifest page size")?;
         require(
-            &bytes[..8] == b"CASMAN02" && u16_at(bytes, 8) == 2,
+            &bytes[..8] == b"CASMAN03" && u16_at(bytes, 8) == 3,
             "manifest page version",
         )?;
         require(
@@ -131,8 +133,9 @@ impl<'a> Page<'a> {
                     bytes[64..80] != [0; 16] && u64_at(bytes, 80) == image_bytes,
                     "manifest FILE identity/capacity",
                 )?;
+                ChunkSize::from_bytes(u32_at(bytes, 88) as usize)?;
                 require(
-                    bytes[88..].iter().all(|&b| b == 0),
+                    bytes[92..].iter().all(|&b| b == 0),
                     "manifest FILE reserved bytes",
                 )?;
             }
@@ -174,7 +177,10 @@ impl<'a> Page<'a> {
                 "manifest extent offset/reserved",
             )?;
             match u16_at(slot, 52) {
-                1 => require(extent.end - extent.start == 1, "fixed chunk extent length")?,
+                1 => require(
+                    extent.start / 4 == (extent.end - 1) / 4,
+                    "fixed chunk extent length/alignment",
+                )?,
                 2 => require(slot[16..48] == [0; 32], "ZERO extent hash")?,
                 _ => {
                     return Err(io::Error::new(
@@ -265,8 +271,8 @@ impl<'a> Page<'a> {
 fn start(bytes: &mut [u8], kind: Kind, offset: u64, level: u16, count: usize) -> io::Result<()> {
     require(bytes.len() == BLOCK_SIZE, "manifest output page size")?;
     bytes.fill(0);
-    bytes[..8].copy_from_slice(b"CASMAN02");
-    put16(bytes, 8, 2);
+    bytes[..8].copy_from_slice(b"CASMAN03");
+    put16(bytes, 8, 3);
     put16(bytes, 10, kind as u16);
     put16(bytes, 12, level);
     put16(bytes, 14, count as u16);
@@ -349,6 +355,7 @@ impl FileHeader {
         start(bytes, Kind::File, 0, 0, 0)?;
         bytes[64..80].copy_from_slice(&self.store);
         put64(bytes, 80, self.image_bytes);
+        put32(bytes, 88, self.chunk_size.bytes() as u32);
         finish(bytes, 0, self.image_bytes)
     }
 
@@ -360,6 +367,7 @@ impl FileHeader {
         Ok(Self {
             store: bytes[64..80].try_into().unwrap(),
             image_bytes,
+            chunk_size: ChunkSize::from_bytes(u32_at(bytes, 88) as usize)?,
         })
     }
 }
