@@ -1,10 +1,13 @@
 """Fail-closed measurement rules; run with uv run --no-project python -m unittest."""
 
+import json
 import socket
+import sys
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agent import CLONE, IMAGE, Agent, fio_options, ssh_ready
 from runner import classify, deltas, has_overlap, phases, rsync_bytes
@@ -36,6 +39,33 @@ def report(sent=0, memory=0, storage=0):
 
 
 class MeasurementTests(unittest.TestCase):
+    def test_fio_json_is_separate_from_ssh_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent = Agent({})
+            try:
+                agent.case = Path(directory)
+                agent.settings = {"seconds": 1}
+                result = {"jobs": [{"error": 0, "read": {"io_bytes": 4096}, "write": {"io_bytes": 0}}]}
+                script = "import sys; print('SSH warning', file=sys.stderr); print(" + repr(json.dumps(result)) + ")"
+                agent.spawn("fio", [sys.executable, "-c", script], separate_stderr=True)
+                self.assertEqual(agent.finish_fio("fio"), result)
+                self.assertIn("SSH warning", (agent.case / "fio.stderr.log").read_text())
+            finally:
+                agent.close()
+
+    def test_storage_only_member_can_settle_without_attached_guests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent = Agent({})
+            try:
+                agent.case = Path(directory)
+                (agent.case / "daemon").mkdir()
+                value = {"images": []}
+                (agent.case / "daemon/telemetry.jsonl").write_text(json.dumps(value) + "\n")
+                with patch("agent.time.sleep"):
+                    self.assertEqual(agent.settle(), value)
+            finally:
+                agent.close()
+
     def test_wire_counts_both_senders_once_and_rejects_restart(self):
         before, after = [report(10), report(20)], [report(17), report(29)]
         self.assertEqual(deltas(before, after)["ship"], 16)

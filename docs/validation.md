@@ -1074,3 +1074,12 @@ setup separately, and requires receiver success and checksum/length agreement.
 The optional KVM appliance supplies a ZFS-capable kernel because native Freestyle
 has no loadable ZFS module. At this commit, cross-VM guest execution remains to
 validate; successful package builds and unit tests do not certify those flows.
+
+Cross-VM attempt `native-n4-001` at `eac4bba` booted the KVM guest and completed
+its verified seed write, then failed parsing fio JSON: the Nix SSH client's
+warning about Ubuntu's unsupported GSSAPI option shared stdout's log. Fio now
+retains stderr separately. Inspection also found that storage-only members with
+no attached guests could never satisfy the runner's settle predicate; the empty
+set now counts as settled. Thirteen remote Python tests pass, including both
+regressions (`runner-python-4.log`). Failed guest evidence is preserved on the
+owned VMs and controller; this attempt does not certify the full N=4 flow.

@@ -159,18 +159,20 @@ class Agent:
         self.case = None
         self.zfs_dataset = None
 
-    def spawn(self, name, argv, env=None, pin=None, pass_fds=()):
+    def spawn(self, name, argv, env=None, pin=None, pass_fds=(), separate_stderr=False):
         if name in self.children:
             raise ValueError(f"child already exists: {name}")
         if pin:
             argv = ["taskset", "-c", pin, *argv]
         write_json(self.case / f"{name}-command.json", {"argv": argv, "env": env})
-        with (self.case / f"{name}.log").open("x") as log:
+        with (self.case / f"{name}.log").open("x") as log, (
+            self.case / f"{name}.stderr.log"
+        ).open("x") as errors:
             process = subprocess.Popen(
                 argv,
                 stdin=subprocess.DEVNULL,
                 stdout=log,
-                stderr=log,
+                stderr=errors if separate_stderr else log,
                 env={**os.environ, **(env or {})},
                 start_new_session=True,
                 pass_fds=pass_fds,
@@ -473,7 +475,7 @@ class Agent:
         )
         if kind == "ship":
             options += ["--rate=" + str(self.settings["ship_rate_bytes"])]
-        self.spawn(name, [*self.guests[guest], shlex.join(options)])
+        self.spawn(name, [*self.guests[guest], shlex.join(options)], separate_stderr=True)
         return {"started_ns": time.monotonic_ns()}
 
     def drift(self, guest):
@@ -548,8 +550,7 @@ class Agent:
                 ]
                 return (
                     value
-                    if states
-                    and all(
+                    if all(
                         s["issued"] == s["published"] == s["compacted"] for s in states
                     )
                     else False
