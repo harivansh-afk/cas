@@ -88,8 +88,10 @@ with (output / "console.log").open("x") as log:
                 "fixture failed; inspect retained results and scratch disks"
             )
     finally:
-        stop(process)
         sampled.set()
-        sampler.join()
+        try:
+            stop(process)
+        finally:
+            sampler.join()
 # Failures retain the disposable disks for diagnosis, as well as the logs.
 shutil.rmtree(scratch)

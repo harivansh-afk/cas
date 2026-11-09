@@ -83,6 +83,11 @@ The default run executes:
   UUIDs/format metadata differ. This is a workload-matched capacity control, not
   a claim that independently formatted disks have identical hashes.
 
+Fleet capacity is sampled after coordinated sweep; the independent-store control
+records settled allocation without a standalone collection pass. These are
+operational footprints at the recorded checkpoints, not normalized minimum-live-data
+capacity bounds. Retain the per-file breakdown when comparing them.
+
 `settings.seconds` and `repeats` default to five 30-second runs. `depths` defaults
 to 1, 4, 16, 64. Set `inline_us` to 0 for the blocking control or 50 for the bounded
 reactor polling arm. The 8 MiB default working set fits the 64 MiB owner cache;

@@ -992,3 +992,22 @@ the existing performance-core pin was retained. TCG boot now allows twenty
 minutes and the local suite four hours, with a boot RPC envelope covering its
 readiness phases. Native KVM and storage/protocol deadlines are unchanged.
 The fixture now records physical host pressure automatically every five seconds.
+
+## 2026-11-09 — interrupted Spark validation; move execution to Freestyle
+
+Worktree `feat/peer-fetch`, revision `f650a2b` plus the fixture sampler cleanup
+and capacity-method clarification. `CARGO_BUILD_JOBS=2 just check` completed on
+Spark before the owner's interruption: 538 Rust tests passed, 27 ignored, and
+eight Python tests passed (`results/two-host/just-check-pressure.log`). Ruff
+passed (`ruff-final.log`). All-systems Nix evaluation was interrupted
+(`nix-eval-pressure.log`). The owner terminated `local-012`; its launcher exited
+143 and the guest flow did not complete. Retained scratch disks, console and
+physical pressure records are incomplete evidence, not a passing fixture.
+
+All earlier Spark latency and guest downtime numbers are contaminated by shared
+host interference and are development diagnostics only. From this point, Spark
+is used only for editing and orchestration: no builds, tests or fixtures. New
+validation runs on x86_64 Freestyle VMs. The provider rejected the requested
+32-vCPU VM with `LIMIT_EXCEEDED` (account maximum 8 vCPUs), so the persistent
+`cas-build` host uses 8 vCPUs / 16 GiB. Inventory and created-resource IDs are
+retained in ignored `results/freestyle/`; existing VMs are not modified.
