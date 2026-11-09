@@ -473,11 +473,22 @@ pub(super) fn verify(output: &Path) -> io::Result<Value> {
         "shared/disjoint dataset digests differ from the workload contract",
     )?;
     // Validate every recorded sample, not only selected stage endpoints.
+    // One-second samples can miss a transient stop that has already reopened
+    // below the low watermark; the daemon also counts every stop transition.
     let mut staging_pressure = false;
+    let mut stops = 0;
     for line in BufReader::new(File::open(root.join("daemon/telemetry.jsonl"))?).lines() {
         let value: Value = serde_json::from_str(&line?)?;
         sample(&value)?;
-        staging_pressure |= value["host"]["staging"]["stopped"] == true;
+        let staging = &value["host"]["staging"];
+        let counted = u64_at(staging, "/stops")?;
+        require(counted >= stops, "staging stop count decreased")?;
+        stops = counted;
+        require(
+            staging["stopped"] != true || stops > 0,
+            "stopped staging sample has no counted stop",
+        )?;
+        staging_pressure |= staging["stopped"] == true || stops > 0;
     }
     require(staging_pressure, "no recorded staging backpressure")?;
     let memory = memory(&root.join("memory.jsonl"))?;

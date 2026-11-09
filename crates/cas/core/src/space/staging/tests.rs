@@ -187,3 +187,29 @@ fn concurrent_reservations_share_one_host_cap() {
     assert_eq!(owner.status(0).unwrap().0.promised, 0);
     assert!(owner.admits(0) && owner.admits(1));
 }
+
+#[test]
+fn transient_host_stops_remain_counted_after_reopening() {
+    let (owner, _) = account(1000, &[(400, 1000), (300, 1000)]);
+    assert_eq!(owner.status(0).unwrap().0.stops, 0);
+    let first = Staging::reserve(&owner, 1, 50).unwrap();
+    let second = Staging::reserve(&owner, 0, 250).unwrap();
+    let (host, _) = owner.status(0).unwrap();
+    assert!(host.stopped);
+    assert_eq!(host.stops, 1);
+    // Further denials while stopped are not new stop transitions.
+    assert!(Staging::reserve(&owner, 1, 1).is_err());
+    assert_eq!(owner.status(0).unwrap().0.stops, 1);
+    drop((first, second));
+    assert!(owner.reclaimed(0, 299).unwrap());
+    let (host, _) = owner.status(0).unwrap();
+    // A later sample sees the reopened gate but keeps the stop on record.
+    assert!(!host.stopped);
+    assert_eq!(host.stops, 1);
+    // A refused request that does not fit is itself a recorded stop.
+    assert_eq!(
+        Staging::reserve(&owner, 0, 500).err().unwrap().kind(),
+        io::ErrorKind::WouldBlock
+    );
+    assert_eq!(owner.status(0).unwrap().0.stops, 2);
+}
