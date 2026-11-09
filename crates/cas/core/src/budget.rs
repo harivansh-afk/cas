@@ -30,6 +30,7 @@ pub struct Usage {
 #[derive(Debug)]
 pub struct Budget {
     limit: Amount,
+    parent: Option<Arc<Budget>>,
     usage: Mutex<Usage>,
 }
 
@@ -37,6 +38,19 @@ impl Budget {
     pub fn new(limit: Amount) -> Arc<Self> {
         Arc::new(Self {
             limit,
+            parent: None,
+            usage: Mutex::new(Usage::default()),
+        })
+    }
+
+    /// A component ledger that also charges the enclosing host budget.
+    pub fn child(parent: &Arc<Self>) -> Arc<Self> {
+        Arc::new(Self {
+            limit: Amount {
+                bytes: usize::MAX,
+                requests: usize::MAX,
+            },
+            parent: Some(Arc::clone(parent)),
             usage: Mutex::new(Usage::default()),
         })
     }
@@ -53,9 +67,23 @@ impl Budget {
     }
 
     fn claim(&self, amount: Amount) -> bool {
+        self.claim_counted(amount, true)
+    }
+
+    fn claim_extra(&self, amount: Amount) -> bool {
+        self.claim_counted(amount, false)
+    }
+
+    fn claim_counted(&self, amount: Amount, count: bool) -> bool {
         let mut usage = self.usage.lock().expect("budget mutex poisoned");
         if amount.bytes > self.limit.bytes - usage.current.bytes
             || amount.requests > self.limit.requests - usage.current.requests
+        {
+            usage.rejected = usage.rejected.saturating_add(1);
+            return false;
+        }
+        if let Some(parent) = &self.parent
+            && !parent.claim_counted(amount, count)
         {
             usage.rejected = usage.rejected.saturating_add(1);
             return false;
@@ -64,12 +92,17 @@ impl Budget {
         usage.current.requests += amount.requests;
         usage.peak.bytes = usage.peak.bytes.max(usage.current.bytes);
         usage.peak.requests = usage.peak.requests.max(usage.current.requests);
-        usage.admitted = usage.admitted.saturating_add(1);
+        if count {
+            usage.admitted = usage.admitted.saturating_add(1);
+        }
         true
     }
 
     fn release(&self, amount: Amount) {
         let mut usage = self.usage.lock().expect("budget mutex poisoned");
+        if let Some(parent) = &self.parent {
+            parent.release(amount);
+        }
         usage.current.bytes -= amount.bytes;
         usage.current.requests -= amount.requests;
         usage.released = usage.released.saturating_add(1);
