@@ -1372,3 +1372,14 @@ records their IDs and digests. Unrelated/pre-existing VMs were untouched. Retain
 results; its VPC and named cache backup snapshot are retained too. No fixture or
 build process remained on the builder at cleanup. CloudLab commands and
 prerequisites are in [the runner guide](two-host-experiments.md#run-on-two-cloudlab-nodes).
+
+Final provider availability caveat: after cleanup, copying the documentation-only
+commit `657b763` to `cas-build` and directly querying that VM both returned HTTP
+503 `INTERNAL_ERROR`. Its last successful exec confirmed the checks and idle
+builder; current availability could not be confirmed. No delete was issued for
+this VM, its VPC or cache snapshot
+`sh-64d909185b34403794c97efb8d162b91` (created at 01:36 UTC). A metadata-filtered
+inventory returned no matching entries, which does not distinguish provider
+failure from VM disappearance. The final documentation bundle remains local;
+all raw evidence and SHA256 manifests were already downloaded, so this API
+failure does not affect the retained validation evidence.
