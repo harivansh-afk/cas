@@ -52,7 +52,7 @@ fn direct(path: &Path, write: bool) -> io::Result<File> {
     }
     options.open(path)
 }
-fn write_seed(path: &Path, domain: u64, bytes: u64, rate: Option<u64>) -> io::Result<Duration> {
+fn write_seed(path: &Path, domain: u64, bytes: u64) -> io::Result<Duration> {
     let mut file = direct(path, true)?;
     // Large writes expose guest request splitting without another whole-file buffer.
     let mut buffer = AlignedBuffer::new(1024 * 1024);
@@ -69,14 +69,41 @@ fn write_seed(path: &Path, domain: u64, bytes: u64, rate: Option<u64>) -> io::Re
             seed(block, domain, offset / BLOCK_SIZE as u64 + index as u64);
         }
         file.write_all(buffer.as_slice())?;
-        if let Some(rate) = rate {
-            let due = Duration::from_secs_f64(
-                (offset + buffer.as_slice().len() as u64) as f64 / rate as f64,
-            );
-            while start.elapsed() < due {
-                process::check_interrupt()?;
-                std::thread::sleep(due.saturating_sub(start.elapsed()).min(process::POLL));
-            }
+        if start.elapsed() > COMMAND_TIMEOUT {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+    }
+    file.sync_all()?;
+    Ok(start.elapsed())
+}
+
+// A finite burst must have its offered bytes ready before the controller starts
+// its clock. Hash expansion under TCG otherwise competes with submission. Keep
+// the original one-MiB direct writes, data, pacing and terminal sync unchanged.
+fn prepare_burst(domain: u64) -> AlignedBuffer {
+    let mut bytes = AlignedBuffer::new(WRITE_BYTES as usize);
+    for (index, block) in bytes
+        .as_mut_slice()
+        .as_chunks_mut::<BLOCK_SIZE>()
+        .0
+        .iter_mut()
+        .enumerate()
+    {
+        seed(block, domain, index as u64);
+    }
+    bytes
+}
+
+fn write_burst(path: &Path, bytes: &AlignedBuffer, rate: u64) -> io::Result<Duration> {
+    let mut file = direct(path, true)?;
+    let start = Instant::now();
+    for (index, buffer) in bytes.as_slice().chunks(1024 * 1024).enumerate() {
+        process::check_interrupt()?;
+        file.write_all(buffer)?;
+        let due = Duration::from_secs_f64(((index + 1) * buffer.len()) as f64 / rate as f64);
+        while start.elapsed() < due {
+            process::check_interrupt()?;
+            std::thread::sleep(due.saturating_sub(start.elapsed()).min(process::POLL));
         }
         if start.elapsed() > COMMAND_TIMEOUT {
             return Err(io::ErrorKind::TimedOut.into());
@@ -237,19 +264,18 @@ fn verify(args: &Args, root: &Path) -> io::Result<Vec<Digest>> {
 }
 fn write(args: &Args, root: &Path) -> io::Result<Vec<Digest>> {
     fs::create_dir(root)?;
-    write_seed(&root.join("shared"), 0, SET_BYTES, None)?;
-    write_seed(
-        &root.join("private"),
-        1 + args.image as u64,
-        SET_BYTES,
-        None,
-    )?;
+    write_seed(&root.join("shared"), 0, SET_BYTES)?;
+    write_seed(&root.join("private"), 1 + args.image as u64, SET_BYTES)?;
     for stage in Stage::ALL {
         let directory = args.output.join(stage.name());
         fs::create_dir(&directory)?;
+        let preparing = Instant::now();
+        let burst = (stage == Stage::Burst).then(|| prepare_burst(20 + args.image as u64));
         publish(
             &directory.join("ready.json"),
-            &serde_json::json!({"image": args.image, "stage": stage}),
+            &serde_json::json!({"image": args.image, "stage": stage,
+                "prepared_bytes":burst.as_ref().map_or(0, |bytes| bytes.as_slice().len()),
+                "preparation_ns":preparing.elapsed().as_nanos()}),
         )?;
         wait(&directory.join("request.json"))?;
         let request: Request = evidence::read_json(&directory.join("request.json"))?;
@@ -265,12 +291,15 @@ fn write(args: &Args, root: &Path) -> io::Result<Vec<Digest>> {
             fio(args, &directory, &root.join(stage.name()), stage)?
         } else if matches!(stage, Stage::Calibration | Stage::Burst) {
             let domain = if stage == Stage::Calibration { 10 } else { 20 } + args.image as u64;
-            let elapsed = write_seed(
-                &root.join(stage.name()),
-                domain,
-                WRITE_BYTES,
-                request.rate_bytes_per_second,
-            )?;
+            let elapsed = if let Some(bytes) = &burst {
+                write_burst(
+                    &root.join(stage.name()),
+                    bytes,
+                    request.rate_bytes_per_second.expect("burst rate"),
+                )?
+            } else {
+                write_seed(&root.join(stage.name()), domain, WRITE_BYTES)?
+            };
             Completed {
                 stage,
                 image: args.image,
@@ -328,11 +357,27 @@ pub fn run(args: Args) -> io::Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn prepared_burst_preserves_direct_payload_and_identity_oracle() {
+        let root = tempfile::tempdir().unwrap();
+        let prepared = root.path().join("prepared");
+        let original = root.path().join("original");
+        let bytes = prepare_burst(21);
+        assert_eq!(bytes.as_slice().len(), WRITE_BYTES as usize);
+        write_burst(&prepared, &bytes, u64::MAX).unwrap();
+        write_seed(&original, 21, WRITE_BYTES).unwrap();
+        assert_eq!(
+            digest(&prepared).unwrap().blake3,
+            digest(&original).unwrap().blake3
+        );
+        verify_seed(&prepared, 21, WRITE_BYTES).unwrap();
+        assert!(verify_seed(&prepared, 20, WRITE_BYTES).is_err());
+    }
+    #[test]
     fn direct_oracle_rejects_wrong_identity_corruption_and_truncation() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("seed");
         let bytes = 1024 * 1024;
-        write_seed(&path, 7, bytes, None).unwrap();
+        write_seed(&path, 7, bytes).unwrap();
         verify_seed(&path, 7, bytes).unwrap();
         assert!(verify_seed(&path, 8, bytes).is_err());
         let file = File::options().write(true).open(&path).unwrap();

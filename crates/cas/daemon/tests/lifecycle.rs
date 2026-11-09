@@ -186,6 +186,13 @@ impl Drop for Daemon {
         // Also runs on assertion failure so as to never leave a blocked daemon behind
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if thread::panicking() {
+            for name in ["stderr", "report.json"] {
+                if let Ok(contents) = fs::read_to_string(self.directory.path().join(name)) {
+                    eprintln!("daemon {name} before cleanup:\n{contents}");
+                }
+            }
+        }
     }
 }
 

@@ -339,6 +339,27 @@ impl Backend {
         restartable: bool,
         fault: Fault,
     ) -> io::Result<Self> {
+        Self::open_with_staging_limit(path, kind, create_bytes, restartable, fault, None)
+    }
+
+    pub fn open_with_staging_limit(
+        path: &Path,
+        kind: BackendKind,
+        create_bytes: Option<u64>,
+        restartable: bool,
+        fault: Fault,
+        staging_bytes: Option<u64>,
+    ) -> io::Result<Self> {
+        if staging_bytes.is_some() && !matches!(kind, BackendKind::Local | BackendKind::LocalAsync)
+        {
+            return Err(io::Error::other(
+                "staging limit requires local or local-async",
+            ));
+        }
+        let mut limits = cas_core::append::Limits::default();
+        if let Some(bytes) = staging_bytes {
+            limits.staging_bytes = bytes;
+        }
         if restartable && !matches!(kind, BackendKind::Staging | BackendKind::LocalAsync) {
             return Err(io::Error::other(
                 "restartable mode requires staging or local-async",
@@ -355,9 +376,22 @@ impl Backend {
                 restartable,
             )?,
             BackendKind::Raw => Storage::raw(path, &completion_event, QUEUE_SIZE)?,
-            BackendKind::Local => Storage::local(path, create_bytes, &completion_event)?,
-            BackendKind::LocalAsync if live => Storage::local_live(path, create_bytes)?,
-            BackendKind::LocalAsync => Storage::local_async(path, create_bytes, &completion_event)?,
+            BackendKind::LocalAsync if live => Storage::from_opening(
+                crate::storage::Opening::with_limits(path, create_bytes, limits)?,
+            )?,
+            BackendKind::Local | BackendKind::LocalAsync => {
+                Storage::from_local(local::Local::open_with_limits(
+                    path,
+                    create_bytes,
+                    &completion_event,
+                    if matches!(kind, BackendKind::Local) {
+                        local::Execution::Synchronous
+                    } else {
+                        local::Execution::Concurrent
+                    },
+                    limits,
+                )?)?
+            }
         };
         Self::from_storage(storage, completion_event, kind, restartable, live, fault)
     }

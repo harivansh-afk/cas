@@ -411,7 +411,16 @@ impl Shared {
     }
 }
 
+#[cfg(test)]
 pub fn create_log(path: &Path, image_bytes: u64) -> io::Result<Log> {
+    create_log_with_limits(path, image_bytes, append::Limits::default())
+}
+
+pub fn create_log_with_limits(
+    path: &Path,
+    image_bytes: u64,
+    limits: append::Limits,
+) -> io::Result<Log> {
     let mut identities = [0; 32];
     File::open("/dev/urandom")?.read_exact(&mut identities)?;
     Log::create(
@@ -422,7 +431,7 @@ pub fn create_log(path: &Path, image_bytes: u64) -> io::Result<Log> {
             image_bytes,
             segment_bytes: 64 * MAX_REQUEST_BYTES as u64,
         },
-        append::Limits::default(),
+        limits,
     )
     .map_err(io::Error::other)
 }
@@ -446,19 +455,37 @@ impl Local {
     pub fn shared_host(&self) -> bool {
         self.shared.window.is_some()
     }
+    #[cfg(test)]
     pub fn open(path: &Path, create_bytes: Option<u64>, event: &EventFd) -> io::Result<Self> {
         Self::open_with_execution(path, create_bytes, event, Execution::Synchronous)
     }
 
+    #[cfg(test)]
     pub fn open_with_execution(
         path: &Path,
         create_bytes: Option<u64>,
         event: &EventFd,
         execution: Execution,
     ) -> io::Result<Self> {
+        Self::open_with_limits(
+            path,
+            create_bytes,
+            event,
+            execution,
+            append::Limits::default(),
+        )
+    }
+
+    pub fn open_with_limits(
+        path: &Path,
+        create_bytes: Option<u64>,
+        event: &EventFd,
+        execution: Execution,
+        limits: append::Limits,
+    ) -> io::Result<Self> {
         let log = match create_bytes {
-            Some(image_bytes) => create_log(path, image_bytes),
-            None => Log::open(path, append::Limits::default()).map_err(io::Error::other),
+            Some(image_bytes) => create_log_with_limits(path, image_bytes, limits),
+            None => Log::open(path, limits).map_err(io::Error::other),
         }?;
         let shared = Shared::new(log.status())?;
         Self::from_log(log, event, execution, shared)

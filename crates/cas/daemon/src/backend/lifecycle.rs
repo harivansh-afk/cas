@@ -137,7 +137,11 @@ impl Backend {
                 .as_ref()
                 .map_or(self.next_id != 0, Session::active);
             match change {
-                StateChange::QueueConfiguration(index) if serving => {
+                // Retain the rebase requirement even if a completion wake
+                // activates a fresh attachment before the queue is re-enabled.
+                StateChange::QueueConfiguration(index)
+                    if serving || self.live.as_ref().is_some_and(Session::fresh) =>
+                {
                     self.blocked_queues[index] = true;
                     self.rebase_queues[index] = true;
                 }

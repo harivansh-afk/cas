@@ -263,6 +263,14 @@ fn execute_guest(
                 command.arg("--create-bytes").arg(DISK_BYTES.to_string());
             }
         }
+        if matches!(build.backend, Backend::Local | Backend::LocalAsync) {
+            // Two 64 MiB write passes can each use a header and commit block
+            // per 4 KiB payload (384 MiB worst case), plus segment rounding,
+            // filesystem allocation metadata. Recovery jobs write less data.
+            command
+                .arg("--staging-bytes")
+                .arg((512_u64 * 1024 * 1024).to_string());
+        }
         if args.device_reset {
             command.arg("--restartable");
         }

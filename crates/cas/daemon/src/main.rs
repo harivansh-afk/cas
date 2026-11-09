@@ -24,6 +24,10 @@ struct Args {
     /// Create new staging/local storage with this logical capacity; never replaces existing data.
     #[arg(long)]
     create_bytes: Option<u64>,
+    /// Physical staging allocation cap for local/local-async (default: 256 MiB).
+    /// Supply the same cap on restart; filesystem metadata counts toward it.
+    #[arg(long)]
+    staging_bytes: Option<u64>,
     /// Live recovery: serial durable staging, or retained inflight state for local-async.
     #[arg(long)]
     restartable: bool,
@@ -69,12 +73,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .write(true)
         .create_new(true)
         .open(&args.report)?;
-    let backend = backend::Backend::open_with_recovery(
+    let backend = backend::Backend::open_with_staging_limit(
         &args.image,
         args.backend,
         args.create_bytes,
         args.restartable,
         fault,
+        args.staging_bytes,
     )?;
     cas_daemon::service::serve(backend, &args.socket, report)?;
     Ok(())

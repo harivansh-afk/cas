@@ -10,6 +10,8 @@ pub(super) struct Endpoint {
     pub manifest: Manifest,
     pub resources: Arc<Resources>,
     pub quiescent: Option<u64>,
+    pub swept_roots: u64,
+    pub swept_attached: bool,
     #[cfg(test)]
     pub control: Arc<Mutex<tests::Control>>,
     pub health: Health,
@@ -267,6 +269,7 @@ impl Endpoint {
 }
 
 pub(super) struct Owner {
+    pub exhausted_space: Option<(u64, u64)>,
     pub catalog: Option<cas_core::catalog::Catalog>,
     pub store: Store,
     pub snapshots: BudgetVec<Snapshot, BudgetAllocator>,
@@ -276,6 +279,26 @@ pub(super) struct Owner {
 }
 
 impl Owner {
+    fn collection_changed(&self) -> bool {
+        if !self.shared.collection_required() {
+            return false;
+        }
+        let Some(exhausted) = self.exhausted_space else {
+            return true;
+        };
+        let space = self
+            .shared
+            .physical
+            .as_ref()
+            .expect("pressured governor")
+            .status();
+        (space.allocated, space.promised) != exhausted
+            || self.endpoints.iter().enumerate().any(|(index, endpoint)| {
+                endpoint.swept_roots != endpoint.manifest.roots_revision()
+                    || endpoint.swept_attached != self.shared.admission.attached(index)
+            })
+    }
+
     pub fn run(mut self) {
         let _io_scope = cas_core::scheduler::Scheduler::background(&self.shared.io_scheduler);
         let mut exit = UnexpectedExit {
@@ -284,14 +307,25 @@ impl Owner {
         };
         let mut next_collection = Instant::now();
         loop {
-            if self.shared.collection_required()
-                && Instant::now() >= next_collection
-                && let Ok(control) = administration::Control::claim(&self.shared)
-            {
-                let result = self.collect();
-                self.shared.collected(&result);
-                drop(control);
+            if self.shared.collection_required() && Instant::now() >= next_collection {
+                // Delayed filesystem frees can reopen admission without a sweep.
+                // Refresh on the owner, without stopping readers.
+                if self.exhausted_space.is_some()
+                    && let Some(physical) = &self.shared.physical
+                    && let Err(error) = physical.refresh()
+                {
+                    self.shared.gate.fail(error.to_string());
+                }
+                if self.collection_changed()
+                    && let Ok(control) = administration::Control::claim(&self.shared)
+                {
+                    let result = self.collect();
+                    self.shared.collected(&result);
+                    drop(control);
+                }
                 next_collection = Instant::now() + Duration::from_secs(1);
+            } else if !self.shared.collection_required() {
+                self.exhausted_space = None;
             }
             let ready = match self.input.recv_timeout(Duration::from_millis(50)) {
                 Ok(ready) => ready,

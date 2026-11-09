@@ -1,6 +1,17 @@
 //! The mandatory scenarios are also the execution inventory; a skip cannot pass.
 use super::Checkpoint;
 
+pub const DEFAULT_DEADLINE_SECONDS: u64 = 115;
+
+pub fn command_deadline_seconds(id: &str) -> u64 {
+    match id {
+        // Evaluating the full NixOS/package graph took 144 s on an otherwise
+        // idle supported host. This is build validation, not a guest IO bound.
+        "nix-check" => 300,
+        _ => DEFAULT_DEADLINE_SECONDS,
+    }
+}
+
 pub const CHECKS: &[(&str, &[&str])] = &[
     ("rust-format", &["cargo", "fmt", "--all", "--", "--check"]),
     (

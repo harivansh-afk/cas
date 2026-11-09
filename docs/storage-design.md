@@ -42,6 +42,14 @@ This is not a bound on worst-case read latency.
 
 ## Compaction and collection
 
+After a complete sweep reports capacity exhaustion, automatic collection waits
+for a change in retained roots, attachment membership or physical allocation
+and promises. Reading the same current root does not trigger another global
+pause. Releasing the final old-root pin or advancing a manifest permits a retry;
+explicit collection remains available. The worker checks delayed filesystem
+frees without pausing readers. This prevents repeated no-progress sweeps but
+does not remove the pause required by a productive collection.
+
 Compaction processes durable WAL data, hashes fixed 4 KiB chunks, and writes
 missing content into shared chunk segments. Chunk data is synchronized before
 publishing a copy-on-write manifest commit. Covered WAL payload is reclaimable

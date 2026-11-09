@@ -33,6 +33,13 @@ nix build .#staging-smoke --out-link result-staging
 ./result-staging/bin/cas-vm-smoke --live-recovery --output results/live-run
 ```
 
+The local/local-async smoke runner passes `--staging-bytes 536870912` (512 MiB)
+to `cas-daemon`, including on cold reopen. The two 64 MiB write passes need
+space for WAL framing, segment rounding and filesystem allocation metadata;
+a 256 MiB cap cannot guarantee completion. Standalone daemon calls still default
+to 256 MiB. An explicit cap must be supplied again on restart. Physical allocated
+blocks remain charged; this fixture budget does not change `cas-host` policy.
+
 The raw and serial staging paths are controls, not the shared `cas-host`
 implementation. The serial live-recovery check does not establish concurrent
 shared recovery. Outputs contain build identity, commands, guest logs, and IO
@@ -48,11 +55,22 @@ nix develop -c result-checkpoints/bin/cas-checkpoints \
 result-cas/bin/cas-harness verify-suite --output results/c5-run
 ```
 
+The shared and pressure fixtures keep their inner guests on TCG. Their immutable
+program store is a prebuilt read-only EROFS disk, avoiding a second 9p hop during
+boot. It uses SCSI so the vhost-user workload disk remains `/dev/vda`. Results
+remain on 9p; guest workloads verify and record the program-store mount.
+
 The suite selects reference checks (C1), packed append (C2), concurrent
 recovery (C3), XFS store/collection (C4), and shared filesystem/pressure
 fixtures (C5). The harness binds evidence to exact sources and built binaries;
 its independent verifier rejects missing or altered required records.
 A pass applies only to the tested revision and failure model.
+
+The Nix flake check has a separate 300-second build-validation budget: complete
+evaluation took 144 seconds on the isolated eight-vCPU correctness host.
+Other command scenarios retain 115 seconds, shared/XFS fixtures 510 seconds,
+and pressure 1260 seconds. Guest IO, recovery and admission deadlines remain
+independent of this build-validation budget.
 
 ## Interactive guests
 

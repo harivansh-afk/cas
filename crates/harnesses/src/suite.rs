@@ -203,7 +203,7 @@ fn scenario(
     let directory = output.join("scenarios").join(id);
     let deadline = match &validation {
         Validation::Fixture(_, case) => case.deadline_seconds(),
-        _ => 115,
+        _ => scenarios::command_deadline_seconds(id),
     };
     let command_result = process::run_logged(command, &directory, Duration::from_secs(deadline))?;
     let validation = if !command_result.succeeded() {
@@ -297,7 +297,9 @@ fn execute(args: &Args, report: &mut Report) -> io::Result<()> {
             "reference_queues":{"count":1, "entries":128},
             "concurrent_queues":(args.checkpoint >= Checkpoint::C3).then(|| json!({"count":4, "entries":256})),
             "fixture_inventory":scenarios::fixtures(args.checkpoint).iter().map(|case| json!({"id":case.id,"crash_at":case.cut,"deadline_seconds":case.deadline_seconds()})).collect::<Vec<_>>(),
-            "scenario_deadline_seconds":115, "guest_boot_deadline_seconds":90,
+            "scenario_deadline_seconds":scenarios::DEFAULT_DEADLINE_SECONDS,
+            "nix_check_deadline_seconds":scenarios::command_deadline_seconds("nix-check"),
+            "guest_boot_deadline_seconds":90,
             "cargo_features":"workspace defaults; resolved features in cargo-graph/stdout.log",
             "paper_gates":[],
         }),
@@ -527,6 +529,26 @@ pub fn verify(output: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nix_evaluation_budget_does_not_extend_runtime_deadlines() {
+        assert_eq!(scenarios::command_deadline_seconds("nix-check"), 300);
+        for id in scenarios::required(Checkpoint::C5) {
+            if id != "nix-check" {
+                assert_eq!(scenarios::command_deadline_seconds(id), 115, "{id}");
+            }
+        }
+        for case in scenarios::fixtures(Checkpoint::C5) {
+            assert_eq!(
+                case.deadline_seconds(),
+                if case.wrapper == "pressure" {
+                    1260
+                } else {
+                    510
+                }
+            );
+        }
+    }
 
     #[test]
     fn c3_requires_every_concurrent_and_persistence_case() {

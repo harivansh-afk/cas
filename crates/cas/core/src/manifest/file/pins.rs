@@ -9,7 +9,10 @@ use hashbrown::HashTable;
 use std::{
     fs::File,
     io,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 struct Entry {
@@ -19,6 +22,7 @@ struct Entry {
 
 struct Registry {
     incarnation: u64,
+    revision: AtomicU64,
     entries: Mutex<HashTable<Entry, BudgetAllocator>>,
 }
 
@@ -48,6 +52,7 @@ impl Pin {
         let registry = BudgetArc::try_new(
             Registry {
                 incarnation,
+                revision: AtomicU64::new(0),
                 entries: Mutex::new(HashTable::new_in(BudgetAllocator::new(Arc::clone(
                     &metadata,
                 )))),
@@ -55,6 +60,10 @@ impl Pin {
             &metadata,
         )?;
         Self::insert(registry, key)
+    }
+
+    pub(super) fn revision(&self) -> u64 {
+        self.registry.revision.load(Ordering::Acquire)
     }
 
     pub(super) fn page_key(&self, offset: u64) -> super::cache::PageKey {
@@ -90,6 +99,7 @@ impl Pin {
                 entries
                     .try_reserve(1, |entry| bucket(entry.key.end))
                     .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
+                registry.changed();
                 entries.insert_unique(bucket(key.end), Entry { key, owners: 1 }, |entry| {
                     bucket(entry.key.end)
                 });
@@ -123,6 +133,16 @@ impl Pin {
             keys,
             metadata,
         })
+    }
+}
+
+impl Registry {
+    fn changed(&self) {
+        self.revision
+            .fetch_update(Ordering::Release, Ordering::Relaxed, |revision| {
+                revision.checked_add(1)
+            })
+            .expect("root registry revision exhausted");
     }
 }
 
@@ -160,6 +180,7 @@ impl Drop for Pin {
             .expect("a live pin has a registered root");
         entry.get_mut().owners -= 1;
         if entry.get().owners == 0 {
+            self.registry.changed();
             entry.remove();
         }
     }
