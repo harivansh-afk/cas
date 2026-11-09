@@ -958,3 +958,167 @@ The diagnostic Nix expression initially used an unfiltered path flake reference;
 that evaluation was canceled, then rebuilt successfully using `git+file://`.
 Diagnostic scripts/expressions, disk copies and logs remain under ignored
 `results/two-host/diagnose*`. They are diagnostic artifacts, not a runner mode.
+
+## 2026-11-09 — Fixed chunk arms and memory accounting
+
+Validated implementation revision `5b5d899bf33edeab11a5da946e72f432594b0705`
+(`feat/chunk-16k`), with no uncommitted changes on the test checkout. This
+record, the storage design/format descriptions and the allocation-audit TODO
+clarification follow that code revision as documentation-only changes. The
+interrupted work was retained and reviewed in
+`cas-public/.worktrees/chunk16`, originally based on
+`d49ab617808c2189cf5c36eea3e9d858ed2fb076`. No rebase onto the concurrently
+changing peer branch, push, merge, CI run or deployment occurred.
+
+All compilation, formatting, tests and fixture execution in this session ran
+on the persistent Freestyle VM `cas-build-chunk16`: x86_64, 8 vCPUs, 16 GiB RAM,
+64 GiB virtual disk, Linux 6.1.102, Ubuntu/glibc 2.39, Rust 1.98.1,
+just 1.59.0 and uv 0.13.7. The provider rejected a 16-vCPU resize because the
+account caps individual VMs at eight. No other VMs were created or modified.
+Spark handled source edits, Git bundles and evidence transfer only. Build
+caches remain on the named VM. Default native tests used ext4; reflink tests
+and comparison data used a fresh 4 GiB XFS loop filesystem at
+`/mnt/chunk16-xfs`. This is virtual-storage development evidence, not a native
+NVMe measurement or a power-loss test.
+
+### Commands and outcomes
+
+The exact command script and environment are retained with the raw evidence.
+Commands ran from `/work/cas` with the pinned toolchain and `ulimit -n 65536`:
+
+```sh
+just check
+TMPDIR=/mnt/chunk16-xfs/tmp cargo test -p cas-core --locked \
+  chunk16_snapshot_clone_collection -- --ignored --nocapture
+TMPDIR=/mnt/chunk16-xfs/tmp cargo test -p cas-core --locked \
+  reflink_snapshot_and_private_clone_roots_survive_shared_chunk_relocation \
+  -- --ignored --nocapture
+cargo test -p cas-core --locked --test chunk_crash -- --nocapture
+cargo test -p cas-core --locked --test memory_accounting -- --nocapture
+cargo run -p cas-core --locked --example chunk-arm -- \
+  fixture /mnt/chunk16-xfs/comparison
+cargo run -p cas-core --locked --example chunk-arm -- \
+  inspect /mnt/chunk16-xfs/comparison/4k
+cargo run -p cas-core --locked --example chunk-arm -- \
+  inspect /mnt/chunk16-xfs/comparison/16k
+mkdir /mnt/chunk16-xfs/host16
+cargo run -p cas-daemon --locked --bin cas-host -- init \
+  --root /mnt/chunk16-xfs/host16 --store 01010101010101010101010101010101 \
+  --image 02020202020202020202020202020202=1048576 --chunk-bytes 16384
+cargo run -p cas-core --locked --example chunk-arm -- inspect /mnt/chunk16-xfs/host16
+```
+
+All commands passed. `just check` passed formatting, warnings-as-errors Clippy,
+554 Rust tests, eight Python tests and whitespace checks. Its default run left
+28 fixture/subprocess-entry tests ignored; the two selected XFS collection
+checks above passed separately. The remaining ignored fixtures and full C5
+inventory were not run. No QEMU guest workload or dedicated-device comparison
+was run in this session.
+
+Coverage includes partial 16 KiB reconstruction from a pinned D plus selected
+WAL data, exclusion of later writes above captured E, overlapping ZERO,
+zero-padded image tails, bounded maximum batches and huge ZERO interiors,
+geometry/version rejection, retained read/root pins, collection IO failures,
+and recovery after three process-exit cuts for each arm (before chunks, after
+chunk sync, after manifest sync). The XFS tests verify actual snapshot/clone
+reflinks, collection relocation and reopen. Daemon tests cover 4 KiB reads of
+16 KiB chunks, shared caching, partial overwrite, collection and restart,
+peer/fleet refusal, and wrong-geometry snapshot rejection before any catalog
+dependency repair. Exact counter tests check WAL headers/payload/fences, base
+assembly reads, manifest preparation reads and collection rewrites without
+double counting them as additional store writes.
+
+### Development comparison
+
+Two 1 MiB images per arm start with identical data. The second then overwrites
+one 4 KiB block in every aligned 16 KiB extent. Both arms receive 2,359,296 guest
+WRITE bytes. After compaction, WAL reclamation and collection, the fixture
+checks every guest block against independently constructed expected bytes.
+The first image still retains the original chunks, so this particular fixture
+has no dead chunks to rewrite; nonzero collection traffic is checked by the
+separate exact-counter and collection tests.
+
+| Measurement | 4 KiB chunks | 16 KiB chunks |
+| --- | ---: | ---: |
+| Stored chunks | 320 | 128 |
+| Unique payload bytes | 1,310,720 | 2,097,152 |
+| Encoded / allocated chunk-file bytes after sweep | 1,343,488 | 2,121,728 |
+| All root file allocations, including WAL/manifest/format | 3,321,856 | 4,026,368 |
+| Live index allocation bytes | 25,112 | 12,568 |
+| Index entry / table overhead / allocator slack bytes | 15,360 / 9,744 / 8 | 6,144 / 6,416 / 8 |
+| Average allocated index bytes per stored chunk | 78.475 | 98.1875 |
+| Guest WRITE bytes | 2,359,296 | 2,359,296 |
+| WAL bytes written | 2,396,160 | 2,396,160 |
+| Store bytes appended | 1,343,488 | 2,121,728 |
+| Manifest bytes written | 139,264 | 65,536 |
+| Compaction read bytes | 2,416,640 | 5,275,648 |
+| Collection rewrite bytes (subset of store writes) | 0 | 0 |
+| Software write ratio | 1.644097 | 1.942708 |
+| Compaction read ratio | 1.024306 | 2.236111 |
+
+The software write ratio is `(WAL + store appends + manifest writes) / guest
+WRITE bytes`. It excludes root-format creation and filesystem/device metadata
+traffic. Collection rewrites are already in store appends. All-root allocation
+includes retained WAL headers, so it is distinct from unique stored payload.
+Offline inspection rebuilt the same index allocation totals in this fixture;
+in general collection retains table capacity and a rebuild can differ. Libc
+usable-size slack may also vary between equal layouts. These are one-run,
+small-fixture values, not constant marginal bytes per entry or scaling results.
+
+The 16 KiB arm saves index allocation here but loses aligned 4 KiB deduplication
+when neighboring blocks differ, and reads untouched base data to reconstruct
+partial extents. No ZFS arm, device write counter, equal-total-memory control,
+CPU-per-GB result, guest latency histogram or repeated-trial variance is claimed.
+Those paper measurements remain open.
+
+### Memory evidence and remaining audit
+
+The isolated memory test touches 110,000 index entries, an 8 MiB clean payload
+cache and a 4 MiB manifest payload cache. Actual component charges were:
+index 6,426,608 bytes; clean cache 9,515,256; manifest cache 4,669,672; total
+20,611,536. Measured RSS increased from 3,764,224 to 32,489,472 bytes, a delta
+of 28,725,248. Libc live allocation increased by 20,655,872 and free arenas by
+8,048,896 bytes. The RSS residual after component charges and free arenas was
+64,816 bytes. RSS after dropping the components was 4,354,048 bytes. The test
+checks allocation reconciliation within 512 KiB and RSS reconciliation within
+2 MiB; it does not equate usable allocation bytes with process RSS.
+
+The index ledger charges full hashbrown layout plus `malloc_usable_size` slack,
+including simultaneous old/new tables during growth. Cache totals include their
+tables, shared controls and reader-held values. Allocation-recorder tests
+independently check Arc layout, final-deallocation credit ordering and rejected
+slack charges. Offline inspection explicitly reports live cache allocations as
+unavailable; live host telemetry exposes clean and manifest cache totals.
+
+The allocation-audit TODO remains unchecked. This work covers these component
+allocations, not all runtime allocations: request/fetch/recovery buffers,
+compaction scratch/preparation, diagnostics, fixed ledger objects, allocator
+bookkeeping/retained arenas, stacks, libraries and kernel/page-cache memory still
+need a complete daemon-lifetime reconciliation and pressure evidence. Cache
+payload caps are not equal-total-memory controls.
+
+### Failures, retries and retained evidence
+
+Initial `cargo test -p cas-core --locked` passed on the reviewed dirty
+`d49ab61` tree. The first complete `just check` failed 21 peer/fleet tests with
+`TooManyOpenFiles` and disconnected children under the VM's 1,024-descriptor
+soft limit. Raising the limit to 65,536 made the next complete check pass.
+A later check at `0d995c1` exposed an existing index-growth test assumption:
+equal layouts happened to get different libc usable sizes (observed peak 624
+versus expected 640 bytes). `5b5d899` checks the actual old/new allocations of
+each attempt and their exact overlap; the final complete check passed. A
+metadata-capture script initially stopped on `ldd --version | head -1` under
+`pipefail`, before any final tests; retaining full version output fixed it.
+One stalled source upload was canceled and retried with a compressed archive.
+The interrupted attempt's older logs were preserved but are not acceptance
+for this revision.
+
+Raw logs, JSON, environment and command script are under ignored
+`results/chunk16-resumed/evidence/`, with the same files at `/work/evidence` on
+`cas-build-chunk16`. Fixture files remain at `/mnt/chunk16-xfs/comparison` and
+`/mnt/chunk16-xfs/host16` on that VM. The transferred code history is retained
+there and locally. `evidence.tgz` SHA-256 is
+`a9b9d0a367ca168890f8aaa684d0545a4c28dd571560b09ff03df5f646587b10`.
+The first dirty-source archive is `results/chunk16-resumed/first-tested-source.tar`,
+SHA-256 `d4321f3500f1f2d5958aebe93ca869b479a3ce7fdc7113736723ddd44357105f`;
+`inherited.patch` preserves the tracked changes found at resumption.

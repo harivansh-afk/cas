@@ -10,9 +10,10 @@ Check off work only when its acceptance condition passes, with a record in
   [Validation](docs/validation.md#2026-11-08--phase-b-static-fleet-transfers-and-crash-recovery)
 - [ ] Establish isolated remote-read p99 and GET/PUT contention results on the
   two-host 100 GbE testbed; shared Spark medians are development evidence only.
-- [ ] Complete the runtime allocation audit, including reader-held buffers,
-  compaction preparation, and diagnostic allocations; reconcile charged bytes
-  with measured process memory.
+- [ ] Complete the remaining runtime allocation audit: fetch/request/recovery
+  buffers, compaction preparation, diagnostics and allocator arenas; reconcile
+  full-daemon RSS. Index and cache component accounting is covered by the
+  [chunk-arm validation](docs/validation.md#2026-11-09--fixed-chunk-arms-and-memory-accounting).
 - [ ] Bound mixed-IO read tails behind FLUSH barriers and capacity-blocked
   writes without breaking ordering or starving reclamation.
 - [ ] Verify mixed readers under actual OOM and ENOSPC with non-expiring

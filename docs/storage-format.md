@@ -1,11 +1,26 @@
-# V2 storage encoding
+# Storage encoding: v2 WAL, v3 chunks and manifests
 
 Encoding used by the [local storage implementation](storage-design.md). All integers
 are little-endian. Every IO address, length and offset is 4 KiB aligned. These
 tables describe the byte representation checked by the encoder and recovery parser.
 CRC32 uses the same algorithm as the v1 reference. A checksum is not authentication.
 
-## Segment header
+## Store geometry (v3)
+
+New stores require `chunk-format.v3` at the root, including empty stores. Its
+single 4096-byte block contains `CASSTO03` at 0, version u32 3 at 8, fixed chunk
+bytes u32 (4096 or 16384) at 12, store ID at 16..32, segment capacity u64 at 32,
+zero reserved bytes 40..4092, and whole-block CRC32 at 4092 with that field zeroed.
+Creation syncs the file and root directory. Geometry cannot change after creation.
+Inspection rejects missing/unsupported geometry and mismatched segment geometry;
+`inspect_sized` also checks an explicitly requested arm. No implicit v2 upgrade.
+
+WAL, catalog and segment filename namespaces retain their v2 encodings/names.
+The manifest filename remains `manifest.v2` for namespace stability, but its
+FILE and every page have v3 magic/version. Old binaries reject v3 pages and new
+binaries reject v2 chunk/manifest headers. A fresh store is required.
+
+## WAL segment header
 
 Each segment starts with this 4 KiB block. Unlisted bytes are zero. CRC32 covers
 the full block with its checksum field zeroed.
@@ -116,17 +131,17 @@ in C0. V1 and unsupported version opens are rejected, never converted implicitly
 ## Chunk segments and batches
 
 Segment header retains the existing staging header positions but has a distinct
-`CASCHS02` magic. Version u32 2 at 8, header length at 12, store ID at 16..32,
-segment number u64 at 56, capacity u64 at 64, CRC32 at 4092. Other bytes zero.
+`CASCHS03` magic. Version u32 3 at 8, header length at 12, store ID at 16..32,
+segment number u64 at 56, capacity u64 at 64, chunk bytes u32 at 72, CRC32 at 4092. Other bytes zero.
 No image identity or image mutation epoch belongs in the shared chunk segment.
 Headers and directories are durable before data. The global durable-header
 allocator includes all chunk/WAL segments and archives; highest tickets survive
 GC until a higher durable header exists. No mutable allocation ledger.
 
-Chunk batch magic `CASCHB02`; otherwise envelope positions mirror WAL v2:
-version u16 at 8, DATA kind 1 at 10, descriptor count at 12, segment u64 at 16,
+Chunk batch magic `CASCHB03`; otherwise envelope positions mirror WAL v2:
+version u16 3 at 8, DATA kind 1 at 10, descriptor count at 12, segment u64 at 16,
 batch u64 at 24, total bytes u32 at 32, payload bytes u32 at 36, first/last
-physical record ordinals at 40/48, CRC32 at 56. Physical ordinals are dense
+physical record ordinals at 40/48, CRC32 at 56, chunk bytes u32 at 60. Physical ordinals are dense
 within the segment and are not image mutation sequences. Store batches do not
 need a FENCE record: data-sync completion gates usable index publication.
 
@@ -134,15 +149,17 @@ Each 64-byte chunk descriptor is:
 
 | Offset | Bytes | Field |
 | --- | --- | --- |
-| 0 | 32 | BLAKE3 of the full 4096-byte chunk |
+| 0 | 32 | BLAKE3 of the full fixed-size chunk |
 | 32 | 4 | Payload offset relative to batch payload |
-| 36 | 4 | Payload length, exactly 4096 |
+| 36 | 4 | Payload length, exactly the store chunk size |
 | 40 | 4 | Payload CRC32 |
 | 44 | 20 | Zero reserved bytes |
 
 Up to 63 descriptors follow the 64-byte envelope in the 4 KiB header. Payloads
-are consecutive with no gaps, so a full chunk batch is 256 KiB including its
-header. Zero content becomes a manifest hole, never a store payload. A real
+are consecutive with no gaps and all descriptors match the recorded chunk size.
+A full batch is 262144 bytes at 4 KiB or 1036288 bytes at 16 KiB, including its
+4096-byte header. An entirely zero chunk becomes a hole, never a store payload.
+A partially zero 16 KiB extent still stores its complete assembled chunk. A real
 all-zero hash value remains a valid hash; it is not an empty-index sentinel.
 
 A 64-bit store address contains the segment ticket in its high 48 bits and
@@ -160,8 +177,8 @@ empty-root sentinel. Common 64-byte page header:
 
 | Offset | Bytes | Field |
 | --- | --- | --- |
-| 0 | 8 | `CASMAN02` |
-| 8 | 2 | Version 2 |
+| 0 | 8 | `CASMAN03` |
+| 8 | 2 | Version 3 |
 | 10 | 2 | Kind: LEAF 1, BRANCH 2, COMMIT 3, FILE 4 |
 | 12 | 2 | Tree level; COMMIT uses root height; FILE uses zero |
 | 14 | 2 | Entry count; zero for COMMIT/FILE |
@@ -175,11 +192,18 @@ Every child offset is aligned, nonzero, below its parent, and its level is one
 less. Branch entries are (minimum logical block u64, child offset u64); capacity
 252. Leaf entries use logical block units, with sorted nonoverlapping extents:
 (start block u64, end block exclusive u64, hash[32], chunk byte offset u32,
-kind u16, reserved[10]); capacity 63. With fixed chunks, hash extents contain one block and their chunk byte offset
-is zero; ZERO may span blocks. The editor can represent ZERO by removing mappings into holes.
+kind u16, reserved[10]); capacity 63. The encoded chunk-byte-offset field remains
+zero. Hash extents cover a subrange of one aligned fixed-size extent (one guest
+block at 4 KiB, up to four at 16 KiB). The implicit byte offset for logical block
+`b` is `(b % (chunk_bytes / 4096)) * 4096`, even after a ZERO splits an extent.
+The final extent may end at the image boundary; the full stored chunk is padded
+with zeros beyond that boundary before hashing. ZERO may span arbitrary blocks;
+the editor may represent ZERO by removing mappings into holes.
 
-FILE payload: store ID at 64..80 and image bytes u64 at 80; remaining bytes
-zero. COMMIT payload: store ID 64..80, image ID 80..96, generation u64 at 96,
+FILE payload: store ID at 64..80, image bytes u64 at 80, chunk bytes u32 at 88;
+remaining bytes zero. Snapshot reflinks and clones preserve this geometry.
+The shared WAL coordinator rejects a manifest/store geometry mismatch before
+creating or repairing WAL. Serving also checks snapshot/image geometry. COMMIT payload: store ID 64..80, image ID 80..96, generation u64 at 96,
 root offset u64 at 104, D u64 at 112, image bytes u64 at 120; remaining bytes
 zero. Empty root has offset/height zero. Nonempty root precedes COMMIT and has
 its declared height. Generation is nonzero and checked against overflow.
@@ -196,8 +220,9 @@ large ZERO operation may rebuild or walk the full map merely to erase it.
 
 ## Optional fleet metadata
 
-Fleet membership and writer records are separate from unchanged v2 chunk/WAL
-and manifest encodings. See [fleet protocol](fleet.md) for ordering and limits.
+Fleet membership and writer records are separate from v2 WAL and v3 chunk and
+manifest encodings. The fleet wire profile still requires 4 KiB chunks.
+See [fleet protocol](fleet.md) for ordering and limits.
 `fleet/membership`, `fleet/root-<32hex-image>` and `fleet/epoch` are 4096-byte
 records: `CASFLT01` at 0, JSON length u32 at 8, BLAKE3 of JSON at 12..44,
 JSON at 44, and zero padding. Publication writes a unique pending file, fsyncs,
@@ -227,3 +252,30 @@ no trailing bytes are accepted. The receiver repacks them into normal v2 WAL
 batches under fresh local tickets and fences E before catalog publication.
 Rejected unpublished image directories remain under unused 32-hex names so
 the existing allocator still observes all rejected segment tickets.
+
+
+## Accounting fields
+
+The index entry has a 32-byte hash, 8-byte address and collection mark, with
+native padding (48 bytes on the tested x86_64 host). `index_memory` reports
+live entry bytes, usable capacity, the complete hashbrown allocation layout,
+layout overhead (empty buckets, control bytes and padding), libc usable-size
+slack, allocated bytes and allocated bytes per stored chunk. Empty indexes
+report a null ratio. Removal retains table capacity; inspection rebuilds it.
+Thus measurements must identify whether they are live post-collection or rebuilt.
+
+Linux/glibc tracked `BudgetAllocator` allocations use System and charge
+`malloc_usable_size`, including growth overlap; a denied slack charge frees the
+new allocation without publishing it. Shared cache controls use the pinned
+std Arc/System layout, independently checked by the allocator-recorder test.
+Other platforms report layout bytes, not glibc slack. Component ledgers forward
+charges to the host metadata budget; they are attribution, not additional memory.
+
+Cache `allocated_bytes` includes its membership table, shared controls, actual
+payload allocations, and reader-held values. Manifest pages are already inside
+metadata allocations: do not add their logical `payload.current.bytes` again.
+Clean-cache logical byte admission remains separate from its actual allocation
+ledger. Fixed Budget-ledger objects, allocator bookkeeping/free arenas, stacks,
+code and kernel memory are outside these component allocation totals.
+The isolated RSS test reports libc live/free-arena deltas and the remaining RSS
+residual; neither allocated bytes nor equal cache caps imply equal process RSS.
