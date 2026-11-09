@@ -758,6 +758,12 @@ class Agent:
             "-u",
             *(["-F"] if base else []),
             "-o",
+            "recordsize=4K",
+            "-o",
+            "compression=off",
+            "-o",
+            "atime=off",
+            "-o",
             "mountpoint=" + str(self.work),
             self.zfs_dataset,
         ]

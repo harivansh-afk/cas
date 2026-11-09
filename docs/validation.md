@@ -1228,3 +1228,9 @@ were observed directly. The latest full raw archives and build caches must not
 be claimed as retained. `disappearance.json` records the five 404s. Restoration
 and replacement raw evidence are in progress; pre-existing VMs remain untouched
 by this agent.
+
+Before regenerating ZFS evidence, the receiver was made to explicitly override
+recordsize=4K, compression=off and atime=off, matching the source. Ordinary send
+streams do not guarantee transfer of dataset properties. The earlier stream
+preserved the existing file's blocks, but the destination dataset could otherwise
+inherit different settings; replacement runs record both ends' properties.
