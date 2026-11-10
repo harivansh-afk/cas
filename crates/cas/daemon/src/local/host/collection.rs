@@ -54,6 +54,10 @@ impl Host {
 
 impl worker::Owner {
     pub fn collect(&mut self) -> io::Result<CollectionReport> {
+        self.exhausted_space = None;
+        if self.shared.fleet.is_some() {
+            return Err(io::Error::other("fleet roots require a coordinated sweep"));
+        }
         let started = Instant::now();
         let mut report =
             self.quiesced(|owner, generation, started| owner.collect_paused(generation, started))?;
@@ -72,6 +76,9 @@ impl worker::Owner {
         let result = (|| {
             self.drain_guests(&pause, started)?;
             for (index, endpoint) in self.endpoints.iter_mut().enumerate() {
+                if endpoint.health.writer_fenced() {
+                    continue;
+                }
                 endpoint.healthy()?;
                 if !self.shared.admission.attached(index) {
                     continue;
@@ -176,6 +183,12 @@ impl worker::Owner {
             }
         }
         report.allocated_after = self.shared.physical.as_ref().map(|p| p.status().allocated);
+        if report.capacity_exhausted {
+            self.exhausted_space = self.shared.physical.as_ref().map(|physical| {
+                let status = physical.status();
+                (status.allocated, status.promised)
+            });
+        }
         Ok(report)
     }
 
@@ -188,6 +201,7 @@ impl worker::Owner {
                 ));
             }
             match self.input.recv_timeout(Duration::from_millis(10)) {
+                Ok(Ready::Fleet(request)) => request.reject(),
                 Ok(Ready::Image { index, .. }) => self.cancel_ready(index)?,
                 Ok(Ready::Collect(request)) => {
                     request.complete(Err(io::ErrorKind::WouldBlock.into()))
@@ -218,6 +232,7 @@ impl worker::Owner {
     fn drain_notifications(&mut self) -> io::Result<()> {
         while let Ok(ready) = self.input.try_recv() {
             match ready {
+                Ready::Fleet(request) => request.reject(),
                 Ready::Image { index, .. } if self.endpoints[index].quiescent.is_none() => {
                     self.cancel_ready(index)?;
                 }
@@ -247,6 +262,12 @@ impl worker::Owner {
     }
 
     fn sweep(&mut self, report: &mut CollectionReport) -> io::Result<()> {
+        // Sample before marking: releasing an old reader during this sweep
+        // must trigger another pass. Ordinary current-root reads do not.
+        for (index, endpoint) in self.endpoints.iter_mut().enumerate() {
+            endpoint.swept_roots = endpoint.manifest.roots_revision();
+            endpoint.swept_attached = self.shared.admission.attached(index);
+        }
         let metadata = &self.shared.resources.compaction;
         let mut collection = self.store.begin_collection()?;
         for endpoint in &mut self.endpoints {

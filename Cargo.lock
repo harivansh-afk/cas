@@ -145,6 +145,7 @@ name = "cas-daemon"
 version = "0.1.0"
 dependencies = [
  "allocator-api2 0.2.21",
+ "blake3",
  "cas-core",
  "clap",
  "io-uring",

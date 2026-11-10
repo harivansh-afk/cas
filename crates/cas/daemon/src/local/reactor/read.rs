@@ -12,6 +12,7 @@ enum Stage {
     Header(store::Read),
     Payload(store::Payload),
     Waiting(Waiter<Fetched>),
+    Remote(crate::peer::Ticket),
     Done,
 }
 
@@ -34,6 +35,9 @@ pub(super) struct Read {
     stage: Stage,
     block: usize,
     shared_io: bool,
+    peer: Option<BudgetArc<crate::peer::Router>>,
+    force_remote: bool,
+    cache_remote: bool,
 }
 
 impl Read {
@@ -56,6 +60,9 @@ impl Read {
             stage: Stage::Done,
             block: 0,
             shared_io: false,
+            peer: None,
+            force_remote: false,
+            cache_remote: false,
         }
     }
 
@@ -64,6 +71,16 @@ impl Read {
             && (0..self.plan.bytes() / BLOCK_SIZE).any(|block| !self.plan.staged(block))
         {
             let port = port.ok_or_else(|| io::Error::other("manifest read has no shared store"))?;
+            self.peer = port.peer();
+            self.force_remote = port.peer_config().peer_force_remote;
+            self.cache_remote = port.peer_config().peer_cache;
+            if let Some(metrics) = port.peer_metrics() {
+                self.io.permit.remote = Some(crate::peer::metrics::Trace::new(
+                    metrics,
+                    self.io.id,
+                    self.io.permit.received.unwrap_or_else(Instant::now),
+                ));
+            }
             self.reader = Some(port.reader());
             self.cache = Some(port.cache());
             self.page_cache = Some(port.page_cache());
@@ -90,7 +107,7 @@ impl Read {
         matches!(self.stage, Stage::Done)
     }
     pub fn notification_only(&self) -> bool {
-        matches!(self.stage, Stage::Waiting(_))
+        matches!(self.stage, Stage::Waiting(_) | Stage::Remote(_))
     }
     pub fn shared_io(&self) -> bool {
         self.shared_io
@@ -104,7 +121,7 @@ impl Read {
             Stage::Manifest { .. } => 1,
             Stage::Header(_) => 2,
             Stage::Payload(_) => 3,
-            Stage::Waiting(_) => 4,
+            Stage::Waiting(_) | Stage::Remote(_) => 4,
             Stage::Done => unreachable!("done read has no IO stage"),
         }
     }
@@ -143,11 +160,13 @@ impl Read {
     /// True requires an IO CQE; a hit already filled the current response block.
     fn chunk(&mut self, hash: cas_core::chunk_index::Hash) -> io::Result<bool> {
         self.chunk_hash = Some(hash);
-        if let Some(bytes) = self.cache.as_ref().and_then(|cache| cache.get(&hash)) {
+        if (!self.force_remote || self.cache_remote)
+            && let Some(bytes) = self.cache.as_ref().and_then(|cache| cache.get(&hash))
+        {
             if let Some(trace) = self.trace() {
                 trace.cache_hits += 1;
             }
-            self.response_block().copy_from_slice(bytes.as_slice());
+            self.copy_chunk(bytes.as_slice())?;
             return Ok(false);
         }
         match Registry::lookup(self.fetches.as_ref().expect("host fetch registry"), hash)? {
@@ -158,9 +177,11 @@ impl Read {
             }
             Some(Lookup::Leader(leader)) => {
                 self.leader = Some(leader);
-                let bytes = AlignedBuffer::try_new_in(BLOCK_SIZE, allocator_api2::alloc::Global)?;
+                let bytes =
+                    AlignedBuffer::try_new_in(self.chunk_bytes(), allocator_api2::alloc::Global)?;
                 self.fetched = Some(BudgetArc::try_new(
                     Fetched {
+                        remote: None,
                         bytes,
                         _credits: self
                             .io
@@ -181,7 +202,9 @@ impl Read {
         }
         // A previous leader may have filled the cache between our miss and
         // registry lookup. Publish that value through our new cell as well.
-        if let Some(bytes) = self.cache.as_ref().and_then(|cache| cache.peek(&hash)) {
+        if (!self.force_remote || self.cache_remote)
+            && let Some(bytes) = self.cache.as_ref().and_then(|cache| cache.peek(&hash))
+        {
             if let Some(trace) = self.trace() {
                 trace.cache_hits += 1;
             }
@@ -192,7 +215,7 @@ impl Read {
                 .bytes
                 .as_mut_slice()
                 .copy_from_slice(bytes.as_slice());
-            self.response_block().copy_from_slice(bytes.as_slice());
+            self.copy_chunk(bytes.as_slice())?;
             self.leader
                 .take()
                 .expect("fetch leader")
@@ -200,19 +223,38 @@ impl Read {
             return Ok(false);
         }
         self.shared_io = true;
-        let read = self
-            .reader
-            .as_ref()
-            .ok_or_else(|| io::Error::other("missing chunk reader"))?
-            .plan(hash)?
-            .ok_or_else(|| io::Error::other("manifest references an unavailable chunk"))?;
-        self.stage = Stage::Header(read);
+        let read = if self.force_remote {
+            None
+        } else {
+            self.reader
+                .as_ref()
+                .ok_or_else(|| io::Error::other("missing chunk reader"))?
+                .plan(hash)?
+        };
+        self.stage = if let Some(read) = read {
+            Stage::Header(read)
+        } else {
+            let peer = self
+                .peer
+                .as_ref()
+                .ok_or_else(|| io::Error::other("manifest references an unavailable chunk"))?;
+            Stage::Remote(peer.fetch(hash)?)
+        };
+        if matches!(&self.stage, Stage::Remote(ticket) if ticket.ready()) {
+            self.finish_remote()?;
+            self.stage = Stage::Done;
+            return Ok(false);
+        }
         Ok(true)
     }
 
     pub fn entry(&mut self) -> squeue::Entry {
         if let Stage::Waiting(waiter) = &self.stage {
             return opcode::PollAdd::new(types::Fd(waiter.notification()), libc::POLLIN as u32)
+                .build();
+        }
+        if let Stage::Remote(ticket) = &self.stage {
+            return opcode::PollAdd::new(types::Fd(ticket.notification()), libc::POLLIN as u32)
                 .build();
         }
         let Operation::Read { buffer, .. } = &mut self.io.operation else {
@@ -258,10 +300,12 @@ impl Read {
                     .bytes
                     .as_mut_slice()
                     .as_mut_ptr(),
-                BLOCK_SIZE,
+                read.bytes(),
                 read.offset(),
             ),
-            Stage::Waiting(_) => unreachable!("waiter submits readiness above"),
+            Stage::Waiting(_) | Stage::Remote(_) => {
+                unreachable!("notification submits readiness above")
+            }
             Stage::Done => unreachable!("completed read has no SQE"),
         };
         opcode::Read::new(types::Fd(file.as_raw_fd()), pointer, bytes as u32)
@@ -272,10 +316,33 @@ impl Read {
     pub fn expected_bytes(&self) -> usize {
         match self.stage {
             Stage::Staging(index) => self.plan.ranges()[index].input_bytes(),
-            Stage::Manifest { .. } | Stage::Header(_) | Stage::Payload(_) => BLOCK_SIZE,
-            Stage::Waiting(_) => libc::POLLIN as usize,
+            Stage::Manifest { .. } | Stage::Header(_) => BLOCK_SIZE,
+            Stage::Payload(ref read) => read.bytes(),
+            Stage::Waiting(_) | Stage::Remote(_) => libc::POLLIN as usize,
             Stage::Done => unreachable!("completed read has no CQE"),
         }
+    }
+
+    fn chunk_bytes(&self) -> usize {
+        self.plan
+            .manifest()
+            .map_or(BLOCK_SIZE, |view| view.chunk_size().bytes())
+    }
+
+    fn copy_chunk(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if bytes.len() != self.chunk_bytes() {
+            return Err(io::Error::other("fetched chunk geometry differs"));
+        }
+        let block = self.plan.offset() / BLOCK_SIZE as u64 + self.block as u64;
+        let offset = self
+            .plan
+            .manifest()
+            .expect("manifest chunk")
+            .chunk_size()
+            .offset(block);
+        self.response_block()
+            .copy_from_slice(&bytes[offset..offset + BLOCK_SIZE]);
+        Ok(())
     }
 
     fn response_block(&mut self) -> &mut [u8] {
@@ -297,6 +364,43 @@ impl Read {
             trace.advance_ns += nanos(started.elapsed());
         }
         result
+    }
+
+    fn finish_remote(&mut self) -> io::Result<()> {
+        let Stage::Remote(ticket) = &self.stage else {
+            unreachable!()
+        };
+        let fetched = self
+            .fetched
+            .as_mut()
+            .expect("remote fetch payload")
+            .get_mut()
+            .expect("unpublished fetch");
+        let (phases, result) = ticket.finish(fetched.bytes.as_mut_slice());
+        fetched.remote = Some(phases);
+        if let Some(trace) = &mut self.io.permit.remote {
+            trace.fetched(phases);
+        }
+        result?;
+        let fetched = self.fetched.take().expect("remote fetch payload");
+        if self.cache_remote
+            && let Some(cache) = &self.cache
+        {
+            match cache.fill(
+                self.chunk_hash.expect("remote hash"),
+                fetched.bytes.as_slice(),
+            ) {
+                Ok(_) => (),
+                Err(e) if e.kind() == io::ErrorKind::OutOfMemory => (),
+                Err(e) => return Err(e),
+            }
+        }
+        self.copy_chunk(fetched.bytes.as_slice())?;
+        self.leader
+            .take()
+            .expect("fetch leader")
+            .complete(fetched)?;
+        Ok(())
     }
 
     fn advance_inner(&mut self) -> io::Result<bool> {
@@ -367,7 +471,7 @@ impl Read {
                         Err(error) => return Err(error),
                     }
                 }
-                self.response_block().copy_from_slice(bytes);
+                self.copy_chunk(bytes)?;
                 self.leader
                     .take()
                     .expect("fetch leader")
@@ -375,12 +479,21 @@ impl Read {
                 self.block += 1;
                 self.next_block()?;
             }
+            Stage::Remote(_) => {
+                self.finish_remote()?;
+                self.block += 1;
+                self.next_block()?;
+            }
             Stage::Waiting(waiter) => {
                 let fetched = waiter
                     .poll()?
                     .ok_or_else(|| io::Error::other("fetch readiness preceded publication"))?;
-                self.response_block()
-                    .copy_from_slice(fetched.bytes.as_slice());
+                if let Some(phases) = fetched.remote
+                    && let Some(trace) = &mut self.io.permit.remote
+                {
+                    trace.fetched(phases);
+                }
+                self.copy_chunk(fetched.bytes.as_slice())?;
                 self.block += 1;
                 self.next_block()?;
             }

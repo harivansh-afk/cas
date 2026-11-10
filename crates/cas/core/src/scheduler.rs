@@ -43,7 +43,7 @@ struct State {
     images: Vec<Image, BudgetAllocator>,
     next_image: usize,
     opportunity: u8,
-    background_ready: bool,
+    background_waiters: usize,
     counters: Counters,
 }
 
@@ -79,7 +79,7 @@ impl State {
             .map(|offset| (self.next_image + offset) % self.images.len())
             .find(|&index| self.images[index].ready)
             .map(Selected::Demand);
-        if self.background_ready && (self.opportunity == 0 || demand.is_none()) {
+        if self.background_waiters != 0 && (self.opportunity == 0 || demand.is_none()) {
             Some(Selected::Background)
         } else {
             demand
@@ -96,7 +96,7 @@ impl State {
                 self.counters.borrowed_demand += u64::from(self.opportunity == 0);
             }
             Selected::Background => {
-                self.background_ready = false;
+                self.background_waiters -= 1;
                 self.counters.background += 1;
                 self.counters.background_requested_bytes += bytes as u64;
                 self.counters.borrowed_background += u64::from(self.opportunity != 0);
@@ -125,7 +125,7 @@ impl Scheduler {
                     images: entries,
                     next_image: 0,
                     opportunity: 0,
-                    background_ready: false,
+                    background_waiters: 0,
                     counters: Counters::default(),
                 }),
                 changed: Condvar::new(),
@@ -182,7 +182,7 @@ impl Scheduler {
         Status {
             counters: state.counters,
             ready_images: state.images.iter().filter(|image| image.ready).count(),
-            background_ready: state.background_ready,
+            background_ready: state.background_waiters != 0,
         }
     }
 
@@ -203,10 +203,10 @@ impl Scheduler {
         let _measurement = crate::io_metrics::measure(bytes as u64, |c| &mut c.scheduler_wait);
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut state = self.state.lock().expect("IO scheduler poisoned");
-        if state.background_ready {
-            return Err(io::Error::other("more than one compaction IO owner"));
-        }
-        state.background_ready = true;
+        // Compaction and fleet shipping share the background class. Register each
+        // caller until its own grant or timeout; one caller must not clear another's
+        // readiness. No request allocation or IO ownership moves into the scheduler.
+        state.background_waiters += 1;
         loop {
             if state.selected() == Some(Selected::Background) {
                 state.grant(Selected::Background, bytes);
@@ -214,7 +214,7 @@ impl Scheduler {
                 return Ok(());
             }
             if Instant::now() >= deadline {
-                state.background_ready = false;
+                state.background_waiters -= 1;
                 self.notify(&state)?;
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
@@ -222,7 +222,7 @@ impl Scheduler {
                 ));
             }
             if let Err(error) = self.notify(&state) {
-                state.background_ready = false;
+                state.background_waiters -= 1;
                 return Err(error);
             }
             state = self

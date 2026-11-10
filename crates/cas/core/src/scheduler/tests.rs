@@ -15,7 +15,7 @@ fn continuously_ready_work_receives_one_background_and_three_demand_opportunitie
     {
         let mut state = owner.state.lock().unwrap();
         for turn in 0..400 {
-            state.background_ready = true;
+            state.background_waiters = 1;
             for image in &mut state.images {
                 image.ready = true;
             }
@@ -63,7 +63,7 @@ fn waiting_background_is_released_after_three_ready_demand_submissions() {
     let copy = owner.clone();
     let worker = std::thread::spawn(move || copy.wait_background(BLOCK_SIZE).unwrap());
     let deadline = Instant::now() + Duration::from_secs(3);
-    while !owner.state.lock().unwrap().background_ready {
+    while owner.state.lock().unwrap().background_waiters == 0 {
         assert!(Instant::now() < deadline);
         std::thread::yield_now();
     }
@@ -73,6 +73,45 @@ fn waiting_background_is_released_after_three_ready_demand_submissions() {
     worker.join().unwrap();
     assert_eq!(owner.counters().background, 1);
     assert_eq!(owner.counters().demand, 3);
+    port.ready(false).unwrap();
+    drop((port, owner));
+    assert_eq!(metadata.usage().current, Amount::default());
+}
+
+#[test]
+fn compaction_and_shipping_share_background_opportunities_without_losing_readiness() {
+    let metadata = metadata();
+    let owner = Scheduler::new(1, &metadata).unwrap();
+    let port = Scheduler::port(&owner, 0).unwrap();
+    owner.state.lock().unwrap().opportunity = 1;
+    port.ready(true).unwrap();
+    let (sent, received) = std::sync::mpsc::channel();
+    let workers = std::array::from_fn::<_, 2, _>(|_| {
+        let copy = owner.clone();
+        let sent = sent.clone();
+        std::thread::spawn(move || sent.send(copy.wait_background(BLOCK_SIZE)).unwrap())
+    });
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while owner.state.lock().unwrap().background_waiters != 2 {
+        assert!(Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    for remaining in [1, 0] {
+        for _ in 0..3 {
+            assert!(port.take(BLOCK_SIZE, true).unwrap());
+        }
+        received
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap()
+            .unwrap();
+        assert_eq!(owner.state.lock().unwrap().background_waiters, remaining);
+    }
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    assert_eq!(owner.counters().background, 2);
+    assert_eq!(owner.counters().demand, 6);
+    assert!(!owner.status().background_ready);
     port.ready(false).unwrap();
     drop((port, owner));
     assert_eq!(metadata.usage().current, Amount::default());

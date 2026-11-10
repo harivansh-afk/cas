@@ -71,8 +71,9 @@ impl Store {
         }
         let allocator = BudgetAllocator::new(Arc::clone(&self.io_memory));
         let header = AlignedBuffer::try_new_in(BLOCK_SIZE, allocator.clone())?;
-        let payload = AlignedBuffer::try_new_in(MAX_CHUNKS * BLOCK_SIZE, allocator.clone())?;
-        let builder = Builder::try_new_in(MAX_CHUNKS, allocator)?;
+        let payload =
+            AlignedBuffer::try_new_in(MAX_CHUNKS * self.chunk_size().bytes(), allocator.clone())?;
+        let builder = Builder::try_new_sized_in(MAX_CHUNKS, self.chunk_size(), allocator)?;
         state.index.clear_marks();
         state.collecting = true;
         drop(state);

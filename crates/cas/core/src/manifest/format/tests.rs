@@ -33,8 +33,8 @@ fn leaf_full_capacity_has_exact_offsets_and_distinguishes_zero_hash_from_hole() 
         .collect();
     let encoded = leaf(4096, CAPACITY, &extents).unwrap();
     let mut expected = [0; BLOCK_SIZE];
-    expected[..8].copy_from_slice(b"CASMAN02");
-    expected[8..10].copy_from_slice(&2u16.to_le_bytes());
+    expected[..8].copy_from_slice(b"CASMAN03");
+    expected[8..10].copy_from_slice(&3u16.to_le_bytes());
     expected[10..12].copy_from_slice(&1u16.to_le_bytes());
     expected[14..16].copy_from_slice(&63u16.to_le_bytes());
     expected[16..24].copy_from_slice(&4096u64.to_le_bytes());
@@ -111,6 +111,7 @@ fn branch_capacity_order_addresses_and_height_are_bounded() {
 #[test]
 fn file_and_commit_identity_survive_clone_without_changing_tree_addresses() {
     let header = FileHeader {
+        chunk_size: crate::chunk::ChunkSize::K4,
         store: [1; 16],
         image_bytes: CAPACITY,
     };
@@ -225,7 +226,7 @@ fn damaged_and_rechecksummed_malformed_pages_fail_before_iteration() {
         );
     }
     assert!(leaf(4096, CAPACITY, &[extent, extent]).is_err());
-    assert!(leaf(4096, CAPACITY, &[Extent { end: 3, ..extent }]).is_err());
+    assert!(leaf(4096, CAPACITY, &[Extent { end: 5, ..extent }]).is_err());
     assert!(
         leaf(
             4096,

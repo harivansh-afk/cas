@@ -20,8 +20,10 @@ for file in source clone; do
 done
 run_tests() {
   local module="$1" executable="$2" filter="$3"
-  "$executable" "$filter" --list > "/results/$module.list"
-  "$executable" "$filter" --include-ignored --test-threads=1 > "/results/$module.log" 2>&1
+  shift 3
+  "$executable" "$filter" "$@" --list > "/results/$module.list"
+  # Keep libtest's inventory lines intact; persist panic details immediately.
+  RUST_BACKTRACE=1 "$executable" "$filter" "$@" --include-ignored --nocapture --test-threads=1 > "/results/$module.log" 2> "/results/$module.stderr.log"
 }
 export CAS_SPACE_REPORT=/results/space-observations.json
 run_tests space "$CAS_CORE_TESTS" space::filesystem::tests
@@ -31,6 +33,10 @@ for scope in store:file manifest:file append:shared; do
   run_tests "$module" "$CAS_CORE_TESTS" "$filter"
 done
 run_tests catalog "$CAS_CORE_TESTS" catalog::
-run_tests runtime "$CAS_DAEMON_TESTS" local::host::tests
+# Fleet/peer protocol tests use plain loopback roots, not the XFS allocation
+# domain; their ignored daemon_child entries only run as subprocesses of those
+# tests. The rust-tests scenario runs all of them.
+run_tests runtime "$CAS_DAEMON_TESTS" local::host::tests \
+  --skip local::host::tests::fleet:: --skip local::host::tests::peer::
 df -B1 /fixture > /results/space-after.log
 sync -f /fixture

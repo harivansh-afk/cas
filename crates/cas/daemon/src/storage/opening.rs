@@ -47,25 +47,49 @@ impl Opening {
             _ => None,
         }
     }
+    #[cfg(test)]
     pub fn new(path: &Path, create_bytes: Option<u64>) -> io::Result<Self> {
         Self::with_deadline(path, create_bytes, Deadline::after(RECOVERY_TIMEOUT))
     }
 
+    #[cfg(test)]
     fn with_deadline(
         path: &Path,
         create_bytes: Option<u64>,
         deadline: Deadline,
     ) -> io::Result<Self> {
+        Self::with_limits_and_deadline(path, create_bytes, append::Limits::default(), deadline)
+    }
+
+    pub fn with_limits(
+        path: &Path,
+        create_bytes: Option<u64>,
+        limits: append::Limits,
+    ) -> io::Result<Self> {
+        Self::with_limits_and_deadline(
+            path,
+            create_bytes,
+            limits,
+            Deadline::after(RECOVERY_TIMEOUT),
+        )
+    }
+
+    fn with_limits_and_deadline(
+        path: &Path,
+        create_bytes: Option<u64>,
+        limits: append::Limits,
+        deadline: Deadline,
+    ) -> io::Result<Self> {
         let path = path.to_owned();
         let (source, config, status) = deadline.run(move || match create_bytes {
             Some(bytes) => {
-                let log = local::create_log(&path, bytes)?;
+                let log = local::create_log_with_limits(&path, bytes, limits)?;
                 let values = (log.config(), log.status());
                 Ok((Source::Created(log), values.0, values.1))
             }
             None => loop {
                 deadline.check()?;
-                match Log::inspect(&path, append::Limits::default()) {
+                match Log::inspect(&path, limits) {
                     Ok(inspected) => {
                         let values = (inspected.config(), inspected.status());
                         break Ok((Source::Existing(inspected), values.0, values.1));

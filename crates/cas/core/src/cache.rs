@@ -1,6 +1,5 @@
 //! Verified clean blocks. LRU membership never owns a reader's last byte credit.
 use crate::{
-    BLOCK_SIZE,
     aligned::AlignedBuffer,
     budget::{Amount, Budget, BudgetAllocator, BudgetArc, Usage},
     chunk_index::Hash,
@@ -29,6 +28,9 @@ pub struct Status {
     pub reader_held_bytes: usize,
     pub payload: Usage,
     pub table_bytes: usize,
+    /// Includes table/control allocations and reader-held values.
+    pub metadata_bytes: usize,
+    pub allocated_bytes: usize,
 }
 
 mod lru;
@@ -38,6 +40,8 @@ type State = Lru<Hash, AlignedBuffer<BudgetAllocator>>;
 
 pub struct Cache {
     capacity_bytes: usize,
+    chunk_size: crate::chunk::ChunkSize,
+    allocations: Arc<Budget>,
     state: Mutex<State>,
     payload: Arc<Budget>,
     metadata: Arc<Budget>,
@@ -51,20 +55,34 @@ impl Key for Hash {
 
 impl Cache {
     pub fn new(bytes: usize, metadata: &Arc<Budget>) -> io::Result<BudgetArc<Self>> {
-        if bytes == 0 || !bytes.is_multiple_of(BLOCK_SIZE) {
+        Self::new_sized(bytes, crate::chunk::ChunkSize::K4, metadata)
+    }
+
+    pub fn new_sized(
+        bytes: usize,
+        chunk_size: crate::chunk::ChunkSize,
+        metadata: &Arc<Budget>,
+    ) -> io::Result<BudgetArc<Self>> {
+        let metadata = Budget::child(metadata);
+        if !bytes.is_multiple_of(chunk_size.bytes()) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "invalid cache byte limit",
             ));
         }
-        BudgetArc::try_new(
+        BudgetArc::try_new_tracked(
             Self {
                 capacity_bytes: bytes,
-                state: Mutex::new(State::new(bytes / BLOCK_SIZE, metadata)?),
+                chunk_size,
+                allocations: Budget::new(Amount {
+                    bytes: usize::MAX,
+                    requests: 0,
+                }),
+                state: Mutex::new(State::new(bytes / chunk_size.bytes(), &metadata)?),
                 payload: Budget::new(Amount { bytes, requests: 0 }),
-                metadata: Arc::clone(metadata),
+                metadata: Arc::clone(&metadata),
             },
-            metadata,
+            &metadata,
         )
     }
 
@@ -87,7 +105,7 @@ impl Cache {
 
     /// Read-fill publication. None means reader-held bytes prevent a new fill.
     pub fn fill(&self, hash: Hash, bytes: &[u8]) -> io::Result<Option<Buffer>> {
-        if bytes.len() != BLOCK_SIZE || blake3::hash(bytes).as_bytes() != &hash {
+        if bytes.len() != self.chunk_size.bytes() || blake3::hash(bytes).as_bytes() != &hash {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "invalid cache fill",
@@ -97,14 +115,21 @@ impl Cache {
         let mut state = self.state.lock().expect("cache poisoned");
         drop(wait);
         let _hold = crate::io_metrics::measure(0, |c| &mut c.chunk_cache_hold);
+        if self.capacity_bytes == 0 {
+            state.counters.refused += 1;
+            return Ok(None);
+        }
         if let Some(buffer) = state.buffer(&hash) {
             state.promote(hash);
             return Ok(Some(buffer));
         }
         let mut buffer = loop {
             match AlignedBuffer::try_new_in(
-                BLOCK_SIZE,
-                BudgetAllocator::new(Arc::clone(&self.payload)),
+                self.chunk_size.bytes(),
+                BudgetAllocator::accounted(
+                    Arc::clone(&self.payload),
+                    Arc::clone(&self.allocations),
+                ),
             ) {
                 Ok(buffer) => break buffer,
                 Err(error) if error.kind() == io::ErrorKind::OutOfMemory => {
@@ -117,7 +142,7 @@ impl Cache {
             }
         };
         buffer.as_mut_slice().copy_from_slice(bytes);
-        let buffer = BudgetArc::try_new(buffer, &self.metadata).inspect_err(|_| {
+        let buffer = BudgetArc::try_new_tracked(buffer, &self.metadata).inspect_err(|_| {
             state.counters.refused += 1;
         })?;
         state.insert(hash, buffer.clone());
@@ -138,7 +163,8 @@ impl Cache {
         drop(wait);
         let _hold = crate::io_metrics::measure(0, |c| &mut c.chunk_cache_hold);
         let payload = self.payload.usage();
-        let resident_bytes = state.len() * BLOCK_SIZE;
+        let resident_bytes = state.len() * self.chunk_size.bytes();
+        let metadata_bytes = self.metadata.usage().current.bytes;
         Status {
             capacity_bytes: self.capacity_bytes,
             counters: state.counters,
@@ -146,6 +172,8 @@ impl Cache {
             reader_held_bytes: payload.current.bytes - resident_bytes,
             payload,
             table_bytes: state.table_bytes(),
+            metadata_bytes,
+            allocated_bytes: metadata_bytes + self.allocations.usage().current.bytes,
         }
     }
 }

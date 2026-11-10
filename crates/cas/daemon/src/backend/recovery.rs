@@ -38,6 +38,9 @@ impl Session {
     pub(super) fn fresh(&self) -> bool {
         self.phase == Phase::Fresh
     }
+    pub(super) fn waiting(&self) -> bool {
+        self.phase == Phase::Waiting
+    }
     pub(super) fn permits_change(&self, change: vhost_user_backend::StateChange) -> bool {
         use vhost_user_backend::StateChange;
         if self.phase != Phase::Waiting {

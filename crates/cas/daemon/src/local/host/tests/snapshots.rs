@@ -79,29 +79,34 @@ fn shared_snapshot_fences_its_cut_and_preserves_old_data_through_overwrite_colle
     assert_eq!(key.end, report.manifest_end);
     drop(inspected);
     // An independent exact-key inspection verifies all referenced chunk bytes.
-    let tickets = Tickets::open(root.path(), Arc::clone(&resources.metadata)).unwrap();
-    let store = Store::inspect(
-        Arc::clone(&tickets),
-        Config {
-            segment_bytes: 2 * MAX_REQUEST_BYTES as u64,
-            ..STORE
-        },
-        Arc::clone(&resources.metadata),
-        resources.read_memory(),
-    )
+    let tickets =
+        contended(|| Tickets::open(root.path(), Arc::clone(&resources.metadata))).unwrap();
+    let store = contended(|| {
+        Store::inspect(
+            Arc::clone(&tickets),
+            Config {
+                segment_bytes: 2 * MAX_REQUEST_BYTES as u64,
+                ..STORE
+            },
+            Arc::clone(&resources.metadata),
+            resources.read_memory(),
+        )
+    })
     .unwrap();
-    let snapshot = Snapshot::inspect(
-        &root.path().join("snapshots").join("09".repeat(16)),
-        key,
-        Arc::clone(&resources.metadata),
-        |hash| {
-            if store.contains(&hash) {
-                Ok(())
-            } else {
-                Err(io::Error::other("missing snapshot chunk"))
-            }
-        },
-    )
+    let snapshot = contended(|| {
+        Snapshot::inspect(
+            &root.path().join("snapshots").join("09".repeat(16)),
+            key,
+            Arc::clone(&resources.metadata),
+            |hash| {
+                if store.contains(&hash) {
+                    Ok(())
+                } else {
+                    Err(io::Error::other("missing snapshot chunk"))
+                }
+            },
+        )
+    })
     .unwrap()
     .recover()
     .unwrap();

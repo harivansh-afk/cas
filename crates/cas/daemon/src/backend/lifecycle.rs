@@ -42,11 +42,20 @@ impl Backend {
                 return Err(io::Error::other(error.clone()));
             }
             self.storage.submit()?;
-            if !self.pending.is_empty()
-                || self
-                    .frontier
-                    .as_ref()
-                    .is_some_and(|frontier| !frontier.is_empty())
+            // While shared recovery is pending, the frontier holds restored
+            // discoveries that only the activated storage can admit. The
+            // session has already limited this change to a queue outside the
+            // replay; finish_attachment admits them after activation.
+            let recovering = self.live.as_ref().is_some_and(Session::waiting);
+            if recovering && !self.pending.is_empty() {
+                return Err(io::Error::other("admitted IO during shared recovery"));
+            }
+            if !recovering
+                && (!self.pending.is_empty()
+                    || self
+                        .frontier
+                        .as_ref()
+                        .is_some_and(|frontier| !frontier.is_empty()))
             {
                 let memory = self
                     .memory
@@ -137,7 +146,11 @@ impl Backend {
                 .as_ref()
                 .map_or(self.next_id != 0, Session::active);
             match change {
-                StateChange::QueueConfiguration(index) if serving => {
+                // Retain the rebase requirement even if a completion wake
+                // activates a fresh attachment before the queue is re-enabled.
+                StateChange::QueueConfiguration(index)
+                    if serving || self.live.as_ref().is_some_and(Session::fresh) =>
+                {
                     self.blocked_queues[index] = true;
                     self.rebase_queues[index] = true;
                 }

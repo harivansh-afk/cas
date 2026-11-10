@@ -156,10 +156,35 @@ pub struct Input {
     payload_bytes: usize,
     edits: ArrayVec<Edit, MAX_CHANGES>,
     metadata: Arc<Budget>,
+    read_bytes: u64,
+    reader: Option<crate::store::file::Reader>,
+    io_memory: Arc<Budget>,
 }
 
 impl Selection {
     pub fn load(self) -> io::Result<Input> {
+        require(
+            self.base.chunk_size() == crate::chunk::ChunkSize::K4,
+            "16 KiB compaction requires a store reader",
+        )?;
+        self.load_raw()
+    }
+
+    pub fn load_with_store(self, reader: &crate::store::file::Reader) -> io::Result<Input> {
+        require(
+            self.base.chunk_size() == reader.chunk_size(),
+            "compaction chunk geometry differs",
+        )?;
+        let mut input = self.load_raw()?;
+        if reader.chunk_size() == crate::chunk::ChunkSize::K16 {
+            input.assemble(reader)?;
+        }
+        reader.record_compaction_reads(input.read_bytes);
+        input.reader = Some(reader.clone());
+        Ok(input)
+    }
+
+    fn load_raw(self) -> io::Result<Input> {
         let image_bytes = self.base.commit().image_bytes;
         let base = self.base.commit().durable;
         let mut input = Input {
@@ -168,9 +193,12 @@ impl Selection {
             through: base,
             payload: AlignedBuffer::try_new_in(
                 MAX_REQUEST_BYTES,
-                BudgetAllocator::new(self.io_memory),
+                BudgetAllocator::new(Arc::clone(&self.io_memory)),
             )?,
             payload_bytes: 0,
+            read_bytes: 0,
+            reader: None,
+            io_memory: Arc::clone(&self.io_memory),
             edits: ArrayVec::new(),
             metadata: Arc::clone(&self.metadata),
         };
@@ -187,6 +215,12 @@ impl Selection {
             });
         require(sequence <= base, "compaction starts above D")?;
         let mut bounded = false;
+        let mut estimated_changes = 0;
+        let limit = if input.base.chunk_size() == crate::chunk::ChunkSize::K4 {
+            318
+        } else {
+            MAX_CHANGES
+        };
         'segments: for span in self.spans {
             if self
                 .cursor
@@ -208,6 +242,7 @@ impl Selection {
                     break 'segments;
                 }
                 direct::read_bytes(&span.segment.file, scratch.as_mut_slice(), offset)?;
+                input.read_bytes += BLOCK_SIZE as u64;
                 let header =
                     Header::decode(scratch.as_slice(), image_bytes).map_err(io::Error::other)?;
                 require(
@@ -227,11 +262,15 @@ impl Selection {
                                 if d.kind == Kind::Write {
                                     d.payload_length as usize / BLOCK_SIZE
                                 } else {
-                                    1
+                                    if input.base.chunk_size() == crate::chunk::ChunkSize::K4 {
+                                        1
+                                    } else {
+                                        3
+                                    }
                                 }
                             })
                             .sum();
-                        if input.edits.len() + edits > MAX_CHANGES
+                        if estimated_changes + edits > limit
                             || input.payload_bytes + envelope.payload_bytes > MAX_REQUEST_BYTES
                         {
                             bounded = true;
@@ -246,6 +285,7 @@ impl Selection {
                                 offset + BLOCK_SIZE as u64,
                             )?;
                         }
+                        input.read_bytes += data.len() as u64;
                         header.verify_payload(data).map_err(io::Error::other)?;
                         for descriptor in header.descriptors() {
                             let start = descriptor.offset / BLOCK_SIZE as u64;
@@ -269,6 +309,7 @@ impl Selection {
                                 }
                             }
                         }
+                        estimated_changes += edits;
                         input.payload_bytes += envelope.payload_bytes;
                         input.through = envelope.last;
                     }
@@ -320,5 +361,102 @@ pub struct Compacted {
 impl Compacted {
     pub fn durable(&self) -> u64 {
         self.view.commit().durable
+    }
+}
+
+impl Input {
+    /// Reconstruct only affected boundary/data chunks. Interior ZERO stays one
+    /// range edit, so discarding a huge image never walks its old mappings.
+    fn assemble(&mut self, reader: &crate::store::file::Reader) -> io::Result<()> {
+        let size = self.base.chunk_size();
+        let blocks = size.blocks();
+        let image_blocks = self.base.commit().image_bytes / BLOCK_SIZE as u64;
+        let mut touched = ArrayVec::<u64, MAX_CHANGES>::new();
+        let mut changes = ArrayVec::<Edit, MAX_CHANGES>::new();
+        for edit in &self.edits {
+            if edit.payload.is_some() {
+                touched.push(edit.start / blocks * blocks);
+            } else {
+                let first = edit.start.next_multiple_of(blocks).min(edit.end);
+                let last = edit.end / blocks * blocks;
+                if edit.start < first {
+                    touched.push(edit.start / blocks * blocks);
+                }
+                if last < edit.end {
+                    touched.push(last);
+                }
+                if first < last {
+                    changes.push(Edit {
+                        start: first,
+                        end: last,
+                        payload: None,
+                    });
+                }
+            }
+        }
+        touched.sort_unstable();
+        let count = touched
+            .iter()
+            .enumerate()
+            .filter(|(i, n)| *i == 0 || touched[*i - 1] != **n)
+            .count();
+        let mut output = AlignedBuffer::try_new_in(
+            count.max(1) * size.bytes(),
+            BudgetAllocator::new(Arc::clone(&self.io_memory)),
+        )?;
+        let mut scratch = AlignedBuffer::try_new_in(
+            size.bytes(),
+            BudgetAllocator::new(Arc::clone(&self.io_memory)),
+        )?;
+        let mut tree = self.base.tree()?;
+        let mut last_hash = None;
+        let mut used = 0;
+        for (i, &start) in touched.iter().enumerate() {
+            if i != 0 && touched[i - 1] == start {
+                continue;
+            }
+            let end = (start + blocks).min(image_blocks);
+            let chunk = &mut output.as_mut_slice()[used..used + size.bytes()];
+            for block in start..end {
+                let target = &mut chunk[size.offset(block)..size.offset(block) + BLOCK_SIZE];
+                if let Some(edit) = self
+                    .edits
+                    .iter()
+                    .rev()
+                    .find(|e| e.start <= block && block < e.end)
+                {
+                    if let Some(offset) = edit.payload {
+                        target
+                            .copy_from_slice(&self.payload.as_slice()[offset..offset + BLOCK_SIZE]);
+                    }
+                } else if let Some(hash) = tree.get(block)? {
+                    if last_hash != Some(hash) {
+                        reader
+                            .plan(hash)?
+                            .ok_or_else(|| io::Error::other("compaction base chunk missing"))?
+                            .load(scratch.as_mut_slice())?;
+                        self.read_bytes += (BLOCK_SIZE + size.bytes()) as u64;
+                        last_hash = Some(hash);
+                    }
+                    target.copy_from_slice(
+                        &scratch.as_slice()[size.offset(block)..size.offset(block) + BLOCK_SIZE],
+                    );
+                }
+            }
+            changes.push(Edit {
+                start,
+                end,
+                payload: Some(used),
+            });
+            used += size.bytes();
+        }
+        self.read_bytes += tree.page_reads() * BLOCK_SIZE as u64;
+        self.payload = output;
+        self.payload_bytes = used;
+        self.edits = changes;
+        Ok(())
+    }
+    pub fn read_bytes(&self) -> u64 {
+        self.read_bytes
     }
 }

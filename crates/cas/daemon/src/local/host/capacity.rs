@@ -133,7 +133,9 @@ pub(super) fn compaction_bytes(prepared: &append::PreparedCompaction<'_>, segmen
         0
     } else {
         segment
-            + ((chunks + chunks.div_ceil(cas_core::store::format::MAX_CHUNKS)) * BLOCK_SIZE) as u64
+            + (prepared.chunk_bytes()
+                + chunks.div_ceil(cas_core::store::format::MAX_CHUNKS) * BLOCK_SIZE)
+                as u64
     };
     output + prepared.manifest_bytes() as u64 + METADATA_MARGIN
 }

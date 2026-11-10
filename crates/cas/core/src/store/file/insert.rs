@@ -4,7 +4,10 @@ use arrayvec::ArrayVec;
 impl Store {
     pub fn insert(&mut self, chunks: &[Chunk<'_>]) -> io::Result<Inserted> {
         require(
-            chunks.len() <= MAX_CHUNKS,
+            chunks.len() <= MAX_CHUNKS
+                && chunks
+                    .iter()
+                    .all(|chunk| chunk.bytes().len() == self.chunk_size().bytes()),
             "chunk insertion exceeds batch bound",
         )?;
         let mut missing = ArrayVec::<Chunk<'_>, MAX_CHUNKS>::new();
@@ -19,7 +22,7 @@ impl Store {
                 }
             }
             state.index.reserve(missing.len())?;
-            let bytes = ((missing.len() + 1) * BLOCK_SIZE) as u64;
+            let bytes = (BLOCK_SIZE + missing.len() * self.chunk_size().bytes()) as u64;
             state
                 .segments
                 .last()
@@ -32,8 +35,9 @@ impl Store {
         if missing.is_empty() {
             return Ok(inserted);
         }
-        let mut builder = Builder::try_new_in(
+        let mut builder = Builder::try_new_sized_in(
             missing.len(),
+            self.chunk_size(),
             BudgetAllocator::new(Arc::clone(&self.io_memory)),
         )?;
         for &chunk in &missing {
@@ -75,9 +79,17 @@ impl Store {
                 &self.shared.directory,
                 &self.shared.tickets,
                 self.config,
+                self.chunk_size(),
                 Arc::clone(&self.shared.metadata),
             ) {
-                Ok(segment) => self.shared.lock().segments.push(segment),
+                Ok(segment) => {
+                    let mut state = self.shared.lock();
+                    state.store_bytes_appended += BLOCK_SIZE as u64;
+                    if publications[0].previous.is_some() {
+                        state.collection_rewrite_bytes += BLOCK_SIZE as u64;
+                    }
+                    state.segments.push(segment);
+                }
                 Err(error) => {
                     guard.pending = self.shared.tickets.status().failed;
                     return Err(error);
@@ -91,7 +103,7 @@ impl Store {
             let segment = state.segments.last_mut().expect("insertion owns a segment");
             require(
                 !segment.sealed
-                    && ((publications.len() + 1) * BLOCK_SIZE) as u64
+                    && (BLOCK_SIZE + publications.len() * self.chunk_size().bytes()) as u64
                         <= segment.header.capacity - segment.end,
                 "chunk destination capacity",
             )?;
@@ -118,7 +130,12 @@ impl Store {
         let addresses = publications
             .iter()
             .enumerate()
-            .map(|(index, _)| Address::new(number, offset + ((index + 1) * BLOCK_SIZE) as u64))
+            .map(|(index, _)| {
+                Address::new(
+                    number,
+                    offset + (BLOCK_SIZE + index * self.chunk_size().bytes()) as u64,
+                )
+            })
             .collect::<io::Result<ArrayVec<_, MAX_CHUNKS>>>()?;
         let bytes = batch.bytes().len() as u64;
         let mut guard = Output {
@@ -129,6 +146,13 @@ impl Store {
         // No lookup lock spans allocation, payload IO or sync.
         direct::preallocate(&file, offset, bytes)?;
         direct::write_bytes(&file, batch.bytes(), offset)?;
+        {
+            let mut state = self.shared.lock();
+            state.store_bytes_appended += bytes;
+            if publications[0].previous.is_some() {
+                state.collection_rewrite_bytes += bytes;
+            }
+        }
         direct::sync_data(&file)?;
         {
             let mut state = self.shared.lock();
@@ -146,6 +170,7 @@ impl Store {
             segment.batches.push(BatchLocation {
                 offset: offset as u32,
                 chunks: publications.len() as u16,
+                chunk_size: self.chunk_size(),
             });
             segment.end += bytes;
             segment.file_bytes = segment.end;

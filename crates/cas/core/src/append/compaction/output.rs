@@ -1,7 +1,6 @@
 //! Complete mapping preparation precedes every chunk publication.
 use super::{Compacted, Input};
 use crate::{
-    BLOCK_SIZE, MAX_REQUEST_BYTES,
     chunk::Chunk,
     encoding::require,
     manifest::{
@@ -26,9 +25,10 @@ pub enum Publication {
 /// Every hash is computed once; the complete mapping is owned before output IO.
 pub struct Prepared<'a> {
     previous: View,
+    unrecorded_reads: u64,
     cursor: super::ScanPosition,
     manifest: ManifestOutput,
-    chunks: ArrayVec<Chunk<'a>, { MAX_REQUEST_BYTES / BLOCK_SIZE }>,
+    chunks: ArrayVec<Chunk<'a>, MAX_CHANGES>,
 }
 
 impl Input {
@@ -40,7 +40,7 @@ impl Input {
         let mut changes = ArrayVec::<Extent, MAX_CHANGES>::new();
         let mut chunks = ArrayVec::new();
         for (index, edit) in self.edits.iter().enumerate() {
-            // Bounded by 318 edits. Keep partially covered ZERO ranges ordered;
+            // Bounded by MAX_CHANGES. Keep partially covered ZERO ranges ordered;
             // splitting them would expand the encoder's reserved mapping bound.
             if self.edits[index + 1..]
                 .iter()
@@ -49,11 +49,12 @@ impl Input {
                 continue;
             }
             let chunk = edit.payload.and_then(|offset| {
-                let _measurement = crate::io_metrics::measure(BLOCK_SIZE as u64, |c| &mut c.hash);
+                let _measurement =
+                    crate::io_metrics::measure(self.base.chunk_size().bytes() as u64, |c| {
+                        &mut c.hash
+                    });
                 Chunk::new(
-                    self.payload.as_slice()[offset..offset + BLOCK_SIZE]
-                        .try_into()
-                        .expect("verified fixed-block edit"),
+                    &self.payload.as_slice()[offset..offset + self.base.chunk_size().bytes()],
                 )
             });
             changes.push(Extent {
@@ -65,14 +66,20 @@ impl Input {
                 chunks.push(chunk);
             }
         }
+        let manifest =
+            manifest.prepare_with_metadata(&changes, self.through, Arc::clone(&self.metadata))?;
+        let manifest_reads = manifest.stats().old_page_reads * crate::BLOCK_SIZE as u64;
+        let unrecorded_reads = if let Some(reader) = &self.reader {
+            reader.record_compaction_reads(manifest_reads);
+            0
+        } else {
+            self.read_bytes + manifest_reads
+        };
         Ok(Prepared {
             previous: self.base.clone(),
+            unrecorded_reads,
             cursor: self.cursor.expect("loaded compaction boundary"),
-            manifest: manifest.prepare_with_metadata(
-                &changes,
-                self.through,
-                Arc::clone(&self.metadata),
-            )?,
+            manifest,
             chunks,
         })
     }
@@ -88,8 +95,16 @@ impl Prepared<'_> {
     pub fn manifest_stats(&self) -> crate::manifest::tree::Stats {
         self.manifest.stats()
     }
+    pub fn chunk_bytes(&self) -> usize {
+        self.chunks.len() * self.previous.chunk_size().bytes()
+    }
+
     pub fn chunk_count(&self) -> usize {
         self.chunks.len()
+    }
+
+    pub fn chunks(&self) -> &[Chunk<'_>] {
+        &self.chunks
     }
 
     pub fn manifest_bytes(&self) -> usize {
@@ -112,13 +127,18 @@ impl Prepared<'_> {
         mut observe: impl FnMut(Publication, u64) -> io::Result<()>,
     ) -> io::Result<Compacted> {
         require(
-            !store.status().failed && store.config().store == self.previous.commit().store,
+            !store.status().failed
+                && store.config().store == self.previous.commit().store
+                && store.chunk_size() == self.previous.chunk_size(),
             "compaction store is failed or differs",
         )?;
         require(
             manifest.view()?.same(&self.previous),
             "compaction manifest changed before output",
         )?;
+        store
+            .reader()?
+            .record_compaction_reads(self.unrecorded_reads);
         observe(Publication::BeforeChunks, manifest.current().durable)?;
         for chunks in self.chunks.chunks(MAX_CHUNKS) {
             store.insert(chunks)?;

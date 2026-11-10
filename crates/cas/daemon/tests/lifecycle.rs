@@ -186,6 +186,13 @@ impl Drop for Daemon {
         // Also runs on assertion failure so as to never leave a blocked daemon behind
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if thread::panicking() {
+            for name in ["stderr", "report.json"] {
+                if let Ok(contents) = fs::read_to_string(self.directory.path().join(name)) {
+                    eprintln!("daemon {name} before cleanup:\n{contents}");
+                }
+            }
+        }
     }
 }
 
@@ -202,6 +209,10 @@ struct FrontendQueue {
 
 impl FrontendQueue {
     fn connect(daemon: &mut Daemon) -> Self {
+        Self::connect_at(daemon, 0)
+    }
+
+    fn connect_at(daemon: &mut Daemon, start: u16) -> Self {
         let stream = daemon.connect();
         let observer = stream.try_clone().unwrap();
         let mut frontend = Frontend::from_stream(stream, 1);
@@ -216,14 +227,18 @@ impl FrontendQueue {
         let call = EventFd::new(EFD_NONBLOCK | EFD_CLOEXEC).unwrap();
         let kick = EventFd::new(EFD_NONBLOCK | EFD_CLOEXEC).unwrap();
         let mut inflight = None;
-        Self::configure(&mut frontend, &mem, &call, &kick, &mut inflight);
+        // Install the empty ring cursors before the backend can schedule it.
+        // SET_VRING_ENABLE(false) does not join an already dispatched event.
+        mem.write_obj(start.to_le(), GuestAddress(0x2002)).unwrap();
+        mem.write_obj(start.to_le(), GuestAddress(0x3002)).unwrap();
+        Self::configure_at(&mut frontend, &mem, &call, &kick, &mut inflight, start);
         Self {
             frontend,
             observer,
             mem,
             call,
             kick,
-            next_avail: 0,
+            next_avail: start,
             deadline: daemon.deadline,
             inflight,
         }
@@ -235,6 +250,17 @@ impl FrontendQueue {
         call: &EventFd,
         kick: &EventFd,
         inflight: &mut Option<(VhostUserInflight, File)>,
+    ) {
+        Self::configure_at(frontend, mem, call, kick, inflight, 0);
+    }
+
+    fn configure_at(
+        frontend: &mut Frontend,
+        mem: &GuestMemoryMmap,
+        call: &EventFd,
+        kick: &EventFd,
+        inflight: &mut Option<(VhostUserInflight, File)>,
+        start: u16,
     ) {
         frontend.set_owner().unwrap();
         let features = frontend.get_features().unwrap();
@@ -275,29 +301,12 @@ impl FrontendQueue {
                 },
             )
             .unwrap();
-        frontend.set_vring_base(0, 0).unwrap();
+        frontend.set_vring_base(0, start).unwrap();
         frontend.set_vring_call(0, call).unwrap();
         frontend.set_vring_kick(0, kick).unwrap();
         frontend.set_vring_enable(0, true).unwrap();
         // A reply orders all preceding setup messages before the first kick.
         frontend.get_features().unwrap();
-    }
-
-    fn reset_base(&mut self, start: u16) {
-        // Enabling a queue may immediately schedule it. Quiesce before changing
-        // the guest's used and available cursors, then install the new base.
-        self.frontend.set_vring_enable(0, false).unwrap();
-        self.frontend.get_features().unwrap();
-        self.next_avail = start;
-        self.mem
-            .write_obj(start.to_le(), GuestAddress(0x2002))
-            .unwrap();
-        self.mem
-            .write_obj(start.to_le(), GuestAddress(0x3002))
-            .unwrap();
-        self.frontend.set_vring_base(0, start).unwrap();
-        self.frontend.set_vring_enable(0, true).unwrap();
-        self.frontend.get_features().unwrap();
     }
 
     fn descriptor(&self, index: u16, addr: u64, len: u32, flags: u16, next: u16) {
@@ -875,9 +884,8 @@ fn concurrent_retained_fd_replays_without_flush_and_ignores_consumed_available_s
                 directory,
                 deadline: Instant::now() + DEADLINE,
             };
-            let mut queue = FrontendQueue::connect(&mut daemon);
+            let mut queue = FrontendQueue::connect_at(&mut daemon, start);
             assert!(queue.inflight.is_some());
-            queue.reset_base(start);
             queue
                 .mem
                 .write_slice(&[0x11; BLOCK_SIZE], GuestAddress(0x5000))

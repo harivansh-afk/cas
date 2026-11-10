@@ -1,0 +1,42 @@
+{
+  "settings": {
+    "seconds": 30,
+    "repeats": 5,
+    "depths": [
+      1,
+      4,
+      16,
+      64
+    ],
+    "image_bytes": 4294967296,
+    "data_bytes": 8388608,
+    "segment_bytes": 8388608,
+    "staging_bytes": 1073741824,
+    "cache_bytes": 67108864,
+    "inline_us": 50
+  },
+  "nodes": [
+    {
+      "storage": "/mnt/cas/fleet-run-001",
+      "output": "/var/tmp/cas-fleet-001",
+      "get": "192.168.1.1:17483",
+      "bulk": "192.168.1.1:17485",
+      "cpus": "2-5",
+      "guest_cpus": "6-7",
+      "zfs_parent": "tank/cas-bench",
+      "zfs_port": 17487
+    },
+    {
+      "ssh": "experiment@node-b",
+      "runner": "/home/experiment/cas/result-two-host/bin/cas-two-host",
+      "storage": "/mnt/cas/fleet-run-001",
+      "output": "/var/tmp/cas-fleet-001",
+      "get": "192.168.1.2:17483",
+      "bulk": "192.168.1.2:17485",
+      "cpus": "2-5",
+      "guest_cpus": "6-7",
+      "zfs_parent": "tank/cas-bench",
+      "zfs_port": 17487
+    }
+  ]
+}

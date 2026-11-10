@@ -25,6 +25,10 @@ use cas_core::{
 use io_uring::{IoUring, opcode, squeue, types};
 use vmm_sys_util::eventfd::EventFd;
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Keep read credits and timestamps inline without an allocation per request"
+)]
 pub enum Permit {
     Reference,
     Local { credits: local::Permit },
@@ -139,27 +143,6 @@ impl Storage {
             _ => Err(io::Error::other("ZERO requires local admission credits")),
         }
     }
-    pub fn local(path: &Path, create_bytes: Option<u64>, event: &EventFd) -> io::Result<Self> {
-        Self::from_local(Local::open(path, create_bytes, event)?)
-    }
-
-    pub fn local_async(
-        path: &Path,
-        create_bytes: Option<u64>,
-        event: &EventFd,
-    ) -> io::Result<Self> {
-        Self::from_local(Local::open_with_execution(
-            path,
-            create_bytes,
-            event,
-            local::Execution::Concurrent,
-        )?)
-    }
-
-    pub fn local_live(path: &Path, create_bytes: Option<u64>) -> io::Result<Self> {
-        Self::from_opening(Opening::new(path, create_bytes)?)
-    }
-
     pub(crate) fn admission_ticket(
         &self,
         kind: local::Kind,

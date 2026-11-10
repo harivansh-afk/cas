@@ -25,7 +25,7 @@ pub(crate) struct Lru<K, V> {
 
 impl<K: Key, V> Lru<K, V> {
     pub fn new(capacity: usize, metadata: &Arc<Budget>) -> io::Result<Self> {
-        let mut entries = HashTable::new_in(BudgetAllocator::new(Arc::clone(metadata)));
+        let mut entries = HashTable::new_in(BudgetAllocator::tracked(Budget::child(metadata)));
         // Pinned hashbrown rehashes tombstones in place below half capacity.
         // Reserve that headroom once so eviction churn never grows the table.
         let slots = capacity.checked_mul(2).ok_or(io::ErrorKind::OutOfMemory)?;
@@ -46,7 +46,7 @@ impl<K: Key, V> Lru<K, V> {
     }
 
     pub fn table_bytes(&self) -> usize {
-        self.entries.allocation_size()
+        self.entries.allocator().charged_bytes()
     }
 
     pub fn buffer(&self, key: &K) -> Option<BudgetArc<V>> {

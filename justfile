@@ -2,6 +2,7 @@ check:
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets --locked -- -D warnings
     cargo test --workspace --locked
+    uv run --no-project python -m unittest discover -s experiments/two-host
     git diff --check
 
 test:

@@ -7,8 +7,29 @@ pub struct Reader {
 }
 
 impl Reader {
+    pub(crate) fn record_compaction_reads(&self, bytes: u64) {
+        self.shared
+            .compaction_reads
+            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+    }
+    /// Bounded by the caller's metadata budget; a shipping pass owns a stable
+    /// inventory while insertions continue. This snapshot does not pin payloads.
+    pub fn inventory(&self, metadata: Arc<Budget>) -> io::Result<Vec<Hash, BudgetAllocator>> {
+        let state = self.shared.lock();
+        state.healthy()?;
+        let mut hashes = Vec::new_in(BudgetAllocator::new(metadata));
+        hashes
+            .try_reserve_exact(state.index.len())
+            .map_err(|_| io::ErrorKind::OutOfMemory)?;
+        hashes.extend(state.index.entries().map(|(hash, _, _)| *hash));
+        Ok(hashes)
+    }
     pub fn plan(&self, hash: Hash) -> io::Result<Option<Read>> {
         self.shared.plan(hash)
+    }
+
+    pub fn chunk_size(&self) -> ChunkSize {
+        self.shared.chunk_size
     }
 
     pub fn status(&self) -> Status {
@@ -82,6 +103,10 @@ impl Read {
     pub fn payload(&self, page: &[u8]) -> io::Result<Payload> {
         let header = Header::decode(page)?;
         require(
+            header.chunk_size() == self.batch.chunk_size,
+            "chunk read geometry",
+        )?;
+        require(
             batch_identity(
                 &header,
                 self.address.segment(),
@@ -91,8 +116,8 @@ impl Read {
             ),
             "chunk read batch identity",
         )?;
-        let index =
-            ((self.address.offset() - self.header_offset()) / BLOCK_SIZE as u64 - 1) as usize;
+        let index = ((self.address.offset() - self.header_offset() - BLOCK_SIZE as u64)
+            / self.batch.chunk_size.bytes() as u64) as usize;
         let descriptor = header
             .descriptors()
             .nth(index)
@@ -102,17 +127,30 @@ impl Read {
             file: Arc::clone(&self.file),
             offset: self.address.offset(),
             crc: descriptor.crc,
+            bytes: self.batch.chunk_size.bytes(),
         })
     }
 
     pub fn load(&self, destination: &mut [u8]) -> io::Result<()> {
-        require(destination.len() == BLOCK_SIZE, "chunk destination size")?;
+        require(
+            destination.len() == self.batch.chunk_size.bytes(),
+            "chunk destination size",
+        )?;
         let mut scratch = AlignedBuffer::try_new_in(
             BLOCK_SIZE,
             BudgetAllocator::new(Arc::clone(&self.metadata)),
         )?;
-        direct::read_bytes(&self.file, scratch.as_mut_slice(), self.header_offset())?;
-        self.payload(scratch.as_slice())?.load(destination)
+        self.load_with_scratch(scratch.as_mut_slice(), destination)
+    }
+
+    /// Reuse aligned caller-owned header scratch on a bounded service worker.
+    pub fn load_with_scratch(&self, scratch: &mut [u8], destination: &mut [u8]) -> io::Result<()> {
+        require(
+            scratch.len() == BLOCK_SIZE && destination.len() == self.batch.chunk_size.bytes(),
+            "chunk scratch/destination size",
+        )?;
+        direct::read_bytes(&self.file, scratch, self.header_offset())?;
+        self.payload(scratch)?.load(destination)
     }
 }
 
@@ -121,9 +159,13 @@ pub struct Payload {
     file: Arc<File>,
     offset: u64,
     crc: u32,
+    bytes: usize,
 }
 
 impl Payload {
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
     pub fn file(&self) -> &File {
         &self.file
     }
@@ -133,13 +175,13 @@ impl Payload {
 
     pub fn verify(&self, bytes: &[u8]) -> io::Result<()> {
         require(
-            bytes.len() == BLOCK_SIZE && crc32fast::hash(bytes) == self.crc,
+            bytes.len() == self.bytes && crc32fast::hash(bytes) == self.crc,
             "chunk read CRC",
         )
     }
 
     pub fn load(&self, destination: &mut [u8]) -> io::Result<()> {
-        require(destination.len() == BLOCK_SIZE, "chunk destination size")?;
+        require(destination.len() == self.bytes, "chunk destination size")?;
         direct::read_bytes(&self.file, destination, self.offset)?;
         self.verify(destination)
     }

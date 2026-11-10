@@ -156,10 +156,40 @@
           };
           sharedRecovery = sharedFor pkgs { liveRecovery = true; };
           pressure = sharedFor pkgs { pressure = true; };
+          fleetRunner =
+            acceleration:
+            import ./nix/fleet {
+              inherit
+                pkgs
+                lib
+                nixpkgs
+                acceleration
+                ;
+              provenance = labProvenance;
+            };
         in
         {
           default = pkgs.cas;
           inherit (pkgs) cas;
+          two-host = fleetRunner "kvm";
+          fleet-appliance = pkgs.callPackage ./nix/fleet/appliance-runner.nix {
+            guest = lib.nixosSystem {
+              specialArgs.runner = fleetRunner "kvm";
+              modules = [
+                ./nix/fleet/appliance.nix
+                { nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system; }
+              ];
+            };
+          };
+          two-host-fixture = pkgs.callPackage ./nix/fleet/fixture-runner.nix {
+            guest = lib.nixosSystem {
+              specialArgs.runner = fleetRunner "tcg";
+              modules = [
+                ./nix/fleet/fixture.nix
+                { nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system; }
+              ];
+            };
+          };
           native = import ./nix/native.nix {
             inherit pkgs lib nixpkgs;
             provenance = labProvenance;
@@ -226,6 +256,8 @@
           packages = with pkgs; [
             cas.toolchain
             just
+            uv
+            rsync
             qemu_kvm
             fio
             openssh
@@ -267,6 +299,7 @@
 
       checks = eachSystem (pkgs: {
         inherit (pkgs) cas;
+        shared-results = import ./nix/checks/shared-results.nix { inherit pkgs; };
         census-pilot = self.packages.${pkgs.stdenv.hostPlatform.system}.census-pilot;
         census-fleet = self.packages.${pkgs.stdenv.hostPlatform.system}.census-fleet;
         host-config = import ./nix/checks/host-config.nix {

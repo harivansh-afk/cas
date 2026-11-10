@@ -6,10 +6,14 @@ enum Grant {
 }
 
 pub(super) struct Endpoint {
+    pub retired: bool,
+    pub fleet: Option<BudgetArc<fleet::Runtime>>,
     pub statistics: BudgetArc<Mutex<statistics::Totals>>,
     pub manifest: Manifest,
     pub resources: Arc<Resources>,
     pub quiescent: Option<u64>,
+    pub swept_roots: u64,
+    pub swept_attached: bool,
     #[cfg(test)]
     pub control: Arc<Mutex<tests::Control>>,
     pub health: Health,
@@ -20,7 +24,10 @@ pub(super) struct Endpoint {
 
 impl Endpoint {
     pub(super) fn healthy(&self) -> io::Result<()> {
-        if let Some(error) = &self.health.lock()?.failure {
+        let health = self.health.lock()?;
+        if let Some(error) = &health.failure
+            && !self.health.writer_fenced()
+        {
             return Err(io::Error::other(error.clone()));
         }
         Ok(())
@@ -66,10 +73,21 @@ impl Endpoint {
             Reply::Selected(Some(selection)) => {
                 let mut attempt = statistics::Attempt::new(&self.statistics);
                 self.healthy()?;
-                let input = selection.load()?;
+                let input = selection.load_with_store(&store.reader()?)?;
                 attempt.advance(statistics::Phase::Prepare);
                 let input_bytes = input.payload_bytes() as u64;
                 let prepared = input.prepare(&self.manifest)?;
+                let mut shipping = reserved_vec(
+                    if self.fleet.is_some() {
+                        prepared.chunk_count()
+                    } else {
+                        0
+                    },
+                    &self.resources.compaction,
+                )?;
+                if self.fleet.is_some() {
+                    shipping.extend(prepared.chunks().iter().map(|chunk| chunk.hash()));
+                }
                 {
                     let stats = prepared.manifest_stats();
                     let mut totals = self
@@ -82,7 +100,7 @@ impl Endpoint {
                     totals.manifest_allocated_bytes += stats.allocated_bytes as u64;
                 }
                 attempt.advance(statistics::Phase::Reserve);
-                let output_bytes = (prepared.chunk_count() * BLOCK_SIZE) as u64;
+                let output_bytes = prepared.chunk_bytes() as u64;
                 let bytes = capacity::compaction_bytes(&prepared, store.config().segment_bytes);
                 let permit = match self.background(physical, bytes)? {
                     Grant::Ready(permit) => permit,
@@ -135,6 +153,11 @@ impl Endpoint {
                                 &health,
                             )
                         })?;
+                    if let Some(fleet) = &self.fleet
+                        && let Some(shipper) = fleet.shipper.get()
+                    {
+                        shipper.enqueue(shipping.iter().copied());
+                    }
                     let Reply::Reclaim(reclaim) = self.exchange(Event::Published(receipt))? else {
                         return Err(io::Error::other("expected reclamation after D publication"));
                     };
@@ -267,6 +290,9 @@ impl Endpoint {
 }
 
 pub(super) struct Owner {
+    pub exhausted_space: Option<(u64, u64)>,
+    pub incoming: Option<fleet_image::Incoming>,
+    pub attachments: std::sync::Weak<Mutex<BudgetVec<Option<Attachment>, BudgetAllocator>>>,
     pub catalog: Option<cas_core::catalog::Catalog>,
     pub store: Store,
     pub snapshots: BudgetVec<Snapshot, BudgetAllocator>,
@@ -276,6 +302,26 @@ pub(super) struct Owner {
 }
 
 impl Owner {
+    fn collection_changed(&self) -> bool {
+        if !self.shared.collection_required() {
+            return false;
+        }
+        let Some(exhausted) = self.exhausted_space else {
+            return true;
+        };
+        let space = self
+            .shared
+            .physical
+            .as_ref()
+            .expect("pressured governor")
+            .status();
+        (space.allocated, space.promised) != exhausted
+            || self.endpoints.iter().enumerate().any(|(index, endpoint)| {
+                endpoint.swept_roots != endpoint.manifest.roots_revision()
+                    || endpoint.swept_attached != self.shared.admission.attached(index)
+            })
+    }
+
     pub fn run(mut self) {
         let _io_scope = cas_core::scheduler::Scheduler::background(&self.shared.io_scheduler);
         let mut exit = UnexpectedExit {
@@ -283,15 +329,30 @@ impl Owner {
             normal: false,
         };
         let mut next_collection = Instant::now();
+        if let Err(error) = self.resume_fleet_epoch() {
+            self.shared.gate.fail(error.to_string());
+            return;
+        }
         loop {
-            if self.shared.collection_required()
-                && Instant::now() >= next_collection
-                && let Ok(control) = administration::Control::claim(&self.shared)
-            {
-                let result = self.collect();
-                self.shared.collected(&result);
-                drop(control);
+            if self.shared.collection_required() && Instant::now() >= next_collection {
+                // Delayed filesystem frees can reopen admission without a sweep.
+                // Refresh on the owner, without stopping readers.
+                if self.exhausted_space.is_some()
+                    && let Some(physical) = &self.shared.physical
+                    && let Err(error) = physical.refresh()
+                {
+                    self.shared.gate.fail(error.to_string());
+                }
+                if self.collection_changed()
+                    && let Ok(control) = administration::Control::claim(&self.shared)
+                {
+                    let result = self.collect();
+                    self.shared.collected(&result);
+                    drop(control);
+                }
                 next_collection = Instant::now() + Duration::from_secs(1);
+            } else if !self.shared.collection_required() {
+                self.exhausted_space = None;
             }
             let ready = match self.input.recv_timeout(Duration::from_millis(50)) {
                 Ok(ready) => ready,
@@ -299,6 +360,14 @@ impl Owner {
                 Err(mailbox::RecvTimeoutError::Disconnected) => break,
             };
             let (index, turn) = match ready {
+                Ready::Fleet(request) => {
+                    if request.op == crate::fleet::collection::FREEZE {
+                        self.freeze(request);
+                    } else {
+                        self.bulk(request);
+                    }
+                    continue;
+                }
                 Ready::Image { index, turn } => (index, turn),
                 Ready::Collect(request) => {
                     let result = self.collect();
@@ -322,6 +391,13 @@ impl Owner {
             let measurements = cas_core::io_metrics::Scope::enter();
             let result = match turn {
                 Turn::Compact => {
+                    #[cfg(test)]
+                    if self.shared.control.lock().unwrap().defer_compaction {
+                        if let Err(error) = endpoint.defer(None) {
+                            self.shared.gate.fail(error.to_string());
+                        }
+                        continue;
+                    }
                     endpoint.compact(&mut self.store, self.shared.physical.as_ref(), None)
                 }
                 Turn::Rotate => endpoint.rotate(self.shared.physical.as_ref()),

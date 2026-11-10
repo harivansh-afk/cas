@@ -3,7 +3,7 @@
 //! `Shared` holds the budgets, health gate and metrics that admission and the
 //! `Worker` (synchronous) or reactor (concurrent) execution both consult.
 pub(crate) mod host;
-mod pools;
+pub(crate) mod pools;
 pub(crate) mod pressure;
 mod reactor;
 mod state;
@@ -62,6 +62,8 @@ impl Execution {
 }
 
 pub struct Permit {
+    pub(crate) received: Option<Instant>,
+    pub(crate) remote: Option<crate::peer::metrics::Trace>,
     pub(crate) trace: Option<crate::read_trace::OwnedTrace>,
     _request: Credits,
     _read: Option<BudgetArc<Credits>>,
@@ -71,6 +73,7 @@ pub struct Permit {
 }
 
 struct Fetched {
+    remote: Option<crate::peer::metrics::Phases>,
     bytes: cas_core::aligned::AlignedBuffer,
     _credits: BudgetArc<Credits>,
 }
@@ -292,6 +295,9 @@ impl Shared {
     }
 
     fn admit(&self, kind: Kind) -> io::Result<pressure::Decision<Permit>> {
+        if self.health.writer_fenced() {
+            return Err(io::Error::other("image writer transferred to peer"));
+        }
         let entry = match &self.admission {
             Some(admission) => {
                 if admission.status().failed {
@@ -365,6 +371,8 @@ impl Shared {
         };
         Ok(Decision::Ready(Permit {
             trace: None,
+            received: None,
+            remote: None,
             _request: request,
             _read: read,
             window,
@@ -411,7 +419,16 @@ impl Shared {
     }
 }
 
+#[cfg(test)]
 pub fn create_log(path: &Path, image_bytes: u64) -> io::Result<Log> {
+    create_log_with_limits(path, image_bytes, append::Limits::default())
+}
+
+pub fn create_log_with_limits(
+    path: &Path,
+    image_bytes: u64,
+    limits: append::Limits,
+) -> io::Result<Log> {
     let mut identities = [0; 32];
     File::open("/dev/urandom")?.read_exact(&mut identities)?;
     Log::create(
@@ -422,7 +439,7 @@ pub fn create_log(path: &Path, image_bytes: u64) -> io::Result<Log> {
             image_bytes,
             segment_bytes: 64 * MAX_REQUEST_BYTES as u64,
         },
-        append::Limits::default(),
+        limits,
     )
     .map_err(io::Error::other)
 }
@@ -446,19 +463,37 @@ impl Local {
     pub fn shared_host(&self) -> bool {
         self.shared.window.is_some()
     }
+    #[cfg(test)]
     pub fn open(path: &Path, create_bytes: Option<u64>, event: &EventFd) -> io::Result<Self> {
         Self::open_with_execution(path, create_bytes, event, Execution::Synchronous)
     }
 
+    #[cfg(test)]
     pub fn open_with_execution(
         path: &Path,
         create_bytes: Option<u64>,
         event: &EventFd,
         execution: Execution,
     ) -> io::Result<Self> {
+        Self::open_with_limits(
+            path,
+            create_bytes,
+            event,
+            execution,
+            append::Limits::default(),
+        )
+    }
+
+    pub fn open_with_limits(
+        path: &Path,
+        create_bytes: Option<u64>,
+        event: &EventFd,
+        execution: Execution,
+        limits: append::Limits,
+    ) -> io::Result<Self> {
         let log = match create_bytes {
-            Some(image_bytes) => create_log(path, image_bytes),
-            None => Log::open(path, append::Limits::default()).map_err(io::Error::other),
+            Some(image_bytes) => create_log_with_limits(path, image_bytes, limits),
+            None => Log::open(path, limits).map_err(io::Error::other),
         }?;
         let shared = Shared::new(log.status())?;
         Self::from_log(log, event, execution, shared)
@@ -792,6 +827,7 @@ impl Local {
                 "local writes must gather directly into an append batch",
             ));
         }
+        permit.received.get_or_insert_with(Instant::now);
         if let Some(trace) = &mut permit.trace {
             trace.enqueued_ns = trace.at();
         }

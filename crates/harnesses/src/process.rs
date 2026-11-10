@@ -343,7 +343,13 @@ mod tests {
             // The pid and command name precede ") " and are not addressable.
             assert!(proc_stat_field(child.pid(), 2).is_err());
             let state = proc_stat_field(child.pid(), 3).unwrap();
-            assert!(["R", "S", "D", "T"].contains(&state.as_str()), "{state}");
+            // The immediate-exit launcher can already be a zombie when this
+            // observer runs; poll() below still owns reaping and descendant cleanup.
+            assert!(
+                ["R", "S", "D", "T"].contains(&state.as_str())
+                    || (ending == "exit 0" && state == "Z"),
+                "{state}"
+            );
             assert!(
                 proc_stat_field(child.pid(), 22)
                     .unwrap()

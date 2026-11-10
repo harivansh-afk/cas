@@ -366,6 +366,7 @@ fn read_errors_and_foreign_headers_do_not_authorize_repair() {
     assert_eq!(fs::read(&file).unwrap(), original);
     assert!(inspect(root.path()).unwrap().recover().is_ok());
     let foreign = SegmentHeader {
+        chunk_size: crate::chunk::ChunkSize::K4,
         store: [6; 16],
         number: 1,
         capacity: CONFIG.segment_bytes,
@@ -391,6 +392,7 @@ fn duplicate_records_rebuild_to_a_verified_location_and_remain_surplus() {
     let directory = root.path().join("chunks");
     let file = direct::open(&directory.join(segments::name(2)), true).unwrap();
     let header = SegmentHeader {
+        chunk_size: crate::chunk::ChunkSize::K4,
         store: CONFIG.store,
         number: 2,
         capacity: CONFIG.segment_bytes,
@@ -487,3 +489,5 @@ fn exhausted_record_ids_fail_before_output_and_empty_insertion_allocates_nothing
         assert_eq!(store.status().chunks, 1);
     }
 }
+
+mod chunk16;

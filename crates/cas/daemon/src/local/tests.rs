@@ -574,7 +574,22 @@ fn pause_drains_prior_reads_and_writes_and_resume_restores_admission() {
 fn fresh_attachment_syncs_both_epochs_and_keeps_image_mutations_monotonic() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("log");
-    let mut local = concurrent(&path);
+    // Three attachment epochs plus cold reopen need four segments. Do not
+    // fill the staging budget exactly: st_blocks can include extent metadata.
+    let log = Log::create(
+        &path,
+        append::Config {
+            store: [1; 16],
+            image: [2; 16],
+            image_bytes: 8 * MAX_REQUEST_BYTES as u64,
+            segment_bytes: 8 * MAX_REQUEST_BYTES as u64,
+        },
+        append::Limits::default(),
+    )
+    .unwrap();
+    let shared = Shared::new(log.status()).unwrap();
+    let event = EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK).unwrap();
+    let mut local = Local::from_log(log, &event, Execution::Concurrent, shared).unwrap();
     for generation in 1..=3 {
         assert_eq!(local.status.epoch, generation);
         write(
@@ -602,7 +617,16 @@ fn fresh_attachment_syncs_both_epochs_and_keeps_image_mutations_monotonic() {
     local.receive(true).unwrap().unwrap().result.unwrap();
     local.stop().unwrap();
     drop(local);
-    let mut log = Log::open(&path, append::Limits::default()).unwrap();
+    // Recovery allocates a fourth 64 MiB epoch. Leave room for filesystem
+    // allocation overhead instead of fitting exactly in the default 256 MiB.
+    let mut log = Log::open(
+        &path,
+        append::Limits {
+            staging_bytes: 320 * MAX_REQUEST_BYTES as u64,
+            ..append::Limits::default()
+        },
+    )
+    .unwrap();
     let mut bytes = AlignedBuffer::new(3 * BLOCK_SIZE);
     log.read_into(0, &mut bytes).unwrap();
     for (index, chunk) in bytes
@@ -883,5 +907,48 @@ fn zero_batches_reserve_only_a_header_and_preserve_mutation_and_flush_order() {
             MAX_REQUEST_BYTES + BLOCK_SIZE
         );
         assert_eq!(report["append"]["current"]["bytes"], 0);
+    }
+}
+
+#[test]
+fn explicit_staging_budget_survives_rotations_and_cold_reopen() {
+    for execution in [Execution::Synchronous, Execution::Concurrent] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("log");
+        let event = EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK).unwrap();
+        let limits = append::Limits {
+            staging_bytes: 512 * MAX_REQUEST_BYTES as u64,
+            ..append::Limits::default()
+        };
+        for generation in 1..=5 {
+            let mut local = Local::open_with_limits(
+                &path,
+                (generation == 1).then_some(8 * MAX_REQUEST_BYTES as u64),
+                &event,
+                execution,
+                limits,
+            )
+            .unwrap();
+            write(&mut local, generation, 0, BLOCK_SIZE, generation as u8);
+            local.receive(true).unwrap().unwrap().result.unwrap();
+            let permit = local.prepare(Kind::Control).unwrap().unwrap();
+            local.enqueue(10, Operation::Flush, permit).unwrap();
+            local.receive(true).unwrap().unwrap().result.unwrap();
+            local.stop().unwrap();
+            drop(local);
+        }
+        // The default cap still rejects these retained allocations. An explicit
+        // cap must survive both ordinary and retained-frontend cold opening.
+        assert!(matches!(
+            Log::open(&path, append::Limits::default()),
+            Err(append::Error::Capacity)
+        ));
+        let mut opening = crate::storage::Opening::with_limits(&path, None, limits).unwrap();
+        let mut log = opening.fresh().unwrap();
+        let mut bytes = AlignedBuffer::new(BLOCK_SIZE);
+        log.read_into(0, &mut bytes).unwrap();
+        assert_eq!(bytes.as_slice(), &[5; BLOCK_SIZE]);
+        assert!(log.status().allocated_bytes <= limits.staging_bytes);
+        assert_eq!((log.status().published, log.status().durable), (5, 5));
     }
 }

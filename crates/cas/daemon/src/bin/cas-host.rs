@@ -21,16 +21,18 @@ struct Storage {
 #[command(about = "Serve all catalog images from one governed local host")]
 struct Serve {
     #[command(flatten)]
+    peer: cas_daemon::peer::Config,
+    #[command(flatten)]
     storage: Storage,
     #[arg(long, value_enum)]
     mode: Mode,
-    /// Repeat once for every catalog image: 32hex-image-id=socket-path.
-    #[arg(long = "image", required = true)]
+    /// Image sockets. Fleet cold mode also accepts IDs awaiting provisioning/migration.
+    #[arg(long = "image")]
     endpoints: Vec<Endpoint>,
     /// Existing directory on another filesystem; creates host.json and per-image reports.
     #[arg(long)]
     reports: PathBuf,
-    /// Clean chunk-cache bytes; bounded by the default host cap.
+    /// Clean chunk-cache bytes; zero disables payload caching, bounded by the host cap.
     #[arg(long, default_value_t = cas_daemon::Resources::DEFAULT_CACHE_BYTES)]
     cache_bytes: usize,
     /// Sample every 500 ms; fail the run if telemetry exceeds 64 MiB or 4,096 samples.
@@ -56,6 +58,9 @@ struct Serve {
     about = "Initialize an empty dedicated storage root; retain all output on error"
 )]
 struct Init {
+    /// Fixed store chunk bytes; guest blocks remain 4096 bytes.
+    #[arg(long, default_value_t = 4096)]
+    chunk_bytes: usize,
     #[command(flatten)]
     storage: Storage,
     /// Repeat for each initial image: 32hex-image-id=size-in-bytes.
@@ -74,16 +79,20 @@ fn main() -> std::io::Result<()> {
     let matches = command().get_matches();
     if let Some(("init", matches)) = matches.subcommand() {
         let args = Init::from_arg_matches(matches).unwrap_or_else(|error| error.exit());
-        let result = initialize::create(initialize::Config {
-            root: args.storage.root,
-            store: cas_core::store::file::Config {
-                store: args.storage.store,
-                segment_bytes: args.storage.segment_bytes,
+        let size = cas_core::chunk::ChunkSize::from_bytes(args.chunk_bytes)?;
+        let result = initialize::create_sized(
+            initialize::Config {
+                root: args.storage.root,
+                store: cas_core::store::file::Config {
+                    store: args.storage.store,
+                    segment_bytes: args.storage.segment_bytes,
+                },
+                append: cas_core::append::Limits::default(),
+                staging_bytes: args.storage.staging_bytes,
+                images: args.images,
             },
-            append: cas_core::append::Limits::default(),
-            staging_bytes: args.storage.staging_bytes,
-            images: args.images,
-        });
+            size,
+        );
         match &result {
             Ok(report) => println!("{report:#}"),
             Err(error) => println!(
@@ -98,6 +107,7 @@ fn main() -> std::io::Result<()> {
     }
     let args = Serve::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     host_service::serve(host_service::Config {
+        peer: args.peer,
         root: args.storage.root,
         store: args.storage.store,
         mode: args.mode,

@@ -13,7 +13,7 @@ use crate::{
 };
 use std::{io, sync::Arc};
 
-pub const MAX_CHANGES: usize = 256 + 62;
+pub const MAX_CHANGES: usize = 256 + 3 * 62;
 pub const MAX_TRANSACTION_BYTES: usize = 128 * 1024 * 1024;
 
 #[derive(Debug, Default, Clone, Copy, serde::Serialize)]
@@ -56,7 +56,7 @@ impl Prepared {
             require(
                 edit.start < edit.end
                     && edit.end <= blocks
-                    && (edit.hash.is_none() || edit.end - edit.start == 1),
+                    && (edit.hash.is_none() || edit.start / 4 == (edit.end - 1) / 4),
                 "manifest edit range",
             )?;
         }

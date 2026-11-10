@@ -22,6 +22,9 @@ pub struct Usage {
     pub capacity: u64,
     pub compaction: bool,
     pub stopped: bool,
+    /// Monotonic count of transitions into `stopped`; a periodic sample can
+    /// miss a stop that already reopened below the low watermark.
+    pub stops: u64,
 }
 
 impl Usage {
@@ -36,16 +39,22 @@ impl Usage {
             capacity: image.capacity,
             compaction: false,
             stopped: false,
+            stops: 0,
         };
         usage.update();
         Ok(usage)
+    }
+
+    fn stop(&mut self) {
+        self.stops += u64::from(!self.stopped);
+        self.stopped = true;
     }
 
     fn update(&mut self) {
         let used = u128::from(self.allocated) + u128::from(self.promised);
         let capacity = u128::from(self.capacity);
         if used >= capacity {
-            self.stopped = true;
+            self.stop();
         } else if used * 100 < capacity * 60 {
             self.stopped = false;
         }
@@ -55,7 +64,7 @@ impl Usage {
     fn admit(&mut self, bytes: u64) -> bool {
         let used = self.allocated.saturating_add(self.promised);
         if bytes > self.capacity.saturating_sub(used) {
-            self.stopped = true;
+            self.stop();
             self.compaction = true;
             return false;
         }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::BLOCK_SIZE;
 
 fn metadata() -> Arc<Budget> {
     Budget::new(Amount {
@@ -163,4 +164,29 @@ fn scoped_cache_timings_separate_acquisition_from_work() {
             .calls,
         0
     );
+}
+
+#[test]
+fn zero_capacity_verifies_fills_but_retains_no_payload_or_membership() {
+    let metadata = metadata();
+    let cache = Cache::new(0, &metadata).unwrap();
+    for value in 0..16 {
+        let (hash, bytes) = block(value);
+        assert!(cache.fill(hash, &bytes).unwrap().is_none());
+        assert!(cache.get(&hash).is_none());
+        assert!(cache.peek(&hash).is_none());
+    }
+    assert_eq!(
+        cache.fill(block(1).0, &block(2).1).err().unwrap().kind(),
+        io::ErrorKind::InvalidData
+    );
+    cache.clear();
+    let status = cache.status();
+    assert_eq!(status.resident_bytes, 0);
+    assert_eq!(status.table_bytes, 0);
+    assert_eq!(status.payload.peak, Amount::default());
+    assert_eq!(status.counters.fills, 0);
+    assert_eq!(status.counters.refused, 16);
+    drop(cache);
+    assert_eq!(metadata.usage().current, Amount::default());
 }

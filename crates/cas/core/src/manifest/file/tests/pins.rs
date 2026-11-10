@@ -241,3 +241,25 @@ fn corrupt_page_is_never_cached_and_optional_fill_denial_keeps_valid_lookup() {
     drop(cache);
     assert_eq!(account.usage().current, Amount::default());
 }
+
+#[test]
+fn root_revision_ignores_read_churn_but_tracks_publication_and_last_old_pin() {
+    let root = tempfile::tempdir().unwrap();
+    let mut manifest = Manifest::create(root.path(), ID, metadata()).unwrap();
+    let old = publish(&mut manifest, 0, 11, 1);
+    let before = manifest.roots_revision();
+    let read = old.lookup(0).unwrap();
+    drop(manifest.view().unwrap());
+    assert_eq!(manifest.roots_revision(), before);
+    let current = publish(&mut manifest, 0, 22, 2);
+    assert!(manifest.roots_revision() > before);
+    let published = manifest.roots_revision();
+    drop(old);
+    assert_eq!(manifest.roots_revision(), published);
+    drop(read);
+    assert!(manifest.roots_revision() > published);
+    let released = manifest.roots_revision();
+    drop(current);
+    drop(manifest.view().unwrap().lookup(0).unwrap());
+    assert_eq!(manifest.roots_revision(), released);
+}

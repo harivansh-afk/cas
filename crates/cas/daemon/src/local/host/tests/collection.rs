@@ -459,6 +459,19 @@ fn a_sweep_with_no_compaction_input_does_not_strand_later_background_work() {
         true
     );
     assert_eq!(host.report()["collection"]["last"]["compactions"], 0);
+    let collections = host.report()["collection"]["completed"].as_u64().unwrap();
+    thread::sleep(Duration::from_millis(1100));
+    read(&mut local, 1, &[0; BLOCK_SIZE]);
+    assert_eq!(host.report()["collection"]["completed"], collections);
+    // Explicit administration still runs even with unchanged exhausted roots.
+    assert!(
+        host.collect()
+            .unwrap()
+            .wait(Duration::from_secs(3))
+            .unwrap()
+            .capacity_exhausted
+    );
+    assert_eq!(host.report()["collection"]["completed"], collections + 1);
     drop(held);
     physical.refresh().unwrap();
     assert!(!physical.status().pressured);

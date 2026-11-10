@@ -23,8 +23,8 @@ fn fixed_layout_full_batch_matches_independently_assembled_bytes() {
     assert_eq!(batch.allocated_bytes(), MAX_BATCH_BYTES);
     assert_eq!(batch.bytes().as_ptr() as usize % BLOCK_SIZE, 0);
     let mut expected = vec![0; MAX_BATCH_BYTES];
-    expected[..8].copy_from_slice(b"CASCHB02");
-    expected[8..10].copy_from_slice(&2u16.to_le_bytes());
+    expected[..8].copy_from_slice(b"CASCHB03");
+    expected[8..10].copy_from_slice(&3u16.to_le_bytes());
     expected[10..12].copy_from_slice(&1u16.to_le_bytes());
     expected[12..14].copy_from_slice(&63u16.to_le_bytes());
     for (offset, value) in [(16, 17u64), (24, 3), (40, 100), (48, 162)] {
@@ -32,6 +32,7 @@ fn fixed_layout_full_batch_matches_independently_assembled_bytes() {
     }
     expected[32..36].copy_from_slice(&262144u32.to_le_bytes());
     expected[36..40].copy_from_slice(&258048u32.to_le_bytes());
+    expected[60..64].copy_from_slice(&4096u32.to_le_bytes());
     for n in 0..63 {
         let payload = [n as u8 + 1; BLOCK_SIZE];
         let slot = 64 + n * 64;
@@ -61,7 +62,7 @@ fn metadata_semantics_are_checked_even_with_a_valid_crc() {
     let batch = batch(1);
     for (offset, value) in [
         (0, 0),
-        (8, 3),
+        (8, 2),
         (10, 2),
         (12, 0),
         (12, 64),
@@ -87,7 +88,7 @@ fn metadata_semantics_are_checked_even_with_a_valid_crc() {
         assert!(Header::decode(&batch.bytes()[..length]).is_err());
     }
     let mut bytes = batch.bytes().to_vec();
-    bytes[BLOCK_SIZE..BLOCK_SIZE + 8].copy_from_slice(b"CASCHB02");
+    bytes[BLOCK_SIZE..BLOCK_SIZE + 8].copy_from_slice(b"CASCHB03");
     let header = Header::decode(&bytes[..BLOCK_SIZE]).unwrap();
     assert!(header.verify_payload(&bytes[BLOCK_SIZE..]).is_err());
     assert!(
@@ -100,6 +101,7 @@ fn metadata_semantics_are_checked_even_with_a_valid_crc() {
 #[test]
 fn chunk_and_wal_headers_cannot_be_interchanged_and_segment_fields_are_strict() {
     let value = SegmentHeader {
+        chunk_size: crate::chunk::ChunkSize::K4,
         store: [5; 16],
         number: 17,
         capacity: 64 * 1024 * 1024,
