@@ -122,6 +122,76 @@ throughput. Queue depth requests are retained alongside fio's achieved depth
 histogram; the guest queue is 128 entries. This runner does not claim to implement
 prefetch, RDMA, nvmet, null-target probes, or the optional fleet-class FLUSH.
 
+## Multi-guest, burst and resume arms
+
+These arms are harness additions on the frozen measured daemon revision; they
+drive everything from the JSON configuration and fail instead of mislabelling.
+
+`settings.guest` sizes every workload guest (`{"cores": 2, "memory_mib": 1024}`
+is the pinned build default). Other sizes append `-m`, `-smp` and a matching
+shared memfd backend after the pinned run script; QEMU takes the last value and
+the harness checks the live QEMU command line against the request before any
+measurement. The effective sizing is retained in each guest's `qemu.json`.
+`burst.guest` and `resume.guest` override it per case.
+
+`settings.guests_per_host` is a list of concurrent workload guest counts for
+`reads-memory` and `reads-storage` (default `[1]`, maximum 16). Each entry is a
+separate arm with its own storage: the one-guest arm keeps the historical case
+name and result schema; larger arms are named `reads-memory-g4` and so on, and
+may also be requested directly in `cases`. Each arm boots N sources on A (its
+own image and seed each) and N provisioned readers on B, warms every image,
+then runs each fio cohort on all N readers at once. Cohorts record the
+aggregate (`fio`: summed IOPS/bytes, merged json+ latency histograms, bucket
+percentiles) and every guest's complete fio JSON under `fio.guests`, together
+with the owner's GET counters and the reader's recent-ring phases. The
+contention cohort runs one shipping writer per source with the requested rate
+divided by N, so the aggregate requested rate matches the one-guest arm.
+`cache_bytes` must hold `2 × data_bytes × max(guests_per_host)`.
+
+`burst-images` (`settings.burst`): A boots `images` guests, each writing an
+identical seeded `base` region (`base_bytes`) and a per-image `unique` region
+(`unique_bytes`) whose first 4 KiB block is a marker; after each image the
+harness FLUSHes, waits for compaction and records the store chunk delta. All
+manifests are provisioned to B under fsfreeze with content already placed
+(`k`, default 1). A's guests stop, B's daemon restarts cold with an empty clean
+cache (optionally `drop_page_cache`, which needs root and otherwise fails), and
+all N guests launch back to back on B. Per guest it records launch→ready,
+launch→first SSH command, launch→marker read (direct read of the unique
+region's first block, checked against the expected marker), the guest's
+`/sys/block/vda/stat` reads and used ext4 blocks, then a full checksum of both
+regions. Per member it records flow bytes, every GET/HAS counter delta, GET wire
+bytes, `max_inflight` before/after and B's phase ring, for the window up to the
+last marker read and up to the end of verification. The daemon's GET counters
+are host wide, so `fetched_fraction_of_used` is B's GET delta over the sum of
+used blocks, and per-image `read_fraction_at_marker` is guest-observed device
+reads over that image's used blocks; the two agree only under `force_remote`,
+which needs `k ≥ 2` so every chunk has a nonlocal owner. A window with zero
+GETs fails the case.
+
+`resume-elsewhere` (`settings.resume`): one guest on A writes `setup_bytes`
+of seeded data (its first block is a marker), runs the optional `setup_script`,
+optionally settles and synchronizes placement, then shuts down cleanly. Both
+daemons restart cold (B with an empty cache), the fenced migration runs, and B
+boots the image, recording launch→first command, launch→marker read, the usual
+downtime decomposition, and bytes per phase: manifest bytes and staging-tail
+bytes from the daemon reply, migration flow bytes, then the missing-chunk bytes
+observed while booting and verifying (ship/sync flow bytes, GET counters and
+wire bytes), followed by an explicit `sync` on B whose bytes are kept separate.
+`raw-rsync` and `zfs-incremental` are unchanged controls.
+
+Host budget: each arm needs `guest cores × N + daemon cpus + 2` hardware
+threads per member; TCG fixture guests additionally burn a host thread per vCPU
+while booting. The N=16 arm with the example's one-vCPU, 1 GiB guests needs at
+least 16 + 4 + 2 = 22 threads and 16 GiB of guest memory per member, plus the
+daemon's staging/cache budgets; two-vCPU guests need 38 threads. Pin
+`guest_cpus` to a set at least as large as `cores × N` and keep the daemon's
+`cpus` disjoint; the `cloudlab*.example.json` sets must be widened accordingly
+on the chosen node type.
+
+`--set KEY=JSON` overrides one settings entry on the command line (for example
+`--set guests_per_host=[4]`); the effective configuration is retained in
+`config.json`.
+
 `results.json` contains schema version, exact source revision, Nix source path,
 executable SHA256 hashes, configuration, hardware inventory, fio JSON+ latency
 histograms, flow bytes, raw recent remote timestamps, capacity and success/error.
@@ -226,8 +296,11 @@ checked against the selected KVM/TCG build. Quiet and shipping read cohorts use
 the same counter-sampling schedule.
 
 Both launchers accept `--cases flows-k1,flows-k2` (or other listed case names)
-for a focused development rerun. The selected list is retained in the raw
-configuration; a subset's success does not certify the omitted cases.
+for a focused development rerun, and `--set KEY=JSON` settings overrides. The
+selected list is retained in the raw configuration; a subset's success does
+not certify the omitted cases. The fixture configuration uses one-vCPU 512 MiB
+TCG guests, four burst images (4 MiB base, 1 MiB unique) and a 2 MiB resume
+setup inside a six-vCPU, 8 GiB outer VM.
 
 The local TCG fixture allows 20 minutes for guest boot and four hours for its
 whole suite; native KVM guest boot retains a four-minute limit. Agent RPC waits

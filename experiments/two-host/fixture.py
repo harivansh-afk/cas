@@ -19,12 +19,23 @@ parser.add_argument("--output", required=True)
 parser.add_argument(
     "--cases", help="Comma-separated cases; defaults to the complete suite"
 )
+parser.add_argument(
+    "--set",
+    action="append",
+    default=[],
+    metavar="KEY=JSON",
+    help="Settings override passed to the runner, e.g. guests_per_host=[2]",
+)
 args = parser.parse_args()
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
 output = Path(args.output).absolute()
 output.mkdir(parents=True, exist_ok=False)
 if args.cases:
     (output / "cases").write_text(args.cases)
+if args.set:
+    if any("\n" in item or "=" not in item for item in args.set):
+        raise SystemExit("--set needs single-line KEY=JSON items")
+    (output / "overrides").write_text("\n".join(args.set) + "\n")
 write_json(
     output / "launcher.json",
     {

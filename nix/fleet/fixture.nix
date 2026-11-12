@@ -16,6 +16,8 @@ let
         "reads-storage"
         "raw-rsync"
         "independent-stores"
+        "burst-images"
+        "resume-elsewhere"
       ];
       settings = {
         seconds = 5;
@@ -26,6 +28,19 @@ let
         ];
         image_bytes = 128 * 1024 * 1024;
         data_bytes = 1024 * 1024;
+        # Small TCG guests so several fit the outer VM; `--set` overrides.
+        guest = {
+          cores = 1;
+          memory_mib = 512;
+        };
+        burst = {
+          images = 4;
+          base_bytes = 4 * 1024 * 1024;
+          unique_bytes = 1024 * 1024;
+        };
+        resume = {
+          setup_bytes = 2 * 1024 * 1024;
+        };
       };
       nodes = [
         {
@@ -48,11 +63,16 @@ let
     runtimeInputs = [ pkgs.coreutils ];
     text = ''
       exec > /results/workload.log 2>&1
-      cases=()
+      args=()
       if test -f /results/cases; then
-        cases=(--cases "$(cat /results/cases)")
+        args+=(--cases "$(cat /results/cases)")
       fi
-      ${lib.getExe runner} --config ${config} --output /results/run "''${cases[@]}"
+      if test -f /results/overrides; then
+        while IFS= read -r line; do
+          test -n "$line" && args+=(--set "$line")
+        done < /results/overrides
+      fi
+      ${lib.getExe runner} --config ${config} --output /results/run "''${args[@]}"
     '';
   };
   finish = pkgs.writeShellApplication {
@@ -73,8 +93,9 @@ in
   services.timesyncd.enable = false;
   virtualisation = {
     diskImage = null;
-    memorySize = 6144;
-    cores = 4;
+    # Two daemons plus up to eight concurrent 512 MiB TCG workload guests.
+    memorySize = 8192;
+    cores = 6;
     graphics = false;
     writableStore = false;
     useHostCerts = false;
