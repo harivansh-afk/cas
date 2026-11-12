@@ -103,6 +103,17 @@ impl Router {
         let index = self.owners(&hash).next().ok_or(io::ErrorKind::NotFound)?;
         self.shared.clients[index].1.fetch(hash)
     }
+    /// A primary GET that also signals `notify` on completion (frontend wake).
+    pub fn fetch_with_notify(
+        &self,
+        hash: [u8; 32],
+        notify: vmm_sys_util::eventfd::EventFd,
+    ) -> io::Result<Ticket> {
+        let index = self.owners(&hash).next().ok_or(io::ErrorKind::NotFound)?;
+        self.shared.clients[index]
+            .1
+            .fetch_with(hash, Some(notify), true, false)
+    }
     /// True when a verified local plan should be captured for the race; the
     /// reader otherwise never consults the local store in force-remote mode.
     pub fn wants_local_plan(&self) -> bool {

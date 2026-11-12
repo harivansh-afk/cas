@@ -20,6 +20,7 @@ The service is disabled unless configured. The serving options are:
 | `--peer-inline-us N` | Additional reactor-local polling window (0–1000 µs, default 0) |
 | `--peer-race-us N` | Race a settled GET against a second source after N µs (0 = at once; off by default) |
 | `--peer-race-local` | With force-remote, let the race use the verified local chunk copy |
+| `--fast-settled-reads` | Complete fully settled reads on the frontend; see [storage design](storage-design.md) |
 
 Force-remote and caching require a peer address. There is no implicit discovery,
 address resolution, self-fetch, or forwarding. Both hosts may have a listener
@@ -198,7 +199,9 @@ A fixed ring retains the most recent 1,024 remote-read records. Nanosecond value
 use one monotonic host-local origin; clocks across hosts are not compared:
 
 - `received_ns`: descriptor discovery at the guest frontend, or submission at
-  the native harness (before admission attempts).
+  the native harness (before admission attempts). Frontend-inline reads
+  (`--fast-settled-reads`) record the same milestones; their GET is sent and
+  their reply consumed on the frontend thread.
 - `phases.send_ns`: client begins sending GET, including any worker queue delay
   before this point; connection establishment precedes this milestone.
 - `phases.first_byte_ns`: first successful userspace receive of the reply.

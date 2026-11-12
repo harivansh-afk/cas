@@ -93,8 +93,13 @@ fn seeded(root: &Path, resources: Arc<Resources>, local_copy: bool) -> Host {
     Host::new(resources, store, vec![(log, manifest)]).unwrap()
 }
 fn resources(config: peer::Config) -> Arc<Resources> {
+    // CAS_FAST_SETTLED_READS runs every fixture through the frontend-inline path.
     Arc::new(Resources {
-        peer: config,
+        peer: peer::Config {
+            fast_settled_reads: config.fast_settled_reads
+                || std::env::var_os("CAS_FAST_SETTLED_READS").is_some(),
+            ..config
+        },
         cache_bytes: BLOCKS * BLOCK_SIZE,
         ..Resources::default()
     })
@@ -581,7 +586,9 @@ fn daemon_child() {
                 for id in 100..700 {
                     get(&mut local, id, id as usize % BLOCKS);
                 }
-                reply(host.report());
+                let mut report = host.report();
+                report["local"] = local.report();
+                reply(report);
             }
             "pipeline" => {
                 for id in 700..704 {
@@ -660,6 +667,17 @@ fn two_daemon_loopback_verifies_data_measures_phases_and_fails_on_peer_loss() {
         700 + profile_reads()
     );
     assert_eq!(report["cache"]["resident_bytes"], 0);
+    if std::env::var_os("CAS_FAST_SETTLED_READS").is_some() {
+        // Every measured read was settled. The first lookups of each
+        // manifest page need a page load and are declined to the reactor;
+        // everything after that completed on the frontend.
+        let fast = &report["local"]["fast"];
+        let remote = fast["remote_reads"].as_u64().unwrap();
+        let page_loads = fast["declined_io"].as_u64().unwrap();
+        assert_eq!(remote + page_loads, 700 + profile_reads(), "{fast}");
+        assert!(page_loads <= 4, "{fast}");
+        assert_eq!(fast["declined_unsettled"], 0, "{fast}");
+    }
     let records: Vec<_> = report["peer"]["recent"]
         .as_array()
         .unwrap()

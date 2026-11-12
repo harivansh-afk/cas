@@ -378,15 +378,16 @@ impl Ticket {
     }
 }
 impl SlotRef {
-    /// A fresh eventfd handle for the challenger while the primary is still
-    /// owned and pending; `None` cancels the race.
+    /// A fresh handle to whatever the primary's reader waits on: its external
+    /// notify when the frontend issued it, else its own slot eventfd. `None`
+    /// while the primary is no longer owned or already done cancels the race.
     pub(crate) fn notify(&self) -> Option<EventFd> {
         let pool = self.shared.pool.lock().expect("peer pool poisoned");
         let slot = &pool.slots[self.index];
         if slot.generation != self.generation || !slot.owned || slot.done {
             return None;
         }
-        slot.event.try_clone().ok()
+        slot.notify.as_ref().unwrap_or(&slot.event).try_clone().ok()
     }
     /// Attach a started challenger. A primary that verified meanwhile, or
     /// whose reader is gone, drops it; a primary that failed meanwhile keeps

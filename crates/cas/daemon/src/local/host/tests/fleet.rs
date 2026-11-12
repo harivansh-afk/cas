@@ -34,6 +34,7 @@ fn member_resources(node: u8, k: u8, addresses: &[SocketAddr]) -> Arc<Resources>
             peer_race_us: std::env::var("CAS_PEER_RACE_US")
                 .ok()
                 .map(|v| v.parse().unwrap()),
+            fast_settled_reads: std::env::var_os("CAS_FAST_SETTLED_READS").is_some(),
             fleet: fleet::Config {
                 peer_node: Some(node),
                 peer_k: k,

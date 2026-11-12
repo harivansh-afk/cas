@@ -42,6 +42,11 @@ pub struct Config {
     /// With force-remote, let the race use the local chunk copy explicitly.
     #[arg(long, requires = "peer_race_us")]
     pub peer_race_local: bool,
+    /// Complete fully settled reads inline on the frontend (clean cache or a
+    /// verified remote reply) while the image has no staged or in-flight
+    /// mutation and no pending FLUSH; the reactor path remains the default.
+    #[arg(long)]
+    pub fast_settled_reads: bool,
 }
 impl Config {
     pub fn validate(&self) -> io::Result<()> {

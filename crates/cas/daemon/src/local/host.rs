@@ -726,6 +726,9 @@ impl Port {
     pub fn fail_shared(&self, error: &io::Error) {
         self.shared.gate.fail(error.to_string());
     }
+    pub(super) fn host_gate(&self) -> BudgetArc<state::HostGate> {
+        self.shared.gate.clone()
+    }
 
     pub(super) fn fair(&self) -> fair::Port {
         fair::Port {
