@@ -76,6 +76,44 @@ In that operational mode, sampling errors stop the sampler and appear in
 failure gate closes. An image socket failure after activation ends that image;
 shared failures and incomplete retained recovery still stop all endpoints.
 
+## Offline import
+
+```sh
+casctl import --root /srv/cas/root --store 0101...0101 --image 0a0a...0a0a \
+  --from corpus/job-17.raw --chunk-bytes 4096
+```
+
+`import` ingests a raw image of whole 4 KiB blocks as a new catalog image
+without running a guest or `cas-host`. An empty or missing root is initialized
+with the requested chunk geometry (4096 by default) and 64 MiB segments; an
+existing root keeps its geometry, must carry the same `--store` identity, and
+is inspected and recovered the way a cold host open does (torn chunk-segment
+tails are archived; other images are not opened). The command holds the root
+lock for its whole run, so it cannot share a root with a running host.
+
+The bytes take the normal durable path: 1 MiB WAL batches, FLUSH, compaction
+into the shared chunk store and copy-on-write manifest transactions, and WAL
+reclamation, every `--compact-every-bytes` (64 MiB) of input. All-zero units of
+the chunk size become ZERO mutations, everything else is WRITE payload; the
+compactor drops all-zero chunks into holes exactly as it does for guest writes.
+When every mutation is published, durable and compacted (D == E == P) the image
+is added to the catalog. Importing several images into one root deduplicates
+chunks across them through the recovered index.
+
+The JSON receipt records the input SHA-256 and BLAKE3, image bytes, WRITE and
+ZERO bytes, mutation/batch/settle counts, the final WAL status, manifest bytes,
+chunk-store samples before and after (chunks, encoded and allocated bytes,
+index memory), unique chunks appended, catalog generation, metadata budget
+usage, elapsed seconds and MiB/s. It is a software receipt from one offline
+process: no device counters, guest latency or host serving behaviour is
+established by it.
+
+An interrupted import leaves its `images/<id>` directory for inspection and the
+catalog unchanged; remove that directory before retrying. Already appended
+chunks are reused by the retry. `--metadata-bytes` (4 GiB) caps the rebuilt
+chunk index and WAL index; a root whose index exceeds the serving host's fixed
+metadata budget cannot be opened by that host.
+
 ## What runs on the host
 
 A 4 GiB KVM host owns a dedicated XFS filesystem inside a fixed 4 GiB image.

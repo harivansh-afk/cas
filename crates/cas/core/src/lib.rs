@@ -30,6 +30,8 @@ mod directory;
 #[cfg(target_os = "linux")]
 mod eventfd;
 #[cfg(target_os = "linux")]
+pub mod import;
+#[cfg(target_os = "linux")]
 pub mod scheduler;
 #[cfg(target_os = "linux")]
 pub mod segments;
