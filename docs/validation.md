@@ -1,5 +1,142 @@
 # Validation
 
+## 2026-11-12 — Burst harness: multi-guest reads, burst-images and resume-elsewhere
+
+Branch `feat/burst-harness` from `main` (`ebbe157`, the frozen measured
+revision). **Tested revision `7a3c5d267a51648363f94fd0cd93aaccc4e566c6`**, clean
+on the test checkout; the fixture-configuration correction, documentation and
+this record are later commits on the branch. Harness-only work: no file under
+`crates/cas/daemon` or `crates/cas/core` changed, so the `cas` package and its
+executable hashes are those of `ebbe157`. Nothing was pushed or merged.
+
+Spark handled edits, Git bundles, provider calls and evidence processing only.
+All builds, checks and runs used the persistent Freestyle VM `cas-build`
+(`vm-7ecd8e364c624bcb8654fa4dbd92767e`, x86_64, 8 vCPU, 16 GiB, Ubuntu, nested
+KVM) in a fresh clone `/root/cas-burst` fetched from a bundle. No VM was created,
+resized or deleted.
+
+### Commands (cas-build, `/root/cas-burst`, Nix profile sourced, `ulimit -n 65536`)
+
+```sh
+nix build .#two-host-fixture .#two-host --out-link /root/burst/result --cores 6
+nix fmt -- --ci
+nix develop -c env CARGO_TARGET_DIR=/root/cas/target CARGO_BUILD_JOBS=6 \
+  RUST_TEST_THREADS=2 just check
+/root/burst/result/bin/cas-two-host-fixture --output /root/burst/fixture-new-001 \
+  --cases reads-memory,reads-storage,burst-images,resume-elsewhere \
+  --set 'guests_per_host=[2]'                         # TCG attempt, stopped
+# Native KVM loopback: both members on one VM, loop-backed XFS files mounted at
+# /mnt/fleet-a and /mnt/fleet-b, daemons pinned to vCPUs 0-1 / 2-3, guests 4-7.
+/root/burst/result-1/bin/cas-two-host --config /root/burst/native-new-001-config.json \
+  --output /root/burst/native-new-001/controller
+/root/burst/result-1/bin/cas-two-host \
+  --config /root/burst/native-regression-001-config.json \
+  --output /root/burst/native-regression-001/controller
+```
+
+Settings for both native runs: 128 MiB image, 1 MiB seeded data, 5-second read
+windows, one repetition, QD 1/4, 4 MiB/s requested shipping rate, 50 µs inline
+polling. `native-new-001`: `guests_per_host=[2]`, one-vCPU 512 MiB guests,
+`burst` = 4 images × (4 MiB shared base + 1 MiB unique), k=1, no force-remote,
+owner cache 0, no page-cache drop; `resume` = 2 MiB setup, k=1, settled.
+`native-regression-001`: defaults (`guests_per_host=[1]`, pinned two-vCPU
+1 GiB guests) for `flows-k1,flows-k2,reads-memory,reads-storage,raw-rsync,
+independent-stores`. The exact configurations are in the archives.
+
+### Outcomes
+
+- `nix build` of both launchers and `nix fmt -- --ci`: pass. `just check`:
+  pass — formatting, strict Clippy, 572 Rust tests passed with 30 fixture
+  ignores, **25 Python tests** (12 new: settings normalization and rejection,
+  case-plan expansion, overrides, image IDs, guest sizing, fio aggregation,
+  burst summary, peer-counter deltas, burst launch ordering, seeded payloads,
+  block statistics), whitespace clean. The corrected `fixture.nix` was
+  format-checked and built separately afterwards (both exit 0).
+- **`native-new-001`: all four cases passed** (`success: true`, 294 s):
+  `reads-memory-g2`, `reads-storage-g2`, `burst-images`, `resume-elsewhere`.
+- **`native-regression-001`: all six legacy cases passed** (415 s) with the
+  historical one-guest schema; their guests ran the pinned QEMU command line
+  (no sizing override, `qemu.json` sizing 2 vCPU / 1024 MiB).
+
+Two-guest arms (aggregate over both readers; per-guest p50 in brackets; all
+reads CRC32C-verified, quiet labels required zero opposite-source service):
+
+| Arm, cohort | Aggregate IOPS | p50 (ms) | p99 (ms) | Owner counters |
+| --- | ---: | ---: | ---: | --- |
+| memory, random QD1 | 6,608 | 0.200 [0.198, 0.202] | 2.900 | 33,043 memory, 0 store |
+| memory, sequential QD4 | 9,339 | 0.506 | 4.227 | 46,691 memory |
+| memory, contention | 5,465 | 0.247 | 3.064 | 27,324 memory, overlap verified |
+| storage, random QD1 | 6,666 | 0.276 [0.276, 0.276] | 0.528 | 0 memory, 33,330 store |
+| storage, sequential QD4 | 11,212 | 0.659 | 1.794 | 56,052 store |
+| storage, contention | 5,058 | 0.334 | 0.979 | 25,292 store, overlap verified |
+
+Aggregate percentiles come from merged json+ bins (bucket lower bounds); the
+per-guest fio JSON retains exact values. The contention cohort ran one 2 MiB/s
+shipping writer per source guest.
+
+`burst-images` (4 images, k=1, B cold with empty cache): per-image store chunk
+deltas after settle were 1,302 then 274, 274, 274 (the shared base deduplicated;
+each later image added only its unique region and metadata). Provisioning all
+four manifests took 0.803 s and 1,331,714 provision-flow bytes; B's cold restart
+recovered in 0.321 s; the four QEMU launches spread over 5.9 ms. Per guest:
+launch→ready 30.5–32.0 s, launch→first SSH command 33.2–34.4 s, launch→marker
+34.1–35.2 s (nested KVM, one vCPU each, four booting at once), 362 of 1,318 used
+blocks read by the marker (0.275 each). B issued 219 GETs by the last marker
+(4.2 % of the 5,272 used blocks over all images, 902,280 GET wire bytes
+received, peak 3 outstanding) and 2,736 by the end of full verification (51.9 %,
+consistent with k=1 placing about half of each image on A; 11,272,320 bytes,
+peak 4). A served all GETs from its store; HAS 0; no errors; 149 ring records.
+Guest-observed reads exceed GETs because zero/hole blocks and B-owned chunks
+are served locally; the attribution caveat is recorded in the case.
+
+`resume-elsewhere` (2 MiB setup, k=1, settled, B cold): downtime 20.772 s =
+0.716 s shutdown + 0.295 s handoff (0.239 s cold recovery, 0.042 s daemon
+migration) + 19.761 s boot/verify/continue; launch→first command 19.221 s,
+launch→marker 19.532 s. Bytes per phase: manifest 131,072, staging tail 20,664
+(migration flow 172,388 wire bytes), missing chunks fetched while booting and
+verifying 298 GETs / 1,227,760 GET bytes plus 12,922 ship bytes, explicit sync
+afterwards 233 bytes. The destination verified the seeded digest and advanced
+epoch 0→1. Legacy controls in the regression run: `flows-k1`/`flows-k2`
+downtime 19.180 / 19.733 s with provision flow 122,803 / 122,668 bytes;
+`raw-rsync` downtime 20.187 s, 134,250,639 bytes per full copy.
+
+These are single-repetition, nested-KVM, loop-file development checks on one
+shared VM: they validate the harness and schema, not latency, boot time or
+placement claims. `zfs-incremental` was not run (no ZFS on the native host; its
+code path is unchanged).
+
+### Failures and retries
+
+- **TCG fixture attempt `fixture-new-001` stopped by the operator.** With the
+  initial fixture configuration (six-vCPU outer VM, one-vCPU 512 MiB TCG
+  guests) the two concurrently booting sources reached their virtio-blk driver
+  about 165 s after launch, but the daemon attaches each image with a fixed
+  60-second recovery window (`RECOVERY_TIMEOUT`, attachment to first queue
+  activation), so both image services ended with `recovery deadline expired`
+  and the guests hung on `set virtio-blk status ... failed`. This is a frozen
+  daemon property, not a harness or sizing defect; the retained attempt
+  (`fixture-new-001-attempt.tgz`, scratch disks excluded) is not a result. The
+  fixture configuration was restored to its four-vCPU, pinned-guest form and
+  the multi-guest/burst/resume arms were removed from its TCG default list;
+  they remain requestable with `--cases` and need KVM. The second fixture
+  invocation (legacy regression) was not started.
+- The replacement native loopback runs required no retry. One operator-side
+  polling command matched its own shell and exited 143 without effect on the
+  run.
+
+### Evidence
+
+Retained under ignored `results/burst-harness/evidence/` with `SHA256SUMS`,
+digests verified against the copies left in `/root/burst/archive` on
+`cas-build`: `checks.tgz` (build, format, `just check` logs and statuses,
+driver scripts, revision), `native-new-001.tgz` and
+`native-regression-001.tgz` (controller `results.json`, `config.json`, RPC
+logs, both hosts' daemon/guest/fio logs, command lines and `qemu.json`),
+`fixture-new-001-attempt.tgz`. The branch bundle `burst-harness.bundle`
+(SHA256 `7cf68f26…2a1a`) and `results.json` copies sit beside them. Loop
+images were unmounted and deleted after archiving; `/root/burst` remains on
+the persistent VM.
+
 ## 2026-11-09 — Integration of C5, peer fetch and 16 KiB chunks
 
 Branch `integration/2026-11-09` from `main` (`9c60e72`), merged in order:

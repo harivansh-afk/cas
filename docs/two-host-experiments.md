@@ -179,6 +179,14 @@ observed while booting and verifying (ship/sync flow bytes, GET counters and
 wire bytes), followed by an explicit `sync` on B whose bytes are kept separate.
 `raw-rsync` and `zfs-incremental` are unchanged controls.
 
+The daemon attaches each image with a fixed 60-second recovery window
+(`RECOVERY_TIMEOUT`), measured from attachment to the guest driver's first
+queue activation. Every guest in a burst must therefore reach its virtio-blk
+driver within 60 seconds of B's cold restart (and every source within 60
+seconds of A's start); a slower boot ends that image service with `recovery
+deadline expired` and fails the case. KVM guests boot in a few seconds;
+concurrently booting TCG guests do not fit, so these arms need KVM.
+
 Host budget: each arm needs `guest cores × N + daemon cpus + 2` hardware
 threads per member; TCG fixture guests additionally burn a host thread per vCPU
 while booting. The N=16 arm with the example's one-vCPU, 1 GiB guests needs at
@@ -298,9 +306,10 @@ the same counter-sampling schedule.
 Both launchers accept `--cases flows-k1,flows-k2` (or other listed case names)
 for a focused development rerun, and `--set KEY=JSON` settings overrides. The
 selected list is retained in the raw configuration; a subset's success does
-not certify the omitted cases. The fixture configuration uses one-vCPU 512 MiB
-TCG guests, four burst images (4 MiB base, 1 MiB unique) and a 2 MiB resume
-setup inside a six-vCPU, 8 GiB outer VM.
+not certify the omitted cases. The fixture configuration also carries four
+burst images (4 MiB base, 1 MiB unique) and a 2 MiB resume setup, but its TCG
+default list excludes the multi-guest, burst and resume arms: see the daemon
+window note above.
 
 The local TCG fixture allows 20 minutes for guest boot and four hours for its
 whole suite; native KVM guest boot retains a four-minute limit. Agent RPC waits

@@ -9,6 +9,9 @@ let
   config = pkgs.writeText "cas-two-host-loopback.json" (
     builtins.toJSON {
       # Legacy TCG fixture has XFS only; the KVM appliance validates ZFS.
+      # The multi-guest, burst and resume arms are not in the TCG default
+      # list: the daemon's fixed 60-second attach-to-driver window is not met
+      # by concurrently booting TCG guests. Request them with --cases on KVM.
       cases = [
         "flows-k1"
         "flows-k2"
@@ -16,8 +19,6 @@ let
         "reads-storage"
         "raw-rsync"
         "independent-stores"
-        "burst-images"
-        "resume-elsewhere"
       ];
       settings = {
         seconds = 5;
@@ -28,11 +29,6 @@ let
         ];
         image_bytes = 128 * 1024 * 1024;
         data_bytes = 1024 * 1024;
-        # Small TCG guests so several fit the outer VM; `--set` overrides.
-        guest = {
-          cores = 1;
-          memory_mib = 512;
-        };
         burst = {
           images = 4;
           base_bytes = 4 * 1024 * 1024;
@@ -93,9 +89,8 @@ in
   services.timesyncd.enable = false;
   virtualisation = {
     diskImage = null;
-    # Two daemons plus up to eight concurrent 512 MiB TCG workload guests.
-    memorySize = 8192;
-    cores = 6;
+    memorySize = 6144;
+    cores = 4;
     graphics = false;
     writableStore = false;
     useHostCerts = false;
