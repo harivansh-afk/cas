@@ -18,6 +18,10 @@ use std::{
 };
 
 pub(crate) const CONNECTIONS: usize = 4;
+/// Test-only injected GET reply delay, read once per reply; never built into releases.
+#[cfg(test)]
+pub(crate) static TEST_REPLY_DELAY_US: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 pub struct Server {
     address: SocketAddr,
     stop: Arc<AtomicBool>,
@@ -283,6 +287,13 @@ fn serve(
             }
         }
         reply.encode(&mut response);
+        #[cfg(test)]
+        {
+            let delay = TEST_REPLY_DELAY_US.load(Ordering::Relaxed);
+            if h.op == GET && delay != 0 {
+                thread::sleep(Duration::from_micros(delay));
+            }
+        }
         write(socket, &response[..reply.bytes], stop, deadline)?;
     }
 }

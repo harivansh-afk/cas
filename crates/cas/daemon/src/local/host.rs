@@ -289,14 +289,35 @@ impl Host {
             || !resources.peer.peer_get_member.is_empty())
         .then(|| crate::peer::metrics::Metrics::new(&metadata))
         .transpose()?;
+        // Demand ports: images, GET service connections, then one local race source.
+        let service_ports = if resources.peer.peer_listen.is_some() {
+            peer_connections
+        } else {
+            0
+        };
+        let race_local = resources.peer.peer_race_local && resources.peer.peer_race_us.is_some();
+        let io_scheduler = cas_core::scheduler::Scheduler::new(
+            slots + service_ports + usize::from(race_local),
+            &metadata,
+        )?;
+        let reader = store.reader()?;
         let peer = if resources.peer.peer_address.is_some()
             || !resources.peer.peer_get_member.is_empty()
         {
+            let local = if race_local {
+                Some(cas_core::scheduler::Scheduler::port(
+                    &io_scheduler,
+                    slots + service_ports,
+                )?)
+            } else {
+                None
+            };
             Some(BudgetArc::try_new(
                 crate::peer::Router::new(
                     &resources.peer,
                     &metadata,
                     peer_metrics.as_ref().expect("peer metrics").clone(),
+                    local,
                 )?,
                 &metadata,
             )?)
@@ -311,17 +332,9 @@ impl Host {
                 peer_metrics,
                 admission,
                 fair,
-                io_scheduler: cas_core::scheduler::Scheduler::new(
-                    slots
-                        + if resources.peer.peer_listen.is_some() {
-                            peer_connections
-                        } else {
-                            0
-                        },
-                    &metadata,
-                )?,
+                io_scheduler,
                 gate,
-                reader: store.reader()?,
+                reader,
                 cache: cas_core::cache::Cache::new_sized(
                     resources.cache_bytes,
                     store.chunk_size(),

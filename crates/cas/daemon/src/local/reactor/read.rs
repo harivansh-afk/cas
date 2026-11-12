@@ -238,10 +238,22 @@ impl Read {
                 .peer
                 .as_ref()
                 .ok_or_else(|| io::Error::other("manifest references an unavailable chunk"))?;
-            Stage::Remote(peer.fetch(hash)?)
+            let ticket = peer.fetch(hash)?;
+            if !ticket.ready() {
+                // Force-remote never consulted the store above; the race arm
+                // may use a verified local plan explicitly.
+                let local = if self.force_remote && peer.wants_local_plan() {
+                    self.reader
+                        .as_ref()
+                        .and_then(|reader| reader.plan(hash).ok().flatten())
+                } else {
+                    None
+                };
+                peer.race(&ticket, hash, local);
+            }
+            Stage::Remote(ticket)
         };
-        if matches!(&self.stage, Stage::Remote(ticket) if ticket.ready()) {
-            self.finish_remote()?;
+        if matches!(&self.stage, Stage::Remote(ticket) if ticket.ready()) && self.finish_remote()? {
             self.stage = Stage::Done;
             return Ok(false);
         }
@@ -366,7 +378,8 @@ impl Read {
         result
     }
 
-    fn finish_remote(&mut self) -> io::Result<()> {
+    /// False keeps the remote stage armed: no source has verified yet.
+    fn finish_remote(&mut self) -> io::Result<bool> {
         let Stage::Remote(ticket) = &self.stage else {
             unreachable!()
         };
@@ -377,6 +390,9 @@ impl Read {
             .get_mut()
             .expect("unpublished fetch");
         let (phases, result) = ticket.finish(fetched.bytes.as_mut_slice());
+        if matches!(result, Ok(false)) {
+            return Ok(false);
+        }
         fetched.remote = Some(phases);
         if let Some(trace) = &mut self.io.permit.remote {
             trace.fetched(phases);
@@ -400,7 +416,7 @@ impl Read {
             .take()
             .expect("fetch leader")
             .complete(fetched)?;
-        Ok(())
+        Ok(true)
     }
 
     fn advance_inner(&mut self) -> io::Result<bool> {
@@ -480,9 +496,10 @@ impl Read {
                 self.next_block()?;
             }
             Stage::Remote(_) => {
-                self.finish_remote()?;
-                self.block += 1;
-                self.next_block()?;
+                if self.finish_remote()? {
+                    self.block += 1;
+                    self.next_block()?;
+                }
             }
             Stage::Waiting(waiter) => {
                 let fetched = waiter

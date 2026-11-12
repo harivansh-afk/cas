@@ -1,6 +1,7 @@
 use super::{
     TIMEOUT,
-    metrics::{Metrics, Phases},
+    metrics::{self, Metrics, Phases},
+    race::{Challenger, Outcome},
     wire::*,
 };
 use allocator_api2::vec::Vec;
@@ -78,6 +79,16 @@ struct Slot {
     phases: Phases,
     error: Option<io::ErrorKind>,
     queued: Instant,
+    /// Reuse counter: a race armed for an earlier occupant must not attach.
+    generation: u64,
+    /// Also signalled on completion: the primary slot's eventfd of a race.
+    notify: Option<EventFd>,
+    /// The second source, owned by the primary request's slot.
+    challenger: Option<Challenger>,
+    racing: bool,
+    used: bool,
+    wire_bytes: u64,
+    race_budget_us: u32,
 }
 struct Pool {
     slots: Vec<Slot, BudgetAllocator>,
@@ -109,6 +120,12 @@ pub struct Ticket {
     shared: BudgetArc<Shared>,
     index: usize,
 }
+/// A non-owning reference to a primary slot, held by an armed race.
+pub(crate) struct SlotRef {
+    shared: BudgetArc<Shared>,
+    index: usize,
+    generation: u64,
+}
 impl Client {
     pub fn new(
         address: SocketAddr,
@@ -136,6 +153,13 @@ impl Client {
                 phases: Phases::default(),
                 error: None,
                 queued: Instant::now(),
+                generation: 0,
+                notify: None,
+                challenger: None,
+                racing: false,
+                used: false,
+                wire_bytes: 0,
+                race_budget_us: 0,
             });
             free.push(index);
         }
@@ -188,6 +212,19 @@ impl Client {
     }
 
     pub fn fetch(&self, hash: [u8; 32]) -> io::Result<Ticket> {
+        self.fetch_with(hash, None, true, false)
+    }
+
+    /// `notify` is additionally signalled on completion (a race primary's
+    /// eventfd, or a frontend wake). Challengers skip the inline polling
+    /// window: the caller is already waiting on the primary.
+    pub(crate) fn fetch_with(
+        &self,
+        hash: [u8; 32],
+        notify: Option<EventFd>,
+        inline: bool,
+        racing: bool,
+    ) -> io::Result<Ticket> {
         if self.shared.stop.load(Ordering::Acquire) {
             return Err(io::ErrorKind::BrokenPipe.into());
         }
@@ -201,11 +238,18 @@ impl Client {
         slot.phases = Phases::default();
         slot.error = None;
         slot.queued = Instant::now();
+        slot.generation = slot.generation.wrapping_add(1);
+        slot.notify = notify;
+        slot.challenger = None;
+        slot.racing = racing;
+        slot.used = false;
+        slot.wire_bytes = 0;
+        slot.race_budget_us = 0;
         pool.queued.push_back(index);
         self.shared.metrics.count(|c| c.gets += 1);
         // The image reactor may send and consume a fast reply itself. Bound
         // polling so a slow peer cannot monopolize mutation/FLUSH processing.
-        if pool.stream.is_some() {
+        if pool.stream.is_some() && inline {
             self.shared.metrics.count(|c| c.inline_attempts += 1);
             let until = Instant::now() + self.shared.inline;
             loop {
@@ -218,6 +262,8 @@ impl Client {
             if pool.slots[index].done {
                 self.shared.metrics.count(|c| c.inline_completed += 1);
             }
+        } else if pool.stream.is_some() {
+            pool.drive(&self.shared.metrics);
         }
         // A completed inline GET needs no worker handoff. Slow replies and
         // connection failures refresh the worker's socket/deadline snapshot.
@@ -239,20 +285,125 @@ impl Ticket {
             .event
             .as_raw_fd()
     }
-    pub fn finish(&self, destination: &mut [u8]) -> (Phases, io::Result<()>) {
+    pub(crate) fn slot_ref(&self) -> SlotRef {
+        let pool = self.shared.pool.lock().expect("peer pool poisoned");
+        SlotRef {
+            shared: self.shared.clone(),
+            index: self.index,
+            generation: pool.slots[self.index].generation,
+        }
+    }
+    /// This slot only, ignoring any challenger.
+    pub(crate) fn peek(&self) -> Outcome {
         let pool = self.shared.pool.lock().expect("peer pool poisoned");
         let slot = &pool.slots[self.index];
-        let result = if !slot.done {
-            Err(io::ErrorKind::WouldBlock.into())
-        } else if let Some(error) = slot.error {
-            Err(error.into())
-        } else if destination.len() != BLOCK_SIZE {
-            Err(io::ErrorKind::InvalidInput.into())
-        } else {
+        Outcome {
+            done: slot.done,
+            error: slot.error,
+            phases: slot.phases,
+        }
+    }
+    /// Copy this slot's verified bytes; `peek` must have reported success.
+    pub(crate) fn take(&self, destination: &mut [u8]) -> io::Result<Phases> {
+        let mut pool = self.shared.pool.lock().expect("peer pool poisoned");
+        let slot = &mut pool.slots[self.index];
+        if !slot.done {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        if let Some(error) = slot.error {
+            return Err(error.into());
+        }
+        if destination.len() != BLOCK_SIZE {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        destination.copy_from_slice(&slot.bytes);
+        slot.used = true;
+        Ok(slot.phases)
+    }
+    /// Complete from whichever source verified first. `Ok(false)` means no
+    /// source has finished yet: the eventfd was drained, so the caller re-arms
+    /// its poll and a later completion on either source signals it again. A
+    /// failed source is masked only by the other source's verified reply.
+    pub fn finish(&self, destination: &mut [u8]) -> (Phases, io::Result<bool>) {
+        let mut pool = self.shared.pool.lock().expect("peer pool poisoned");
+        let metrics = self.shared.metrics.clone();
+        let slot = &mut pool.slots[self.index];
+        // Drain before inspecting either source: any completion after this
+        // point writes the counter again and re-triggers the reader's poll.
+        let _ = slot.event.read();
+        if slot.done && slot.error.is_none() {
+            if destination.len() != BLOCK_SIZE {
+                return (slot.phases, Err(io::ErrorKind::InvalidInput.into()));
+            }
             destination.copy_from_slice(&slot.bytes);
-            Ok(())
+            slot.used = true;
+            let mut phases = slot.phases;
+            if slot.racing {
+                phases.race_winner = metrics::WINNER_FIRST;
+                phases.race_budget_us = slot.race_budget_us;
+                metrics.count(|c| c.race_won_first += 1);
+            }
+            return (phases, Ok(true));
+        }
+        let Some(challenger) = &slot.challenger else {
+            return match (slot.done, slot.error) {
+                (true, Some(error)) => (slot.phases, Err(error.into())),
+                _ => (slot.phases, Ok(false)),
+            };
         };
-        (slot.phases, result)
+        // Nested pool locks always go from the lower member index to the
+        // higher one, then to the local source; no path locks the reverse.
+        let other = challenger.peek();
+        if other.done && other.error.is_none() {
+            return match challenger.take(destination) {
+                Ok(mut phases) => {
+                    phases.race_winner = challenger.winner();
+                    phases.race_budget_us = slot.race_budget_us;
+                    metrics.count(|c| {
+                        if phases.race_winner == metrics::WINNER_LOCAL {
+                            c.race_won_local += 1;
+                        } else {
+                            c.race_won_second += 1;
+                        }
+                    });
+                    (phases, Ok(true))
+                }
+                Err(error) => (other.phases, Err(error)),
+            };
+        }
+        match (slot.done, slot.error, other.done) {
+            (true, Some(error), true) => (slot.phases, Err(error.into())),
+            _ => (slot.phases, Ok(false)),
+        }
+    }
+}
+impl SlotRef {
+    /// A fresh eventfd handle for the challenger while the primary is still
+    /// owned and pending; `None` cancels the race.
+    pub(crate) fn notify(&self) -> Option<EventFd> {
+        let pool = self.shared.pool.lock().expect("peer pool poisoned");
+        let slot = &pool.slots[self.index];
+        if slot.generation != self.generation || !slot.owned || slot.done {
+            return None;
+        }
+        slot.event.try_clone().ok()
+    }
+    /// Attach a started challenger. A primary that verified meanwhile, or
+    /// whose reader is gone, drops it; a primary that failed meanwhile keeps
+    /// it, so the reader waiting on that failure can still be rescued by a
+    /// verified reply.
+    pub(crate) fn attach(&self, challenger: Challenger, budget_us: u32) {
+        let mut pool = self.shared.pool.lock().expect("peer pool poisoned");
+        let slot = &mut pool.slots[self.index];
+        if slot.generation != self.generation || !slot.owned || (slot.done && slot.error.is_none())
+        {
+            drop(pool);
+            drop(challenger);
+            return;
+        }
+        slot.racing = true;
+        slot.race_budget_us = budget_us;
+        slot.challenger = Some(challenger);
     }
 }
 impl Drop for Ticket {
@@ -260,10 +411,22 @@ impl Drop for Ticket {
         let mut pool = self.shared.pool.lock().expect("peer pool poisoned");
         let slot = &mut pool.slots[self.index];
         slot.owned = false;
+        // A loser's late completion must not signal a reused primary slot.
+        slot.notify = None;
+        let challenger = slot.challenger.take();
         if slot.done {
+            if slot.racing && !slot.used {
+                let wasted = slot.wire_bytes;
+                self.shared.metrics.count(|c| {
+                    c.race_discarded += 1;
+                    c.race_wasted_wire_bytes += wasted;
+                });
+            }
             pool.free.push(self.index);
         }
         // Pending abandoned slots are recycled only after transport completion.
+        drop(pool);
+        drop(challenger);
     }
 }
 impl Drop for Client {
@@ -283,6 +446,7 @@ impl Pool {
         index: usize,
         error: Option<io::ErrorKind>,
         first: u64,
+        wire: usize,
     ) {
         let slot = &mut self.slots[index];
         slot.phases.first_byte_ns = first;
@@ -294,13 +458,25 @@ impl Pool {
         }
         slot.error = error;
         slot.done = true;
+        slot.wire_bytes = wire as u64;
         metrics.count(|c| {
             c.verified += u64::from(error.is_none());
             c.errors += u64::from(error.is_some());
         });
+        if let Some(notify) = &slot.notify {
+            let _ = notify.write(1);
+        }
         if slot.owned {
             let _ = slot.event.write(1);
         } else {
+            // Abandoned by its reader: a raced loser's bytes were wasted.
+            slot.notify = None;
+            if slot.racing && !slot.used {
+                metrics.count(|c| {
+                    c.race_discarded += 1;
+                    c.race_wasted_wire_bytes += wire as u64;
+                });
+            }
             self.free.push(index);
         }
     }
@@ -331,7 +507,7 @@ impl Pool {
             self.pending.push_back(index);
         }
         while let Some(index) = self.pending.pop_front() {
-            self.finish(metrics, index, Some(error), self.first);
+            self.finish(metrics, index, Some(error), self.first, 0);
             self.first = 0;
         }
         self.received = 0;
@@ -411,7 +587,7 @@ impl Pool {
                 MISSING => Some(io::ErrorKind::NotFound),
                 _ => Some(io::ErrorKind::Other),
             };
-            self.finish(metrics, index, error, self.first);
+            self.finish(metrics, index, error, self.first, self.expected);
             self.pending.pop_front();
             self.response.copy_within(self.expected..self.received, 0);
             self.received -= self.expected;
