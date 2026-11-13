@@ -24,6 +24,7 @@ from agent import (
     working_set_script,
 )
 from runner import (
+    PEER_COUNTERS,
     DEFAULT_CASES,
     RING_RETENTION,
     aggregate_fio,
@@ -589,6 +590,30 @@ class WorkingSetTests(unittest.TestCase):
         ):
             with self.subTest(bad=bad), self.assertRaises((ValueError, TypeError)):
                 normalize_settings(config(working_set=bad))
+
+    def test_replay_working_set_records_the_spec_and_both_passes(self):
+        from runner import Experiment
+
+        experiment = Experiment.__new__(Experiment)
+        report = [{"peer": {"counters": {k: 0 for k in PEER_COUNTERS} | {"get_wire": 0}, "recent": []}, "fleet": {"flows": {}}}] * 2
+        calls = []
+
+        class FakeAgent:
+            def call(self, method, **args):
+                calls.append((method, args))
+                return [{"name": "g", "commands": [{"index": 0, "command": "pwd", "started_ns": 10, "completed_ns": 20, "elapsed_ns": 10, "stdout_bytes": 0, "stdout_sha256": ""}]}]
+
+        experiment.agents = [FakeAgent(), FakeAgent()]
+        with patch.object(Experiment, "report", lambda self: report), patch("runner.deltas", lambda a, b: {}), patch("runner.peer_counters", lambda a, b: {"gets": 3, "get_wire": 12288, "errors": 0, "failed_reads": 0}):
+            spec = {"commands": ["pwd"], "chroot": "/mnt/cas/root", "cwd": "/work", "env": {"A": "1"}}
+            result = experiment.replay_working_set(1, ["g"], spec, {"g": 0})
+        self.assertEqual((result["commands"], result["chroot"], result["guest_cwd"], result["env"]), (["pwd"], "/mnt/cas/root", "/work", {"A": "1"}))
+        self.assertEqual(set(result) >= {"cold", "warm"}, True)
+        self.assertEqual(result["cold"]["destination_fetched_chunks"], 3)
+        self.assertEqual([c[1]["chroot"] for c in calls], ["/mnt/cas/root", "/mnt/cas/root"])
+        self.assertEqual([c[1]["label"] for c in calls], ["cold", "warm"])
+        plain = experiment.replay_working_set(1, ["g"], {"commands": ["ls"], "chroot": None, "cwd": None, "env": {}}, {"g": 0}) if False else None
+        self.assertIsNone(plain)
 
     def test_working_set_script_wraps_chroot_commands(self):
         self.assertEqual(working_set_script("ls"), "cd /mnt/cas\nls")

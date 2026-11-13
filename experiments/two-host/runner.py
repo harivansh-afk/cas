@@ -787,8 +787,10 @@ class Experiment:
                 "destination_get_wire": peers[node]["get_wire"],
             }
         return {
-            "commands": commands,
-            "guest_cwd": "/mnt/cas",
+            "commands": spec["commands"],
+            "chroot": spec["chroot"],
+            "guest_cwd": spec["cwd"] if spec["chroot"] else "/mnt/cas",
+            "env": spec["env"],
             **passes,
         }
 
