@@ -893,20 +893,21 @@ impl Local {
                     fast::Outcome::Declined(operation, permit) => (operation, permit),
                 }
             }
-            Some(fast) => {
-                if matches!(operation, Operation::Flush) {
-                    fast.flush_enqueued();
-                }
-                (operation, permit)
-            }
-            None => (operation, permit),
+            _ => (operation, permit),
         };
+        let flush = matches!(operation, Operation::Flush);
         self.send(Command::Io(Io {
             id,
             operation,
             permit,
             boundary,
-        }))
+        }))?;
+        // Only a FLUSH the reactor actually received is a barrier for inline
+        // reads; rejected ones complete through `rejected` without one.
+        if flush && let Some(fast) = &mut self.fast {
+            fast.flush_sent(id);
+        }
+        Ok(())
     }
 
     pub fn receive(&mut self, wait: bool) -> io::Result<Option<Completed>> {
@@ -953,7 +954,7 @@ impl Local {
         if let Some(fast) = &mut self.fast
             && matches!(completed.data, CompletionData::Flush)
         {
-            fast.flush_completed();
+            fast.flush_completed(completed.id);
         }
         completed
     }

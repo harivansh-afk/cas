@@ -2,14 +2,17 @@
 //!
 //! A read bypasses the reactor only when **all** of these hold at enqueue:
 //!
-//! 1. The image is host attached, concurrent, healthy and not paused.
+//! 1. The image is host attached, concurrent, not paused, and its completion
+//!    gate has no failure (a failed image rejects through the reactor).
 //! 2. The reactor's latest status has `published == admitted` (every mutation
 //!    this frontend ever admitted, including an unsealed batch, is published:
 //!    no in-flight write exists) and `compacted == published` (D == P: the
 //!    staging index retains no mapping newer than D, so no staged write can
 //!    take precedence over the manifest for any block).
 //! 3. The manifest view published by the reactor is exactly the one at that D.
-//! 4. No FLUSH admitted by this frontend is outstanding.
+//! 4. No FLUSH this frontend sent to the reactor is outstanding (tracked by
+//!    request id, so a FLUSH rejected before it was sent is not a barrier and
+//!    cannot cancel one that is).
 //! 5. Every block resolves without local IO: its manifest lookup completes
 //!    from the page cache and yields a hole, a clean-cache hit, or a chunk
 //!    that the frozen path would also fetch from a peer (force-remote, or no
@@ -44,6 +47,7 @@ pub(super) struct Counters {
     pub declined_flush: u64,
     pub declined_io: u64,
     pub declined_capacity: u64,
+    pub declined_failed: u64,
     pub failed_reads: u64,
 }
 
@@ -73,7 +77,8 @@ pub(super) struct Context {
     gate: BudgetArc<state::HostGate>,
     metadata: Arc<Budget>,
     pending: BudgetVec<Pending, BudgetAllocator>,
-    flushes: usize,
+    /// Ids of FLUSHes sent to the reactor and not yet completed.
+    flushes: BudgetVec<u64, BudgetAllocator>,
     pub(super) counters: Counters,
 }
 
@@ -100,8 +105,8 @@ impl Context {
             pages: port.page_cache(),
             gate: port.host_gate(),
             pending: reserved_vec(IMAGE_REQUEST_LIMIT, &metadata)?,
+            flushes: reserved_vec(IMAGE_REQUEST_LIMIT, &metadata)?,
             metadata,
-            flushes: 0,
             counters: Counters::default(),
         })
     }
@@ -122,11 +127,19 @@ impl Context {
             permit,
         ))
     }
-    pub fn flush_enqueued(&mut self) {
-        self.flushes += 1;
+    pub fn flush_sent(&mut self, id: u64) {
+        if self.flushes.len() < self.flushes.capacity() {
+            self.flushes.push(id);
+        } else {
+            // Cannot happen within the admission limit; stay conservative.
+            self.flushes.clear();
+            self.flushes.push(u64::MAX);
+        }
     }
-    pub fn flush_completed(&mut self) {
-        self.flushes = self.flushes.saturating_sub(1);
+    pub fn flush_completed(&mut self, id: u64) {
+        if let Some(index) = self.flushes.iter().position(|&flush| flush == id) {
+            self.flushes.swap_remove(index);
+        }
     }
 
     /// Serve the read inline, start its remote fetches, or decline it.
@@ -142,8 +155,17 @@ impl Context {
         let Operation::Read { offset, buffer } = operation else {
             return Ok(Outcome::Declined(operation, permit));
         };
-        if self.flushes != 0 {
+        if !self.flushes.is_empty() {
             return self.decline(|c| &mut c.declined_flush, offset, buffer, permit);
+        }
+        if shared
+            .health
+            .lock()
+            .map_err(|_| io::Error::other("completion gate poisoned"))?
+            .failure
+            .is_some()
+        {
+            return self.decline(|c| &mut c.declined_failed, offset, buffer, permit);
         }
         let status = *shared.final_status.lock().expect("status poisoned");
         if status.published != admitted || status.compacted != status.published {
@@ -171,9 +193,9 @@ impl Context {
             return self.decline(|c| &mut c.declined_capacity, offset, buffer, permit);
         }
         // Resolve every block before issuing any request, so a declined read
-        // leaves no cancelled GET behind.
+        // leaves no cancelled GET behind. Holes are zeroed here; cached and
+        // remote blocks are written exactly once by their source.
         let mut buffer = buffer;
-        buffer.as_mut_slice().fill(0);
         let mut remote = BudgetVec::new_in(BudgetAllocator::new(Arc::clone(&self.metadata)));
         let chunk = view.chunk_size();
         let serve_cache = !self.force_remote || self.cache_remote;
@@ -184,7 +206,10 @@ impl Context {
                 Err(_) => return self.decline(|c| &mut c.declined_io, offset, buffer, permit),
             };
             let hash = match lookup.cached(&self.pages) {
-                Ok(LookupState::Complete(None)) => continue,
+                Ok(LookupState::Complete(None)) => {
+                    buffer.as_mut_slice()[block * BLOCK_SIZE..(block + 1) * BLOCK_SIZE].fill(0);
+                    continue;
+                }
                 Ok(LookupState::Complete(Some(hash))) => hash,
                 _ => return self.decline(|c| &mut c.declined_io, offset, buffer, permit),
             };

@@ -186,3 +186,77 @@ fn fast_settled_reads_interleaved_with_overlapping_writes_and_flush_match_a_mode
     drop(local);
     shutdown(host);
 }
+
+/// A FLUSH the reactor holds must keep declining the bypass even when a later
+/// FLUSH is rejected before it was sent (its completion must not cancel the
+/// barrier), and a failed completion gate must decline every read.
+#[test]
+fn rejected_flush_does_not_cancel_the_in_flight_barrier_and_failed_gate_declines() {
+    let root = tempfile::tempdir().unwrap();
+    let resources = Arc::new(Resources {
+        peer: crate::peer::Config {
+            fast_settled_reads: true,
+            ..Default::default()
+        },
+        ..Resources::default()
+    });
+    let mut host = create(root.path(), 2, Arc::clone(&resources));
+    let mut local = attach(&mut host, 2);
+    let data = vec![0x5a; BLOCK_SIZE];
+    write(&mut local, 1, 0, &data);
+    let published = local.status.published;
+    drained(&mut local, published);
+    // Block the reactor inside a store read of block 0 (not cached yet).
+    let (entered, wait) = mpsc::channel();
+    let (resume, resumed) = mpsc::channel();
+    host.shared.control.lock().unwrap().before_fetch = Some(Pause {
+        entered,
+        resume: resumed,
+    });
+    submit_read(&mut local, 2, 0, BLOCK_SIZE);
+    wait.recv_timeout(Duration::from_secs(5)).unwrap();
+    // FLUSH 3 reaches the reactor's mailbox and stays in flight behind it.
+    let permit = local.prepare(Kind::Control).unwrap().unwrap();
+    local.enqueue(3, Operation::Flush, permit).unwrap();
+    // FLUSH 4 is rejected before it is sent; its completion is not a barrier.
+    let permit = local.prepare(Kind::Control).unwrap().unwrap();
+    local.paused = true;
+    assert!(local.enqueue(4, Operation::Flush, permit).is_err());
+    local.paused = false;
+    let rejected = received(&mut local);
+    assert_eq!(rejected.id, 4);
+    assert!(rejected.result.is_err());
+    // A settled hole read must still be declined while FLUSH 3 is in flight.
+    let declined = fast(&local, "declined_flush");
+    let inline = fast(&local, "inline_reads");
+    submit_read(&mut local, 5, 8 * BLOCK_SIZE, BLOCK_SIZE);
+    assert_eq!(fast(&local, "declined_flush"), declined + 1);
+    assert_eq!(fast(&local, "inline_reads"), inline);
+    resume.send(()).unwrap();
+    for _ in 0..3 {
+        let done = completed(&mut local);
+        match done.id {
+            2 => expect_read(done, 2, &data),
+            5 => expect_read(done, 5, &[0; BLOCK_SIZE]),
+            3 => (),
+            other => panic!("unexpected completion {other}"),
+        }
+    }
+    // The barrier is gone: the same hole read is inline again.
+    read_at(&mut local, 6, 8 * BLOCK_SIZE as u64, &[0; BLOCK_SIZE]);
+    assert_eq!(fast(&local, "inline_reads"), inline + 1);
+    // A failed completion gate declines every read; the reactor rejects it.
+    local
+        .shared
+        .health
+        .lock()
+        .unwrap()
+        .fail("test failure".into());
+    submit_read(&mut local, 7, 8 * BLOCK_SIZE, BLOCK_SIZE);
+    assert_eq!(fast(&local, "declined_failed"), 1);
+    let failed = received(&mut local);
+    assert_eq!(failed.id, 7);
+    assert!(failed.result.is_err());
+    drop(local);
+    shutdown(host);
+}
