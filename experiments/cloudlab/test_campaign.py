@@ -448,3 +448,17 @@ class Build(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkerCommand(unittest.TestCase):
+    def test_detached_worker_carries_every_run_time_input(self):
+        args = argparse.Namespace(arms="/arms", redo=True, dry_run=True, revision="a" * 40)
+        worker = campaign.worker_command(args, Path("/n.json"), Path("/p.json"), "user@host:/srv")
+        self.assertEqual(worker[1:3], [str(campaign.HERE / "campaign.py"), "run"])
+        for flag, value in (("--nodes", "/n.json"), ("--plan", "/p.json"), ("--arms", "/arms"), ("--export", "user@host:/srv"), ("--revision", "a" * 40)):
+            self.assertEqual(worker[worker.index(flag) + 1], value)
+        self.assertIn("--redo", worker)
+        self.assertIn("--dry-run", worker)
+        plain = campaign.worker_command(argparse.Namespace(arms="/arms", redo=False, dry_run=False), Path("/n"), Path("/p"), None)
+        for flag in ("--export", "--redo", "--dry-run", "--revision"):
+            self.assertNotIn(flag, plain)

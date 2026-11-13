@@ -587,13 +587,7 @@ class Campaign:
     def start(self):
         """Detach the worker so a lost SSH session does not end the campaign."""
         self.dir.mkdir(parents=True, exist_ok=True)
-        worker = [sys.executable, str(HERE / "campaign.py"), "run", "--nodes", str(self.nodes_path), "--plan", str(self.plan_path), "--arms", str(self.args.arms)]
-        if self.export_path:
-            worker += ["--export", self.export_path]
-        if self.args.redo:
-            worker.append("--redo")
-        if self.args.dry_run:
-            worker.append("--dry-run")
+        worker = worker_command(self.args, self.nodes_path, self.plan_path, self.export_path)
         unit = f"cas-campaign-{self.name}"
         if shutil.which("systemd-run"):
             scope = [] if os.geteuid() == 0 else ["--user"]
@@ -611,6 +605,21 @@ class Campaign:
             process = subprocess.Popen(["nohup", *worker], stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
         self.set_status(launched=now(), launched_via=f"nohup setsid pid {process.pid}")
         print(f"started pid {process.pid} via nohup; status: campaign.py status --nodes {self.nodes_path}")
+
+
+def worker_command(args, nodes_path, plan_path, export_path):
+    """The detached `run` carries every run-time input of `start`: nodes,
+    plan, arms, export, redo, dry-run and the pinned revision."""
+    worker = [sys.executable, str(HERE / "campaign.py"), "run", "--nodes", str(nodes_path), "--plan", str(plan_path), "--arms", str(args.arms)]
+    if export_path:
+        worker += ["--export", export_path]
+    if args.redo:
+        worker.append("--redo")
+    if args.dry_run:
+        worker.append("--dry-run")
+    if getattr(args, "revision", None):
+        worker += ["--revision", args.revision]
+    return worker
 
 
 def main():
