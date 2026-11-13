@@ -118,6 +118,23 @@ already appended. `--metadata-bytes` (4 GiB) caps the rebuilt
 chunk index and WAL index; a root whose index exceeds the serving host's fixed
 metadata budget cannot be opened by that host.
 
+## Flags added in this revision
+
+| Flag | Binary | Default | Effect |
+| --- | --- | --- | --- |
+| `--attach-timeout-secs N` | `cas-host` | 60 | Window after cold recovery for a guest to connect and enable its queues; see [storage design](storage-design.md) |
+| `--metadata-bytes N` | `cas-host` | 134,217,728 (128 MiB) | Host metadata budget (indexes, manifests, queues, rings); at most physical memory |
+| `--peer-race-us N` | `cas-host` | off | Race a settled GET against a second source after N µs (0 = at once); see [peer fetch](peer-fetch.md) |
+| `--peer-race-local` | `cas-host` | off | With `--peer-force-remote` and a race budget, let the race use the verified local copy |
+| `--fast-settled-reads` | `cas-host` | off | Complete fully settled reads on the frontend without the reactor; see [storage design](storage-design.md) |
+| `--chunk-bytes N` | `casctl import` | 4096 | Chunk geometry of a new root (an existing root keeps its own) |
+| `--segment-bytes N` | `casctl import` | 67,108,864 (64 MiB) | Chunk-segment size of a new root |
+| `--compact-every-bytes N` | `casctl import` | 67,108,864 (64 MiB) | Input bytes between FLUSH, compaction and WAL reclamation |
+| `--metadata-bytes N` | `casctl import` | 4 GiB | Importer metadata budget for the rebuilt chunk and WAL indexes |
+
+No `cas-host` default changes: without flags the host keeps the 60 s attach
+window, the 128 MiB metadata budget, unraced GETs and the reactor read path.
+
 ## What runs on the host
 
 A 4 GiB KVM host owns a dedicated XFS filesystem inside a fixed 4 GiB image.

@@ -11,11 +11,22 @@ use std::{
 };
 
 const RETAIN: usize = 1024;
+/// Race outcome codes recorded in the ring: no race, first owner, second owner, local copy.
+pub const WINNER_NONE: u8 = 0;
+pub const WINNER_FIRST: u8 = 1;
+pub const WINNER_SECOND: u8 = 2;
+pub const WINNER_LOCAL: u8 = 3;
 #[derive(Default, Clone, Copy, Debug, serde::Serialize)]
 pub struct Phases {
     pub send_ns: u64,
     pub first_byte_ns: u64,
     pub verified_ns: u64,
+    /// The winning source and budget travel with the completing transport's
+    /// milestones; the record exposes them at its top level.
+    #[serde(skip)]
+    pub race_budget_us: u32,
+    #[serde(skip)]
+    pub race_winner: u8,
 }
 #[derive(Default, Clone, Copy, Debug, serde::Serialize)]
 pub struct Record {
@@ -25,6 +36,9 @@ pub struct Record {
     pub completed_ns: u64,
     pub chunks: u64,
     pub success: bool,
+    /// Last raced chunk of this read: budget in microseconds and WINNER_* code.
+    pub race_budget_us: u32,
+    pub race_winner: u8,
 }
 #[derive(Default, Clone, Copy, serde::Serialize)]
 pub struct Counters {
@@ -42,6 +56,15 @@ pub struct Counters {
     pub has: u64,
     pub completed_reads: u64,
     pub failed_reads: u64,
+    pub races_started: u64,
+    pub race_won_first: u64,
+    pub race_won_second: u64,
+    pub race_won_local: u64,
+    pub race_discarded: u64,
+    pub race_wasted_wire_bytes: u64,
+    /// Armed races never started: racer table full or stopping, or the
+    /// challenger's slot pool exhausted.
+    pub race_dropped: u64,
 }
 /// GETs issued without an image slot (harness clients, HAS probes).
 pub(crate) const UNATTRIBUTED: usize = usize::MAX;
@@ -230,6 +253,10 @@ impl Trace {
             self.record.phases = phases;
         } else {
             self.record.phases.verified_ns = phases.verified_ns;
+        }
+        if phases.race_winner != WINNER_NONE {
+            self.record.race_winner = phases.race_winner;
+            self.record.race_budget_us = phases.race_budget_us;
         }
         self.record.chunks += 1;
     }

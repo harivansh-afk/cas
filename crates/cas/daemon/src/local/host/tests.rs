@@ -8,6 +8,7 @@ mod allocation;
 mod cache;
 mod chunk16;
 mod collection;
+mod fast;
 mod fleet;
 mod initialization;
 mod peer;

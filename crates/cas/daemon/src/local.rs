@@ -2,6 +2,8 @@
 //! thread and gathers writes straight into their final append allocation;
 //! `Shared` holds the budgets, health gate and metrics that admission and the
 //! `Worker` (synchronous) or reactor (concurrent) execution both consult.
+mod chunk;
+mod fast;
 pub(crate) mod host;
 pub(crate) mod pools;
 pub(crate) mod pressure;
@@ -223,6 +225,8 @@ pub struct Shared {
     metrics: Mutex<Metrics>,
     pressure: pressure::Counters,
     final_status: Mutex<append::Status>,
+    /// The manifest view at `final_status.compacted`, for frontend-inline reads.
+    manifest: Mutex<Option<(u64, cas_core::manifest::file::View)>>,
     pub(crate) health: Health,
     pub(crate) injection: OnceLock<crate::fault::Injection>,
     window: Option<BudgetArc<window::Window>>,
@@ -266,6 +270,7 @@ impl Shared {
                 metrics: Mutex::new(Metrics::default()),
                 pressure: pressure::Counters::default(),
                 final_status: Mutex::new(status),
+                manifest: Mutex::new(None),
                 health,
                 window,
                 admission,
@@ -276,6 +281,21 @@ impl Shared {
 
     pub(crate) fn metadata(&self) -> Arc<Budget> {
         Arc::clone(&self.metadata)
+    }
+
+    /// Reactor-side publication of the status and, when D moved, the manifest
+    /// view at that D. Both only advance, so a frontend reading them later
+    /// sees a conservative (never newer than true) settled state.
+    fn publish_status(&self, log: &Log) {
+        let status = log.status();
+        *self.final_status.lock().expect("status poisoned") = status;
+        let mut manifest = self.manifest.lock().expect("manifest poisoned");
+        if manifest
+            .as_ref()
+            .is_none_or(|(compacted, _)| *compacted != status.compacted)
+        {
+            *manifest = log.manifest().map(|view| (status.compacted, view.clone()));
+        }
     }
 
     pub fn hit(&self, point: crate::fault::Point, count: u64) -> io::Result<()> {
@@ -447,6 +467,7 @@ pub fn create_log_with_limits(
 
 pub struct Local {
     fair: Option<host::fair::Port>,
+    fast: Option<fast::Context>,
     sender: Option<mailbox::Sender<Command>>,
     receiver: Mutex<mailbox::Receiver<Response>>,
     worker: Option<JoinHandle<()>>,
@@ -527,7 +548,7 @@ impl Local {
     ) -> io::Result<Self> {
         let rejected = BudgetQueue::with_capacity(IMAGE_REQUEST_LIMIT, &shared.metadata)?;
         let status = log.status();
-        *shared.final_status.lock().expect("status poisoned") = status;
+        shared.publish_status(&log);
         let (sender, input) = mailbox::bounded(IMAGE_REQUEST_LIMIT + 1, &shared.metadata)?;
         let (output, receiver) = mailbox::bounded(IMAGE_REQUEST_LIMIT, &shared.metadata)?;
         let input_wake = match &port {
@@ -546,6 +567,12 @@ impl Local {
             )?;
         }
         let fair = port.as_ref().map(host::Port::fair);
+        let fast = match &port {
+            Some(port) if port.peer_config().fast_settled_reads => {
+                Some(fast::Context::new(port, event)?)
+            }
+            _ => None,
+        };
         let worker = Worker {
             log,
             output,
@@ -563,6 +590,7 @@ impl Local {
         };
         Ok(Self {
             fair,
+            fast,
             sender: Some(sender),
             receiver: Mutex::new(receiver),
             worker: Some(worker),
@@ -832,49 +860,92 @@ impl Local {
         if let Some(trace) = &mut permit.trace {
             trace.enqueued_ns = trace.at();
         }
-        let command = Command::Io(Io {
+        let io = Io {
             id,
             operation,
             permit,
             boundary: self.admitted,
-        });
+        };
         if self.paused {
-            command.reject("local admission is paused", &mut self.rejected);
+            Command::Io(io).reject("local admission is paused", &mut self.rejected);
             return Err(io::Error::other("local admission is paused"));
         }
         if let Err(error) = self.seal() {
-            command.reject(&error.to_string(), &mut self.rejected);
+            Command::Io(io).reject(&error.to_string(), &mut self.rejected);
             return Err(error);
         }
-        self.send(command)
+        let io = match &mut self.fast {
+            Some(fast) if matches!(io.operation, Operation::Read { .. }) => {
+                match fast.enqueue(&self.shared, io, &mut self.rejected)? {
+                    fast::Outcome::Taken => return Ok(()),
+                    fast::Outcome::Declined(io) => io,
+                }
+            }
+            _ => io,
+        };
+        let flush = matches!(io.operation, Operation::Flush);
+        self.send(Command::Io(io))?;
+        // Only a FLUSH the reactor actually received is a barrier for inline
+        // reads; rejected ones complete through `rejected` without one.
+        if flush && let Some(fast) = &mut self.fast {
+            fast.flush_sent(id);
+        }
+        Ok(())
     }
 
     pub fn receive(&mut self, wait: bool) -> io::Result<Option<Completed>> {
-        if let Some(completed) = self.rejected.pop_front() {
-            return Ok(Some(completed));
-        }
-        let receiver = self
-            .receiver
-            .get_mut()
-            .map_err(|_| io::Error::other("local receiver poisoned"))?;
-        let response = if wait {
-            Some(receiver.recv().map_err(io::Error::other)?)
-        } else {
-            match receiver.try_recv() {
-                Ok(response) => Some(response),
-                Err(mailbox::TryRecvError::Empty) => None,
-                Err(error) => return Err(io::Error::other(error)),
+        loop {
+            if let Some(completed) = self.rejected.pop_front() {
+                return Ok(Some(self.observe(completed)));
             }
-        };
-        Ok(response.map(|(completed, status)| {
-            self.status = status;
-            completed
-        }))
+            if let Some(fast) = &mut self.fast
+                && fast.has_pending()
+            {
+                fast.poll(&self.shared, &mut self.rejected)?;
+                if let Some(completed) = self.rejected.pop_front() {
+                    return Ok(Some(self.observe(completed)));
+                }
+            }
+            let pending_fast = self.fast.as_ref().is_some_and(fast::Context::has_pending);
+            let receiver = self
+                .receiver
+                .get_mut()
+                .map_err(|_| io::Error::other("local receiver poisoned"))?;
+            let response = if wait && !pending_fast {
+                Some(receiver.recv().map_err(io::Error::other)?)
+            } else {
+                match receiver.try_recv() {
+                    Ok(response) => Some(response),
+                    Err(mailbox::TryRecvError::Empty) => None,
+                    Err(error) => return Err(io::Error::other(error)),
+                }
+            };
+            match response {
+                Some((completed, status)) => {
+                    self.status = status;
+                    return Ok(Some(self.observe(completed)));
+                }
+                // Inline reads wait on the frontend wake, which remote
+                // replies and the reactor both signal.
+                None if wait => self.fast.as_ref().expect("pending fast reads").wait(10)?,
+                None => return Ok(None),
+            }
+        }
+    }
+
+    fn observe(&mut self, completed: Completed) -> Completed {
+        if let Some(fast) = &mut self.fast
+            && matches!(completed.data, CompletionData::Flush)
+        {
+            fast.flush_completed(completed.id);
+        }
+        completed
     }
 
     pub fn report(&self) -> serde_json::Value {
         let status = *self.shared.final_status.lock().expect("status poisoned");
         serde_json::json!({ "status":status, "metrics":*self.shared.metrics.lock().expect("metrics poisoned"),
+            "fast": self.fast.as_ref().map(|fast| fast.counters),
             "requests":self.shared.pools.requests.usage(), "read_requests":self.shared.pools.read_requests.usage(),
             "append":self.shared.pools.append.usage(),
             "read":self.shared.pools.read.usage(), "control":self.shared.pools.control.usage(),

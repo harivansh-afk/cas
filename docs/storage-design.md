@@ -45,6 +45,54 @@ Independent reads can bypass capacity-blocked writes within bounded descriptor
 metadata; overlapping operations and FLUSH barriers still constrain ordering.
 This is not a bound on worst-case read latency.
 
+### Frontend-inline settled reads
+
+`--fast-settled-reads` (off by default; the reactor path remains the frozen
+behaviour) lets the frontend complete a read without the reactor. The bypass
+is taken only when every condition below holds at enqueue, and otherwise the
+read is handed to the reactor unchanged:
+
+1. The image is host attached and concurrent, its gate is healthy and
+   admission is not paused.
+2. The reactor's last published status has `published == admitted` and
+   `compacted == published`. `admitted` counts every mutation this frontend
+   has ever admitted, including an unsealed batch, so the first equality
+   means no mutation is in flight; the second (D == P) means the staging
+   index retains no mapping newer than D, so no staged write exists that WAL
+   precedence could select for any block.
+3. The manifest view the reactor published is the one at that D.
+4. No FLUSH admitted by this frontend is still outstanding.
+5. Every block resolves without local IO through the per-block resolution
+   shared with the reactor (`local/chunk.rs`): a hole (zeros), a clean-cache
+   hit, or a chunk the reactor path would also fetch from a peer
+   (force-remote, or absent from the local store). A manifest page load or a
+   local store read declines.
+6. Bounded state: one slot in a per-image table sized like the reactor
+   mailbox, one fetch-registry entry and one GET slot per remote chunk;
+   exhaustion before anything is held declines.
+
+The frontend is the only admitter of mutations for its image, so under (2)
+every mutation that could precede the read in guest order is published and
+compacted, and the manifest at D is the complete image state. A mutation
+discovered after the check is younger than the read and may be excluded, as
+the reactor may already plan a read before or after a concurrent write
+publishes. Both status fields only advance and `admitted` is frontend-owned,
+so a stale snapshot can only decline, never admit, a bypass. The permit keeps
+its credits, host admission entry and fairness release until completion, which
+flows through the same receive path and the same completion gate as reactor
+completions; live-recovery bookkeeping is unchanged. A remote verification or
+transport failure fails the read, the image gate and the shared host gate like
+the frozen path, and zeroes the buffer. Remote chunks join the shared fetch
+registry: as leader the frontend's GET fills the cell for every waiter; as
+waiter it is woken through its own completion eventfd (the registry accepts a
+caller-provided signal), so one chunk is never fetched twice concurrently by
+the two schedulers. Once a registry entry is held the read is never declined
+(dropping a leader would fail its waiters); it completes, or fails closed
+exactly as a reactor read does. Cache-fill rules (`--peer-cache`) are shared
+through the same resolution code. Per-image `local.fast` counters report
+inline, remote, shared-wait, declined (unsettled, flush, IO, capacity, failed
+gate) and failed reads.
+
 ## Compaction and collection
 
 After a complete sweep reports capacity exhaustion, automatic collection waits

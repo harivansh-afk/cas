@@ -1188,12 +1188,7 @@ impl Reactor {
                         {
                             notify(&self.worker.wake.0)?;
                         }
-                        *self
-                            .worker
-                            .shared
-                            .final_status
-                            .lock()
-                            .expect("status poisoned") = self.worker.log.status();
+                        self.worker.shared.publish_status(&self.worker.log);
                     }
                     self.publish()?;
                     if let Some(window) = &self.worker.shared.window

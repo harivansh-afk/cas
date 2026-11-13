@@ -37,6 +37,9 @@ pub struct Resources {
     pub compaction: Arc<Budget>,
     pools: pools::HostPools,
     fault: Option<Mutex<Option<fault::Pause>>>,
+    /// Test-only: this host's GET service delays every reply by this much.
+    #[cfg(test)]
+    pub peer_reply_delay_us: u64,
 }
 
 impl Default for Resources {
@@ -49,6 +52,8 @@ impl Default for Resources {
             compaction: metadata_budget(),
             pools: pools::HostPools::new(),
             fault: None,
+            #[cfg(test)]
+            peer_reply_delay_us: 0,
         }
     }
 }
@@ -293,14 +298,28 @@ impl Host {
             || !resources.peer.peer_get_member.is_empty())
         .then(|| crate::peer::metrics::Metrics::new(&metadata, slots))
         .transpose()?;
+        // Demand ports: images, GET service connections, then one local race source.
+        let service_ports = if resources.peer.peer_listen.is_some() {
+            peer_connections
+        } else {
+            0
+        };
+        let race_local = resources.peer.peer_race_local && resources.peer.peer_race_us.is_some();
+        let io_scheduler = cas_core::scheduler::Scheduler::new(
+            slots + service_ports + usize::from(race_local),
+            &metadata,
+        )?;
+        let reader = store.reader()?;
         let peer = if resources.peer.peer_address.is_some()
             || !resources.peer.peer_get_member.is_empty()
         {
+            let local = race_local.then(|| (io_scheduler.clone(), slots + service_ports));
             Some(BudgetArc::try_new(
                 crate::peer::Router::new(
                     &resources.peer,
                     &metadata,
                     peer_metrics.as_ref().expect("peer metrics").clone(),
+                    local,
                 )?,
                 &metadata,
             )?)
@@ -315,17 +334,9 @@ impl Host {
                 peer_metrics,
                 admission,
                 fair,
-                io_scheduler: cas_core::scheduler::Scheduler::new(
-                    slots
-                        + if resources.peer.peer_listen.is_some() {
-                            peer_connections
-                        } else {
-                            0
-                        },
-                    &metadata,
-                )?,
+                io_scheduler,
                 gate,
-                reader: store.reader()?,
+                reader,
                 cache: cas_core::cache::Cache::new_sized(
                     resources.cache_bytes,
                     store.chunk_size(),
@@ -399,7 +410,11 @@ impl Host {
                     &metadata,
                     shared.peer_metrics.as_ref().expect("peer metrics").clone(),
                     (shared.io_scheduler.clone(), slots),
-                    peer_connections,
+                    crate::peer::ServiceOptions {
+                        connections: peer_connections,
+                        #[cfg(test)]
+                        reply_delay: Duration::from_micros(shared.resources.peer_reply_delay_us),
+                    },
                 )
             })
             .transpose()?;
@@ -718,6 +733,9 @@ impl Port {
 
     pub fn fail_shared(&self, error: &io::Error) {
         self.shared.gate.fail(error.to_string());
+    }
+    pub(super) fn host_gate(&self) -> BudgetArc<state::HostGate> {
+        self.shared.gate.clone()
     }
 
     pub(super) fn fair(&self) -> fair::Port {
