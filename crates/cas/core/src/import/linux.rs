@@ -432,7 +432,17 @@ fn validate_new_segment(store: [u8; 16], segment_bytes: u64) -> io::Result<()> {
 fn validate_interval(segment_bytes: u64, interval: u64) -> io::Result<()> {
     let limits = Limits::default();
     let splits = (interval / MAX_REQUEST_BYTES as u64) * 5 * BLOCK_SIZE as u64;
-    let capacity = segment_bytes - (2 * BLOCK_SIZE + MAX_BATCH_BYTES) as u64;
+    // A segment must hold its header, one batch and a commit block; a smaller
+    // existing segment can never take a whole batch, so no interval fits.
+    let capacity = segment_bytes
+        .checked_sub((2 * BLOCK_SIZE + MAX_BATCH_BYTES) as u64)
+        .filter(|capacity| *capacity > 0)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "segment size cannot hold one WAL batch; the root cannot be imported into",
+            )
+        })?;
     let bound = segment_bytes * (1 + (interval + splits).div_ceil(capacity));
     require(
         bound <= limits.staging_bytes
@@ -691,4 +701,25 @@ fn allocated(path: &Path) -> io::Result<u64> {
         };
     }
     Ok(total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::import::{DEFAULT_COMPACTION_INTERVAL, DEFAULT_SEGMENT_BYTES};
+
+    #[test]
+    fn interval_validation_refuses_a_segment_too_small_for_one_batch() {
+        // Below the header + batch + commit floor the subtraction used to
+        // panic in debug builds and wrap in release; now it is a refusal.
+        for segment in [
+            2 * BLOCK_SIZE as u64,
+            (2 * BLOCK_SIZE + MAX_BATCH_BYTES) as u64,
+        ] {
+            let error = validate_interval(segment, DEFAULT_COMPACTION_INTERVAL).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{segment}");
+        }
+        validate_interval(DEFAULT_SEGMENT_BYTES, DEFAULT_COMPACTION_INTERVAL).unwrap();
+        assert!(validate_interval(DEFAULT_SEGMENT_BYTES, 256 << 20).is_err());
+    }
 }
