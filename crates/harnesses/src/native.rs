@@ -12,6 +12,8 @@ use std::{
 
 const GIB: u64 = 1024 * 1024 * 1024;
 const STORE: &str = "01010101010101010101010101010101";
+/// The guest limit the campaign driver reads from `crates/harnesses/native-limits.json`
+/// (inside the crate, so the packaged build sees it); a unit test keeps the two equal.
 pub const MAX_GUESTS: u8 = 16;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, ValueEnum)]
@@ -97,6 +99,24 @@ fn allowed_filesystems(backend: Backend) -> &'static [&'static str] {
     }
 }
 
+/// Whether `path` names a partition of `device` by the kernel's rule: a digit
+/// suffix, with a `p` separator only when the device name itself ends in a
+/// digit (`/dev/sda1`, `/dev/nvme0n1p2`), or udev's `-partN`. `/dev/sdap` is
+/// another disk, not a partition of `/dev/sda`.
+fn is_partition_of(path: &str, device: &str) -> bool {
+    let Some(rest) = path.strip_prefix(device) else {
+        return false;
+    };
+    let digits = if let Some(digits) = rest.strip_prefix("-part") {
+        Some(digits)
+    } else if device.ends_with(|c: char| c.is_ascii_digit()) {
+        rest.strip_prefix('p')
+    } else {
+        Some(rest)
+    };
+    digits.is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// Whether `zpool list -v -H -P <pool>` lists `device` (or a partition on it) as a vdev.
 fn pool_has_device(listing: &str, device: &Path) -> bool {
     let device = device.to_string_lossy();
@@ -108,9 +128,7 @@ fn pool_has_device(listing: &str, device: &Path) -> bool {
                 let path = fs::canonicalize(path)
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_else(|_| path.to_string());
-                path == device
-                    || path.starts_with(&format!("{device}p"))
-                    || path.starts_with(&format!("{device}-part"))
+                path == device || is_partition_of(&path, &device)
             })
     })
 }
@@ -343,5 +361,37 @@ mod tests {
         assert!(validate(&args).unwrap_err().to_string().contains("aligned"));
         args.output = "bad,path".into();
         assert!(validate(&args).unwrap_err().to_string().contains("commas"));
+    }
+
+    #[test]
+    fn partition_naming_follows_the_kernel_rule() {
+        assert!(is_partition_of("/dev/sda1", "/dev/sda"));
+        assert!(is_partition_of("/dev/sda12", "/dev/sda"));
+        assert!(!is_partition_of("/dev/sdap", "/dev/sda"));
+        assert!(!is_partition_of("/dev/sdap1", "/dev/sda"));
+        assert!(is_partition_of("/dev/nvme0n1p2", "/dev/nvme0n1"));
+        assert!(!is_partition_of("/dev/nvme0n12", "/dev/nvme0n1"));
+        assert!(!is_partition_of("/dev/nvme0n1", "/dev/nvme0n1"));
+        assert!(is_partition_of(
+            "/dev/disk/by-id/nvme-X-part3",
+            "/dev/disk/by-id/nvme-X"
+        ));
+        assert!(!is_partition_of(
+            "/dev/disk/by-id/nvme-X-part",
+            "/dev/disk/by-id/nvme-X"
+        ));
+        let listing = "pool\t-\n\t/dev/sdap\t-\n\t/dev/sda1\t-\n";
+        assert!(pool_has_device(listing, Path::new("/dev/sda")));
+        assert!(!pool_has_device(
+            "pool\t-\n\t/dev/sdap\t-\n",
+            Path::new("/dev/sda")
+        ));
+    }
+
+    #[test]
+    fn guest_limit_matches_the_shared_limits_file() {
+        let limits: serde_json::Value =
+            serde_json::from_str(include_str!("../native-limits.json")).unwrap();
+        assert_eq!(limits["max_guests"], u64::from(MAX_GUESTS));
     }
 }

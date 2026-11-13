@@ -13,7 +13,11 @@ HERE = Path(__file__).resolve().parent
 ARMS_DIR = HERE / "arms"
 RUNNERS = ("two-host", "native", "r0")
 NATIVE_BACKENDS = ("raw", "daemon", "cas")
-NATIVE_MAX_GUESTS = 2  # cas-harness native: --guests 1..=2
+# One place for the native runner's guest limit: `crates/harnesses/native-limits.json`,
+# which `crates/harnesses/src/native.rs` includes and checks against its constant.
+NATIVE_MAX_GUESTS = json.loads(
+    (Path(__file__).resolve().parents[2] / "crates" / "harnesses" / "native-limits.json").read_text()
+)["max_guests"]
 MAX_GUESTS = 16
 PLACEHOLDERS = ("RACE_BUDGET_US", "WORKING_SET_FROM_BUNDLE")
 # Settings the two-host runner must know for an arm to be measurable; a runner
