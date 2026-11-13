@@ -25,6 +25,22 @@ pub(crate) fn truncate(file: &File, length: u64) -> io::Result<()> {
     file.set_len(length)
 }
 
+/// Read-only direct IO on an immutable record (the store geometry marker):
+/// a shared lock, so concurrent readers in one or several processes do not
+/// exclude each other, while the exclusive lock `open` takes to create or
+/// rewrite a file still excludes them.
+pub(crate) fn open_readonly(path: &Path) -> io::Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECT | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::other("storage IO requires a regular file"));
+    }
+    file.try_lock_shared().map_err(io::Error::from)?;
+    Ok(file)
+}
+
 pub(crate) fn open(path: &Path, create: bool) -> io::Result<File> {
     let file = OpenOptions::new()
         .read(true)

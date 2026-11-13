@@ -42,8 +42,12 @@ pub(super) fn read(
     Ok(size)
 }
 
+/// Readers share the marker: every WAL open and store inspection reads it,
+/// concurrently across threads and processes, and the record never changes
+/// after `create`. An exclusive lock here made concurrent readers fail with
+/// `WouldBlock`.
 pub(super) fn config(tickets: &Tickets, metadata: Arc<Budget>) -> io::Result<(Config, ChunkSize)> {
-    let file = direct::open(&tickets.root().join(NAME), false)?;
+    let file = direct::open_readonly(&tickets.root().join(NAME))?;
     require(
         file.metadata()?.len() == BLOCK_SIZE as u64,
         "store format length",
@@ -65,4 +69,38 @@ pub(super) fn config(tickets: &Tickets, metadata: Arc<Budget>) -> io::Result<(Co
     };
     config.validate()?;
     Ok((config, ChunkSize::from_bytes(u32_at(bytes, 12) as usize)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn concurrent_geometry_readers_do_not_exclude_each_other() {
+        let directory = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let metadata = Budget::new(crate::budget::Amount {
+            bytes: 1 << 20,
+            requests: 0,
+        });
+        let tickets = Tickets::open(directory.path(), Arc::clone(&metadata)).unwrap();
+        let config = Config {
+            store: [7; 16],
+            segment_bytes: 64 << 20,
+        };
+        create(&tickets, config, ChunkSize::from_bytes(BLOCK_SIZE).unwrap(), Arc::clone(&metadata))
+            .unwrap();
+        // A reader holding the marker open must not block another reader:
+        // the daemon reads it from several threads (WAL opens, inspection).
+        let held = direct::open_readonly(&tickets.root().join(NAME)).unwrap();
+        let (recorded, size) = self::config(&tickets, Arc::clone(&metadata)).unwrap();
+        assert_eq!((recorded, size.bytes()), (config, BLOCK_SIZE));
+        // An exclusive writer is still excluded while readers hold it.
+        assert_eq!(
+            direct::open(&tickets.root().join(NAME), false)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(held);
+    }
 }
