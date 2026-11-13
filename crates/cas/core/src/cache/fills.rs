@@ -127,16 +127,18 @@ impl<T> Registry<T> {
     }
 
     pub fn lookup(owner: &BudgetArc<Self>, hash: Hash) -> io::Result<Option<Lookup<T>>> {
-        Self::lookup_with(owner, hash, None)
+        Self::lookup_with(owner, hash, None::<fn() -> io::Result<OwnedFd>>)
     }
 
-    /// Like `lookup`, but a waiter is signalled through `wake` (a descriptor
-    /// the caller already polls, such as a frontend's completion eventfd)
-    /// instead of a fresh per-waiter eventfd.
-    pub fn lookup_with(
+    /// Like `lookup`, but a waiter is signalled through the descriptor `wake`
+    /// produces (one the caller already polls, such as a frontend's
+    /// completion eventfd) instead of a fresh per-waiter eventfd. `wake` is
+    /// called only when this lookup becomes a waiter, before any state
+    /// changes, so its failure leaves the registry untouched.
+    pub fn lookup_with<F: FnOnce() -> io::Result<OwnedFd>>(
         owner: &BudgetArc<Self>,
         hash: Hash,
-        wake: Option<OwnedFd>,
+        wake: Option<F>,
     ) -> io::Result<Option<Lookup<T>>> {
         let wait = crate::io_metrics::measure(0, |c| &mut c.fetch_registry_wait);
         let mut state = owner.state.lock().expect("fetch registry poisoned");
@@ -150,7 +152,7 @@ impl<T> Registry<T> {
             };
             let cell = entry.cell.clone();
             let signal = match wake {
-                Some(wake) => Signal::adopt(wake, &owner.metadata)?,
+                Some(wake) => Signal::adopt(wake()?, &owner.metadata)?,
                 None => Signal::new(&owner.metadata)?,
             };
             let wait = crate::io_metrics::measure(0, |c| &mut c.fetch_registry_wait);

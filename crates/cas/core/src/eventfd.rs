@@ -1,16 +1,17 @@
 //! Nonblocking readiness signals shared by cache fills and IO scheduling.
 use std::{
     io,
-    os::fd::{AsRawFd, BorrowedFd, OwnedFd, RawFd},
+    os::fd::{AsRawFd, BorrowedFd, OwnedFd},
 };
 
-/// Duplicate a live eventfd (or any descriptor) into an owned handle, for a
-/// waiter or transport that signals the owner's wake. The duplicate shares
-/// the counter; closing it never closes the original.
-pub fn duplicate(fd: RawFd) -> io::Result<OwnedFd> {
-    // SAFETY: the caller passes a descriptor it owns and keeps open for the
-    // duration of this call; the borrow does not outlive the call.
-    unsafe { BorrowedFd::borrow_raw(fd) }.try_clone_to_owned()
+/// Duplicate a live eventfd (or any descriptor owner) into an owned handle,
+/// for a waiter or transport that signals the owner's wake. The duplicate
+/// shares the counter; closing it never closes the original. The owner is
+/// borrowed for the call, so the descriptor cannot be closed underneath it.
+pub fn duplicate(owner: &impl AsRawFd) -> io::Result<OwnedFd> {
+    // SAFETY: `owner` is borrowed for the whole call and owns the descriptor
+    // it reports, so the raw fd is open and the borrow does not outlive it.
+    unsafe { BorrowedFd::borrow_raw(owner.as_raw_fd()) }.try_clone_to_owned()
 }
 
 pub fn notify(fd: BorrowedFd<'_>) -> io::Result<()> {

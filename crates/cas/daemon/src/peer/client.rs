@@ -305,11 +305,11 @@ impl Slot {
         let Some(pending) = self.pending.take() else {
             return;
         };
-        let wake = self
-            .notify
-            .as_ref()
-            .map_or(self.event.as_raw_fd(), AsRawFd::as_raw_fd);
-        let Ok(notify) = cas_core::eventfd::duplicate(wake) else {
+        let notify = match &self.notify {
+            Some(notify) => cas_core::eventfd::duplicate(notify),
+            None => cas_core::eventfd::duplicate(&self.event),
+        };
+        let Ok(notify) = notify else {
             metrics.count(|c| c.race_dropped += 1);
             return;
         };

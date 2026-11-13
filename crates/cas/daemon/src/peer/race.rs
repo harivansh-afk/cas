@@ -247,7 +247,7 @@ impl LocalSource {
         let grant = EventFd::new(libc::EFD_NONBLOCK | libc::EFD_CLOEXEC)?;
         scheduler.0.bind(
             scheduler.1,
-            cas_core::eventfd::duplicate(grant.as_raw_fd())?,
+            cas_core::eventfd::duplicate(&grant)?,
         )?;
         let scheduling = scheduler::Scheduler::port(&scheduler.0, scheduler.1)?;
         let mut slots = crate::local::reserved_vec(LOCAL_SLOTS, budget)?;
