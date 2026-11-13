@@ -618,8 +618,10 @@ fn race_completes_from_the_local_copy_when_the_peer_reply_fails_verification() {
 
 /// The peer fails before the budget: with a connection refused outright, and
 /// with a peer that reads the GET and closes. Both start the local challenger
-/// at once, so the read completes long before the 200 ms budget; without a
-/// local copy the same failures stay closed.
+/// at once, so the read completes long before the 2 s budget (the wall-time
+/// bound is a loose hang guard; a loaded parallel test host took 158 ms once
+/// against a 150 ms bound); without a local copy the same failures stay
+/// closed.
 #[test]
 fn primary_failure_before_the_budget_starts_the_local_challenger_at_once() {
     use std::io::Read as _;
@@ -639,7 +641,7 @@ fn primary_failure_before_the_budget_starts_the_local_challenger_at_once() {
             drop(listener);
             None
         };
-        let r = raced(address, 200_000);
+        let r = raced(address, 2_000_000);
         let mut host = seeded(root.path(), r.clone(), local_copy);
         let mut local = attach(&mut host, 2);
         let started = Instant::now();
@@ -647,7 +649,7 @@ fn primary_failure_before_the_budget_starts_the_local_challenger_at_once() {
         receive(&mut local, local_copy.then_some(5));
         let elapsed = started.elapsed();
         assert!(
-            elapsed < Duration::from_millis(150),
+            elapsed < Duration::from_secs(1),
             "{local_copy} {eof} {elapsed:?}"
         );
         assert_eq!(counter(&host, "errors"), 1, "{local_copy} {eof}");
