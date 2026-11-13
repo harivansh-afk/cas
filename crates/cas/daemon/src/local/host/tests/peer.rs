@@ -1078,7 +1078,11 @@ fn two_daemon_loopback_race_wins_locally_against_a_delayed_server() {
         unraced += u64::from(r["race_winner"] == peer::metrics::WINNER_NONE);
         assert_eq!(
             r["race_budget_us"],
-            if r["race_winner"] == peer::metrics::WINNER_NONE { 0 } else { 100 }
+            if r["race_winner"] == peer::metrics::WINNER_NONE {
+                0
+            } else {
+                100
+            }
         );
         assert_eq!(r["success"], true);
     }
