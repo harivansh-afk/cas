@@ -876,8 +876,17 @@ impl Local {
         }
         let io = match &mut self.fast {
             Some(fast) if matches!(io.operation, Operation::Read { .. }) => {
+                let before = self.rejected.len();
                 match fast.enqueue(&self.shared, io, &mut self.rejected)? {
-                    fast::Outcome::Taken => return Ok(()),
+                    fast::Outcome::Taken => {
+                        // Inline completions must wake the frontend like
+                        // reactor completions do; pending remote reads wake it
+                        // from the transport later.
+                        if self.rejected.len() > before {
+                            fast.signal()?;
+                        }
+                        return Ok(());
+                    }
                     fast::Outcome::Declined(io) => io,
                 }
             }

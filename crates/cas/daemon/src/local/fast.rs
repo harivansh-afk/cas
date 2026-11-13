@@ -165,6 +165,14 @@ impl Context {
     fn wake(&self) -> io::Result<OwnedFd> {
         cas_core::eventfd::duplicate(self.notify.as_raw_fd())
     }
+    /// Signal the frontend's completion eventfd. A vhost-user backend learns
+    /// of completions only through that descriptor (the reactor writes it
+    /// after every mailbox send, a GET reply writes it from the transport);
+    /// a read completed inline here would otherwise sit in the completion
+    /// queue until an unrelated wake, which stalled a booting guest.
+    pub fn signal(&self) -> io::Result<()> {
+        cas_core::eventfd::notify(std::os::fd::AsFd::as_fd(&self.notify))
+    }
 
     /// Serve the read inline, start its remote fetches, or decline it. The
     /// request's boundary is the frontend's `admitted` at enqueue.

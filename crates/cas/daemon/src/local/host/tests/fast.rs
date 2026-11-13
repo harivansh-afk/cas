@@ -335,3 +335,34 @@ fn registry_exhaustion_after_a_waiter_joined_fails_only_the_image() {
     drop(local);
     shutdown(host);
 }
+
+/// A vhost-user backend wakes only on its completion eventfd. A read served
+/// inline (a hole on a settled image) must signal it like a reactor
+/// completion does; without the signal the completion sat in the queue until
+/// an unrelated wake and a booting guest stalled on its first settled reads.
+#[test]
+fn inline_completion_signals_the_frontend_completion_eventfd() {
+    let root = tempfile::tempdir().unwrap();
+    let resources = Arc::new(Resources {
+        peer: crate::peer::Config {
+            fast_settled_reads: true,
+            ..Default::default()
+        },
+        ..Resources::default()
+    });
+    let mut host = create(root.path(), 2, Arc::clone(&resources));
+    let event = EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK).unwrap();
+    let mut local = host.local([2; 16], &event).unwrap();
+    // Drain whatever start-up wrote, then submit one inline hole read.
+    let _ = event.read();
+    submit_read(&mut local, 1, 0, BLOCK_SIZE);
+    assert_eq!(fast(&local, "inline_reads"), 1);
+    assert!(
+        event.read().is_ok(),
+        "an inline completion must signal the completion eventfd"
+    );
+    let done = received(&mut local);
+    expect_read(done, 1, &[0; BLOCK_SIZE]);
+    drop(local);
+    shutdown(host);
+}
