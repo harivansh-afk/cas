@@ -183,10 +183,18 @@ wire bytes), followed by an explicit `sync` on B whose bytes are kept separate.
 
 `settings.working_set` is a JSON list of guest shell command strings (for
 example the bash commands of a recorded agent trajectory; the harness knows
-nothing about their origin). `burst.working_set` and `resume.working_set`
-override it per case; an empty list disables the phase and leaves
-`working_set` null. After the marker read, every guest runs the list in order
-with `sh -eu -c` from `/mnt/cas`; a failing command fails the case. Each
+nothing about their origin), or an object `{"commands": [...], "chroot":
+PATH, "cwd": PATH, "env": {NAME: VALUE}}`. With `chroot` (default null)
+each command runs as `env -i NAME=VALUE... chroot PATH /bin/bash -lc 'cd CWD
+&& COMMAND'`: inside the data disk's own root with the recorded working
+directory and exactly the recorded environment, so a trajectory replays
+against the filesystem it was recorded in; the chroot must provide
+`/bin/bash` and its libraries. `cwd` needs a `chroot`. The effective settings
+retain the object form; the per-command rows retain the exact guest script.
+`burst.working_set` and `resume.working_set` override it per case; an empty
+list disables the phase and leaves `working_set` null. After the marker
+read, every guest runs the list in order (without a chroot: with `sh -eu -c`
+from `/mnt/cas`); a failing command fails the case. Each
 command records its start and completion on host B's monotonic clock, its
 stdout size and SHA-256 (stdout itself is retained under the guest's output
 directory as `working-set-<pass>-<index>.out`). The daemon report is taken on

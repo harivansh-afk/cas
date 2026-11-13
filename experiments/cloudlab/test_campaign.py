@@ -118,6 +118,8 @@ class Arms(unittest.TestCase):
             arm(config={"settings": {}, "cases": ["reads-memory"]}, requires_runner_settings=["fast_settled_reads"]),
             arm(config={"settings": {}, "cases": ["reads-memory"]}, requires_runner_settings=["bogus"]),
             arm(runner="native", backend="ext4", cases={"g1": {"guests": 1}}),
+            arm(runner="native", backend="cas", filesystem="zfs", cases={"g1": {"guests": 1}}),
+            arm(runner="native", backend="raw", filesystem="ext4", cases={"g1": {"guests": 1}}),
             arm(runner="native", backend="raw", cases={"g1": {"guests": 0}}),
             arm(runner="native", backend="raw", cases={"g1": {"guests": 1, "script_args": [1]}}),
             arm(runner="r0", cases=["floor", "x"]),

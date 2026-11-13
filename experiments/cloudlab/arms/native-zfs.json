@@ -3,7 +3,7 @@
  "runner": "native",
  "backend": "raw",
  "filesystem": "zfs",
- "description": "Single-host control: raw image on an OpenZFS dataset with fast dedup, 4 KiB recordsize, compression off. No runner in cas-native-run (XFS only); every case is blocked until one exists. Kept so the plan names the gap.",
+ "description": "Single-host control: raw image on an OpenZFS dataset with fast dedup, 4 KiB recordsize, compression off (cas-native-run --backend raw with storage on the node's zfs_storage_mount, device check against the pool's vdev zfs_device). Blocked on a node without that dataset. The dataset's dedup/recordsize/compression properties are the operator's to set and record.",
  "pinning": {
   "r6615": {
    "logical_cpus": 32,

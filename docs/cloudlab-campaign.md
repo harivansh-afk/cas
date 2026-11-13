@@ -11,9 +11,9 @@ and one set of binary hashes per campaign.
 | --- | --- |
 | `setup.sh` | Per-node preparation: record hardware and settings first, install Nix, build the pinned revision from a git bundle, make one XFS on the named experiment disk, raise the descriptor limit, pin the NIC's IRQs, write `node-inventory.json`. `--inventory-only` records and changes nothing. |
 | `inventory.py` | Assembles `node-inventory.json` from `setup.sh`'s raw records. |
-| `r0.sh`, `pingpong.py` | Testbed floor: fio 4 KiB QD1 direct read and 4 KiB QD1 write+fdatasync on the experiment XFS, TCP ping-pong between the nodes, JSON with percentiles. |
+| `r0.sh`, `pingpong.py` | Testbed floor: fio 4 KiB QD1 direct read and 4 KiB QD1 write+fdatasync on the experiment XFS, TCP ping-pong between the nodes, the kernel nvme-tcp floor (B exports a file-backed nvmet namespace, A reads it), JSON with percentiles. |
 | `campaign.py`, `campaignlib.py` | The driver (CLI and orchestration; pure logic) and its unit tests `test_campaign.py`. |
-| `arms/*.json` | One config per arm; `plans/three-days.json` the day plan; `cloudlab.example.json` the node description to copy and edit. |
+| `arms/*.json` | One config per arm; `plans/three-days.json` (r6615) and `plans/three-days-c6525.json` the day plans; `cloudlab.example.json` the node description to copy and edit. |
 
 ## setup.sh
 
@@ -37,9 +37,13 @@ the revision, require a clean tree equal to the requested SHA), `build`
 (`nix build .#two-host` and `.#native`, store paths and binary hashes into
 `build.json`), `disk`, `limits` (`limits.d` entry, 65,536 descriptors for
 the experiment account), `irq` (stop irqbalance for the session, round-robin
-the NIC's MSI IRQs over `--irq-cpus`, record before/after), `inventory`.
-Each step can be skipped (`--skip-nix`, `--skip-build`, `--skip-disk`,
-`--skip-irq`); skipped steps appear in the inventory's `skipped` list.
+the NIC's MSI IRQs over `--irq-cpus`, record before/after), `smt` (write
+`off` to `/sys/devices/system/cpu/smt/control` now and persist `nosmt` in
+`/etc/default/grub.d/99-cas-nosmt.cfg` through `update-grub` for reboots;
+before/after state, the command line and the online CPU count go to
+`smt.json` and the inventory's `smt` block), `inventory`. Each step can be
+skipped (`--skip-nix`, `--skip-build`, `--skip-disk`, `--skip-irq`,
+`--skip-smt`); skipped steps appear in the inventory's `skipped` list.
 
 What it refuses to do: it never partitions anything and never touches a
 disk that may hold data. The device must be given (`--device`, an absolute
@@ -76,21 +80,38 @@ is not a NIC floor. `r0.json` holds `read_4k_qd1`, `fdatasync_4k_qd1` (the
 write completion and the `sync` distributions separately) and `pingpong`.
 The scratch directory is removed; nothing is formatted.
 
+With `--nvme-tcp` (the `r0` arm sets `nvme_tcp: true`; a campaign turns it
+off with `r0_nvme_tcp: false`) the run adds the kernel nvme-tcp floor row,
+following `docs/review/transport.md`: B loads `nvmet` and `nvmet-tcp`,
+fills a 1 GiB file in its scratch directory on the experiment XFS, exports
+it as a file-backed namespace (`buffered_io=0`, so reads are `O_DIRECT`
+against the file) under the subsystem `nqn.2026-11.sh.harivan.cas:r0-floor`
+on a TCP port bound to the experiment address, and records every configfs
+attribute (`nvmet-target.txt`). A loads `nvme-tcp`, waits for B's gate
+(ping-pong port + 1), `nvme connect`s, records the controller's sysfs
+attributes and `nvme id-ctrl` (`nvme-tcp-initiator.txt`), runs the same 4
+KiB QD1 direct random read with `--readonly` against the namespace device,
+disconnects, and tells the gate it is done; B then removes the port,
+disables the namespace and deletes the subsystem, and records that
+`nvmet` is empty again. Both sides require root and refuse to start when
+`nvmet` already has any subsystem or port (`nvme-tcp-prereqs.txt`).
+`r0.sh --nvme-tcp-check` runs only that prerequisite check (modules, `nvme`
+CLI, root, configfs, an unconfigured target) and is what the dry run uses.
+The results appear under `r0.json` `nvme_tcp` with the status of each side.
+
 ## Arms
 
-Every arm states its pinning for `r6615` (32-core EPYC 9354P; the sets
-assume SMT on, 64 logical CPUs), `c6525-25g` (16-core EPYC 7302P; sets
-assume SMT on, 32 logical CPUs) and `loopback-8` (the development VM).
-The sets are the same in every arm: IRQs on `0-1`, daemons on `2-5`,
-controller and agent on `6-7`, guests on `8-23` (sixteen one-vCPU guests).
-The driver checks each set against the node's inventoried CPU count, the
+Every arm states its pinning for `r6615` (32-core EPYC 9354P), `c6525-25g`
+(16-core EPYC 7302P) and `loopback-8` (the development VM). SMT is disabled
+on both node types by `setup.sh`, so the sets name physical cores only and
+`logical_cpus` is the core count (32 and 16). r6615: IRQs on `0-1`, daemons
+on `2-5`, controller and agent on `6-7`, guests on `8-23` (sixteen one-vCPU
+guests). c6525-25g: the same up to `6-7`, guests on `8-15`, so its plan
+drops the sixteen-guest units and uses the eight-image `burst-8` arm. The
+driver checks each set against the node's inventoried CPU count, the
 overlap rules and the doc's budget (`cores × N` guest threads + daemon CPUs
-+ 2) before any unit runs. **These sets are a proposal**: on an r6615 they
-use physical cores 0-23 only; on a c6525-25g with SMT on, CPUs 16-23 are the
-siblings of 0-7, so the human should either disable SMT and drop the
-sixteen-guest units or accept sibling sharing and say so. The `logical_cpus`
-field makes the assumption explicit and the dry run fails if the inventory
-disagrees.
++ 2), and refuses a native node whose inventory reports SMT other than off,
+before any unit runs.
 
 | Arm | Runner | Flags and placement | Cases |
 | --- | --- | --- | --- |
@@ -98,12 +119,13 @@ disagrees.
 | `fast` | two-host | `--fast-settled-reads` | same |
 | `raced` | two-host | fast plus `--peer-race-us RACE_BUDGET_US`, k=2 | same |
 | `warm-owner` | two-host | fast, owner cache 2 GiB (`cache_bytes` and `burst.owner_cache_bytes`) | same |
-| `burst` | two-host | fast, k=1, 16 images × (1 GiB base + 64 MiB unique), working set `WORKING_SET_FROM_BUNDLE` | burst-images |
-| `resume` | two-host | fast, k=1, 16 GiB setup in a 32 GiB image, working set `WORKING_SET_FROM_BUNDLE` | resume-elsewhere |
-| `native-raw` | native | `cas-native-run --backend raw`, `workload.sh baseline 30 512` | g1, g4, g8, g16 |
-| `native-cas` | native | `cas-native-run --backend cas` | g1, g4, g8, g16 |
-| `native-zfs` | none | raw image on ZFS fast dedup; no runner exists | g1, g4, g8, g16 (all blocked) |
-| `r0` | r0.sh | floor | floor |
+| `burst` | two-host | fast, k=1, 16 images × (1 GiB base + 64 MiB unique), working set from the bundle in a `/mnt/cas` chroot | burst-images |
+| `burst-8` | two-host | the same with 8 images, for c6525-25g | burst-images |
+| `resume` | two-host | fast, k=1, 16 GiB setup in a 32 GiB image, working set from the bundle in a `/mnt/cas` chroot | resume-elsewhere |
+| `native-raw` | native | `cas-native-run --backend raw --guests N`, `workload.sh baseline 30 512` | g1, g4, g8, g16 |
+| `native-cas` | native | `cas-native-run --backend cas --guests N` | g1, g4, g8, g16 |
+| `native-zfs` | native | `cas-native-run --backend raw` with storage on a ZFS dataset (fast dedup, 4 KiB recordsize, compression off; the dataset and its device are the node's `zfs_storage_mount`/`zfs_device`) | g1, g4, g8, g16 |
+| `r0` | r0.sh | floor, with the nvme-tcp row | floor |
 
 The runner's own `repeats` is 1 in every arm; repetition and rotation are the
 campaign's. `fast`, `raced`, `warm-owner`, `burst` and `resume` carry
@@ -120,15 +142,24 @@ rounded to microseconds); sources and the rule are recorded in
 `manifest.json` `fills.race_budget` and never recomputed. A raced unit
 scheduled before any frozen reads-memory unit has finished is blocked.
 `WORKING_SET_FROM_BUNDLE` is the first ten `command` strings of the
-`actions.json` named by `nodes.bundle_actions`, verbatim, with the file's
-hash and action count recorded in `fills.working_set`. The commands run in
-the guest with `sh -eu -c` from `/mnt/cas`; whether the guest layout matches
-the trajectory's `/testbed` is a decision for whoever prepares the image.
+`actions.json` named by `nodes.bundle_actions` (the swe bundle object with
+`cwd`, `env`, `interpreter`, `timeout` and `steps`), verbatim, together
+with the recorded `cwd` and `env`; the file's hash and action count are
+recorded in `fills.working_set`. The `burst`, `burst-8` and `resume` arms
+write `"working_set": {"chroot": "/mnt/cas", "bundle": "WORKING_SET_FROM_BUNDLE"}`,
+which the driver merges into the two-host runner's object form: each
+command runs as `chroot /mnt/cas /bin/bash -lc 'cd <cwd> && <cmd>'` under
+exactly the recorded environment, so the data disk must be a root
+filesystem image that contains `/bin/bash` and the trajectory's `/testbed`.
+Preparing that image (the corpus's Stage A disk, imported with `casctl
+import`) is outside this driver.
 
-Known gaps the configs name rather than hide: `cas-native-run` boots one or
-two guests on XFS only, so `native-raw`/`native-cas` at g4+ and every
-`native-zfs` case are blocked; CAS load per host at 4/8/16 guests comes from
-the two-host `reads-*-gN` arms; there is no nvme-tcp floor row.
+Known gaps the configs name rather than hide: `cas-native-run` boots up to
+sixteen guests, each with its own disk and fio job, but the single-host
+comparison at 4/8/16 guests is still a one-host arm; the `native-zfs` arm
+needs a node with a ZFS pool on the second NVMe (`zfs_storage_mount` and
+`zfs_device` in the nodes file) and is blocked without one; the nvme-tcp row
+needs `nvme` CLI, the `nvmet`/`nvme-tcp` modules and root on both nodes.
 
 ## campaign.py
 
@@ -141,9 +172,14 @@ python3 experiments/cloudlab/campaign.py start --nodes /var/tmp/nodes.json \
 python3 experiments/cloudlab/campaign.py status --nodes /var/tmp/nodes.json
 ```
 
-The nodes file names the campaign, the export destination, the bundle, an
-optional explicit race budget and two or more nodes (node 0 is the local
-controller; the others have `ssh` targets whose host keys are already
+The nodes file names the campaign, the revision it is bound to
+(`expected_revision`: the example carries `INTEGRATION_REVISION_PLACEHOLDER`,
+to be replaced by the integration branch's measured commit once
+`feat/burst-harness` has merged there; `run` refuses the placeholder and any
+node whose checkout differs from it or is dirty, loopback development
+layouts may omit it), the export destination, the bundle, an optional
+explicit race budget, `r0_nvme_tcp` and two or more nodes (node 0 is the
+local controller; the others have `ssh` targets whose host keys are already
 verified). The campaign directory is `<node 0 output_root>/<campaign>`; it
 holds `campaign.log`, `status.json`, `manifest.json`, `inventory/{start,end}/`,
 `dry-run.json` or `preflight.json`, and `units/<id>/` with `unit.json`,
@@ -200,9 +236,21 @@ order rotated):
   `raced burst-images`, `frozen raw-rsync`, `frozen zfs-incremental`, and
   three of `frozen flows-k1`.
 
-The predictions document's "repeats of anything with spread over 15%" is a
-human decision at the end of day three: add the units to a fourth-day plan
-and run the same campaign directory again.
+`plans/three-days-c6525.json` is the same plan for a c6525-25g pair without
+the g16 units, with `burst-8` for `burst`, and without `raced burst-images`
+(the raced arm's burst block is sixteen images).
+
+The predictions document's "repeats of anything with spread over 15%" is
+`campaign.py repeats --nodes N.json --out day4-repeats.json [--threshold
+0.15]`: it reads every finished unit, takes one p99-class number per unit
+(reads cases: the quiet random QD1 cohort's clat p99; burst: the slowest
+guest's cold time to working set; resume: time to working set, or downtime
+without a working set; r0: node A's 4 KiB read clat p99; native: the
+`read-q1` aggregate's largest per-guest p99), computes (max − min) / median
+over each (day, arm, case)'s repetitions and writes a day-4 plan listing
+every group above the threshold with its original repetition count, plus
+the per-group spread and the units without a usable number. Run the same
+campaign directory again with that plan; the new units are `d4-...`.
 
 ## Rehearsal
 

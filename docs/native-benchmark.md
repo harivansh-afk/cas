@@ -2,15 +2,23 @@
 
 `nix build .#native --out-link result-native` builds a pinned NixOS workload
 guest and `cas-native-run`. Storage runs directly on the Linux host. There is
-no outer VM. Each arm has the same two-vCPU, 2 GiB KVM guest, one virtio queue
-of 128 entries, and a fresh 4 GiB data disk. Raw uses QEMU's direct/io_uring
-file backend; daemon uses the raw vhost-user reference; CAS uses `cas-host`.
+no outer VM. Each arm boots `--guests N` (1 to 16) identical two-vCPU, 2 GiB
+KVM guests, each with one virtio queue of 128 entries and its own fresh 4 GiB
+data disk (`raw-<i>.img`, or one CAS image per guest in a single store). Raw
+uses QEMU's direct/io_uring file backend; daemon uses the raw vhost-user
+reference; CAS uses `cas-host`. Readiness allows 120 s plus 30 s per guest;
+the daemon's attach window is unchanged.
 
 This runner never formats or mounts a physical disk. Prepare an explicitly
-approved, dedicated XFS filesystem first. The storage directory must be new;
-reports must be on another filesystem. The runner checks the supplied device
-against the storage filesystem and verifies a live KVM descriptor in QEMU.
-Loop devices require `--allow-loop-device` and are labelled development runs.
+approved, dedicated filesystem first: XFS for the CAS and daemon backends;
+XFS or a ZFS dataset for the raw backend, so the ZFS control shares this
+runner. The storage directory must be new; reports must be on another
+filesystem. The runner checks the supplied device against the storage
+filesystem (the mount's own device for XFS; for ZFS, `--device` must be a
+vdev of the dataset's pool as `zpool list -v -P` reports it) and verifies a
+live KVM descriptor in QEMU. The storage filesystem type is recorded in
+`identity.json`. Loop devices require `--allow-loop-device` and are labelled
+development runs.
 
 ```sh
 nix build .#native --out-link result-native
@@ -26,9 +34,15 @@ systemd-run --user --scope -p MemoryMax=8G -p MemorySwapMax=0 \
 
 Choose CPU IDs from the actual host topology and retain that choice for every
 arm. Run `smoke` first. `baseline` measures 4 KiB random reads/writes at QD1
-and QD32, 128 KiB sequential reads, and write-plus-fdatasync at QD1. `pressure`
-needs `--guests 2`: one guest reads while the other writes at 8, 32, 128 MiB/s
-and without a rate cap. These are offered rates; report achieved rates too.
+and QD32, 128 KiB sequential reads, and write-plus-fdatasync at QD1, with
+every guest running each job at the same time; one guest is the historical
+pilot. `pressure` needs at least two guests: the last guest writes at 8, 32,
+128 MiB/s and without a rate cap while every other guest reads at QD1 (the
+`reader-alone` phase runs those readers without the writer). These are
+offered rates; report achieved rates too. Per-guest fio `json+` stays under
+`guest-<i>/<label>.json`; `aggregate-<label>.json` sums IOPS and bandwidth
+over the guests and gives the min/max/mean of each guest's own clat p50, p99
+and p99.9, not a merged histogram. `smoke` and `accounting` use guest 1.
 The second script argument is timed seconds; the third is working-set MiB.
 `accounting` performs one finite sequential overwrite with a new seed, without
 ramp or time limit, followed by drain. It retains guest and host-device sector

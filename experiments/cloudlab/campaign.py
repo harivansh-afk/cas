@@ -328,21 +328,37 @@ class Campaign:
             problems.append(str(error))
         return problems
 
+    def native_storage(self, arm):
+        """(mount, device, fstype) for a native arm on node 0: the experiment
+        XFS, or the node's ZFS dataset for a `filesystem: zfs` arm."""
+        node = self.nodes[0]
+        if arm.get("filesystem", "xfs") == "zfs":
+            mount, device = node.get("zfs_storage_mount"), node.get("zfs_device")
+            if not mount:
+                return None, None, None
+            out = self.shell(node, ["findmnt", "-n", "-o", "FSTYPE", "-T", mount], check=False).strip()
+            return mount, device, out or None
+        return node["storage_mount"], node.get("device"), self.mount_type(node)["fstype"]
+
     def check_native(self, arm, case):
         problems = []
         entry = arm["cases"][case]
         node = self.nodes[0]
         if entry["guests"] > lib.NATIVE_MAX_GUESTS:
             problems.append(f"cas-native-run boots at most {lib.NATIVE_MAX_GUESTS} guests; {entry['guests']} needs a harness extension")
-        if arm.get("filesystem", "xfs") != "xfs":
-            problems.append(f"cas-native-run requires an XFS storage filesystem; the {arm['filesystem']} arm needs its own runner")
+        wanted = arm.get("filesystem", "xfs")
+        if wanted == "zfs" and arm["backend"] != "raw":
+            problems.append("only the raw backend may store on ZFS")
+        mount, device, fstype = self.native_storage(arm)
+        if mount is None:
+            problems.append("node 0 has no zfs_storage_mount/zfs_device for the ZFS arm")
+        elif fstype != wanted:
+            problems.append(f"{mount} is not a mounted {wanted} filesystem (found {fstype})")
         if not node.get("native"):
             problems.append("node 0 has no native runner path")
         elif not self.exists(node, node["native"], "-x"):
             problems.append(f"native runner {node['native']} missing")
-        if self.mount_type(node)["fstype"] != "xfs":
-            problems.append(f"{node['storage_mount']} is not a mounted XFS filesystem")
-        if not self.loopback and not (node.get("device") and self.exists(node, node["device"], "-b")):
+        if not self.loopback and not (device and self.exists(node, device, "-b")):
             problems.append("node 0 device missing or not a block device")
         if not self.exists(node, f"{node['source']}/experiments/native/workload.sh"):
             problems.append("experiments/native/workload.sh missing on node 0")
@@ -408,14 +424,15 @@ class Campaign:
         node = self.nodes[0]
         if entry["guests"] > lib.NATIVE_MAX_GUESTS:
             raise Blocked(f"cas-native-run boots at most {lib.NATIVE_MAX_GUESTS} guests")
-        if arm.get("filesystem", "xfs") != "xfs":
-            raise Blocked(f"cas-native-run requires XFS; {arm['filesystem']} arm has no runner")
+        mount, device, fstype = self.native_storage(arm)
+        if mount is None or fstype != arm.get("filesystem", "xfs"):
+            raise Blocked(f"no mounted {arm.get('filesystem', 'xfs')} storage for the arm on node 0")
         sets = arm["pinning"][node["node_type"]]
         cpus = lib.format_cpuset(lib.parse_cpuset(lib.pin_for(sets, "daemon", 0)) + lib.parse_cpuset(lib.pin_for(sets, "guests", 0)))
         command = [
             "taskset", "-c", cpus, node["native"], "--backend", arm["backend"], "--guests", str(entry["guests"]),
-            "--device", node.get("device") or self.mount_type(node)["source"],
-            "--storage", f"{node['storage_mount']}/{self.name}/{uid}", "--output", str(unit_dir / "native"),
+            "--device", device or self.mount_type(node)["source"],
+            "--storage", f"{mount}/{self.name}/{uid}", "--output", str(unit_dir / "native"),
             "--script", f"{node['source']}/experiments/native/workload.sh",
         ]
         for value in entry.get("script_args", []):

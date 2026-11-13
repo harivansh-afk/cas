@@ -595,9 +595,15 @@ class WorkingSetTests(unittest.TestCase):
         script = working_set_script("echo $HOME > out", "/mnt/cas/root", "/testbed", {"PATH": "/bin", "HOME": "/root"})
         self.assertEqual(
             script,
-            "env -i HOME=/root PATH=/bin chroot /mnt/cas/root /bin/bash -lc 'cd /testbed && echo $HOME > out'",
+            "CHROOT=$(command -v chroot)\n"
+            "env -i HOME=/root PATH=/bin \"$CHROOT\" /mnt/cas/root /bin/bash -lc 'cd /testbed && echo $HOME > out'",
         )
-        self.assertEqual(working_set_script("ls", "/r"), "env -i chroot /r /bin/bash -lc ls")
+        self.assertEqual(working_set_script("ls", "/r"), "CHROOT=$(command -v chroot)\nenv -i \"$CHROOT\" /r /bin/bash -lc ls")
+        # The wrapper is itself valid sh and keeps the command's own quoting intact.
+        import subprocess
+
+        probe = subprocess.run(["sh", "-eu", "-c", 'CHROOT=echo\nenv -i A=1 "$CHROOT" /r /bin/bash -lc \'cd /t && echo "$A"\''], capture_output=True, text=True)
+        self.assertEqual(probe.stdout.strip(), '/r /bin/bash -lc cd /t && echo "$A"')
 
     def test_working_set_rejects_non_command_lists(self):
         for bad in (

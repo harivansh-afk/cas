@@ -225,8 +225,14 @@ def working_set_script(command, chroot=None, cwd=None, env=None):
     if chroot is None:
         return "cd /mnt/cas\n" + command
     inner = command if cwd is None else f"cd {shlex.quote(cwd)} && {command}"
-    argv = ["env", "-i", *(f"{k}={v}" for k, v in sorted((env or {}).items())), "chroot", chroot, "/bin/bash", "-lc", inner]
-    return shlex.join(argv)
+    # `env -i` resolves its program in the new environment, so chroot is
+    # located first on the guest's own PATH and invoked by absolute path.
+    return (
+        "CHROOT=$(command -v chroot)\n"
+        + shlex.join(["env", "-i", *(f"{k}={v}" for k, v in sorted((env or {}).items()))])
+        + ' "$CHROOT" '
+        + shlex.join([chroot, "/bin/bash", "-lc", inner])
+    )
 
 
 class Agent:

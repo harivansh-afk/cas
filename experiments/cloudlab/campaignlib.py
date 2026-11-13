@@ -229,6 +229,10 @@ def validate_two_host_arm(arm):
 def validate_native_arm(arm):
     if arm.get("backend") not in NATIVE_BACKENDS:
         raise ValueError(f"{arm['arm']}: native backend must be one of {NATIVE_BACKENDS}")
+    if arm.get("filesystem", "xfs") not in ("xfs", "zfs"):
+        raise ValueError(f"{arm['arm']}: filesystem must be xfs or zfs")
+    if arm.get("filesystem", "xfs") == "zfs" and arm["backend"] != "raw":
+        raise ValueError(f"{arm['arm']}: only the raw backend may store on zfs")
     cases = arm.get("cases")
     if not isinstance(cases, dict) or not cases:
         raise ValueError(f"{arm['arm']}: native arms map case names to guests/script_args")

@@ -17,7 +17,9 @@
    "native": "/home/experiment/cas/result-native/bin/cas-native-run",
    "storage_mount": "/mnt/cas-exp",
    "output_root": "/var/tmp/cas-campaign",
-   "zfs_parent": "tank/cas-bench"
+   "zfs_parent": "tank/cas-bench",
+   "zfs_storage_mount": "/tank/cas-bench/native",
+   "zfs_device": "/dev/disk/by-id/nvme-Dell_Ent_NVMe_P5600_MU_U.2_1.6TB_SERIAL-A2"
   },
   {
    "name": "b",
