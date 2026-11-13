@@ -9,6 +9,9 @@ let
   config = pkgs.writeText "cas-two-host-loopback.json" (
     builtins.toJSON {
       # Legacy TCG fixture has XFS only; the KVM appliance validates ZFS.
+      # The multi-guest, burst and resume arms are not in the TCG default
+      # list: the daemon's fixed 60-second attach-to-driver window is not met
+      # by concurrently booting TCG guests. Request them with --cases on KVM.
       cases = [
         "flows-k1"
         "flows-k2"
@@ -26,6 +29,25 @@ let
         ];
         image_bytes = 128 * 1024 * 1024;
         data_bytes = 1024 * 1024;
+        burst = {
+          images = 4;
+          base_bytes = 4 * 1024 * 1024;
+          unique_bytes = 1024 * 1024;
+          # Two direct reads of distinct unique-region chunks, then the shared base.
+          working_set = [
+            "dd if=/mnt/cas/unique bs=4096 count=64 iflag=direct status=none | sha256sum"
+            "dd if=/mnt/cas/unique bs=4096 count=64 skip=128 iflag=direct status=none | sha256sum"
+            "sha256sum /mnt/cas/base"
+          ];
+        };
+        resume = {
+          setup_bytes = 2 * 1024 * 1024;
+          working_set = [
+            "dd if=/mnt/cas/data bs=4096 count=64 iflag=direct status=none | sha256sum"
+            "dd if=/mnt/cas/data bs=4096 count=64 skip=256 iflag=direct status=none | sha256sum"
+            "sha256sum /mnt/cas/data"
+          ];
+        };
       };
       nodes = [
         {
@@ -48,11 +70,16 @@ let
     runtimeInputs = [ pkgs.coreutils ];
     text = ''
       exec > /results/workload.log 2>&1
-      cases=()
+      args=()
       if test -f /results/cases; then
-        cases=(--cases "$(cat /results/cases)")
+        args+=(--cases "$(cat /results/cases)")
       fi
-      ${lib.getExe runner} --config ${config} --output /results/run "''${cases[@]}"
+      if test -f /results/overrides; then
+        while IFS= read -r line; do
+          test -n "$line" && args+=(--set "$line")
+        done < /results/overrides
+      fi
+      ${lib.getExe runner} --config ${config} --output /results/run "''${args[@]}"
     '';
   };
   finish = pkgs.writeShellApplication {

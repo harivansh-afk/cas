@@ -13,7 +13,9 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -21,15 +23,97 @@ STORE = "01" * 16
 IMAGE = "02" * 16
 EMPTY = "03" * 16
 CLONE = "04" * 16
+PAYLOAD_PIECE = 16 * 1024**2
+# Seconds the owner waits for each agent operation; long operations declare
+# their own budget from the request so the owner never guesses by name.
+RPC_BUDGET_S = {"default": 900, "boot": 2400, "boot_burst": 2400, "run_commands": 60}
+
+
+def rpc_budget(method, args):
+    budget = RPC_BUDGET_S.get(method, RPC_BUDGET_S["default"])
+    if method == "boot_burst":
+        budget += 600 * len(args["guests"])
+    elif method == "run_commands":
+        budget += args.get("timeout", 1800) * len(args["commands"])
+    return budget
+
+
+# 8. The boot probe and guest_stat share one guest-side statistics tail.
+GUEST_STAT = "cat /sys/block/vda/stat; stat -f -c '%b %f %S' /mnt/cas"
+
+
+def marker_probe(path):
+    """Direct read of a file's first block (the marker), then device/ext4 stats."""
+    return (
+        f"dd if={path} bs=4096 count=1 iflag=direct status=none | tr -d '\\000'; echo; "
+        + GUEST_STAT
+    )
+
+
+def image_id(family, index):
+    """Stable catalog IDs: index 0 keeps the legacy constant for its family."""
+    if family not in (IMAGE, CLONE) or not 0 <= index < 256:
+        raise ValueError("image family must be IMAGE or CLONE with index below 256")
+    if index == 0:
+        return family
+    return family[:2] + f"{index:02x}" + "00" * 14
+
+
+def sizing_args(guest, default):
+    """Trailing QEMU arguments override the pinned run script's -m/-smp.
+
+    The script's memfd backend keeps the build size, so a differently sized
+    guest needs its own shared backend; QEMU takes the last -m/-smp/-machine.
+    """
+    cores, memory = int(guest["cores"]), int(guest["memory_mib"])
+    if cores < 1 or memory < 128:
+        raise ValueError("guest sizing needs at least one core and 128 MiB")
+    if (cores, memory) == (int(default["cores"]), int(default["memory_mib"])):
+        return []
+    return [
+        "-m",
+        str(memory),
+        "-smp",
+        str(cores),
+        "-object",
+        f"memory-backend-memfd,id=cas-guest-mem,size={memory}M,share=on",
+        "-machine",
+        "memory-backend=cas-guest-mem",
+    ]
+
+
+def effective_sizing(argv):
+    """Last -m/-smp values win in QEMU; read them from the live command line."""
+    values = {}
+    for flag, key in (("-m", "memory_mib"), ("-smp", "cores")):
+        found = [argv[i + 1] for i, a in enumerate(argv[:-1]) if a == flag]
+        if not found:
+            raise ValueError(f"QEMU argv lacks {flag}")
+        values[key] = int(found[-1].split(",")[0].removesuffix("M"))
+    return values
+
+
+def parse_block_stat(text):
+    """/sys/block/<dev>/stat: read I/Os, merges, sectors, ticks, then writes."""
+    fields = text.split()
+    if len(fields) < 11:
+        raise ValueError("unexpected block stat line")
+    return {
+        "read_ios": int(fields[0]),
+        "read_sectors": int(fields[2]),
+        "read_ticks_ms": int(fields[3]),
+        "write_ios": int(fields[4]),
+        "write_sectors": int(fields[6]),
+    }
 
 
 def write_json(path, value):
     Path(path).write_text(json.dumps(value, indent=2) + "\n")
 
 
-def checked(argv, **kwargs):
+def checked(argv, timeout=600, **kwargs):
     result = subprocess.run(
-        argv, check=False, text=True, capture_output=True, timeout=600, **kwargs
+        argv, check=False, text=True, capture_output=True, timeout=timeout, **kwargs
     )
     if result.returncode:
         raise RuntimeError(
@@ -112,7 +196,7 @@ def fio_options(kind, size, seconds, depth=1, seed=42):
     return options
 
 
-def qemu_record(pid, acceleration):
+def qemu_record(pid, acceleration, sizing=None):
     pending = [pid]
     for current in pending:
         if len(pending) > 64:
@@ -133,11 +217,20 @@ def qemu_record(pid, acceleration):
                     raise ValueError(
                         "QEMU's live KVM descriptors disagree with the selected build"
                     )
+                effective = effective_sizing(argv)
+                if sizing and effective != {
+                    "cores": int(sizing["cores"]),
+                    "memory_mib": int(sizing["memory_mib"]),
+                }:
+                    raise ValueError(
+                        f"QEMU runs {effective}, not the configured guest sizing {sizing}"
+                    )
                 return {
                     "pid": current,
                     "executable": executable,
                     "argv": argv,
                     "kvm_vm_fd": kvm,
+                    "sizing": effective,
                     "process_status": (root / "status").read_text(),
                 }
             pending.extend(
@@ -172,31 +265,34 @@ class Agent:
         self.serial = 0
         self.case = None
         self.zfs_dataset = None
+        self.lock = threading.Lock()
+        self.launches = {}
 
     def spawn(self, name, argv, env=None, pin=None, pass_fds=(), separate_stderr=False):
-        if name in self.children:
-            raise ValueError(f"child already exists: {name}")
         if pin:
             argv = ["taskset", "-c", pin, *argv]
-        write_json(self.case / f"{name}-command.json", {"argv": argv, "env": env})
-        with (
-            (self.case / f"{name}.log").open("x") as log,
-            (
-                (self.case / f"{name}.stderr.log").open("x")
-                if separate_stderr
-                else nullcontext(log)
-            ) as errors,
-        ):
-            process = subprocess.Popen(
-                argv,
-                stdin=subprocess.DEVNULL,
-                stdout=log,
-                stderr=errors,
-                env={**os.environ, **(env or {})},
-                start_new_session=True,
-                pass_fds=pass_fds,
-            )
-        self.children[name] = process
+        with self.lock:
+            if name in self.children:
+                raise ValueError(f"child already exists: {name}")
+            write_json(self.case / f"{name}-command.json", {"argv": argv, "env": env})
+            with (
+                (self.case / f"{name}.log").open("x") as log,
+                (
+                    (self.case / f"{name}.stderr.log").open("x")
+                    if separate_stderr
+                    else nullcontext(log)
+                ) as errors,
+            ):
+                process = subprocess.Popen(
+                    argv,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=errors,
+                    env={**os.environ, **(env or {})},
+                    start_new_session=True,
+                    pass_fds=pass_fds,
+                )
+            self.children[name] = process
         return process
 
     def healthy(self):
@@ -285,20 +381,17 @@ class Agent:
             str(self.settings["staging_bytes"]),
         ]
 
-    def init(self, node):
+    def init(self, node, images=None):
         root = self.work / "store"
         root.mkdir()
-        return json.loads(
-            checked(
-                [
-                    self.build["host"],
-                    "init",
-                    *self.storage_args(),
-                    "--image",
-                    f"{IMAGE if node == 0 else (128 + node).to_bytes(16, 'big').hex()}={self.settings['image_bytes']}",
-                ]
-            )
-        )
+        if images is None:
+            images = [IMAGE] if node == 0 else [(128 + node).to_bytes(16, "big").hex()]
+        if not images:
+            raise ValueError("initialization needs at least one image")
+        argv = [self.build["host"], "init", *self.storage_args()]
+        for image in images:
+            argv += ["--image", f"{image}={self.settings['image_bytes']}"]
+        return json.loads(checked(argv))
 
     def host(self, node, k, members, cache, force=False, images=None):
         self.host_options = {
@@ -353,14 +446,15 @@ class Agent:
         self.spawn("host", argv, pin=self.node.get("cpus"))
         return {"pid": self.children["host"].pid}
 
-    def restart_host(self):
+    def restart_host(self, images=None):
         # Guest shutdown consumes this daemon's one-shot image attachment.
-        # Cold recovery reconstructs it before the fenced handoff.
+        # Cold recovery reconstructs it before the fenced handoff. The clean
+        # chunk cache is memory only, so a restart always starts it empty.
         if any(name in self.children for name in self.guests):
             raise ValueError("stop every guest before restarting its daemon")
         stop(self.children.pop("host"))
-        for image in (IMAGE, CLONE):
-            Path(self.socket(image)).unlink(missing_ok=True)
+        for sock in Path(self.sockets.name).glob(f"{self.case.name}-*.sock"):
+            sock.unlink(missing_ok=True)
         for suffix in ("log", "command.json"):
             source = (
                 self.case / f"host.{suffix}"
@@ -369,11 +463,26 @@ class Agent:
             )
             source.rename(self.case / f"host-{self.host_generation}-{suffix}")
         self.host_generation += 1
-        options = {
-            **self.host_options,
-            "images": [IMAGE] if self.host_options["node"] == 1 else [],
+        if images is None:
+            images = [IMAGE] if self.host_options["node"] == 1 else []
+        started = time.monotonic_ns()
+        result = self.host(**{**self.host_options, "images": images})
+        return {
+            **result,
+            "restarted_ns": started,
+            "cache_bytes": self.host_options["cache"],
         }
-        return self.host(**options)
+
+    def drop_page_cache(self):
+        # Only when the configuration asks; never silently skipped or faked.
+        path = Path("/proc/sys/vm/drop_caches")
+        if os.geteuid() != 0 or not os.access(path, os.W_OK):
+            raise PermissionError(
+                "dropping the host page cache needs root; run without drop_page_cache"
+            )
+        os.sync()
+        path.write_text("3\n")
+        return {"dropped": True, "unix_ns": time.time_ns()}
 
     def socket(self, image):
         return str(Path(self.sockets.name) / f"{self.case.name}-{image}.sock")
@@ -385,7 +494,12 @@ class Agent:
     def fleet(self, argv):
         return json.loads(checked([self.build["fleet"], *argv]))
 
-    def boot(self, name, image=IMAGE, backend="cas", format=False):
+    def boot(self, name, image=IMAGE, backend="cas", format=False, sizing=None):
+        launched = self.launch(name, image, backend, format, sizing)
+        return {**launched, **self.await_guest(name)}
+
+    def launch(self, name, image=IMAGE, backend="cas", format=False, sizing=None):
+        """Start QEMU and return immediately; await_guest completes readiness."""
         self.healthy()
         directory = self.case / name
         directory.mkdir()
@@ -411,9 +525,32 @@ class Agent:
             "CAS_RAW_IMAGE": str(self.work / (image + ".raw")),
             "TMPDIR": self.sockets.name,
         }
+        default = self.build.get("guest_sizing", {"cores": 2, "memory_mib": 1024})
+        sizing = sizing or default
+        launched_ns = time.monotonic_ns()
         process = self.spawn(
-            name, [self.build["guests"][backend]], env, self.node.get("guest_cpus")
+            name,
+            [self.build["guests"][backend], *sizing_args(sizing, default)],
+            env,
+            self.node.get("guest_cpus"),
         )
+        self.launches[name] = {
+            "process": process,
+            "port": port,
+            "directory": directory,
+            "sizing": sizing,
+            "launched_ns": launched_ns,
+        }
+        return {"pid": process.pid, "port": port, "launched_ns": launched_ns}
+
+    def await_guest(self, name):
+        launch = self.launches.pop(name)
+        process, port, directory = (
+            launch["process"],
+            launch["port"],
+            launch["directory"],
+        )
+        timings = {"launched_ns": launch["launched_ns"]}
 
         def ready():
             self.healthy()
@@ -424,9 +561,10 @@ class Agent:
             ).exists()
 
         wait_for(ready, 1200 if self.build["acceleration"] == "tcg" else 240)
+        timings["ready_ns"] = time.monotonic_ns()
         write_json(
             directory / "qemu.json",
-            qemu_record(process.pid, self.build["acceleration"]),
+            qemu_record(process.pid, self.build["acceleration"], launch["sizing"]),
         )
         known = directory / "known_hosts"
         known.write_text("guest " + (directory / "host-key.pub").read_text())
@@ -453,6 +591,24 @@ class Agent:
             "root@127.0.0.1",
         ]
         wait_for(lambda: ready() and ssh_ready(port), 180)
+        timings["ssh_banner_ns"] = time.monotonic_ns()
+        # The first command runs without the master so its timestamp does not
+        # include master setup. Ready is a mounted filesystem, not an
+        # application readiness signal.
+        direct = [a for a in self.guests[name] if a != "-S" and a != str(control)]
+        wait_for(
+            lambda: (
+                subprocess.run(
+                    [*direct, "true"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=120,
+                ).returncode
+                == 0
+            )
+        )
+        timings["first_command_ns"] = time.monotonic_ns()
         # A foreground, owned master avoids a new SSH handshake for each phase.
         # No ControlPersist daemon is left behind after the experiment.
         master = self.spawn(name + "-ssh", ["ssh", "-M", "-N", *self.guests[name][1:]])
@@ -463,7 +619,6 @@ class Agent:
             return control.exists()
 
         wait_for(connected)
-        # Ready is a mounted filesystem, not an application readiness signal.
         wait_for(
             lambda: (
                 subprocess.run(
@@ -480,12 +635,137 @@ class Agent:
             "pid": process.pid,
             "port": port,
             "acceleration": self.build["acceleration"],
+            "sizing": launch["sizing"],
+            **timings,
         }
 
-    def shell(self, guest, script):
-        return checked([*self.guests[guest], shlex.join(["sh", "-eu", "-c", script])])
+    def clock(self):
+        """This host's monotonic clock, for anchors other hosts cannot supply."""
+        return {"monotonic_ns": time.monotonic_ns()}
 
-    def fio(self, guest, kind, name, seconds=None, depth=1, seed=42):
+    def boot_burst(self, guests, probe=None, sample_ring=False):
+        """Launch every guest back to back, then observe each one concurrently.
+
+        `probe` is a shell script run immediately after the first successful
+        command; its output and completion time are recorded per guest. With
+        `sample_ring` the daemon report (and so its bounded remote-read ring)
+        is taken right after the probe, before later reads can evict the
+        earliest post-boot records.
+        """
+        if not guests:
+            raise ValueError("burst needs at least one guest")
+        launches = [self.launch(**guest) for guest in guests]
+
+        def observe(guest):
+            result = self.await_guest(guest["name"])
+            if probe:
+                result["probe"] = self.shell(guest["name"], probe)
+                result["probe_ns"] = time.monotonic_ns()
+            if sample_ring:
+                result["report_at_ready"] = self.report()
+                result["report_at_ready_ns"] = time.monotonic_ns()
+            return result
+
+        with ThreadPoolExecutor(max_workers=len(guests)) as executor:
+            observed = list(executor.map(observe, guests))
+        return [
+            {
+                "name": guest["name"],
+                "image": guest.get("image", IMAGE),
+                **launch,
+                **seen,
+            }
+            for guest, launch, seen in zip(guests, launches, observed, strict=True)
+        ]
+
+    def shell(self, guest, script, timeout=600):
+        return checked(
+            [*self.guests[guest], shlex.join(["sh", "-eu", "-c", script])],
+            timeout=timeout,
+        )
+
+    def run_commands(self, guests, commands, label, timeout=1800):
+        """Replay a recorded command list in every guest at once.
+
+        Each guest runs its list in order from the data disk; a failing command
+        fails the case. Completion times are this host's monotonic clock, the
+        same clock as the guest launch milestones. Stdout is retained per
+        command under the guest's directory, not in the RPC reply.
+        """
+        if not guests or not commands:
+            raise ValueError("working set needs guests and commands")
+        if not label.replace("-", "").isalnum():
+            raise ValueError("invalid working-set label")
+
+        def replay(guest):
+            rows = []
+            for index, command in enumerate(commands):
+                output = self.case / guest / f"working-set-{label}-{index}.out"
+                started = time.monotonic_ns()
+                text = self.shell(guest, "cd /mnt/cas\n" + command, timeout)
+                completed = time.monotonic_ns()
+                output.write_text(text)
+                rows.append(
+                    {
+                        "index": index,
+                        "command": command,
+                        "started_ns": started,
+                        "completed_ns": completed,
+                        "elapsed_ns": completed - started,
+                        "stdout_bytes": len(text.encode()),
+                        "stdout_sha256": hashlib.sha256(text.encode()).hexdigest(),
+                    }
+                )
+            return {"name": guest, "commands": rows}
+
+        with ThreadPoolExecutor(max_workers=len(guests)) as executor:
+            return list(executor.map(replay, guests))
+
+    def calibrate_ring(self, guest, path, reads=32, chunk_bytes=16384):
+        """Bracket the daemon's ring clock against this host's monotonic clock.
+
+        The peer ring stamps reads in nanoseconds since the peer runtime
+        started, so its records are not directly comparable to launch or
+        command timestamps. Each direct 4 KiB read of a distinct chunk is
+        bracketed on the host clock; a read that adds exactly one ring record
+        bounds the ring origin to [started - received, completed - completed].
+        Reads of locally owned chunks add no record and are retained as such.
+        """
+        if reads < 1 or chunk_bytes % 4096:
+            raise ValueError("calibration needs reads and a 4 KiB chunk multiple")
+        if "/" not in path or any(c.isspace() for c in path):
+            raise ValueError("calibration path must be an absolute guest path")
+        rows = []
+        previous = self.report()["peer"]
+        for index in range(reads):
+            skip = index * chunk_bytes // 4096
+            started = time.monotonic_ns()
+            self.shell(
+                guest,
+                f"dd if={path} bs=4096 count=1 skip={skip} iflag=direct status=none > /dev/null",
+            )
+            completed = time.monotonic_ns()
+            current = self.report()["peer"]
+            known = {record["id"] for record in previous["recent"]}
+            rows.append(
+                {
+                    "index": index,
+                    "offset": skip * 4096,
+                    "started_ns": started,
+                    "completed_ns": completed,
+                    "completed_reads": current["counters"]["completed_reads"]
+                    - previous["counters"]["completed_reads"],
+                    "records": [
+                        record
+                        for record in current["recent"]
+                        if record["id"] not in known
+                    ],
+                }
+            )
+            previous = current
+        return {"guest": guest, "path": path, "chunk_bytes": chunk_bytes, "reads": rows}
+
+    def fio(self, guest, kind, name, seconds=None, depth=1, seed=42, rate=None):
         options = fio_options(
             kind,
             self.settings["data_bytes"],
@@ -494,7 +774,7 @@ class Agent:
             seed,
         )
         if kind == "ship":
-            options += ["--rate=" + str(self.settings["ship_rate_bytes"])]
+            options += ["--rate=" + str(rate or self.settings["ship_rate_bytes"])]
         self.spawn(
             name, [*self.guests[guest], shlex.join(options)], separate_stderr=True
         )
@@ -518,6 +798,64 @@ class Agent:
             "bytes": len(payload),
             "sha256": digest,
             "elapsed_ns": time.monotonic_ns() - start,
+        }
+
+    def write_payload(self, guest, name, seed, size, marker=None, block_size=1024**2):
+        """Deterministic seeded bytes through the guest's direct write path.
+
+        Identical seeds produce identical content across guests, so shared
+        regions really deduplicate. An optional marker replaces the first
+        4 KiB block with recognizable text for the boot probe.
+        """
+        if size <= 0 or size % 4096 or block_size % 4096:
+            raise ValueError("payload and block sizes must be positive 4 KiB multiples")
+        shared = self.case / f"payload-{seed}-{size}-{marker or 'plain'}"
+        if not shared.exists():
+            generator = random.Random(seed)
+            with shared.open("xb") as file:
+                remaining = size
+                first = True
+                while remaining:
+                    piece = generator.randbytes(min(PAYLOAD_PIECE, remaining))
+                    if first and marker:
+                        piece = marker.encode().ljust(4096, b"\0") + piece[4096:]
+                    first = False
+                    file.write(piece)
+                    remaining -= len(piece)
+        recorded = shared.with_suffix(".sha256")
+        if recorded.exists():
+            digest = recorded.read_text().strip()
+        else:
+            with shared.open("rb") as file:
+                digest = hashlib.file_digest(file, "sha256").hexdigest()
+            recorded.write_text(digest + "\n")
+        link = self.case / guest / f"{name}-payload"
+        if not link.exists():
+            os.link(shared, link)
+        start = time.monotonic_ns()
+        output = self.shell(
+            guest,
+            f"dd if=/results/{name}-payload of=/mnt/cas/{name} bs={block_size} oflag=direct conv=fsync status=none; cd /mnt/cas; sha256sum {name}; sync -f .",
+        )
+        if output.split()[0] != digest:
+            raise ValueError(f"payload write verification failed: {name}")
+        return {
+            "name": name,
+            "bytes": size,
+            "sha256": digest,
+            "seed": seed,
+            "marker": marker,
+            "elapsed_ns": time.monotonic_ns() - start,
+        }
+
+    def guest_stat(self, guest):
+        """Guest-observed device reads and ext4 occupancy; no host attribution."""
+        output = self.shell(guest, GUEST_STAT).splitlines()
+        blocks, free, fragment = (int(v) for v in output[-1].split())
+        return {
+            "device": parse_block_stat(output[0]),
+            "used_bytes": (blocks - free) * fragment,
+            "sampled_ns": time.monotonic_ns(),
         }
 
     def fio_running(self, name):
@@ -549,12 +887,22 @@ class Agent:
         status = process.wait(timeout=180)
         if status:
             raise RuntimeError(f"guest shutdown failed: {name} {status}")
-        del self.children[name]
+        with self.lock:
+            del self.children[name]
         return {"shutdown_ns": time.monotonic_ns() - start}
+
+    def stop_guests(self, names):
+        with ThreadPoolExecutor(max_workers=max(1, len(names))) as executor:
+            return list(executor.map(self.stop_guest, names))
 
     def settle(self):
         # Require a fresh complete telemetry sample after guest syncfs.
-        journal = self.case / "daemon/telemetry.jsonl"
+        generation = getattr(self, "host_generation", 0)
+        journal = (
+            self.case
+            / ("daemon" if generation == 0 else f"daemon-{generation}")
+            / "telemetry.jsonl"
+        )
         time.sleep(0.6)
 
         def settled():
@@ -895,14 +1243,24 @@ class Agent:
             "host",
             "report",
             "restart_host",
+            "drop_page_cache",
             "fleet",
             "boot",
+            "launch",
+            "await_guest",
+            "boot_burst",
+            "clock",
+            "run_commands",
+            "calibrate_ring",
             "shell",
             "fio",
             "finish_fio",
             "fio_running",
             "drift",
+            "write_payload",
+            "guest_stat",
             "stop_guest",
+            "stop_guests",
             "settle",
             "capacity",
             "rsync",

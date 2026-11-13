@@ -783,6 +783,99 @@ Evidence: `results/readpath/review/` (per-arm `reader-*.json`, delayed-server
 JSON, logs summarized here), `ledger.json` (both VM ids, identities, deletion).
 No CI, push, merge or deployment occurred.
 
+## 2026-11-13 — Working-set replay, boot split and first useful IO
+
+Branch `feat/burst-harness`. **Tested revision
+`838c4a20e9fc17bd7bc65b476b2853d5f3f2bea1`**, clean on the test checkout;
+this record is a later commit on the branch. Harness-only: `experiments/
+two-host/{runner,agent,test_runner}.py`, the example configs, `nix/fleet/
+fixture.nix` and `docs/two-host-experiments.md` changed; nothing under
+`crates/`, so the daemon is still the `ebbe157` build. Nothing pushed or
+merged.
+
+Spark handled edits, bundles and evidence; all builds and runs used the
+persistent Freestyle VM `cas-build` (`vm-7ecd8e364c624bcb8654fa4dbd92767e`,
+x86_64, 8 vCPU, 16 GiB, nested KVM) in the existing clone `/root/cas-burst`,
+fetched from a bundle. No VM was created, resized or deleted.
+
+### Commands (cas-build, `/root/cas-burst`; driver `/root/burst/ws-driver.sh`)
+
+```sh
+nix build .#two-host --out-link /root/burst/ws/result --cores 6
+nix fmt -- --ci
+nix develop -c uv run --no-project python -m unittest discover -s experiments/two-host
+# Native KVM loopback: both members on one VM, fresh 12 GiB loop-backed XFS
+# files at /mnt/fleet-a and /mnt/fleet-b, daemons on vCPUs 0-1 / 2-3, guests 4-7.
+/root/burst/ws/result/bin/cas-two-host --config /root/burst/ws/native-ws-001-config.json \
+  --output /root/burst/ws/native-ws-001/controller      # cases resume-elsewhere,burst-images
+```
+
+Settings: 128 MiB image, 1 MiB data, one-vCPU 512 MiB guests, `resume` =
+2 MiB setup, k=1, settled, working set `[dd data 0–256 KiB direct | sha256sum,
+dd data 1 MiB–1.25 MiB direct | sha256sum, sha256sum data]`; `burst` = 2
+images × (4 MiB base + 1 MiB unique), k=1, no force-remote, owner cache 0,
+working set `[dd unique 0–256 KiB, dd unique 512–768 KiB, sha256sum base]`.
+Spark ran the same unit tests (`uv run --no-project python -m unittest
+discover -s experiments/two-host`).
+
+### Outcomes
+
+- Unit tests: **34 pass** on Spark and on cas-build (9 new: working-set
+  parsing/inheritance/overrides and rejection, ring-origin bracketing, first
+  remote read with eviction censoring, interval conversion, replay summary,
+  agent replay ordering and stdout retention, agent calibration rows, and
+  the `checked()` timeout path). `nix build .#two-host` and
+  `nix fmt -- --ci`: pass. `just check` was not rerun (Rust unchanged since
+  2026-11-12).
+- **`native-ws-001`: both cases passed** (`success: true`, schema 3, 106 s).
+- `resume-elsewhere` (B's clock, anchor = handoff completion seen on B;
+  handoff bracket 250 ms): launch delay 6.7 ms, **boot 18.38 s** (launch →
+  ready), SSH banner 18.69 s, first command 20.31 s, marker 20.74 s;
+  **first useful IO 7.04 s** after the handoff (bounds 7.00–7.07 s; the
+  first remote fetch lands during the ext4 mount, well before `ready`);
+  **time to working set 21.22 s**, of which the cold replay was 0.33 s
+  (commands 97 / 96 / 136 ms) fetching 313 GETs / 1,289,560 GET bytes on B;
+  warm replay 0.27 s (97 / 93 / 75 ms) with 68 GETs, since the two direct
+  reads bypass the guest page cache and B retains no fetched chunk — only
+  the whole-file checksum became a page-cache hit. Ring calibration: 19 of 32
+  direct reads were remote; origin bracket 68 ms wide. Downtime 21.93 s =
+  0.57 s stop + 0.50 s handoff + 20.87 s boot/marker/continue (now ending at
+  the durable epoch increment); final checksum afterwards 117 ms with 0 GETs
+  (page cache). Boot→continue issued 54 GETs; boot→final verify 435.
+- `burst-images` N=2 (anchor = first launch; launches 0.6 ms apart): boot
+  20.41 / 20.56 s, SSH 20.50 / 20.64 s, marker 22.72 / 22.71 s; first useful
+  IO 8.44 s (8.41–8.47 s); 107 GETs by the last marker (4.1 % of used
+  blocks); **time to working set 23.20 / 23.20 s** with concurrent cold
+  replays of 0.45 s each (115 / 107 / 226 ms and 105 / 109 / 236 ms) fetching
+  1,060 GETs / 4,367,200 bytes in aggregate; warm replays 0.29 / 0.28 s with
+  128 GETs. 1,541 GETs (58.5 % of used blocks) by the end of verification,
+  which now includes the replay. Calibration: 12 of 32 reads remote, bracket
+  62 ms.
+
+Nested-KVM, loop-file, single-repetition development checks on one shared
+VM: they validate the harness, schema and interval arithmetic, not boot,
+latency or placement claims. The TCG fixture was not used (the arms need KVM;
+its configuration carries the same working sets for `--cases` runs).
+
+### Failures and retries
+
+- **Attempt 1 (03:21 UTC) failed after 22 s**: `agent.shell(timeout=)`
+  collided with `checked()`'s fixed `subprocess.run` timeout, so the first
+  guest shell RPC (`write_payload`) raised `TypeError`. The unit tests had
+  patched `shell` and missed it. Fixed in `838c4a2` with a test over the real
+  subprocess path; the attempt is retained as `native-ws-attempt-1.tgz`
+  (not a result). The rerun at 06:21 UTC needed no retry.
+
+### Evidence
+
+Retained under ignored `results/burst-harness/evidence/` with `SHA256SUMS`,
+digests matching `/root/burst/archive` on cas-build: `native-ws-001.tgz`
+(revision, driver/build/fmt/unittest logs and statuses, config, controller
+`results.json`, `config.json`, RPC logs, both hosts' daemon/guest logs,
+`qemu.json`, per-command `working-set-*.out` files), `native-ws-001-results.json`,
+`native-ws-attempt-1.tgz`. Loop images were unmounted; `/root/burst/ws`
+remains on the persistent VM.
+
 ## 2026-11-12 — Offline raw-image importer (`casctl import`)
 
 Branch `feat/offline-import` from `main` (`ebbe157`). **Tested revision:
@@ -1069,6 +1162,199 @@ and one race-arm release loopback whose `reader.json` holds the measure report
 (700 GETs, 0 errors). The VM `vm-38331efffa414b098f8136cacf1e903c` was then
 deleted through the provider API (`results/readpath/ledger.json` records the
 deletion); no other VM was created, touched or deleted.
+
+## 2026-11-12 — Burst harness: multi-guest reads, burst-images and resume-elsewhere
+
+Branch `feat/burst-harness` from `main` (`ebbe157`, the frozen measured
+revision). **Tested revision `7a3c5d267a51648363f94fd0cd93aaccc4e566c6`**, clean
+on the test checkout; the fixture-configuration correction, documentation and
+this record are later commits on the branch. Harness-only work: no file under
+`crates/cas/daemon` or `crates/cas/core` changed, so the `cas` package and its
+executable hashes are those of `ebbe157`. Nothing was pushed or merged.
+
+Spark handled edits, Git bundles, provider calls and evidence processing only.
+All builds, checks and runs used the persistent Freestyle VM `cas-build`
+(`vm-7ecd8e364c624bcb8654fa4dbd92767e`, x86_64, 8 vCPU, 16 GiB, Ubuntu, nested
+KVM) in a fresh clone `/root/cas-burst` fetched from a bundle. No VM was created,
+resized or deleted.
+
+### Commands (cas-build, `/root/cas-burst`, Nix profile sourced, `ulimit -n 65536`)
+
+```sh
+nix build .#two-host-fixture .#two-host --out-link /root/burst/result --cores 6
+nix fmt -- --ci
+nix develop -c env CARGO_TARGET_DIR=/root/cas/target CARGO_BUILD_JOBS=6 \
+  RUST_TEST_THREADS=2 just check
+/root/burst/result/bin/cas-two-host-fixture --output /root/burst/fixture-new-001 \
+  --cases reads-memory,reads-storage,burst-images,resume-elsewhere \
+  --set 'guests_per_host=[2]'                         # TCG attempt, stopped
+# Native KVM loopback: both members on one VM, loop-backed XFS files mounted at
+# /mnt/fleet-a and /mnt/fleet-b, daemons pinned to vCPUs 0-1 / 2-3, guests 4-7.
+/root/burst/result-1/bin/cas-two-host --config /root/burst/native-new-001-config.json \
+  --output /root/burst/native-new-001/controller
+/root/burst/result-1/bin/cas-two-host \
+  --config /root/burst/native-regression-001-config.json \
+  --output /root/burst/native-regression-001/controller
+```
+
+Settings for both native runs: 128 MiB image, 1 MiB seeded data, 5-second read
+windows, one repetition, QD 1/4, 4 MiB/s requested shipping rate, 50 µs inline
+polling. `native-new-001`: `guests_per_host=[2]`, one-vCPU 512 MiB guests,
+`burst` = 4 images × (4 MiB shared base + 1 MiB unique), k=1, no force-remote,
+owner cache 0, no page-cache drop; `resume` = 2 MiB setup, k=1, settled.
+`native-regression-001`: defaults (`guests_per_host=[1]`, pinned two-vCPU
+1 GiB guests) for `flows-k1,flows-k2,reads-memory,reads-storage,raw-rsync,
+independent-stores`. The exact configurations are in the archives.
+
+### Outcomes
+
+- `nix build` of both launchers and `nix fmt -- --ci`: pass. `just check`:
+  pass — formatting, strict Clippy, 572 Rust tests passed with 30 fixture
+  ignores, **25 Python tests** (12 new: settings normalization and rejection,
+  case-plan expansion, overrides, image IDs, guest sizing, fio aggregation,
+  burst summary, peer-counter deltas, burst launch ordering, seeded payloads,
+  block statistics), whitespace clean. The corrected `fixture.nix` was
+  format-checked and built separately afterwards (both exit 0).
+- **`native-new-001`: all four cases passed** (`success: true`, 294 s):
+  `reads-memory-g2`, `reads-storage-g2`, `burst-images`, `resume-elsewhere`.
+- **`native-regression-001`: all six legacy cases passed** (415 s) with the
+  historical one-guest schema; their guests ran the pinned QEMU command line
+  (no sizing override, `qemu.json` sizing 2 vCPU / 1024 MiB).
+
+Two-guest arms (aggregate over both readers; per-guest p50 in brackets; all
+reads CRC32C-verified, quiet labels required zero opposite-source service):
+
+| Arm, cohort | Aggregate IOPS | p50 (ms) | p99 (ms) | Owner counters |
+| --- | ---: | ---: | ---: | --- |
+| memory, random QD1 | 6,608 | 0.200 [0.198, 0.202] | 2.900 | 33,043 memory, 0 store |
+| memory, sequential QD4 | 9,339 | 0.506 | 4.227 | 46,691 memory |
+| memory, contention | 5,465 | 0.247 | 3.064 | 27,324 memory, overlap verified |
+| storage, random QD1 | 6,666 | 0.276 [0.276, 0.276] | 0.528 | 0 memory, 33,330 store |
+| storage, sequential QD4 | 11,212 | 0.659 | 1.794 | 56,052 store |
+| storage, contention | 5,058 | 0.334 | 0.979 | 25,292 store, overlap verified |
+
+Aggregate percentiles come from merged json+ bins (bucket lower bounds); the
+per-guest fio JSON retains exact values. The contention cohort ran one 2 MiB/s
+shipping writer per source guest.
+
+`burst-images` (4 images, k=1, B cold with empty cache): per-image store chunk
+deltas after settle were 1,302 then 274, 274, 274 (the shared base deduplicated;
+each later image added only its unique region and metadata). Provisioning all
+four manifests took 0.803 s and 1,331,714 provision-flow bytes; B's cold restart
+recovered in 0.321 s; the four QEMU launches spread over 5.9 ms. Per guest:
+launch→ready 30.5–32.0 s, launch→first SSH command 33.2–34.4 s, launch→marker
+34.1–35.2 s (nested KVM, one vCPU each, four booting at once), 362 of 1,318 used
+blocks read by the marker (0.275 each). B issued 219 GETs by the last marker
+(4.2 % of the 5,272 used blocks over all images, 902,280 GET wire bytes
+received, peak 3 outstanding) and 2,736 by the end of full verification (51.9 %,
+consistent with k=1 placing about half of each image on A; 11,272,320 bytes,
+peak 4). A served all GETs from its store; HAS 0; no errors; 149 ring records.
+Guest-observed reads exceed GETs because zero/hole blocks and B-owned chunks
+are served locally; the attribution caveat is recorded in the case.
+
+`resume-elsewhere` (2 MiB setup, k=1, settled, B cold): downtime 20.772 s =
+0.716 s shutdown + 0.295 s handoff (0.239 s cold recovery, 0.042 s daemon
+migration) + 19.761 s boot/verify/continue; launch→first command 19.221 s,
+launch→marker 19.532 s. Bytes per phase: manifest 131,072, staging tail 20,664
+(migration flow 172,388 wire bytes), missing chunks fetched while booting and
+verifying 298 GETs / 1,227,760 GET bytes plus 12,922 ship bytes, explicit sync
+afterwards 233 bytes. The destination verified the seeded digest and advanced
+epoch 0→1. Legacy controls in the regression run: `flows-k1`/`flows-k2`
+downtime 19.180 / 19.733 s with provision flow 122,803 / 122,668 bytes;
+`raw-rsync` downtime 20.187 s, 134,250,639 bytes per full copy.
+
+These are single-repetition, nested-KVM, loop-file development checks on one
+shared VM: they validate the harness and schema, not latency, boot time or
+placement claims. `zfs-incremental` was not run (no ZFS on the native host; its
+code path is unchanged).
+
+### Failures and retries
+
+- **TCG fixture attempt `fixture-new-001` stopped by the operator.** With the
+  initial fixture configuration (six-vCPU outer VM, one-vCPU 512 MiB TCG
+  guests) the two concurrently booting sources reached their virtio-blk driver
+  about 165 s after launch, but the daemon attaches each image with a fixed
+  60-second recovery window (`RECOVERY_TIMEOUT`, attachment to first queue
+  activation), so both image services ended with `recovery deadline expired`
+  and the guests hung on `set virtio-blk status ... failed`. This is a frozen
+  daemon property, not a harness or sizing defect; the retained attempt
+  (`fixture-new-001-attempt.tgz`, scratch disks excluded) is not a result. The
+  fixture configuration was restored to its four-vCPU, pinned-guest form and
+  the multi-guest/burst/resume arms were removed from its TCG default list;
+  they remain requestable with `--cases` and need KVM. The second fixture
+  invocation (legacy regression) was not started.
+- The replacement native loopback runs required no retry. One operator-side
+  polling command matched its own shell and exited 143 without effect on the
+  run.
+
+### Evidence
+
+Retained under ignored `results/burst-harness/evidence/` with `SHA256SUMS`,
+digests verified against the copies left in `/root/burst/archive` on
+`cas-build`: `checks.tgz` (build, format, `just check` logs and statuses,
+driver scripts, revision), `native-new-001.tgz` and
+`native-regression-001.tgz` (controller `results.json`, `config.json`, RPC
+logs, both hosts' daemon/guest/fio logs, command lines and `qemu.json`),
+`fixture-new-001-attempt.tgz`. The branch bundle `burst-harness.bundle`
+(SHA256 `7cf68f26…2a1a`) and `results.json` copies sit beside them. Loop
+images were unmounted and deleted after archiving; `/root/burst` remains on
+the persistent VM.
+
+### Addendum (same day) — review fixes, rerun at `c0bca19`
+
+Code review of the branch raised ten items; fixed in `9559587` (measurement:
+provision freezes sources *before* the timed window again, as at `ebbe157`;
+the resume boot stamp precedes the anchor RPC and post-handoff report so
+`handoff_ns` excludes harness work; calibration skips and counts
+multi-record reads; explicit `reads-memory-gN` arms get the cache-headroom
+check at plan time; `fio.guests` stays the count with per-guest jobs under
+`fio.per_guest`) and `c0bca19` (declared per-request RPC budgets with an
+exhausted budget raised as `RuntimeError`, one `marker_probe(path)` sharing
+its statistics tail with `guest_stat`, fio errors counted once per job,
+`peer_delta` as a projection of `peer_counters`, `ring_since` reuse, payload
+digest hashed once and persisted). **Tested revision
+`c0bca1930a9b7b76179a6fa75b0617dd97dd8795`**, clean. Unit tests: **35 pass**
+on Spark and cas-build (one new: RPC budgets and the probe tail).
+
+Rerun `native-ws-002` on cas-build (same VM, driver `/root/burst/ws-driver-2.sh`,
+fresh loop XFS files, same settings) for `flows-k1, reads-memory-g2,
+burst-images, resume-elsewhere`: **all four passed** (`success: true`, 257 s).
+
+- `flows-k1` (legacy control, provision window now excludes the freeze as
+  before): provision 173 ms, 124,877 provision-flow bytes; boot/verify
+  19.95 s; downtime 20.89 s = 0.52 s stop + 0.43 s handoff (0.33 s cold
+  recovery) + 19.95 s boot/verify/continue — consistent with the 2026-11-12
+  regression run (19.18 s on a different day).
+- `reads-memory-g2` (two readers, aggregate, p50/p99 from merged bins; owner
+  served everything from memory, 0 store): random QD1 5,795 IOPS,
+  0.208 / 2.867 ms; sequential QD1 5,154 IOPS, 0.247 / 2.998 ms; sequential
+  QD4 8,603 IOPS, 0.489 / 4.489 ms; contention 5,413 IOPS, 0.189 / 3.195 ms
+  with overlap verified. `fio.guests` = 2 with both jobs under `fio.per_guest`.
+- `burst-images` N=2: boot 19.71 / 19.91 s, SSH 20.02 / 20.02 s, marker
+  21.69 / 21.90 s (launches 2.4 ms apart); first useful IO 8.33 s (8.30–8.36)
+  after the first launch; 115 GETs by the last marker (4.4 %); **time to
+  working set 22.33 / 22.34 s**, cold replays 0.39 / 0.40 s (96 / 90 / 208 ms,
+  96 / 98 / 209 ms) with 1,138 GETs / 4,688,560 bytes aggregate, warm 0.25 /
+  0.25 s with 128 GETs; 1,627 GETs (61.7 %) by the end of verification.
+  Calibration 13 of 32 reads remote, 0 ambiguous, bracket 57 ms.
+- `resume-elsewhere`: handoff bracket on B 54 ms; launch delay 6.5 ms;
+  **boot 17.97 s**; SSH 18.28 s; first command 19.75 s; marker 20.16 s;
+  **first useful IO 7.41 s** (7.38–7.44) after the handoff; **time to working
+  set 20.70 s**, cold replay 0.38 s (107 / 128 / 149 ms) with 313 GETs /
+  1,289,560 bytes, warm 0.30 s (112 / 112 / 80 ms) with 68 GETs; final
+  checksum 122 ms, 0 GETs. **Re-derived downtime 21.33 s = 0.72 s stop +
+  0.32 s handoff (0.26 s cold recovery, 131,072 manifest bytes, 20,664
+  staging-tail bytes) + 20.30 s boot/marker/continue**: the handoff term
+  fell from 0.50 s in `native-ws-001` because the anchor RPC and the
+  post-handoff full-fleet report no longer sit inside it. 48 GETs from boot
+  to the epoch continue, 429 to the end of the final checksum. Calibration
+  19 of 32 remote, 0 ambiguous, bracket 64 ms.
+
+Same caveats as above: nested-KVM loop-file development checks on one shared
+VM, single repetition; they certify the harness, schema and interval
+arithmetic only. Evidence: `native-ws-002.tgz` and `native-ws-002-results.json`
+appended to `results/burst-harness/evidence/SHA256SUMS` (all five entries
+re-verified), copies in `/root/burst/archive`; loop images unmounted.
 
 ## 2026-11-09 — Integration of C5, peer fetch and 16 KiB chunks
 

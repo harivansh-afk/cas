@@ -12,8 +12,43 @@
     "data_bytes": 8388608,
     "segment_bytes": 8388608,
     "staging_bytes": 1073741824,
-    "cache_bytes": 67108864,
-    "inline_us": 50
+    "cache_bytes": 268435456,
+    "inline_us": 50,
+    "guests_per_host": [
+      1,
+      4,
+      8,
+      16
+    ],
+    "guest": {
+      "cores": 1,
+      "memory_mib": 1024
+    },
+    "working_set": [
+      "dd if=/mnt/cas/data bs=4096 count=1024 iflag=direct status=none | sha256sum",
+      "dd if=/mnt/cas/data bs=4096 count=1024 skip=16384 iflag=direct status=none | sha256sum",
+      "sha256sum /mnt/cas/data"
+    ],
+    "burst": {
+      "images": 16,
+      "base_bytes": 1073741824,
+      "unique_bytes": 67108864,
+      "k": 1,
+      "force_remote": false,
+      "owner_cache_bytes": 0,
+      "drop_page_cache": false,
+      "working_set": [
+        "dd if=/mnt/cas/unique bs=4096 count=1024 iflag=direct status=none | sha256sum",
+        "dd if=/mnt/cas/unique bs=4096 count=1024 skip=8192 iflag=direct status=none | sha256sum",
+        "sha256sum /mnt/cas/base"
+      ]
+    },
+    "resume": {
+      "setup_bytes": 268435456,
+      "k": 1,
+      "settle": true,
+      "drop_page_cache": false
+    }
   },
   "nodes": [
     {
@@ -38,5 +73,16 @@
       "zfs_parent": "tank/cas-bench",
       "zfs_port": 17487
     }
+  ],
+  "cases": [
+    "flows-k1",
+    "flows-k2",
+    "reads-memory",
+    "reads-storage",
+    "raw-rsync",
+    "zfs-incremental",
+    "independent-stores",
+    "burst-images",
+    "resume-elsewhere"
   ]
 }

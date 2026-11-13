@@ -122,7 +122,157 @@ throughput. Queue depth requests are retained alongside fio's achieved depth
 histogram; the guest queue is 128 entries. This runner does not claim to implement
 prefetch, RDMA, nvmet, null-target probes, or the optional fleet-class FLUSH.
 
-`results.json` contains schema version, exact source revision, Nix source path,
+## Multi-guest, burst and resume arms
+
+These arms are harness additions on the frozen measured daemon revision; they
+drive everything from the JSON configuration and fail instead of mislabelling.
+
+`settings.guest` sizes every workload guest (`{"cores": 2, "memory_mib": 1024}`
+is the pinned build default). Other sizes append `-m`, `-smp` and a matching
+shared memfd backend after the pinned run script; QEMU takes the last value and
+the harness checks the live QEMU command line against the request before any
+measurement. The effective sizing is retained in each guest's `qemu.json`.
+`burst.guest` and `resume.guest` override it per case.
+
+`settings.guests_per_host` is a list of concurrent workload guest counts for
+`reads-memory` and `reads-storage` (default `[1]`, maximum 16). Each entry is a
+separate arm with its own storage: the one-guest arm keeps the historical case
+name and result schema; larger arms are named `reads-memory-g4` and so on, and
+may also be requested directly in `cases`. Each arm boots N sources on A (its
+own image and seed each) and N provisioned readers on B, warms every image,
+then runs each fio cohort on all N readers at once. Cohorts record the
+aggregate (`fio`: summed IOPS/bytes, merged json+ latency histograms, bucket
+percentiles, `fio.guests` the guest count) and every guest's complete fio JSON
+under `fio.per_guest`, together
+with the owner's GET counters and the reader's recent-ring phases. The
+contention cohort runs one shipping writer per source with the requested rate
+divided by N, so the aggregate requested rate matches the one-guest arm.
+`cache_bytes` must hold `2 × data_bytes × max(guests_per_host)`.
+
+`burst-images` (`settings.burst`): A boots `images` guests, each writing an
+identical seeded `base` region (`base_bytes`) and a per-image `unique` region
+(`unique_bytes`) whose first 4 KiB block is a marker; after each image the
+harness FLUSHes, waits for compaction and records the store chunk delta. All
+manifests are provisioned to B under fsfreeze with content already placed
+(`k`, default 1). A's guests stop, B's daemon restarts cold with an empty clean
+cache (optionally `drop_page_cache`, which needs root and otherwise fails), and
+all N guests launch back to back on B. Per guest it records launch→ready,
+launch→first SSH command, launch→marker read (direct read of the unique
+region's first block, checked against the expected marker), the guest's
+`/sys/block/vda/stat` reads and used ext4 blocks, then a full checksum of both
+regions. Per member it records flow bytes, every GET/HAS counter delta, GET wire
+bytes, `max_inflight` before/after and B's phase ring, for the window up to the
+last marker read and up to the end of verification. The daemon's GET counters
+are host wide, so `fetched_fraction_of_used` is B's GET delta over the sum of
+used blocks, and per-image `read_fraction_at_marker` is guest-observed device
+reads over that image's used blocks; the two agree only under `force_remote`,
+which needs `k ≥ 2` so every chunk has a nonlocal owner. A window with zero
+GETs fails the case.
+
+`resume-elsewhere` (`settings.resume`): one guest on A writes `setup_bytes`
+of seeded data (its first block is a marker), runs the optional `setup_script`,
+optionally settles and synchronizes placement, then shuts down cleanly. Both
+daemons restart cold (B with an empty cache), the fenced migration runs, and B
+boots the image, recording launch→first command, launch→marker read, the usual
+downtime decomposition, and bytes per phase: manifest bytes and staging-tail
+bytes from the daemon reply, migration flow bytes, then the missing-chunk bytes
+observed while booting and verifying (ship/sync flow bytes, GET counters and
+wire bytes), followed by an explicit `sync` on B whose bytes are kept separate.
+`raw-rsync` and `zfs-incremental` are unchanged controls.
+
+### Working set, boot and first useful IO
+
+`settings.working_set` is a JSON list of guest shell command strings (for
+example the bash commands of a recorded agent trajectory; the harness knows
+nothing about their origin). `burst.working_set` and `resume.working_set`
+override it per case; an empty list disables the phase and leaves
+`working_set` null. After the marker read, every guest runs the list in order
+with `sh -eu -c` from `/mnt/cas`; a failing command fails the case. Each
+command records its start and completion on host B's monotonic clock, its
+stdout size and SHA-256 (stdout itself is retained under the guest's output
+directory as `working-set-<pass>-<index>.out`). The daemon report is taken on
+every member before and after the whole list, so `cold.peer[1].gets` — B's
+GET delta — is the **working set**: the chunks the replayed commands actually
+fetched, with `cold.wire` and `destination_get_wire` as its bytes. The same
+list then runs again immediately as the `warm` pass, a control for how much of
+the cold time was storage rather than the commands themselves. In
+`burst-images` every guest replays the list at once, so the counters are the
+burst's aggregate and the per-guest numbers are timings only; the burst's
+`windows.to_verified` then also spans the replay. The replay
+runs **before** the full checksum verification, which would otherwise pull the
+whole disk through the guest page cache first.
+
+The `intervals` block holds the paper's storage-path metrics. Everything in it
+is on host B's monotonic clock; cross-host clocks are never subtracted. For
+`resume-elsewhere` the anchor is `handoff_b.after_ns`, B's clock read by B's
+agent immediately after `cas-fleet migrate` returned to the controller; it is
+late by one controller→B RPC (`handoff_bracket_ns` is the before/after width
+of that bracket). For `burst-images` the anchor is the first QEMU launch.
+
+- `launch_delay_ns`: anchor → QEMU `execve` on B. Controller RPC, result
+  directory creation and the wait for the daemon's vhost socket.
+- `boot_ns`: QEMU launch → the guest's `ready` marker. Firmware, kernel and
+  systemd of the preinstalled boot closure, then `mount` of the migrated ext4
+  disk (so the first data-disk reads — superblock, journal, group
+  descriptors — fall inside it). Excludes SSH.
+- `ssh_ready_ns`, `first_command_ns`, `marker_ns`: launch → sshd banner,
+  → first successful SSH command, → marker block read; cumulative, as in the
+  per-guest burst summary. `time_to_marker_ns` is anchor → marker.
+- `first_useful_io`: anchor → the first guest read that reached B's daemon
+  **and needed a remote chunk**. Reads served from B's own store never enter
+  the daemon's ring, so this is the first remote fetch, not the first block
+  request. The ring stamps records in nanoseconds since the peer runtime
+  started, so `ring_calibration` brackets that origin against B's clock after
+  all windows close: direct 4 KiB reads of distinct chunks, each bracketed on
+  the host clock; a read that added exactly one ring record bounds the origin
+  to `[started − received_ns, completed − completed_ns]`, and the bounds are
+  intersected. `ns` is the midpoint, `lower_ns`/`upper_ns` the bracket. The
+  ring is sampled right after each guest's probe, after the epoch continue
+  and after the working set; if the earliest sample is at full retention
+  with no pre-anchor record, the first read may have been evicted and the
+  value is `censored` with `ns` null. With `k` equal to the member count no
+  read is remote and the value is null with a reason.
+- `time_to_working_set_ns`: anchor → completion of the last replayed command
+  of the cold pass (per guest in the burst). It therefore includes
+  `launch_delay_ns`, `boot_ns`, SSH readiness, the marker read, the durable
+  epoch increment and the replay; `cold.guests[].replay_ns` is the replay
+  alone and `warm_replay_ns` (`warm.guests[].replay_ns`) the second pass.
+
+`migration.downtime_ns` keeps its decomposition: `stop_ns` + `handoff_ns` +
+`boot_verify_continue_ns`, on the controller's clock. In `resume-elsewhere`
+the last term now ends when the guest has read and checked the marker block
+and durably advanced the application epoch (`continue_epoch`); the full data
+checksum runs after the working set and is reported as `final_verify_ns`, with
+its own `final_verify_wire`/`final_verify_peer` deltas, so a configured working
+set never inflates downtime. `migration.first_command_ns` and `marker_ns` are
+measured from `handoff_b.after_ns` on B's clock (earlier revisions subtracted
+the controller's clock, which is only valid on a loopback fixture).
+
+The daemon attaches each image with a fixed 60-second recovery window
+(`RECOVERY_TIMEOUT`), measured from attachment to the guest driver's first
+queue activation. Every guest in a burst must therefore reach its virtio-blk
+driver within 60 seconds of B's cold restart (and every source within 60
+seconds of A's start); a slower boot ends that image service with `recovery
+deadline expired` and fails the case. KVM guests boot in a few seconds;
+concurrently booting TCG guests do not fit, so these arms need KVM.
+
+Host budget: each arm needs `guest cores × N + daemon cpus + 2` hardware
+threads per member; TCG fixture guests additionally burn a host thread per vCPU
+while booting. The N=16 arm with the example's one-vCPU, 1 GiB guests needs at
+least 16 + 4 + 2 = 22 threads and 16 GiB of guest memory per member, plus the
+daemon's staging/cache budgets; two-vCPU guests need 38 threads. Pin
+`guest_cpus` to a set at least as large as `cores × N` and keep the daemon's
+`cpus` disjoint; the `cloudlab*.example.json` sets must be widened accordingly
+on the chosen node type.
+
+`--set KEY=JSON` overrides one settings entry on the command line (for example
+`--set guests_per_host=[4]`); the effective configuration is retained in
+`config.json`.
+
+`results.json` is `schema_version` 3: version 2 plus, under `burst-images` and
+`resume-elsewhere`, `working_set`, `intervals`, `ring_calibration` and (resume)
+`final_verify_ns`, `migration.handoff_b` and the extra `phases.missing_chunks`
+deltas; no earlier field was renamed. It contains schema version, exact source revision, Nix source path,
 executable SHA256 hashes, configuration, hardware inventory, fio JSON+ latency
 histograms, flow bytes, raw recent remote timestamps, capacity and success/error.
 `recent_phases` retains the final bounded ring (up to 1,024 reads), not an unbiased
@@ -226,8 +376,13 @@ checked against the selected KVM/TCG build. Quiet and shipping read cohorts use
 the same counter-sampling schedule.
 
 Both launchers accept `--cases flows-k1,flows-k2` (or other listed case names)
-for a focused development rerun. The selected list is retained in the raw
-configuration; a subset's success does not certify the omitted cases.
+for a focused development rerun, and `--set KEY=JSON` settings overrides. The
+selected list is retained in the raw configuration; a subset's success does
+not certify the omitted cases. The fixture configuration also carries four
+burst images (4 MiB base, 1 MiB unique), a 2 MiB resume setup and a
+three-command working set (two direct reads of distinct regions, then a whole
+file checksum), but its TCG default list excludes the multi-guest, burst and
+resume arms: see the daemon window note above.
 
 The local TCG fixture allows 20 minutes for guest boot and four hours for its
 whole suite; native KVM guest boot retains a four-minute limit. Agent RPC waits
