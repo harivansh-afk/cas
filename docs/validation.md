@@ -1,5 +1,98 @@
 # Validation
 
+## 2026-11-13 — Working-set replay, boot split and first useful IO
+
+Branch `feat/burst-harness`. **Tested revision
+`838c4a20e9fc17bd7bc65b476b2853d5f3f2bea1`**, clean on the test checkout;
+this record is a later commit on the branch. Harness-only: `experiments/
+two-host/{runner,agent,test_runner}.py`, the example configs, `nix/fleet/
+fixture.nix` and `docs/two-host-experiments.md` changed; nothing under
+`crates/`, so the daemon is still the `ebbe157` build. Nothing pushed or
+merged.
+
+Spark handled edits, bundles and evidence; all builds and runs used the
+persistent Freestyle VM `cas-build` (`vm-7ecd8e364c624bcb8654fa4dbd92767e`,
+x86_64, 8 vCPU, 16 GiB, nested KVM) in the existing clone `/root/cas-burst`,
+fetched from a bundle. No VM was created, resized or deleted.
+
+### Commands (cas-build, `/root/cas-burst`; driver `/root/burst/ws-driver.sh`)
+
+```sh
+nix build .#two-host --out-link /root/burst/ws/result --cores 6
+nix fmt -- --ci
+nix develop -c uv run --no-project python -m unittest discover -s experiments/two-host
+# Native KVM loopback: both members on one VM, fresh 12 GiB loop-backed XFS
+# files at /mnt/fleet-a and /mnt/fleet-b, daemons on vCPUs 0-1 / 2-3, guests 4-7.
+/root/burst/ws/result/bin/cas-two-host --config /root/burst/ws/native-ws-001-config.json \
+  --output /root/burst/ws/native-ws-001/controller      # cases resume-elsewhere,burst-images
+```
+
+Settings: 128 MiB image, 1 MiB data, one-vCPU 512 MiB guests, `resume` =
+2 MiB setup, k=1, settled, working set `[dd data 0–256 KiB direct | sha256sum,
+dd data 1 MiB–1.25 MiB direct | sha256sum, sha256sum data]`; `burst` = 2
+images × (4 MiB base + 1 MiB unique), k=1, no force-remote, owner cache 0,
+working set `[dd unique 0–256 KiB, dd unique 512–768 KiB, sha256sum base]`.
+Spark ran the same unit tests (`uv run --no-project python -m unittest
+discover -s experiments/two-host`).
+
+### Outcomes
+
+- Unit tests: **34 pass** on Spark and on cas-build (9 new: working-set
+  parsing/inheritance/overrides and rejection, ring-origin bracketing, first
+  remote read with eviction censoring, interval conversion, replay summary,
+  agent replay ordering and stdout retention, agent calibration rows, and
+  the `checked()` timeout path). `nix build .#two-host` and
+  `nix fmt -- --ci`: pass. `just check` was not rerun (Rust unchanged since
+  2026-11-12).
+- **`native-ws-001`: both cases passed** (`success: true`, schema 3, 106 s).
+- `resume-elsewhere` (B's clock, anchor = handoff completion seen on B;
+  handoff bracket 250 ms): launch delay 6.7 ms, **boot 18.38 s** (launch →
+  ready), SSH banner 18.69 s, first command 20.31 s, marker 20.74 s;
+  **first useful IO 7.04 s** after the handoff (bounds 7.00–7.07 s; the
+  first remote fetch lands during the ext4 mount, well before `ready`);
+  **time to working set 21.22 s**, of which the cold replay was 0.33 s
+  (commands 97 / 96 / 136 ms) fetching 313 GETs / 1,289,560 GET bytes on B;
+  warm replay 0.27 s (97 / 93 / 75 ms) with 68 GETs, since the two direct
+  reads bypass the guest page cache and B retains no fetched chunk — only
+  the whole-file checksum became a page-cache hit. Ring calibration: 19 of 32
+  direct reads were remote; origin bracket 68 ms wide. Downtime 21.93 s =
+  0.57 s stop + 0.50 s handoff + 20.87 s boot/marker/continue (now ending at
+  the durable epoch increment); final checksum afterwards 117 ms with 0 GETs
+  (page cache). Boot→continue issued 54 GETs; boot→final verify 435.
+- `burst-images` N=2 (anchor = first launch; launches 0.6 ms apart): boot
+  20.41 / 20.56 s, SSH 20.50 / 20.64 s, marker 22.72 / 22.71 s; first useful
+  IO 8.44 s (8.41–8.47 s); 107 GETs by the last marker (4.1 % of used
+  blocks); **time to working set 23.20 / 23.20 s** with concurrent cold
+  replays of 0.45 s each (115 / 107 / 226 ms and 105 / 109 / 236 ms) fetching
+  1,060 GETs / 4,367,200 bytes in aggregate; warm replays 0.29 / 0.28 s with
+  128 GETs. 1,541 GETs (58.5 % of used blocks) by the end of verification,
+  which now includes the replay. Calibration: 12 of 32 reads remote, bracket
+  62 ms.
+
+Nested-KVM, loop-file, single-repetition development checks on one shared
+VM: they validate the harness, schema and interval arithmetic, not boot,
+latency or placement claims. The TCG fixture was not used (the arms need KVM;
+its configuration carries the same working sets for `--cases` runs).
+
+### Failures and retries
+
+- **Attempt 1 (03:21 UTC) failed after 22 s**: `agent.shell(timeout=)`
+  collided with `checked()`'s fixed `subprocess.run` timeout, so the first
+  guest shell RPC (`write_payload`) raised `TypeError`. The unit tests had
+  patched `shell` and missed it. Fixed in `838c4a2` with a test over the real
+  subprocess path; the attempt is retained as `native-ws-attempt-1.tgz`
+  (not a result). The rerun at 06:21 UTC needed no retry.
+
+### Evidence
+
+Retained under ignored `results/burst-harness/evidence/` with `SHA256SUMS`,
+digests matching `/root/burst/archive` on cas-build: `native-ws-001.tgz`
+(revision, driver/build/fmt/unittest logs and statuses, config, controller
+`results.json`, `config.json`, RPC logs, both hosts' daemon/guest logs,
+`qemu.json`, per-command `working-set-*.out` files), `native-ws-001-results.json`,
+`native-ws-attempt-1.tgz`. Loop images were unmounted; `/root/burst/ws`
+remains on the persistent VM.
+
 ## 2026-11-12 — Burst harness: multi-guest reads, burst-images and resume-elsewhere
 
 Branch `feat/burst-harness` from `main` (`ebbe157`, the frozen measured
