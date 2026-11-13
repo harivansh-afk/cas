@@ -223,7 +223,7 @@ fn race_budget_starts_the_challenger_only_after_the_primary_is_late() {
                 .write_all(&response(h, &[value; BLOCK_SIZE]))
                 .unwrap();
             let h = request(&mut socket);
-            thread::sleep(Duration::from_millis(60));
+            thread::sleep(Duration::from_millis(500));
             socket
                 .write_all(&response(h, &[value; BLOCK_SIZE]))
                 .unwrap();
@@ -231,7 +231,9 @@ fn race_budget_starts_the_challenger_only_after_the_primary_is_late() {
         (address, server)
     };
     let (second, second_server) = member(value, Duration::ZERO, false, 1);
-    let config = raced_config(5_000, first, second);
+    // A 100 ms budget: a prompt loopback reply stays far inside it even on a
+    // loaded parallel test host, and the 500 ms late reply far outside.
+    let config = raced_config(100_000, first, second);
     let budget = memory();
     let metrics = Metrics::new(&budget, 1).unwrap();
     let router = Router::new(&config, &budget, metrics.clone(), None).unwrap();
@@ -242,7 +244,7 @@ fn race_budget_starts_the_challenger_only_after_the_primary_is_late() {
     result.unwrap();
     assert_eq!(phases.race_winner, metrics::WINNER_NONE);
     drop(ticket);
-    thread::sleep(Duration::from_millis(20));
+    thread::sleep(Duration::from_millis(120));
     assert_eq!(counter(&metrics, "races_started"), 0);
     let ticket = router.fetch(hash).unwrap();
     router.race(&ticket, hash, None);
@@ -250,10 +252,10 @@ fn race_budget_starts_the_challenger_only_after_the_primary_is_late() {
     let (phases, result, bytes) = wait(&ticket);
     result.unwrap();
     assert_eq!(bytes, [value; BLOCK_SIZE]);
-    assert!(started.elapsed() >= Duration::from_millis(5));
-    assert!(started.elapsed() < Duration::from_millis(60));
+    assert!(started.elapsed() >= Duration::from_millis(100));
+    assert!(started.elapsed() < Duration::from_millis(500));
     assert_eq!(phases.race_winner, metrics::WINNER_SECOND);
-    assert_eq!(phases.race_budget_us, 5_000);
+    assert_eq!(phases.race_budget_us, 100_000);
     assert_eq!(counter(&metrics, "races_started"), 1);
     drop(ticket);
     wait_counter(&metrics, "race_discarded", 1);
@@ -282,7 +284,7 @@ fn stale_racer_deadline_does_not_cancel_a_reused_slots_race() {
                 .write_all(&response(h, &[value; BLOCK_SIZE]))
                 .unwrap();
             let h = request(&mut socket);
-            thread::sleep(Duration::from_millis(200));
+            thread::sleep(Duration::from_millis(500));
             socket
                 .write_all(&response(h, &[value; BLOCK_SIZE]))
                 .unwrap();
@@ -290,7 +292,7 @@ fn stale_racer_deadline_does_not_cancel_a_reused_slots_race() {
         (address, server)
     };
     let (second, second_server) = member(value, Duration::ZERO, false, 1);
-    let config = raced_config(30_000, first, second);
+    let config = raced_config(100_000, first, second);
     let budget = memory();
     let metrics = Metrics::new(&budget, 1).unwrap();
     let router = Router::new(&config, &budget, metrics.clone(), None).unwrap();
@@ -300,7 +302,7 @@ fn stale_racer_deadline_does_not_cancel_a_reused_slots_race() {
     let (phases, result, _) = wait(&ticket);
     result.unwrap();
     assert_eq!(phases.race_winner, metrics::WINNER_NONE);
-    // The slot is free again while its 30 ms deadline is still armed; the
+    // The slot is free again while its 100 ms deadline is still armed; the
     // next fetch reuses it (the free list is a stack) with a new generation.
     drop(ticket);
     let ticket = router.fetch(hash).unwrap();
@@ -310,12 +312,12 @@ fn stale_racer_deadline_does_not_cancel_a_reused_slots_race() {
     result.unwrap();
     assert_eq!(bytes, [value; BLOCK_SIZE]);
     assert!(
-        started.elapsed() < Duration::from_millis(200),
+        started.elapsed() < Duration::from_millis(500),
         "the reused slot's race was cancelled: {:?}",
         started.elapsed()
     );
     assert_eq!(phases.race_winner, metrics::WINNER_SECOND);
-    assert_eq!(phases.race_budget_us, 30_000);
+    assert_eq!(phases.race_budget_us, 100_000);
     assert_eq!(counter(&metrics, "races_started"), 1);
     assert_eq!(counter(&metrics, "race_won_second"), 1);
     assert_eq!(counter(&metrics, "race_dropped"), 0);

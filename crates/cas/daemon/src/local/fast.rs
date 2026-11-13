@@ -329,7 +329,9 @@ impl Context {
                             break;
                         }
                     };
-                    if !ticket.ready() {
+                    // A reply that already failed is raced too (the
+                    // challenger starts at once); only a verified one is not.
+                    if !ticket.verified() {
                         let local = if peer.wants_local_plan() {
                             self.sources.race_plan(hash)
                         } else {

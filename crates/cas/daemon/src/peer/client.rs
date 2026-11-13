@@ -337,6 +337,14 @@ impl Ticket {
     pub fn ready(&self) -> bool {
         self.shared.pool.lock().expect("peer pool poisoned").slots[self.index].done
     }
+    /// The primary reply verified already: nothing is left to race. A slot
+    /// that finished with an error is still raced; arming it starts the
+    /// challenger at once.
+    pub fn verified(&self) -> bool {
+        let pool = self.shared.pool.lock().expect("peer pool poisoned");
+        let slot = &pool.slots[self.index];
+        slot.done && slot.error.is_none()
+    }
     pub fn notification(&self) -> RawFd {
         self.shared.pool.lock().expect("peer pool poisoned").slots[self.index]
             .event

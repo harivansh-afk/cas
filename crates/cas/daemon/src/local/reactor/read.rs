@@ -252,7 +252,10 @@ impl Read {
                     .as_ref()
                     .ok_or_else(|| io::Error::other("manifest references an unavailable chunk"))?;
                 let ticket = peer.fetch(hash)?;
-                if !ticket.ready() {
+                // A reply that already failed (refused connection, EOF, a
+                // corrupt payload) is raced too: arming starts the challenger
+                // now. Only a verified reply leaves nothing to race.
+                if !ticket.verified() {
                     // Force-remote never consulted the store above; the race
                     // arm may use a verified local plan explicitly.
                     let local = if peer.wants_local_plan() {
