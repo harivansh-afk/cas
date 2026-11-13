@@ -392,7 +392,10 @@ fn shipping_window_ring_records_a_delayed_owner_acknowledgement() {
     assert_eq!(report["peer"]["origin_monotonic_ns"], origin);
     let now = crate::peer::metrics::monotonic_now_ns();
     for shipped in recent {
-        assert!(origin + shipped["acked_ns"].as_u64().unwrap() <= now, "{shipped}");
+        assert!(
+            origin + shipped["acked_ns"].as_u64().unwrap() <= now,
+            "{shipped}"
+        );
     }
     // The owner shipped nothing back: its ring is empty and its totals zero.
     let owner = b.command(json!({"op":"report"}));

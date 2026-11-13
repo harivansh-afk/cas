@@ -87,8 +87,13 @@ mod tests {
             store: [7; 16],
             segment_bytes: 64 << 20,
         };
-        create(&tickets, config, ChunkSize::from_bytes(BLOCK_SIZE).unwrap(), Arc::clone(&metadata))
-            .unwrap();
+        create(
+            &tickets,
+            config,
+            ChunkSize::from_bytes(BLOCK_SIZE).unwrap(),
+            Arc::clone(&metadata),
+        )
+        .unwrap();
         // A reader holding the marker open must not block another reader:
         // the daemon reads it from several threads (WAL opens, inspection).
         let held = direct::open_readonly(&tickets.root().join(NAME)).unwrap();
