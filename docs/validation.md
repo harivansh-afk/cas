@@ -255,6 +255,213 @@ guest scheduling; no CI, push, merge, deployment, CloudLab, multi-host
 (`cas-two-host`) or guest-measured run occurred in this session. The
 multi-host N=2/N=4 suites from the 2026-11-09 entry were not repeated here.
 
+### Follow-up (same day): flake fix, review fixes, multi-host suites
+
+Coordinator follow-ups on the same branch; **tested revision `57acfcd5d67f690787ac9d5bca8f32710f672561`**
+(commits `1111965`…`57acfcd`), clean on a second fresh Freestyle VM
+`cas-build-integration` (`vm-0b06f9f7927c4a8093127b61daa71248`, same shape,
+Nix and procedure as above; the first VM had been deleted after the entry
+above). The VM was deleted after export. Nothing was pushed or merged.
+
+#### The `peer`-filter flake: two causes, both fixed at the source
+
+Reproduction on the unmodified head `15754ae`: `cargo test -p cas-daemon
+--lib -- peer` ten times → **4/10 failed** (`failed_retained_negotiation…`
+three times with `host.json` `startup_error: "operation would block"`, i.e.
+`host_service::serve` failed at the root lock before binding any socket, and
+`race_completes_from_the_local_copy…` once). Skipping the one test that
+spawns a subprocess with a `pre_exec` hook → **0/10 failed**; skipping the
+`posix_spawn` loopback tests instead → **3/10 failed**. With a `pre_exec`
+hook `Command` must `fork()` the large multi-threaded test binary, and
+between fork and exec the child holds a copy of every open description, so a
+`flock` another test has just released stays held for milliseconds (locks
+live on the description). Fix (`1111965`): the descriptor-limit child lowers
+its own `RLIMIT_NOFILE` from the environment and `Command` uses
+`posix_spawn`. A first attempt at lock-holder diagnostics was wrong twice
+(hex inode match against the decimal `/proc/locks` field; the "holder" it
+printed was its own contender descriptor) and its `/proc/*/fd` scan was slow
+enough to distort the retry budgets; that probe was discarded. The 10/10
+failures recorded while it was in place were mostly a second mistake of
+mine: the `try_connect` helper had dropped the feature/protocol negotiation,
+so the service never saw the inflight request; fixed before any kept run.
+
+With the fork window gone the `WouldBlock` still recurred once in 14 runs
+(`Log::create` in a test helper). Second cause: `geometry::config` read the
+immutable store marker `chunk-format.v3` through `direct::open`, which takes
+an **exclusive** `flock` for a transient read-only check; every WAL open
+(`append/shared.rs`) and every store inspection reads it, from several
+threads of one daemon and from fixtures beside it, so concurrent readers of
+one root collided. Fix (`4ba5520`): readers take a shared lock
+(`direct::open_readonly`); `create` keeps the exclusive one; unit test.
+
+A read-path bug surfaced by the same loops (`3ff5d42`): both schedulers armed
+the race only while the primary ticket was not `ready()`; a failure that
+landed first (refused connection, EOF, a corrupt payload verified on the
+worker thread) made the ticket ready, so the read was never raced and failed
+closed although the local copy or second owner would have served it —
+intermittent `ConnectionRefused` and `races_started 0` in the race tests.
+`Ticket::verified` now distinguishes a verified reply (nothing to race) from
+a failed one (raced; arming an already failed primary starts the challenger
+at once). Two timing assumptions in tests were widened to what a loaded
+debug host can honour: router-level race budgets 5 ms → 100 ms against
+500 ms late replies, and the delayed-server loopback test's server delay
+1 ms → 10 ms (`c463a3c`).
+
+Loops on the fixed tree (debug, parallel, 8 threads, `peer` filter = 32
+tests incl. the loopback subprocess tests): after the fork fix and the
+shared-reader change, 12/12 then 15/15 (ten flags off, five race arm) and
+three full daemon-lib runs; the full campaign on `97575b8` added 10/10 off +
+5/5 race with one `WouldBlock` in a `Log::create` of the parallel loop
+(1 in about 40 runs), traced to the marker's *creator* still taking an
+exclusive lock (`11c2f57`); 20 runs on that head: 18/20, the two misses
+being the delayed-server test counting a legitimately unraced read
+(`d94f345`); 20 runs on `d94f345`: 19/20, the miss a run in which two
+unrelated tests timed out together (11.7 s wall versus 2.7 s; a stall of
+the shared VM, not a code path); 10 runs on `57acfcd` (rustfmt of that test hunk): 10/10. The `just check`
+of that loop failed with eleven unrelated tests at their 5 s request
+deadline in one run and the daemon-lib binary at 110 s instead of 44 s;
+`dmesg` showed hung `xfs-sync/loop*` workqueues (`xfs_log_worker` pending)
+from the four 16 GiB XFS images loop-mounted for the multi-host runs,
+which also explains the loop-10 miss. With those images unmounted and
+detached, `just check` passed twice in a row on `57acfcd` (**599 passed, 0
+failed, 30 ignored**, 14 Python tests). Three timing assumptions in
+the race tests were corrected rather than tolerated along the way: the
+corrupt-reply test asserted the reply's error before its discard (the local
+copy can win before the transport has connected); the delayed-server test's
+"700/700 local wins" is a timing claim the debug parallel suite cannot
+honour (half the reads lost to the 1 ms reply under load once), so the 95 %
+floor applies to release builds and the debug build asserts exact accounting
+(wins sum to starts, one discard per start, wasted bytes equal local wins ×
+frame, 700 verified, 0 errors, unraced reads counted); the failed-primary
+test's 150 ms wall-time guard tripped at 158 ms and is now a loose guard
+against a 2 s budget. A 10 ms server delay was tried and rejected: 700
+serial replies back up past the 2 s GET timeout.
+
+#### Review fixes (nine findings)
+
+- `67c5cd6` (1) `SlotRef::due` on a generation mismatch no longer takes the
+  newer occupant's `pending`; test `stale_racer_deadline_does_not_cancel_a_reused_slots_race`.
+- `5c84944` (2) `fast.rs` fails the shared host gate only for failures of
+  shared IO (poll-time: a GET reply, a waited publication, the cache fill);
+  local exhaustion while joining fails only the read and its image. Test
+  `registry_exhaustion_after_a_waiter_joined_fails_only_the_image`.
+- `1905ffc` (3) `validate_interval` refuses a segment too small for one WAL
+  batch instead of underflowing; unit test at and below the floor.
+- `5c84944` (4) one fetch-registry state machine in `local/chunk.rs`
+  (`Sources::join`, `Fetch::publish`) used by the reactor and the inline
+  path; (5) `decline` keeps the `Io`; (6) `cas_core::eventfd::duplicate` is
+  the one descriptor duplication, transport notifies are `OwnedFd`; (8)
+  `receive(wait)` with pending inline reads blocks on the frontend eventfd
+  (the reactor already signals it after every mailbox send); (9) the FLUSH
+  table overflow counts `fast.flush_overflow` and logs once.
+- `c2b30ad` (7) image keys through `cas_core::id::hex`.
+- `29da053` two-host runner settings `peer_race_us` / `fast_settled_reads`
+  (needed for the "both flags" multi-host arm; unit test).
+- `1389b8a` ring origin: `peer.origin_monotonic_ns` and
+  `fleet.shipping.origin_monotonic_ns` are the `CLOCK_MONOTONIC` reading taken
+  with the ring origin, so a ring time `ns` is the host instant
+  `origin_monotonic_ns + ns` (documented in `peer-fetch.md` and `fleet.md`;
+  tests: reads stamped after a known instant convert to later instants
+  bounded by now; the shipping ring shares the origin). Ring entries are
+  unchanged.
+- `7295c9c` fast path: inline completions signal the frontend completion
+  eventfd (found by the multi-host runs below).
+
+#### Outcomes on `57acfcd`
+
+- fmt, strict Clippy: clean. `just check`: **599 Rust tests passed, 0
+  failed, 30 ignored**, 14 Python tests.
+- Peer suite (`peer` filter, 32 selected): off **32**, fast **32**, race
+  **32**, both **32** passed (2 ignored entry points each); fleet: **20/1
+  ignored** in all four arms; `local::host::tests::fast` 5/5 (off, race);
+  importer 2/2; `peer` filter loops: 9/10 off (see below), 5/5 race.
+- Release loopback, three runs per arm (same method as above; this VM):
+
+| Arm | Receipt→send p50 | p99 | Verified→completion p50 | p99 | Total p50 | Total p99 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Flags off | 21.8–27.3 | 37.9–65.1 | 31.1–36.3 | 49.7–78.6 | 96.3–119.8 | 146.5–208.6 |
+| `--fast-settled-reads` | 8.1–12.4 | 20.2–26.6 | 13.7–19.0 | 28.5–37.9 | 55.3–74.1 | 93.4–109.6 |
+| Race 100 µs + local, fast off | 22.7–32.0 | 37.5–47.9 | 29.2–39.1 | 53.5–54.0 | 93.0–124.6 | 139.7–161.0 |
+| Race 100 µs + local + fast | 8.7–14.8 | 16.8–31.7 | 16.6–22.4 | 31.0–43.0 | 72.5–93.1 | 103.5–123.0 |
+
+  Every run 700 verified, 0 errors, `Σ images.verified_bytes = 4096 ×
+  verified`; race arms 11–18 starts per 700 reads (5–13 local wins), one
+  discard per start, `race_dropped` 0; `peer.origin_monotonic_ns` present.
+  Delayed server (1 ms reply, 100 µs budget, release, standalone):
+  **700/700 local wins** with and without the fast flag, `race_discarded`
+  700, wasted 2,884,000 bytes, 0 errors; total median 479.8 µs (fast off) /
+  406.6 µs (fast on).
+
+#### Multi-host N=2 and N=4
+
+The two-host runner ran on this VM with every member local (as the N=4 run
+of the 2026-11-09 entry did on one of its VMs): members on separate 16 GiB
+XFS loop mounts `/mnt/fleet0..3`, GET/bulk ports 17483–17490 on 127.0.0.1,
+daemons pinned to vCPUs 0–3 and guests to 4–7, nested KVM guests, settings
+as the 2026-11-09 run (128 MiB image, 1 MiB data, 4 MiB/s shipping, 5 s
+windows, QD 1/4, one repeat); N=2 all six cases, N=4 the five
+(`raw-rsync` is two-node). The dev shell's `mkfs.xfs` 6.19 wrote feature
+bits (`0xc0`) kernel 6.1 rejects; Ubuntu's xfsprogs 6.6 with
+`-m rmapbt=0,inobtcount=0 -i nrext64=0` mounted. `cas-two-host` gained
+`settings.peer_race_us` / `fast_settled_reads` (`29da053`) so the "both
+flags" arm passes `--peer-race-us 100 --fast-settled-reads` to every fleet
+host.
+
+**First attempt (tree `48f36e5`):** flags off, N=2 and N=4 both passed
+`flows-k1`, `flows-k2`, `reads-memory` and failed in `reads-storage`
+(N=2: the contention writer's fio SSH call exceeded its 260 s timeout; N=4:
+`r0-contention-writer` fio exit 1); **both flags on, N=2 and N=4 failed the
+very first guest boot** (`flows-k1` seed: "experiment readiness deadline").
+Attribution with `flows-k1` alone: `fast_settled_reads` only → the same
+boot stall; `peer_race_us` only → pass. Cause (`7295c9c`): a vhost-user
+backend learns of completions only through its completion eventfd (the
+reactor writes it after every mailbox send, a GET reply writes it from the
+transport); a read the fast path completed inline (a hole or cache hit on a
+settled image, which is what a booting guest reads) was queued without any
+signal, so it waited for an unrelated wake. The native harness and the
+loopback tests poll `receive()` and never saw it; this is the first time a
+real guest booted on a `--fast-settled-reads` host. Regression test:
+an inline hole read makes the Local's completion eventfd readable before
+`receive()` is called.
+
+**Second attempt (`ba649d9`):** flags off N=2 passed all six cases; both
+flags still stalled the first boot. With gdb attached to the stalled host
+(`results/integration-1113/gdb-*.txt`): `vring_worker` blocked in
+`state::Gate::lock` called from `fast::Context::enqueue`, the main thread
+blocked in `HostGate::failure` behind it, reactor and transport idle. The
+vhost-user backend holds the image completion gate (host failure mutex plus
+image state) across admission and publication, and the fast path, running on
+that thread, locked the same gate to check for a failure and to record one:
+a self-deadlock on the first settled read of a booting guest; the service
+loop then blocked behind it (telemetry stopped after seven seconds) and the
+guest hung in its disk probe. The native harness never holds the gate around
+`enqueue`. Fix (`c571079`): `Gate::is_failed` (an atomic mirror written when
+a guard drops) and `Gate::fail_pending` / `HostGate::fail_pending` (applied
+by the next `lock()` / `failure()`); the fast path uses only these, and
+`receive(wait)` bounds its eventfd wait as a safety net because the
+backend's epoll handler drains the same descriptor. Regression: an inline
+read with the gate held is served; a failure recorded under the gate
+declines the next inline read without locking.
+
+**Third attempt (`97575b8`, after both fast-path fixes): every suite
+passed.** N=2 flags off: `flows-k1`, `flows-k2`, `reads-memory`,
+`reads-storage`, `raw-rsync`, `independent-stores` (6/6, 10:49–10:56 UTC);
+N=2 both flags (`--peer-race-us 100 --fast-settled-reads` on every fleet
+host): 6/6 (10:56–11:03); N=4 flags off: `flows-k1`, `flows-k2`,
+`reads-memory`, `reads-storage`, `independent-stores` (5/5, 11:03–11:08);
+N=4 both flags: 5/5 (11:08–11:14); the fast-only `flows-k1` attribution run
+passed as well. All members on one 8-vCPU VM (placement and protocol across
+one kernel, not host isolation, as the 2026-11-09 N=4 run); the earlier
+`reads-storage` writer timeouts of the first attempt did not recur and are
+recorded as unexplained one-offs of that attempt. Controller and host
+outputs are in the evidence archive (`mh/<run>/`).
+
+Evidence: `results/integration-1113/{skiploop,lockloop,lockloop2,loop3,campaign2,campaign3,multihost}.log`,
+`evidence/evidence-2.tgz` (every VM log, loopback JSON, controller and host
+outputs of the multi-host runs) with its SHA-256 in `evidence/export-2.log`;
+`multihost/*.json` are the configurations. VM ledger `resources.json`
+(`vm-0b06f9f7927c4a8093127b61daa71248` created, granted, deleted).
+
 ## 2026-11-13 — Measurement flags: attach window, metadata budget, per-image reads, shipping window
 
 Branch `feat/measure-flags` from `main` (`35add83`, code identical to the
