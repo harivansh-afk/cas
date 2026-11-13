@@ -16,6 +16,8 @@ from agent import (
     Agent,
     checked,
     effective_sizing,
+    marker_probe,
+    rpc_budget,
     fio_options,
     image_id,
     parse_block_stat,
@@ -24,6 +26,7 @@ from agent import (
 )
 from runner import (
     DEFAULT_CASES,
+    PEER_COUNTERS,
     RING_RETENTION,
     aggregate_fio,
     apply_overrides,
@@ -58,12 +61,12 @@ def report(sent=0, memory=0, storage=0):
         },
         "peer": {
             "counters": {
-                "gets": 0,
-                "verified": 0,
-                "errors": 0,
+                **{key: 0 for key in PEER_COUNTERS},
+                "max_inflight": 0,
                 "server_memory": memory,
                 "server_store": storage,
-            }
+            },
+            "get_wire": {"sent": 0, "received": 0},
         },
     }
 
@@ -406,20 +409,6 @@ class HarnessSchemaTests(unittest.TestCase):
         def peer(gets, has, inflight):
             value = report()
             value["peer"]["counters"].update(
-                {
-                    key: 0
-                    for key in (
-                        "connections",
-                        "server_missing",
-                        "server_errors",
-                        "completed_reads",
-                        "failed_reads",
-                        "inline_attempts",
-                        "inline_completed",
-                    )
-                }
-            )
-            value["peer"]["counters"].update(
                 {"gets": gets, "has": has, "max_inflight": inflight}
             )
             value["peer"]["get_wire"] = {"sent": gets * 24, "received": gets * 4120}
@@ -516,6 +505,10 @@ class HarnessSchemaTests(unittest.TestCase):
                 self.assertEqual(base0["sha256"], base1["sha256"])
                 self.assertEqual(written["g0", "base"], written["g1", "base"])
                 self.assertEqual(
+                    (agent.case / "payload-7-65536-plain.sha256").read_text().strip(),
+                    base0["sha256"],
+                )
+                self.assertEqual(
                     (agent.case / "g0/base-payload").stat().st_ino,
                     (agent.case / "g1/base-payload").stat().st_ino,
                 )
@@ -526,6 +519,17 @@ class HarnessSchemaTests(unittest.TestCase):
                     agent.write_payload("g0", "odd", 1, 4097)
             finally:
                 agent.close()
+
+    def test_rpc_budgets_follow_the_request_and_probe_shares_the_stat_tail(self):
+        self.assertEqual(rpc_budget("report", {}), 900)
+        self.assertEqual(rpc_budget("boot", {}), 2400)
+        self.assertEqual(rpc_budget("boot_burst", {"guests": [1, 2, 3]}), 4200)
+        self.assertEqual(
+            rpc_budget("run_commands", {"commands": ["a", "b"], "timeout": 100}), 260
+        )
+        probe = marker_probe("/mnt/cas/data")
+        self.assertTrue(probe.startswith("dd if=/mnt/cas/data bs=4096 count=1 "))
+        self.assertIn("/sys/block/vda/stat; stat -f -c '%b %f %S' /mnt/cas", probe)
 
     def test_block_stat_parsing_rejects_short_lines(self):
         stat = parse_block_stat("8 0 64 3 1 0 8 2 0 5 5")

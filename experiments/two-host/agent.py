@@ -24,6 +24,30 @@ IMAGE = "02" * 16
 EMPTY = "03" * 16
 CLONE = "04" * 16
 PAYLOAD_PIECE = 16 * 1024**2
+# Seconds the owner waits for each agent operation; long operations declare
+# their own budget from the request so the owner never guesses by name.
+RPC_BUDGET_S = {"default": 900, "boot": 2400, "boot_burst": 2400, "run_commands": 60}
+
+
+def rpc_budget(method, args):
+    budget = RPC_BUDGET_S.get(method, RPC_BUDGET_S["default"])
+    if method == "boot_burst":
+        budget += 600 * len(args["guests"])
+    elif method == "run_commands":
+        budget += args.get("timeout", 1800) * len(args["commands"])
+    return budget
+
+
+# 8. The boot probe and guest_stat share one guest-side statistics tail.
+GUEST_STAT = "cat /sys/block/vda/stat; stat -f -c '%b %f %S' /mnt/cas"
+
+
+def marker_probe(path):
+    """Direct read of a file's first block (the marker), then device/ext4 stats."""
+    return (
+        f"dd if={path} bs=4096 count=1 iflag=direct status=none | tr -d '\\000'; echo; "
+        + GUEST_STAT
+    )
 
 
 def image_id(family, index):
@@ -784,8 +808,13 @@ class Agent:
                     first = False
                     file.write(piece)
                     remaining -= len(piece)
-        with shared.open("rb") as file:
-            digest = hashlib.file_digest(file, "sha256").hexdigest()
+        recorded = shared.with_suffix(".sha256")
+        if recorded.exists():
+            digest = recorded.read_text().strip()
+        else:
+            with shared.open("rb") as file:
+                digest = hashlib.file_digest(file, "sha256").hexdigest()
+            recorded.write_text(digest + "\n")
         link = self.case / guest / f"{name}-payload"
         if not link.exists():
             os.link(shared, link)
@@ -807,10 +836,7 @@ class Agent:
 
     def guest_stat(self, guest):
         """Guest-observed device reads and ext4 occupancy; no host attribution."""
-        output = self.shell(
-            guest,
-            "cat /sys/block/vda/stat; stat -f -c '%b %f %S' /mnt/cas",
-        ).splitlines()
+        output = self.shell(guest, GUEST_STAT).splitlines()
         blocks, free, fragment = (int(v) for v in output[-1].split())
         return {
             "device": parse_block_stat(output[0]),

@@ -20,7 +20,9 @@ from agent import (
     IMAGE,
     Agent,
     image_id,
+    marker_probe,
     parse_block_stat,
+    rpc_budget,
     stop,
     wait_for,
     write_json,
@@ -287,7 +289,11 @@ def aggregate_fio(results):
     jobs = [job for result in results for job in result["jobs"]]
     if not jobs:
         raise ValueError("no fio jobs to aggregate")
-    aggregate = {"guests": len(results), "jobs": len(jobs), "errors": 0}
+    aggregate = {
+        "guests": len(results),
+        "jobs": len(jobs),
+        "errors": sum(1 for job in jobs if job["error"]),
+    }
     for direction in ("read", "write"):
         rows = [job[direction] for job in jobs]
         summary = {
@@ -309,7 +315,6 @@ def aggregate_fio(results):
                     "percentile": bin_percentiles(bins),
                 }
         aggregate[direction] = summary
-        aggregate["errors"] += sum(1 for job in jobs if job["error"])
     if aggregate["errors"]:
         raise ValueError("aggregated fio jobs include errors")
     return aggregate
@@ -500,8 +505,10 @@ def deltas(before, after):
 
 
 def peer_delta(before, after):
+    """The owner-side subset of peer_counters used by the read cohorts."""
+    counters = peer_counters(before, after)
     return {
-        key: after["peer"]["counters"][key] - before["peer"]["counters"][key]
+        key: counters[key]
         for key in ("gets", "verified", "errors", "server_memory", "server_store")
     }
 
@@ -592,17 +599,14 @@ class Remote:
         self.events = (directory / "rpc.jsonl").open("x")
 
     def call(self, method, **args):
-        request = {"method": method, "args": args}
+        budget = rpc_budget(method, args)
+        request = {"method": method, "args": args, "budget_s": budget}
         self.process.stdin.write(json.dumps(request) + "\n")
         self.process.stdin.flush()
-        timeout = 900
-        if method == "boot":
-            timeout = 2400
-        elif method == "boot_burst":
-            timeout = 2400 + 600 * len(args["guests"])
-        elif method == "run_commands":
-            timeout = 60 + args.get("timeout", 1800) * len(args["commands"])
-        value = self.replies.get(timeout=timeout)
+        try:
+            value = self.replies.get(timeout=budget)
+        except queue.Empty:
+            value = {"error": f"no reply within the {budget} s budget"}
         self.events.write(json.dumps({"request": request, "response": value}) + "\n")
         self.events.flush()
         if "error" in value:
@@ -1042,10 +1046,7 @@ class Experiment:
                         <= before[1]["peer"]["counters"]["verified"]
                     ):
                         raise ValueError("no verified remote reads")
-                    since = max(
-                        (r["completed_ns"] for r in before[1]["peer"]["recent"]),
-                        default=0,
-                    )
+                    since = ring_since(before[1])
                     result["cohorts"].append(
                         {
                             "name": tag,
@@ -1084,9 +1085,7 @@ class Experiment:
                 )
             finished = [a.call("finish_fio", name=writer) for writer in writers]
             writer = finished[0] if guests == 1 else finished
-            since = max(
-                (r["completed_ns"] for r in before[1]["peer"]["recent"]), default=0
-            )
+            since = ring_since(before[1])
             result["cohorts"].append(
                 {
                     "name": tag,
@@ -1209,10 +1208,7 @@ class Experiment:
         before = self.report()
         since = ring_since(before[1])
         names = guest_names("burst", n)
-        probe = (
-            "dd if=/mnt/cas/unique bs=4096 count=1 iflag=direct status=none | tr -d '\\000'; echo;"
-            " cat /sys/block/vda/stat; stat -f -c '%b %f %S' /mnt/cas"
-        )
+        probe = marker_probe("/mnt/cas/unique")
         guests = self.boot_burst(
             1, names, self.clones, burst["guest"], probe, sample_ring=True
         )
@@ -1362,10 +1358,7 @@ class Experiment:
         handoff_b["after_ns"] = b.call("clock")["monotonic_ns"]
         anchor = handoff_b["after_ns"]
         migrated = self.report()
-        probe = (
-            "dd if=/mnt/cas/data bs=4096 count=1 iflag=direct status=none | tr -d '\\000'; echo;"
-            " cat /sys/block/vda/stat; stat -f -c '%b %f %S' /mnt/cas"
-        )
+        probe = marker_probe("/mnt/cas/data")
         guest = self.boot_burst(
             1, ["resumed"], [IMAGE], resume["guest"], probe, sample_ring=True
         )[0]
