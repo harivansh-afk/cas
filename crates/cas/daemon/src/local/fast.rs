@@ -171,7 +171,7 @@ impl Context {
     /// a read completed inline here would otherwise sit in the completion
     /// queue until an unrelated wake, which stalled a booting guest.
     pub fn signal(&self) -> io::Result<()> {
-        cas_core::eventfd::notify(std::os::fd::AsFd::as_fd(&self.notify))
+        notify(&self.notify)
     }
 
     /// Serve the read inline, start its remote fetches, or decline it. The
