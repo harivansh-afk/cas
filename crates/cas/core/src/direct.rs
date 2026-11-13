@@ -41,6 +41,21 @@ pub(crate) fn open_readonly(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+/// Create an immutable record (the store geometry marker) under a shared
+/// lock: `create_new` already guarantees no other opener, and a shared lock
+/// means a descriptor inherited by a forked child for the fork-to-exec
+/// window can never block the readers that follow.
+pub(crate) fn create_immutable(path: &Path) -> io::Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .custom_flags(libc::O_DIRECT | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    file.try_lock_shared().map_err(io::Error::from)?;
+    Ok(file)
+}
+
 pub(crate) fn open(path: &Path, create: bool) -> io::Result<File> {
     let file = OpenOptions::new()
         .read(true)

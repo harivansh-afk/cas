@@ -16,7 +16,7 @@ pub(super) fn create(
     bytes[16..32].copy_from_slice(&config.store);
     put64(bytes, 32, config.segment_bytes);
     put32(bytes, 4092, checksum(bytes, 4092));
-    let file = direct::open(&tickets.root().join(NAME), true)?;
+    let file = direct::create_immutable(&tickets.root().join(NAME))?;
     direct::write_bytes(&file, page.as_slice(), 0)?;
     direct::sync_all(&file)?;
     direct::sync_all(tickets.root_file())
@@ -96,6 +96,11 @@ mod tests {
         .unwrap();
         // A reader holding the marker open must not block another reader:
         // the daemon reads it from several threads (WAL opens, inspection).
+        // Neither does the creator's own descriptor, which a forked child can
+        // hold past the creator's close.
+        let creator = direct::create_immutable(&directory.path().join("other-marker")).unwrap();
+        assert!(direct::open_readonly(&directory.path().join("other-marker")).is_ok());
+        drop(creator);
         let held = direct::open_readonly(&tickets.root().join(NAME)).unwrap();
         let (recorded, size) = self::config(&tickets, Arc::clone(&metadata)).unwrap();
         assert_eq!(recorded.store, config.store);
