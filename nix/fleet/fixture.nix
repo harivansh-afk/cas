@@ -33,9 +33,20 @@ let
           images = 4;
           base_bytes = 4 * 1024 * 1024;
           unique_bytes = 1024 * 1024;
+          # Two direct reads of distinct unique-region chunks, then the shared base.
+          working_set = [
+            "dd if=/mnt/cas/unique bs=4096 count=64 iflag=direct status=none | sha256sum"
+            "dd if=/mnt/cas/unique bs=4096 count=64 skip=128 iflag=direct status=none | sha256sum"
+            "sha256sum /mnt/cas/base"
+          ];
         };
         resume = {
           setup_bytes = 2 * 1024 * 1024;
+          working_set = [
+            "dd if=/mnt/cas/data bs=4096 count=64 iflag=direct status=none | sha256sum"
+            "dd if=/mnt/cas/data bs=4096 count=64 skip=256 iflag=direct status=none | sha256sum"
+            "sha256sum /mnt/cas/data"
+          ];
         };
       };
       nodes = [

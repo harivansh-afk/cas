@@ -601,11 +601,18 @@ class Agent:
             **timings,
         }
 
-    def boot_burst(self, guests, probe=None):
+    def clock(self):
+        """This host's monotonic clock, for anchors other hosts cannot supply."""
+        return {"monotonic_ns": time.monotonic_ns()}
+
+    def boot_burst(self, guests, probe=None, sample_ring=False):
         """Launch every guest back to back, then observe each one concurrently.
 
         `probe` is a shell script run immediately after the first successful
-        command; its output and completion time are recorded per guest.
+        command; its output and completion time are recorded per guest. With
+        `sample_ring` the daemon report (and so its bounded remote-read ring)
+        is taken right after the probe, before later reads can evict the
+        earliest post-boot records.
         """
         if not guests:
             raise ValueError("burst needs at least one guest")
@@ -616,6 +623,9 @@ class Agent:
             if probe:
                 result["probe"] = self.shell(guest["name"], probe)
                 result["probe_ns"] = time.monotonic_ns()
+            if sample_ring:
+                result["report_at_ready"] = self.report()
+                result["report_at_ready_ns"] = time.monotonic_ns()
             return result
 
         with ThreadPoolExecutor(max_workers=len(guests)) as executor:
@@ -630,8 +640,92 @@ class Agent:
             for guest, launch, seen in zip(guests, launches, observed, strict=True)
         ]
 
-    def shell(self, guest, script):
-        return checked([*self.guests[guest], shlex.join(["sh", "-eu", "-c", script])])
+    def shell(self, guest, script, timeout=600):
+        return checked(
+            [*self.guests[guest], shlex.join(["sh", "-eu", "-c", script])],
+            timeout=timeout,
+        )
+
+    def run_commands(self, guests, commands, label, timeout=1800):
+        """Replay a recorded command list in every guest at once.
+
+        Each guest runs its list in order from the data disk; a failing command
+        fails the case. Completion times are this host's monotonic clock, the
+        same clock as the guest launch milestones. Stdout is retained per
+        command under the guest's directory, not in the RPC reply.
+        """
+        if not guests or not commands:
+            raise ValueError("working set needs guests and commands")
+        if not label.replace("-", "").isalnum():
+            raise ValueError("invalid working-set label")
+
+        def replay(guest):
+            rows = []
+            for index, command in enumerate(commands):
+                output = self.case / guest / f"working-set-{label}-{index}.out"
+                started = time.monotonic_ns()
+                text = self.shell(guest, "cd /mnt/cas\n" + command, timeout)
+                completed = time.monotonic_ns()
+                output.write_text(text)
+                rows.append(
+                    {
+                        "index": index,
+                        "command": command,
+                        "started_ns": started,
+                        "completed_ns": completed,
+                        "elapsed_ns": completed - started,
+                        "stdout_bytes": len(text.encode()),
+                        "stdout_sha256": hashlib.sha256(text.encode()).hexdigest(),
+                    }
+                )
+            return {"name": guest, "commands": rows}
+
+        with ThreadPoolExecutor(max_workers=len(guests)) as executor:
+            return list(executor.map(replay, guests))
+
+    def calibrate_ring(self, guest, path, reads=32, chunk_bytes=16384):
+        """Bracket the daemon's ring clock against this host's monotonic clock.
+
+        The peer ring stamps reads in nanoseconds since the peer runtime
+        started, so its records are not directly comparable to launch or
+        command timestamps. Each direct 4 KiB read of a distinct chunk is
+        bracketed on the host clock; a read that adds exactly one ring record
+        bounds the ring origin to [started - received, completed - completed].
+        Reads of locally owned chunks add no record and are retained as such.
+        """
+        if reads < 1 or chunk_bytes % 4096:
+            raise ValueError("calibration needs reads and a 4 KiB chunk multiple")
+        if "/" not in path or any(c.isspace() for c in path):
+            raise ValueError("calibration path must be an absolute guest path")
+        rows = []
+        previous = self.report()["peer"]
+        for index in range(reads):
+            skip = index * chunk_bytes // 4096
+            started = time.monotonic_ns()
+            self.shell(
+                guest,
+                f"dd if={path} bs=4096 count=1 skip={skip} iflag=direct status=none > /dev/null",
+            )
+            completed = time.monotonic_ns()
+            current = self.report()["peer"]
+            known = {record["id"] for record in previous["recent"]}
+            rows.append(
+                {
+                    "index": index,
+                    "offset": skip * 4096,
+                    "started_ns": started,
+                    "completed_ns": completed,
+                    "completed_reads": current["counters"]["completed_reads"]
+                    - previous["counters"]["completed_reads"],
+                    "records": [
+                        record
+                        for record in current["recent"]
+                        if record["id"] not in known
+                    ],
+                }
+            )
+            previous = current
+        return {"guest": guest, "path": path, "chunk_bytes": chunk_bytes, "reads": rows}
 
     def fio(self, guest, kind, name, seconds=None, depth=1, seed=42, rate=None):
         options = fio_options(
@@ -1115,6 +1209,9 @@ class Agent:
             "launch",
             "await_guest",
             "boot_burst",
+            "clock",
+            "run_commands",
+            "calibrate_ring",
             "shell",
             "fio",
             "finish_fio",

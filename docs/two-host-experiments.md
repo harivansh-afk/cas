@@ -179,6 +179,74 @@ observed while booting and verifying (ship/sync flow bytes, GET counters and
 wire bytes), followed by an explicit `sync` on B whose bytes are kept separate.
 `raw-rsync` and `zfs-incremental` are unchanged controls.
 
+### Working set, boot and first useful IO
+
+`settings.working_set` is a JSON list of guest shell command strings (for
+example the bash commands of a recorded agent trajectory; the harness knows
+nothing about their origin). `burst.working_set` and `resume.working_set`
+override it per case; an empty list disables the phase and leaves
+`working_set` null. After the marker read, every guest runs the list in order
+with `sh -eu -c` from `/mnt/cas`; a failing command fails the case. Each
+command records its start and completion on host B's monotonic clock, its
+stdout size and SHA-256 (stdout itself is retained under the guest's output
+directory as `working-set-<pass>-<index>.out`). The daemon report is taken on
+every member before and after the whole list, so `cold.peer[1].gets` — B's
+GET delta — is the **working set**: the chunks the replayed commands actually
+fetched, with `cold.wire` and `destination_get_wire` as its bytes. The same
+list then runs again immediately as the `warm` pass, a control for how much of
+the cold time was storage rather than the commands themselves. In
+`burst-images` every guest replays the list at once, so the counters are the
+burst's aggregate and the per-guest numbers are timings only; the burst's
+`windows.to_verified` then also spans the replay. The replay
+runs **before** the full checksum verification, which would otherwise pull the
+whole disk through the guest page cache first.
+
+The `intervals` block holds the paper's storage-path metrics. Everything in it
+is on host B's monotonic clock; cross-host clocks are never subtracted. For
+`resume-elsewhere` the anchor is `handoff_b.after_ns`, B's clock read by B's
+agent immediately after `cas-fleet migrate` returned to the controller; it is
+late by one controller→B RPC (`handoff_bracket_ns` is the before/after width
+of that bracket). For `burst-images` the anchor is the first QEMU launch.
+
+- `launch_delay_ns`: anchor → QEMU `execve` on B. Controller RPC, result
+  directory creation and the wait for the daemon's vhost socket.
+- `boot_ns`: QEMU launch → the guest's `ready` marker. Firmware, kernel and
+  systemd of the preinstalled boot closure, then `mount` of the migrated ext4
+  disk (so the first data-disk reads — superblock, journal, group
+  descriptors — fall inside it). Excludes SSH.
+- `ssh_ready_ns`, `first_command_ns`, `marker_ns`: launch → sshd banner,
+  → first successful SSH command, → marker block read; cumulative, as in the
+  per-guest burst summary. `time_to_marker_ns` is anchor → marker.
+- `first_useful_io`: anchor → the first guest read that reached B's daemon
+  **and needed a remote chunk**. Reads served from B's own store never enter
+  the daemon's ring, so this is the first remote fetch, not the first block
+  request. The ring stamps records in nanoseconds since the peer runtime
+  started, so `ring_calibration` brackets that origin against B's clock after
+  all windows close: direct 4 KiB reads of distinct chunks, each bracketed on
+  the host clock; a read that added exactly one ring record bounds the origin
+  to `[started − received_ns, completed − completed_ns]`, and the bounds are
+  intersected. `ns` is the midpoint, `lower_ns`/`upper_ns` the bracket. The
+  ring is sampled right after each guest's probe, after the epoch continue
+  and after the working set; if the earliest sample is at full retention
+  with no pre-anchor record, the first read may have been evicted and the
+  value is `censored` with `ns` null. With `k` equal to the member count no
+  read is remote and the value is null with a reason.
+- `time_to_working_set_ns`: anchor → completion of the last replayed command
+  of the cold pass (per guest in the burst). It therefore includes
+  `launch_delay_ns`, `boot_ns`, SSH readiness, the marker read, the durable
+  epoch increment and the replay; `cold.guests[].replay_ns` is the replay
+  alone and `warm_replay_ns` (`warm.guests[].replay_ns`) the second pass.
+
+`migration.downtime_ns` keeps its decomposition: `stop_ns` + `handoff_ns` +
+`boot_verify_continue_ns`, on the controller's clock. In `resume-elsewhere`
+the last term now ends when the guest has read and checked the marker block
+and durably advanced the application epoch (`continue_epoch`); the full data
+checksum runs after the working set and is reported as `final_verify_ns`, with
+its own `final_verify_wire`/`final_verify_peer` deltas, so a configured working
+set never inflates downtime. `migration.first_command_ns` and `marker_ns` are
+measured from `handoff_b.after_ns` on B's clock (earlier revisions subtracted
+the controller's clock, which is only valid on a loopback fixture).
+
 The daemon attaches each image with a fixed 60-second recovery window
 (`RECOVERY_TIMEOUT`), measured from attachment to the guest driver's first
 queue activation. Every guest in a burst must therefore reach its virtio-blk
@@ -200,7 +268,10 @@ on the chosen node type.
 `--set guests_per_host=[4]`); the effective configuration is retained in
 `config.json`.
 
-`results.json` contains schema version, exact source revision, Nix source path,
+`results.json` is `schema_version` 3: version 2 plus, under `burst-images` and
+`resume-elsewhere`, `working_set`, `intervals`, `ring_calibration` and (resume)
+`final_verify_ns`, `migration.handoff_b` and the extra `phases.missing_chunks`
+deltas; no earlier field was renamed. It contains schema version, exact source revision, Nix source path,
 executable SHA256 hashes, configuration, hardware inventory, fio JSON+ latency
 histograms, flow bytes, raw recent remote timestamps, capacity and success/error.
 `recent_phases` retains the final bounded ring (up to 1,024 reads), not an unbiased
@@ -307,9 +378,10 @@ Both launchers accept `--cases flows-k1,flows-k2` (or other listed case names)
 for a focused development rerun, and `--set KEY=JSON` settings overrides. The
 selected list is retained in the raw configuration; a subset's success does
 not certify the omitted cases. The fixture configuration also carries four
-burst images (4 MiB base, 1 MiB unique) and a 2 MiB resume setup, but its TCG
-default list excludes the multi-guest, burst and resume arms: see the daemon
-window note above.
+burst images (4 MiB base, 1 MiB unique), a 2 MiB resume setup and a
+three-command working set (two direct reads of distinct regions, then a whole
+file checksum), but its TCG default list excludes the multi-guest, burst and
+resume arms: see the daemon window note above.
 
 The local TCG fixture allows 20 minutes for guest boot and four hours for its
 whole suite; native KVM guest boot retains a four-minute limit. Agent RPC waits

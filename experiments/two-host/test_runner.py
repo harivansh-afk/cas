@@ -23,17 +23,22 @@ from agent import (
 )
 from runner import (
     DEFAULT_CASES,
+    RING_RETENTION,
     aggregate_fio,
     apply_overrides,
     burst_guest_summary,
     classify,
     deltas,
+    first_remote_read,
+    first_useful_io,
     has_overlap,
     normalize_settings,
+    peer_clock_origin,
     peer_counters,
     phases,
     plan_cases,
     rsync_bytes,
+    working_set_summary,
 )
 
 
@@ -440,6 +445,7 @@ class HarnessSchemaTests(unittest.TestCase):
                     )[1],
                 ),
                 patch.object(Agent, "shell", lambda self, guest, script: "probe"),
+                patch.object(Agent, "report", lambda self: {"peer": {"recent": []}}),
             ):
                 result = agent.boot_burst(
                     [
@@ -459,6 +465,7 @@ class HarnessSchemaTests(unittest.TestCase):
                         },
                     ],
                     probe="cat marker",
+                    sample_ring=True,
                 )
             self.assertEqual(events[:2], [("launch", "g0"), ("launch", "g1")])
             self.assertEqual(
@@ -466,6 +473,11 @@ class HarnessSchemaTests(unittest.TestCase):
             )
             self.assertEqual([g["probe"] for g in result], ["probe", "probe"])
             self.assertTrue(all("probe_ns" in g and g["image"] for g in result))
+            # The ring sample follows the probe so marker timing stays unperturbed.
+            self.assertTrue(
+                all(g["report_at_ready_ns"] >= g["probe_ns"] for g in result)
+            )
+            self.assertEqual(result[0]["report_at_ready"], {"peer": {"recent": []}})
             with self.assertRaises(ValueError):
                 agent.boot_burst([])
         finally:
@@ -511,3 +523,255 @@ class HarnessSchemaTests(unittest.TestCase):
         self.assertEqual((stat["read_ios"], stat["read_sectors"]), (8, 64))
         with self.assertRaises(ValueError):
             parse_block_stat("1 2 3")
+
+
+def ring_record(id, received, completed, success=True):
+    return {
+        "id": id,
+        "chunks": 1,
+        "received_ns": received,
+        "success": success,
+        "phases": {
+            "send_ns": received + 1,
+            "first_byte_ns": received + 2,
+            "verified_ns": completed - 1,
+        },
+        "completed_ns": completed,
+    }
+
+
+def ring_sample(records, retention=RING_RETENTION):
+    return {"peer": {"recent": records, "retention": retention}}
+
+
+class WorkingSetTests(unittest.TestCase):
+    """Working-set configuration and the handoff/boot/first-IO arithmetic."""
+
+    def test_working_set_defaults_empty_and_is_inherited_per_case(self):
+        settings = normalize_settings(config())
+        self.assertEqual(settings["working_set"], [])
+        self.assertEqual(settings["burst"]["working_set"], [])
+        self.assertEqual(settings["resume"]["working_set"], [])
+        commands = ["sha256sum /mnt/cas/data", "wc -c < unique"]
+        shared = normalize_settings(config(working_set=commands))
+        self.assertEqual(shared["burst"]["working_set"], commands)
+        self.assertEqual(shared["resume"]["working_set"], commands)
+        own = normalize_settings(
+            config(working_set=commands, resume={"working_set": ["true"]})
+        )
+        self.assertEqual(own["resume"]["working_set"], ["true"])
+        self.assertEqual(own["burst"]["working_set"], commands)
+        cleared = normalize_settings(
+            config(working_set=commands, burst={"working_set": []})
+        )
+        self.assertEqual(cleared["burst"]["working_set"], [])
+        cfg = apply_overrides(config(), ['working_set=["ls -l"]'])
+        self.assertEqual(normalize_settings(cfg)["resume"]["working_set"], ["ls -l"])
+
+    def test_working_set_rejects_non_command_lists(self):
+        for bad in (
+            {"working_set": "ls"},
+            {"working_set": [1]},
+            {"working_set": [""]},
+            {"working_set": ["ls\0"]},
+            {"working_set": ["true"] * 257},
+            {"resume": {"working_set": "ls"}},
+            {"burst": {"working_set": [None]}},
+        ):
+            with self.subTest(bad=bad), self.assertRaises((ValueError, TypeError)):
+                normalize_settings(config(**bad))
+
+    def test_peer_clock_origin_intersects_only_single_record_reads(self):
+        # Host clock: origin at 1_000; ring stamps are host minus origin.
+        calibration = {
+            "reads": [
+                {
+                    "started_ns": 5_000,
+                    "completed_ns": 5_400,
+                    "completed_reads": 1,
+                    "records": [ring_record(1, 4_100, 4_300)],
+                },
+                {
+                    "started_ns": 6_000,
+                    "completed_ns": 6_500,
+                    "completed_reads": 0,
+                    "records": [],
+                },
+                {
+                    "started_ns": 7_000,
+                    "completed_ns": 7_300,
+                    "completed_reads": 1,
+                    "records": [ring_record(2, 6_050, 6_250)],
+                },
+            ]
+        }
+        origin = peer_clock_origin(calibration)
+        # read 1: [5000-4100, 5400-4300] = [900, 1100]; read 3: [950, 1050].
+        self.assertEqual((origin["lower_ns"], origin["upper_ns"]), (950, 1050))
+        self.assertEqual((origin["remote_reads"], origin["reads"]), (2, 3))
+        local_only = {"reads": [calibration["reads"][1]]}
+        with self.assertRaises(ValueError):
+            peer_clock_origin(local_only)
+        ambiguous = {"reads": [{**calibration["reads"][0], "completed_reads": 2}]}
+        with self.assertRaises(ValueError):
+            peer_clock_origin(ambiguous)
+        disjoint = {
+            "reads": [
+                calibration["reads"][0],
+                {
+                    "started_ns": 9_000,
+                    "completed_ns": 9_100,
+                    "completed_reads": 1,
+                    "records": [ring_record(3, 4_000, 4_050)],
+                },
+            ]
+        }
+        with self.assertRaises(ValueError):
+            peer_clock_origin(disjoint)
+
+    def test_first_remote_read_takes_the_earliest_sample_and_reports_eviction(self):
+        before = [ring_record(1, 10, 20), ring_record(2, 30, 40)]
+        ready = ring_sample(before + [ring_record(3, 90, 95), ring_record(4, 70, 80)])
+        later = ring_sample([ring_record(5, 60, 65)])
+        self.assertEqual(
+            first_remote_read([ready, later], since=40),
+            {"received_ns": 70, "censored": False},
+        )
+        self.assertEqual(
+            first_remote_read([ring_sample(before)], since=40)["received_ns"], None
+        )
+        # Full retention holding only post-anchor records may have evicted the first.
+        full = ring_sample([ring_record(i, 100 + i, 200 + i) for i in range(4)], 4)
+        self.assertTrue(first_remote_read([full, later], since=40)["censored"])
+        # A pre-anchor record still present proves nothing after it was evicted.
+        kept = ring_sample(
+            [ring_record(0, 10, 20)]
+            + [ring_record(i, 100 + i, 200 + i) for i in range(1, 4)],
+            4,
+        )
+        self.assertEqual(first_remote_read([kept], since=40)["received_ns"], 101)
+
+    def test_first_useful_io_converts_through_origin_bounds_or_stays_null(self):
+        origin = {"lower_ns": 950, "upper_ns": 1050}
+        first = {"received_ns": 4_100, "censored": False}
+        interval = first_useful_io(first, origin, anchor_ns=3_000)
+        # Host time of the read is 4_100 + [950, 1050]; anchor 3_000.
+        self.assertEqual((interval["lower_ns"], interval["upper_ns"]), (2050, 2150))
+        self.assertEqual(interval["ns"], 2100)
+        self.assertFalse(interval["censored"])
+        missing = first_useful_io({"received_ns": None, "censored": True}, origin, 0)
+        self.assertIsNone(missing["ns"])
+        self.assertTrue(missing["censored"])
+        uncalibrated = first_useful_io(first, {"unavailable": "no remote"}, 0)
+        self.assertIsNone(uncalibrated["ns"])
+        self.assertEqual(uncalibrated["reason"], "no remote")
+
+    def test_working_set_summary_measures_from_each_guest_anchor(self):
+        replay = [
+            {
+                "name": "g0",
+                "commands": [
+                    {"index": 0, "started_ns": 50, "completed_ns": 60},
+                    {"index": 1, "started_ns": 61, "completed_ns": 90},
+                ],
+            },
+            {
+                "name": "g1",
+                "commands": [{"index": 0, "started_ns": 70, "completed_ns": 100}],
+            },
+        ]
+        rows = working_set_summary(replay, {"g0": 10, "g1": 20})
+        self.assertEqual(rows[0]["time_to_working_set_ns"], 80)
+        self.assertEqual(rows[0]["replay_ns"], 40)
+        self.assertEqual(rows[0]["per_command_completion_ns"], [50, 80])
+        self.assertEqual(rows[1]["time_to_working_set_ns"], 80)
+        replay[1]["commands"][0]["completed_ns"] = 69
+        with self.assertRaises(ValueError):
+            working_set_summary(replay, {"g0": 10, "g1": 20})
+        with self.assertRaises(ValueError):
+            working_set_summary([{"name": "g2", "commands": []}], {"g2": 0})
+
+    def test_agent_replays_commands_in_order_from_the_data_disk(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent = Agent({})
+            try:
+                agent.case = Path(directory)
+                for guest in ("g0", "g1"):
+                    (agent.case / guest).mkdir()
+                scripts = []
+
+                def shell(self, guest, script, timeout=600):
+                    scripts.append((guest, script, timeout))
+                    return f"{guest}:{script.splitlines()[-1]}\n"
+
+                with patch.object(Agent, "shell", shell):
+                    result = agent.run_commands(
+                        ["g0", "g1"], ["sha256sum data", "wc -c < unique"], "cold"
+                    )
+                for guest, script, timeout in scripts:
+                    self.assertTrue(script.startswith("cd /mnt/cas\n"))
+                    self.assertEqual(timeout, 1800)
+                self.assertEqual(
+                    [s[1].splitlines()[-1] for s in scripts if s[0] == "g0"],
+                    ["sha256sum data", "wc -c < unique"],
+                )
+                self.assertEqual([g["name"] for g in result], ["g0", "g1"])
+                rows = result[0]["commands"]
+                self.assertEqual([r["index"] for r in rows], [0, 1])
+                self.assertLessEqual(rows[0]["completed_ns"], rows[1]["started_ns"])
+                self.assertEqual(
+                    (agent.case / "g0/working-set-cold-1.out").read_text(),
+                    "g0:wc -c < unique\n",
+                )
+                self.assertEqual(
+                    rows[1]["stdout_sha256"],
+                    hashlib.sha256(b"g0:wc -c < unique\n").hexdigest(),
+                )
+                with self.assertRaises(ValueError):
+                    agent.run_commands(["g0"], [], "cold")
+                with self.assertRaises(ValueError):
+                    agent.run_commands(["g0"], ["true"], "bad label")
+            finally:
+                agent.close()
+
+    def test_agent_calibration_brackets_reads_and_keeps_local_hits(self):
+        agent = Agent({})
+        try:
+            reports = iter(
+                [
+                    {"peer": {"recent": [], "counters": {"completed_reads": 0}}},
+                    {
+                        "peer": {
+                            "recent": [ring_record(7, 100, 150)],
+                            "counters": {"completed_reads": 1},
+                        }
+                    },
+                    {
+                        "peer": {
+                            "recent": [ring_record(7, 100, 150)],
+                            "counters": {"completed_reads": 1},
+                        }
+                    },
+                ]
+            )
+            reads = []
+            with (
+                patch.object(Agent, "report", lambda self: next(reports)),
+                patch.object(
+                    Agent, "shell", lambda self, g, s, timeout=600: reads.append(s)
+                ),
+            ):
+                result = agent.calibrate_ring("g0", "/mnt/cas/data", reads=2)
+            self.assertEqual(len(result["reads"]), 2)
+            self.assertIn("skip=0 ", reads[0])
+            self.assertIn("skip=4 ", reads[1])
+            self.assertEqual(result["reads"][0]["records"][0]["id"], 7)
+            self.assertEqual(result["reads"][0]["completed_reads"], 1)
+            self.assertEqual(result["reads"][1]["records"], [])
+            self.assertLessEqual(
+                result["reads"][0]["started_ns"], result["reads"][0]["completed_ns"]
+            )
+            with self.assertRaises(ValueError):
+                agent.calibrate_ring("g0", "data", reads=1)
+        finally:
+            agent.close()

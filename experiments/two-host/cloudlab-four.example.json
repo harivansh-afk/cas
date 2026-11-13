@@ -24,6 +24,11 @@
       "cores": 1,
       "memory_mib": 1024
     },
+    "working_set": [
+      "dd if=/mnt/cas/data bs=4096 count=1024 iflag=direct status=none | sha256sum",
+      "dd if=/mnt/cas/data bs=4096 count=1024 skip=16384 iflag=direct status=none | sha256sum",
+      "sha256sum /mnt/cas/data"
+    ],
     "burst": {
       "images": 16,
       "base_bytes": 1073741824,
@@ -31,7 +36,12 @@
       "k": 1,
       "force_remote": false,
       "owner_cache_bytes": 0,
-      "drop_page_cache": false
+      "drop_page_cache": false,
+      "working_set": [
+        "dd if=/mnt/cas/unique bs=4096 count=1024 iflag=direct status=none | sha256sum",
+        "dd if=/mnt/cas/unique bs=4096 count=1024 skip=8192 iflag=direct status=none | sha256sum",
+        "sha256sum /mnt/cas/base"
+      ]
     },
     "resume": {
       "setup_bytes": 268435456,
