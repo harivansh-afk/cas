@@ -369,14 +369,19 @@ class Repeats(unittest.TestCase):
 
 
 class NodeRules(unittest.TestCase):
-    def test_pinned_revision(self):
+    def test_pinned_revision_is_a_run_time_input(self):
         sha = "a" * 40
+        other = "b" * 40
         self.assertEqual(lib.pinned_revision({"expected_revision": sha}), sha)
+        self.assertEqual(lib.pinned_revision({"expected_revision": sha}, other), other)
+        self.assertEqual(lib.pinned_revision({}, sha), sha)
         self.assertIsNone(lib.pinned_revision({"loopback": True}))
-        self.assertIsNone(lib.pinned_revision({"loopback": True, "expected_revision": lib.REVISION_PLACEHOLDER}))
-        for bad in ({}, {"expected_revision": lib.REVISION_PLACEHOLDER}, {"expected_revision": "abc"}):
+        self.assertEqual(lib.pinned_revision({"loopback": True}, sha), sha)
+        for bad in ({}, {"expected_revision": "abc"}):
             with self.assertRaises(ValueError):
                 lib.pinned_revision(bad)
+        with self.assertRaises(ValueError):
+            lib.pinned_revision({}, "abc")
 
     def test_smt_rule(self):
         self.assertIsNone(lib.smt_problem({"hardware": {"smt": "off"}}, False))

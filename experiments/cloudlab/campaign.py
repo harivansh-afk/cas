@@ -55,7 +55,11 @@ class Campaign:
         self.nodes_config = json.loads(self.nodes_path.read_text())
         self.nodes = lib.validate_nodes(self.nodes_config)
         self.loopback = lib.loopback(self.nodes_config)
-        self.pinned_revision = lib.pinned_revision(self.nodes_config) if args.command != "status" else None
+        self.pinned_revision = (
+            lib.pinned_revision(self.nodes_config, getattr(args, "revision", None))
+            if args.command != "status"
+            else None
+        )
         self.name = self.nodes_config["campaign"]
         self.dir = Path(self.nodes[0]["output_root"]) / self.name
         self.units_dir = self.dir / "units"
@@ -614,6 +618,10 @@ def main():
     parser.add_argument("command", choices=["start", "run", "status", "dry-run", "repeats"])
     parser.add_argument("--nodes", required=True, help="campaign nodes config (see cloudlab.example.json)")
     parser.add_argument("--plan", help="day plan JSON")
+    parser.add_argument(
+        "--revision",
+        help="full commit every node must be checked out at (overrides expected_revision in the nodes file); required unless the loopback layout",
+    )
     parser.add_argument("--arms", default=str(lib.ARMS_DIR))
     parser.add_argument("--export", help="rsync destination for evidence; overrides the nodes config")
     parser.add_argument("--redo", action="store_true", help="rerun units whose outputs exist (old outputs are kept as .attempt-N)")

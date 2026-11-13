@@ -173,11 +173,12 @@ python3 experiments/cloudlab/campaign.py status --nodes /var/tmp/nodes.json
 ```
 
 The nodes file names the campaign, the revision it is bound to
-(`expected_revision`: the example carries `INTEGRATION_REVISION_PLACEHOLDER`,
-to be replaced by the integration branch's measured commit once
-`feat/burst-harness` has merged there; `run` refuses the placeholder and any
-node whose checkout differs from it or is dirty, loopback development
-layouts may omit it), the export destination, the bundle, an optional
+(`expected_revision`, a run-time input: `--revision` on the command line or
+`expected_revision` in a nodes file kept outside the tree, never a value
+committed into the configs, so the measured revision is simply the clean
+integration head; `run` requires it except for loopback development layouts,
+refuses any node whose checkout differs from it or is dirty, and records it
+in the manifest), the export destination, the bundle, an optional
 explicit race budget, `r0_nvme_tcp` and two or more nodes (node 0 is the
 local controller; the others have `ssh` targets whose host keys are already
 verified). The campaign directory is `<node 0 output_root>/<campaign>`; it

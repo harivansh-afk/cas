@@ -1,6 +1,5 @@
 {
  "campaign": "cloudlab-2026-11-18",
- "expected_revision": "INTEGRATION_REVISION_PLACEHOLDER",
  "export": "experiment@archive.example.org:/srv/evidence",
  "bundle_actions": "/var/tmp/corpus/swe-bundles/astropy__astropy-12907/actions.json",
  "race_budget_us": null,

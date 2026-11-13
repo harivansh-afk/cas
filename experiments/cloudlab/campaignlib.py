@@ -491,19 +491,20 @@ def two_host_config(arm, nodes, campaign, unit, case, fills):
     return {"settings": settings, "nodes": members, "cases": [case]}
 
 
-REVISION_PLACEHOLDER = "INTEGRATION_REVISION_PLACEHOLDER"
 SMT_OFF = ("off", "forceoff", "notsupported", "notimplemented")
 
 
-def pinned_revision(nodes_config):
-    """The revision a native campaign is bound to. Loopback development
-    layouts may leave it out; a real campaign must replace the placeholder
-    with the integration branch's measured commit before `run`."""
-    value = nodes_config.get("expected_revision")
-    if loopback(nodes_config) and value in (None, REVISION_PLACEHOLDER):
-        return None
-    if value is None or value == REVISION_PLACEHOLDER:
-        raise ValueError("expected_revision is the placeholder; pin the integration branch's measured revision")
+def pinned_revision(nodes_config, override=None):
+    """The revision a native campaign is bound to: a run-time input
+    (`--revision`, else `expected_revision` in the nodes file), never a value
+    committed into the tree, so the measured revision is simply the clean
+    integration head. Required unless the loopback development layout;
+    verified against every node's checkout and recorded in the manifest."""
+    value = override or nodes_config.get("expected_revision")
+    if value is None:
+        if loopback(nodes_config):
+            return None
+        raise ValueError("expected_revision is required: pass --revision or set it in the nodes file")
     if not re.fullmatch(r"[0-9a-f]{40}", value):
         raise ValueError("expected_revision must be a full 40-hex commit")
     return value
