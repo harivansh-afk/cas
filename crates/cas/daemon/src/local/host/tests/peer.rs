@@ -242,8 +242,19 @@ fn per_image_remote_read_attribution_sums_to_the_host_counters() {
     let mut a = seeded_images(root_a.path(), ra.clone(), false, &[2, 3]);
     let mut first = attach(&mut a, 2);
     let mut second = attach(&mut a, 3);
+    let before = peer::metrics::monotonic_now_ns();
     for id in 0..5 {
         get(&mut first, id, id as usize);
+    }
+    // Ring timestamps convert to host instants as origin_monotonic_ns + ns:
+    // every read stamped after `before` lands after it and before now.
+    let after = peer::metrics::monotonic_now_ns();
+    let origin = a.report()["peer"]["origin_monotonic_ns"].as_u64().unwrap();
+    assert!(origin < before, "{origin} {before}");
+    for record in a.report()["peer"]["recent"].as_array().unwrap() {
+        let received = origin + record["received_ns"].as_u64().unwrap();
+        let completed = origin + record["completed_ns"].as_u64().unwrap();
+        assert!(before < received && received <= completed && completed <= after);
     }
     for id in 0..3 {
         get(&mut second, 100 + id, 10 + id as usize);

@@ -397,8 +397,9 @@ impl Shipper {
         value["recent"] = serde_json::to_value(&*window.recent).expect("shipping ring");
         value["retention"] = WINDOW_RETAIN.into();
         value["next_slot"] = window.cursor.into();
+        value["origin_monotonic_ns"] = self.shared.clock.origin_monotonic_ns().into();
         value["clock"] =
-            "nanoseconds on the peer metrics clock, shared with peer.recent; monotonic, host local"
+            "nanoseconds on the peer metrics clock, shared with peer.recent; monotonic, host local; host instant = origin_monotonic_ns + ns"
                 .into();
         value
     }

@@ -95,8 +95,26 @@ pub struct Metrics {
     wire_sent: AtomicU64,
     wire_received: AtomicU64,
     origin: Instant,
+    /// `CLOCK_MONOTONIC` read together with `origin`: a ring timestamp `ns`
+    /// is the host instant `origin_monotonic_ns + ns` (same clock as
+    /// `clock_gettime(CLOCK_MONOTONIC)` in any process on this host).
+    origin_monotonic_ns: u64,
     state: Mutex<State>,
 }
+
+/// The host's `CLOCK_MONOTONIC` in nanoseconds, the clock `Instant` uses on
+/// Linux, so harnesses can place ring timestamps without a calibration bracket.
+pub fn monotonic_now_ns() -> u64 {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: clock_gettime writes one initialized timespec through a valid pointer.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) };
+    assert_eq!(rc, 0, "CLOCK_MONOTONIC is always readable");
+    time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64
+}
+
 impl Metrics {
     /// `slots` preallocates one per-image attribution slot per host image slot.
     pub fn new(budget: &Arc<Budget>, slots: usize) -> io::Result<BudgetArc<Self>> {
@@ -106,6 +124,10 @@ impl Metrics {
             Self {
                 wire_sent: AtomicU64::new(0),
                 wire_received: AtomicU64::new(0),
+                // Read back to back: the raw clock first, then the Instant the
+                // ring measures from, so `origin_monotonic_ns + ns` is never
+                // later than the real instant by more than the two reads' gap.
+                origin_monotonic_ns: monotonic_now_ns(),
                 origin: Instant::now(),
                 state: Mutex::new(State {
                     counters: Counters::default(),
@@ -143,6 +165,10 @@ impl Metrics {
                 sum.plus(slot.counters)
             })
     }
+    /// The `CLOCK_MONOTONIC` value of the ring origin.
+    pub fn origin_monotonic_ns(&self) -> u64 {
+        self.origin_monotonic_ns
+    }
     pub fn at(&self, time: Instant) -> u64 {
         time.saturating_duration_since(self.origin)
             .as_nanos()
@@ -177,7 +203,8 @@ impl Metrics {
         serde_json::json!({"counters": state.counters, "recent": &*state.recent, "images": images,
             "get_wire":{"sent":self.wire_sent.load(Ordering::Relaxed),"received":self.wire_received.load(Ordering::Relaxed)},
             "retention": RETAIN, "next_slot": state.cursor,
-            "clock": "nanoseconds since peer runtime start; monotonic, host local"})
+            "origin_monotonic_ns": self.origin_monotonic_ns,
+            "clock": "nanoseconds since peer runtime start; monotonic, host local; host instant = origin_monotonic_ns + ns"})
     }
     pub(crate) fn wire(&self, sending: bool, bytes: usize) {
         let count = if sending {

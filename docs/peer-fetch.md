@@ -205,7 +205,12 @@ necessarily indicate that a busy-poll window was enabled. No JSON formatting or 
 on the IO path.
 
 A fixed ring retains the most recent 1,024 remote-read records. Nanosecond values
-use one monotonic host-local origin; clocks across hosts are not compared:
+use one monotonic host-local origin; clocks across hosts are not compared.
+`origin_monotonic_ns` is the `CLOCK_MONOTONIC` value at which that origin was
+taken, so a ring timestamp `ns` is the host instant `origin_monotonic_ns +
+ns` on the same clock a harness reads with `clock_gettime(CLOCK_MONOTONIC)`;
+no calibration bracket is needed (the two origin reads are back to back,
+sub-microsecond apart). Milestones:
 
 - `received_ns`: descriptor discovery at the guest frontend, or submission at
   the native harness (before admission attempts). Frontend-inline reads

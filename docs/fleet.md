@@ -192,8 +192,11 @@ the distribution and the sums its mean. Batches assembled from an inventory
 rescan (startup, a full queue, retry after a failed pass) have a null
 `queued_ns` and count in `rescan_batches` instead. A batch whose owner already
 held every chunk sends no PUT and is not recorded. Nanoseconds are read from
-the peer metrics clock, the same monotonic host-local clock as `peer.recent`;
-never compare them across hosts. The
+the peer metrics clock, the same monotonic host-local clock as `peer.recent`,
+and `fleet.shipping.origin_monotonic_ns` is that clock's origin on
+`CLOCK_MONOTONIC` (equal to `peer.origin_monotonic_ns`), so a ring time `ns`
+is the host instant `origin_monotonic_ns + ns`; never compare them across
+hosts. The
 acknowledgement means the owner's `Store::insert` and store synchronization
 completed, not fleet-class FLUSH.
 
