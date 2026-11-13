@@ -37,6 +37,9 @@ pub struct Resources {
     pub compaction: Arc<Budget>,
     pools: pools::HostPools,
     fault: Option<Mutex<Option<fault::Pause>>>,
+    /// Test-only: this host's GET service delays every reply by this much.
+    #[cfg(test)]
+    pub peer_reply_delay_us: u64,
 }
 
 impl Default for Resources {
@@ -49,6 +52,8 @@ impl Default for Resources {
             compaction: metadata_budget(),
             pools: pools::HostPools::new(),
             fault: None,
+            #[cfg(test)]
+            peer_reply_delay_us: 0,
         }
     }
 }
@@ -401,7 +406,11 @@ impl Host {
                     &metadata,
                     shared.peer_metrics.as_ref().expect("peer metrics").clone(),
                     (shared.io_scheduler.clone(), slots),
-                    peer_connections,
+                    crate::peer::ServiceOptions {
+                        connections: peer_connections,
+                        #[cfg(test)]
+                        reply_delay: Duration::from_micros(shared.resources.peer_reply_delay_us),
+                    },
                 )
             })
             .transpose()?;

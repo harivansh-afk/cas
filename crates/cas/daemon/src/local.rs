@@ -859,50 +859,31 @@ impl Local {
         if let Some(trace) = &mut permit.trace {
             trace.enqueued_ns = trace.at();
         }
-        let boundary = self.admitted;
-        if self.paused {
-            Command::Io(Io {
-                id,
-                operation,
-                permit,
-                boundary,
-            })
-            .reject("local admission is paused", &mut self.rejected);
-            return Err(io::Error::other("local admission is paused"));
-        }
-        if let Err(error) = self.seal() {
-            Command::Io(Io {
-                id,
-                operation,
-                permit,
-                boundary,
-            })
-            .reject(&error.to_string(), &mut self.rejected);
-            return Err(error);
-        }
-        let (operation, permit) = match &mut self.fast {
-            Some(fast) if matches!(operation, Operation::Read { .. }) => {
-                match fast.enqueue(
-                    &self.shared,
-                    self.admitted,
-                    id,
-                    operation,
-                    permit,
-                    &mut self.rejected,
-                )? {
-                    fast::Outcome::Taken => return Ok(()),
-                    fast::Outcome::Declined(operation, permit) => (operation, permit),
-                }
-            }
-            _ => (operation, permit),
-        };
-        let flush = matches!(operation, Operation::Flush);
-        self.send(Command::Io(Io {
+        let io = Io {
             id,
             operation,
             permit,
-            boundary,
-        }))?;
+            boundary: self.admitted,
+        };
+        if self.paused {
+            Command::Io(io).reject("local admission is paused", &mut self.rejected);
+            return Err(io::Error::other("local admission is paused"));
+        }
+        if let Err(error) = self.seal() {
+            Command::Io(io).reject(&error.to_string(), &mut self.rejected);
+            return Err(error);
+        }
+        let io = match &mut self.fast {
+            Some(fast) if matches!(io.operation, Operation::Read { .. }) => {
+                match fast.enqueue(&self.shared, io, &mut self.rejected)? {
+                    fast::Outcome::Taken => return Ok(()),
+                    fast::Outcome::Declined(io) => io,
+                }
+            }
+            _ => io,
+        };
+        let flush = matches!(io.operation, Operation::Flush);
+        self.send(Command::Io(io))?;
         // Only a FLUSH the reactor actually received is a barrier for inline
         // reads; rejected ones complete through `rejected` without one.
         if flush && let Some(fast) = &mut self.fast {

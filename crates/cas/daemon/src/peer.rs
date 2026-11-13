@@ -9,9 +9,7 @@ mod server;
 mod wire;
 pub use client::{Client, Ticket};
 pub(crate) use server::CONNECTIONS;
-#[cfg(test)]
-pub(crate) use server::TEST_REPLY_DELAY_US;
-pub use server::{Server, has};
+pub use server::{Options as ServiceOptions, Server, has};
 use std::{io, net::SocketAddr, time::Duration};
 
 #[derive(Clone, Debug, Default, clap::Args)]

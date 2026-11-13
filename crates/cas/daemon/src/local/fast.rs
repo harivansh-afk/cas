@@ -103,11 +103,11 @@ pub(super) struct Context {
 
 #[expect(
     clippy::large_enum_variant,
-    reason = "A declined read hands its buffer and permit straight back to the reactor path"
+    reason = "A declined read hands its request straight back to the reactor path"
 )]
 pub(super) enum Outcome {
     Taken,
-    Declined(Operation, Permit),
+    Declined(Io),
 }
 
 impl Context {
@@ -136,12 +136,16 @@ impl Context {
         offset: u64,
         buffer: AlignedBuffer,
         permit: Permit,
+        id: u64,
+        boundary: u64,
     ) -> io::Result<Outcome> {
         *count(&mut self.counters) += 1;
-        Ok(Outcome::Declined(
-            Operation::Read { offset, buffer },
+        Ok(Outcome::Declined(Io {
+            id,
+            operation: Operation::Read { offset, buffer },
             permit,
-        ))
+            boundary,
+        }))
     }
     pub fn flush_sent(&mut self, id: u64) {
         if self.flushes.len() < self.flushes.capacity() {
@@ -164,21 +168,38 @@ impl Context {
         Ok(unsafe { OwnedFd::from_raw_fd(raw) })
     }
 
-    /// Serve the read inline, start its remote fetches, or decline it.
+    /// Serve the read inline, start its remote fetches, or decline it. The
+    /// request's boundary is the frontend's `admitted` at enqueue.
     pub fn enqueue(
         &mut self,
         shared: &Shared,
-        admitted: u64,
-        id: u64,
-        operation: Operation,
-        mut permit: Permit,
+        io: Io,
         output: &mut BudgetQueue<Completed>,
     ) -> io::Result<Outcome> {
+        let Io {
+            id,
+            operation,
+            mut permit,
+            boundary,
+        } = io;
+        let admitted = boundary;
         let Operation::Read { offset, buffer } = operation else {
-            return Ok(Outcome::Declined(operation, permit));
+            return Ok(Outcome::Declined(Io {
+                id,
+                operation,
+                permit,
+                boundary,
+            }));
         };
         if !self.flushes.is_empty() {
-            return self.decline(|c| &mut c.declined_flush, offset, buffer, permit);
+            return self.decline(
+                |c| &mut c.declined_flush,
+                offset,
+                buffer,
+                permit,
+                id,
+                boundary,
+            );
         }
         if shared
             .health
@@ -187,18 +208,48 @@ impl Context {
             .failure
             .is_some()
         {
-            return self.decline(|c| &mut c.declined_failed, offset, buffer, permit);
+            return self.decline(
+                |c| &mut c.declined_failed,
+                offset,
+                buffer,
+                permit,
+                id,
+                boundary,
+            );
         }
         let status = *shared.final_status.lock().expect("status poisoned");
         if status.published != admitted || status.compacted != status.published {
-            return self.decline(|c| &mut c.declined_unsettled, offset, buffer, permit);
+            return self.decline(
+                |c| &mut c.declined_unsettled,
+                offset,
+                buffer,
+                permit,
+                id,
+                boundary,
+            );
         }
         let view = match &*shared.manifest.lock().expect("manifest poisoned") {
             Some((compacted, view)) if *compacted == status.compacted => view.clone(),
-            _ => return self.decline(|c| &mut c.declined_unsettled, offset, buffer, permit),
+            _ => {
+                return self.decline(
+                    |c| &mut c.declined_unsettled,
+                    offset,
+                    buffer,
+                    permit,
+                    id,
+                    boundary,
+                );
+            }
         };
         if view.commit().durable != status.compacted {
-            return self.decline(|c| &mut c.declined_unsettled, offset, buffer, permit);
+            return self.decline(
+                |c| &mut c.declined_unsettled,
+                offset,
+                buffer,
+                permit,
+                id,
+                boundary,
+            );
         }
         let bytes = buffer.as_slice().len();
         let end = offset.checked_add(bytes as u64);
@@ -209,10 +260,17 @@ impl Context {
             || bytes > MAX_REQUEST_BYTES
         {
             // The reactor returns the actual range error.
-            return self.decline(|c| &mut c.declined_io, offset, buffer, permit);
+            return self.decline(|c| &mut c.declined_io, offset, buffer, permit, id, boundary);
         }
         if self.pending.len() == self.pending.capacity() {
-            return self.decline(|c| &mut c.declined_capacity, offset, buffer, permit);
+            return self.decline(
+                |c| &mut c.declined_capacity,
+                offset,
+                buffer,
+                permit,
+                id,
+                boundary,
+            );
         }
         // Pass 1: resolve every block through the shared resolution before
         // touching the registry or the transport, so a decline holds nothing.
@@ -229,12 +287,26 @@ impl Context {
                     if self.peer.is_some() && view.chunk_size().bytes() == BLOCK_SIZE =>
                 {
                     if remote.try_reserve(1).is_err() {
-                        return self.decline(|c| &mut c.declined_capacity, offset, buffer, permit);
+                        return self.decline(
+                            |c| &mut c.declined_capacity,
+                            offset,
+                            buffer,
+                            permit,
+                            id,
+                            boundary,
+                        );
                     }
                     remote.push((block, hash));
                 }
                 Ok(Block::Remote(_) | Block::Page { .. } | Block::Store(..)) | Err(_) => {
-                    return self.decline(|c| &mut c.declined_io, offset, buffer, permit);
+                    return self.decline(
+                        |c| &mut c.declined_io,
+                        offset,
+                        buffer,
+                        permit,
+                        id,
+                        boundary,
+                    );
                 }
             }
         }
@@ -253,7 +325,14 @@ impl Context {
         }
         let mut sources = BudgetVec::new_in(BudgetAllocator::new(Arc::clone(&self.metadata)));
         if sources.try_reserve_exact(remote.len()).is_err() {
-            return self.decline(|c| &mut c.declined_capacity, offset, buffer, permit);
+            return self.decline(
+                |c| &mut c.declined_capacity,
+                offset,
+                buffer,
+                permit,
+                id,
+                boundary,
+            );
         }
         // Pass 2: join the shared fetch registry. Nothing is held until the
         // first entry; after that a problem fails the read like a reactor
@@ -348,7 +427,14 @@ impl Context {
                     }
                 }
                 Ok(None) if sources.is_empty() => {
-                    return self.decline(|c| &mut c.declined_capacity, offset, buffer, permit);
+                    return self.decline(
+                        |c| &mut c.declined_capacity,
+                        offset,
+                        buffer,
+                        permit,
+                        id,
+                        boundary,
+                    );
                 }
                 Ok(None) => {
                     failure = Some(io::Error::other(
@@ -357,7 +443,14 @@ impl Context {
                     break;
                 }
                 Err(_) if sources.is_empty() => {
-                    return self.decline(|c| &mut c.declined_capacity, offset, buffer, permit);
+                    return self.decline(
+                        |c| &mut c.declined_capacity,
+                        offset,
+                        buffer,
+                        permit,
+                        id,
+                        boundary,
+                    );
                 }
                 Err(error) => {
                     failure = Some(error);

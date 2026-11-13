@@ -93,6 +93,10 @@ fn seeded(root: &Path, resources: Arc<Resources>, local_copy: bool) -> Host {
     Host::new(resources, store, vec![(log, manifest)]).unwrap()
 }
 fn resources(config: peer::Config) -> Arc<Resources> {
+    resources_serving_after(config, 0)
+}
+/// A host whose own GET service delays every reply by `reply_delay_us`.
+fn resources_serving_after(config: peer::Config, reply_delay_us: u64) -> Arc<Resources> {
     // CAS_FAST_SETTLED_READS runs every fixture through the frontend-inline path.
     Arc::new(Resources {
         peer: peer::Config {
@@ -101,6 +105,7 @@ fn resources(config: peer::Config) -> Arc<Resources> {
             ..config
         },
         cache_bytes: BLOCKS * BLOCK_SIZE,
+        peer_reply_delay_us: reply_delay_us,
         ..Resources::default()
     })
 }
@@ -344,20 +349,22 @@ fn corrupting_peer(delay: Duration, requests: usize) -> (SocketAddr, JoinHandle<
 fn force_remote_race_local_wins_against_a_delayed_peer_and_discards_its_reply() {
     let root_b = tempfile::tempdir().unwrap();
     let root_a = tempfile::tempdir().unwrap();
-    let rb = resources(peer::Config {
-        peer_listen: Some("127.0.0.1:0".parse().unwrap()),
-        ..Default::default()
-    });
+    // B's own GET service answers every request 5 ms late.
+    let rb = resources_serving_after(
+        peer::Config {
+            peer_listen: Some("127.0.0.1:0".parse().unwrap()),
+            ..Default::default()
+        },
+        5_000,
+    );
     let b = seeded(root_b.path(), rb.clone(), true);
     let ra = raced(b.peer_address().unwrap(), 0);
     let mut a = seeded(root_a.path(), ra.clone(), true);
     let mut local = attach(&mut a, 2);
-    peer::TEST_REPLY_DELAY_US.store(5_000, std::sync::atomic::Ordering::Relaxed);
     let started = Instant::now();
     for id in 0..8 {
         get(&mut local, id, id as usize);
     }
-    peer::TEST_REPLY_DELAY_US.store(0, std::sync::atomic::Ordering::Relaxed);
     // The counters prove the local copy won every race; wall time only
     // guards against a hang (eight 5 ms replies would otherwise be 40 ms,
     // but a loaded test host can stall either side).
@@ -607,6 +614,7 @@ fn daemon_child() {
         .ok()
         .map(|v| v.parse().unwrap())
         .unwrap_or(0);
+    let mut reply_delay_us = 0;
     if role != "server" {
         config.peer_race_us = std::env::var("CAS_PEER_RACE_US")
             .ok()
@@ -616,12 +624,12 @@ fn daemon_child() {
         .ok()
         .map(|v| v.parse().unwrap())
     {
-        peer::TEST_REPLY_DELAY_US.store(delay, std::sync::atomic::Ordering::Relaxed);
+        reply_delay_us = delay;
     }
     config.validate().unwrap();
     let race_local = config.peer_race_local;
     let root = tempfile::tempdir().unwrap();
-    let r = resources(config);
+    let r = resources_serving_after(config, reply_delay_us);
     let mut host = seeded(root.path(), r.clone(), true);
     let mut local = attach(&mut host, 2);
     reply(serde_json::json!({"ready":true,"address":host.peer_address()}));
