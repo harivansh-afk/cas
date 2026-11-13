@@ -50,6 +50,9 @@ struct Serve {
     pause_after: std::num::NonZeroU64,
     #[arg(long, requires = "pause_compaction")]
     pause_wait_for_arm: bool,
+    /// Seconds a cold guest has to connect and enable its queues before the attachment fails.
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..))]
+    attach_timeout_secs: u64,
 }
 
 #[derive(Parser)]
@@ -126,12 +129,46 @@ fn main() -> std::io::Result<()> {
                 after: args.pause_after,
                 wait_for_arm: args.pause_wait_for_arm,
             }),
+        attach_timeout: std::time::Duration::from_secs(args.attach_timeout_secs),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn serve_args<'a>(extra: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
+        [
+            "cas-host",
+            "--root",
+            "/fixture",
+            "--store",
+            "01010101010101010101010101010101",
+            "--mode",
+            "cold",
+            "--reports",
+            "/reports",
+            "--image",
+            "02020202020202020202020202020202=/socket",
+        ]
+        .into_iter()
+        .chain(extra)
+        .collect()
+    }
+
+    #[test]
+    fn measurement_flags_keep_their_frozen_defaults_and_reject_zero() {
+        let matches = command()
+            .try_get_matches_from(serve_args(["--attach-timeout-secs", "240"]))
+            .unwrap();
+        let serve = Serve::from_arg_matches(&matches).unwrap();
+        assert_eq!(serve.attach_timeout_secs, 240);
+        assert!(
+            command()
+                .try_get_matches_from(serve_args(["--attach-timeout-secs", "0"]))
+                .is_err()
+        );
+    }
 
     #[test]
     fn initialization_and_existing_serve_options_parse_without_mixing() {
@@ -162,10 +199,9 @@ mod tests {
                 "02020202020202020202020202020202=/socket",
             ]))
             .unwrap();
-        assert_eq!(
-            Serve::from_arg_matches(&matches).unwrap().endpoints.len(),
-            1
-        );
+        let serve = Serve::from_arg_matches(&matches).unwrap();
+        assert_eq!(serve.endpoints.len(), 1);
+        assert_eq!(serve.attach_timeout_secs, 60);
         assert!(
             command()
                 .try_get_matches_from(

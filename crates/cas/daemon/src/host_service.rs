@@ -71,6 +71,9 @@ pub struct Config {
     pub telemetry: bool,
     pub telemetry_rotate: bool,
     pub pause: Option<crate::CompactionPause>,
+    /// Window for a cold guest to connect and enable its virtio-blk queues
+    /// before the attachment fails; `RECOVERY_TIMEOUT` unless configured.
+    pub attach_timeout: Duration,
 }
 
 struct Output {
@@ -230,6 +233,11 @@ fn run(
     drop(config.endpoints);
     drop(config.reports);
     let deadline = Deadline::after(RECOVERY_TIMEOUT);
+    // The guest attachment window starts with recovery, as before, but has its
+    // own configurable length: many guests cold-booting at once can need more
+    // than the recovery bound without relaxing recovery itself.
+    let attach_deadline = Deadline::after(config.attach_timeout);
+    let attach_timeout = config.attach_timeout;
     let worker_resources = Arc::clone(resources);
     let mut ids = reserved_vec(outputs.len(), &resources.metadata)?;
     ids.extend(outputs.iter().map(|output| output.image));
@@ -273,12 +281,21 @@ fn run(
         }
     })?;
     if fleet_cold {
-        return run_fleet_services(outputs, &mut runtime, &resources.metadata, telemetry);
+        return run_fleet_services(
+            outputs,
+            &mut runtime,
+            &resources.metadata,
+            telemetry,
+            attach_timeout,
+        );
     }
     let mut services = reserved_vec(outputs.len(), &resources.metadata)?;
     let mut controls = reserved_vec(outputs.len(), &resources.metadata)?;
     for output in outputs {
-        let service = Service::new(runtime.attach(output.image, deadline)?, output.report)?;
+        let service = Service::new(
+            runtime.attach(output.image, attach_deadline)?,
+            output.report,
+        )?;
         controls.push((output.image, service.control()?));
         services.push((output.socket, service));
     }
@@ -325,6 +342,7 @@ fn run_fleet_services(
     runtime: &mut Runtime,
     metadata: &Arc<Budget>,
     mut telemetry: Option<Telemetry>,
+    attach_timeout: Duration,
 ) -> io::Result<Outcome> {
     let mut pending = reserved_vec(outputs.len(), metadata)?;
     pending.extend(outputs.into_iter().map(Some));
@@ -346,11 +364,8 @@ fn run_fleet_services(
                 continue;
             }
             let output = slot.take().unwrap();
-            let backend = host.attach_cold(
-                output.image,
-                RECOVERY_TIMEOUT,
-                crate::fault::Fault::default(),
-            )?;
+            let backend =
+                host.attach_cold(output.image, attach_timeout, crate::fault::Fault::default())?;
             let service = Service::new(backend, output.report)?;
             controls.push((output.image, service.control()?));
             workers.push(Some((

@@ -18,6 +18,7 @@ fn config(root: &Path, transport: &Path, mode: Mode) -> ServiceConfig {
         staging_bytes: 1024 * MAX_REQUEST_BYTES as u64,
         mode,
         pause: None,
+        attach_timeout: crate::deadline::RECOVERY_TIMEOUT,
         endpoints: (2..4)
             .map(|image| Endpoint {
                 image: [image; 16],

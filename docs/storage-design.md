@@ -89,7 +89,15 @@ reconciles completed and pending requests before serving resumes.
 require a fresh attachment; this is not general hot-upgrade compatibility.
 
 Cold recovery inspects durable prefixes before repair. Rejected or incomplete
-suffixes must not be interpreted as acknowledged work. Shutdown, reset, socket
+suffixes must not be interpreted as acknowledged work. After cold recovery each
+image socket waits for its guest to connect and reach the virtio-blk driver;
+when that window expires the attachment fails with `recovery deadline expired`
+and the service reports `connection_ok: false`. `cas-host --attach-timeout-secs N`
+sets the window (default 60, the same as the fixed recovery bound). It starts
+when recovery starts, and fleet cold members apply the same length to each
+image they activate. Many guests booting together on one host can need more
+than 60 s; the flag lengthens the wait without changing the failure path, the
+recovery scan bound or retained reconnection. Shutdown, reset, socket
 failure, and host-wide failures have different ownership boundaries; their
 regressions live beside the implementations and in `crates/harnesses/`.
 
