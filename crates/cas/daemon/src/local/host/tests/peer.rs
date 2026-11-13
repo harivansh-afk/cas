@@ -1043,8 +1043,11 @@ fn two_daemon_loopback_race_wins_locally_against_a_delayed_server() {
     let c = &report["peer"]["counters"];
     let won_local = c["race_won_local"].as_u64().unwrap();
     let won_first = c["race_won_first"].as_u64().unwrap();
-    assert_eq!(c["races_started"], 700, "{c}");
-    assert_eq!(won_local + won_first, 700, "{c}");
+    let started = c["races_started"].as_u64().unwrap();
+    // A primary that verified before the reader armed the race is a
+    // legitimately unraced read (`race_winner` 0 in its record); on a loaded
+    // debug host the reader can be descheduled past the 1 ms reply.
+    assert_eq!(won_local + won_first, started, "{c}");
     // The local-win rate is a timing claim: the release loopback run makes
     // it (and is recorded in docs/validation.md); the debug build under the
     // parallel suite only shows that local wins occur, with exact accounting.
@@ -1063,21 +1066,29 @@ fn two_daemon_loopback_race_wins_locally_against_a_delayed_server() {
         .collect();
     assert_eq!(records.len(), 700);
     let mut local_records = 0;
+    let mut unraced = 0;
     for r in records {
         assert!(
             r["race_winner"] == peer::metrics::WINNER_LOCAL
-                || r["race_winner"] == peer::metrics::WINNER_FIRST,
+                || r["race_winner"] == peer::metrics::WINNER_FIRST
+                || r["race_winner"] == peer::metrics::WINNER_NONE,
             "{r}"
         );
         local_records += u64::from(r["race_winner"] == peer::metrics::WINNER_LOCAL);
-        assert_eq!(r["race_budget_us"], 100);
+        unraced += u64::from(r["race_winner"] == peer::metrics::WINNER_NONE);
+        assert_eq!(
+            r["race_budget_us"],
+            if r["race_winner"] == peer::metrics::WINNER_NONE { 0 } else { 100 }
+        );
         assert_eq!(r["success"], true);
     }
     assert_eq!(local_records, won_local);
+    assert_eq!(started + unraced, 700, "{c}");
+    assert!(unraced <= 700 - floor, "{c}");
     let until = Instant::now() + Duration::from_secs(10);
     let late = loop {
         let r = a.command("report");
-        if r["peer"]["counters"]["race_discarded"] == 700 {
+        if r["peer"]["counters"]["race_discarded"] == started {
             break r;
         }
         assert!(Instant::now() < until, "{}", r["peer"]["counters"]);
