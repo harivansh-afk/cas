@@ -876,6 +876,253 @@ digests matching `/root/burst/archive` on cas-build: `native-ws-001.tgz`
 `native-ws-attempt-1.tgz`. Loop images were unmounted; `/root/burst/ws`
 remains on the persistent VM.
 
+## 2026-11-13 — Campaign follow-ups: N-guest native runner, chroot working set, nvme-tcp floor, repeats
+
+Branch `feat/cloudlab-campaign`. **Tested revisions `d954ff7`** (native
+runner, two-host chroot form, r0.sh nvme-tcp, campaign changes; rehearsal
+003), **`4cae14c`** (the chroot wrapper's `command -v chroot` fix and the
+driver's native-ZFS storage selection) **and `c0f7df4`** (the replay result
+records the working-set spec; the passing chroot run and the final dry
+run), all clean on the VM checkout; this record is a later commit. Changes
+in `crates/harnesses/src/native.rs` and `native/runtime.rs` (harness only,
+no daemon code), `experiments/native/workload.sh`, `experiments/two-host/
+{runner,agent,test_runner}.py`, `experiments/cloudlab/` and docs. Nothing
+pushed or merged. Same hosts as the entry above: Spark for edits, bundles,
+Python unit tests and `cargo check`; every build, Rust test and run on the
+persistent Freestyle VM `cas-build` (loop-backed XFS, nested KVM). No VM
+created or deleted; the loop images were unmounted afterwards.
+
+### Commands (cas-build, `/root/campaign/driver3.sh`, `rerun-chroot2.sh`)
+
+```sh
+bash $SRC/experiments/cloudlab/setup.sh --bundle campaign4.bundle --revision $REV --source $SRC \
+  --skip-disk --skip-irq --skip-nix --skip-smt --cores 6 --out out/node-inventory-setup-3.json
+nix develop -c cargo test --locked -p cas-harness native
+nix develop -c uv run --no-project python -m unittest discover -s experiments/two-host   # 36
+nix develop -c uv run --no-project python -m unittest discover -s experiments/cloudlab   # 28
+taskset -c 0-7 $SRC/result-native/bin/cas-native-run --backend raw --guests 2 --device $LOOPA \
+  --storage /mnt/fleet-a/native-2g-baseline --output native-2g-baseline \
+  --script $SRC/experiments/native/workload.sh --script-arg baseline --script-arg 5 --script-arg 64 --allow-loop-device
+# the same with --script-arg pressure
+$SRC/result-two-host/bin/cas-two-host --config ws-chroot-001-config.json --output ws-chroot-001/controller
+bash $SRC/experiments/cloudlab/r0.sh --nvme-tcp-check
+python3 campaign.py dry-run --nodes nodes-dry3.json --plan plans/dev-loopback.json
+python3 campaign.py run --nodes nodes-r03.json --plan plan-r0.json --export /root/campaign/export   # r0_nvme_tcp false
+python3 campaign.py repeats --nodes nodes-r03.json --out out/dev-r0-003/day4-repeats.json
+```
+
+### Outcomes
+
+- `cargo test -p cas-harness native`: **5 pass** (guest bound 1..16, raw-only
+  ZFS, pool-membership parsing, the two existing refusals). Python: 36 and
+  28 pass on the VM and on Spark. `nix build .#native` and `.#two-host` at
+  both revisions.
+- `cas-native-run --backend raw --guests 2`, `baseline 5 64` and `pressure 5
+  64` on the loop-backed XFS: both `outcome.json` `success: true` (111 s and
+  102 s). Per-guest fio JSON under `guest-1/`, `guest-2/`; `aggregate-<label>
+  .json` per label. Baseline `read-q1`: 2 guests, 16,560 IOPS summed, per-
+  guest clat p50/p99/p99.9 max 80/175/289 µs; `write-q1` 12,912 IOPS;
+  `flush` 3,343 IOPS; errors 0. Pressure: `reader-alone` 1 reader 8,636
+  IOPS p99 167 µs; `mixed-8m-reader` 8,739 IOPS p99 159 µs; `mixed-0m-reader`
+  (uncapped writer) 8,043 IOPS p99 220 µs. `identity.json` records
+  `guests: 2`, `storage_fstype: xfs`, `native_media: false`. Development
+  numbers on a shared VM's virtual disk.
+- `ws-chroot-001` (`c0f7df4`, two-host `resume-elsewhere` on the loopback
+  layout, 128 MiB image, 2 MiB setup): **`success: true`** (58 s). The
+  resume `setup_script` built a synthetic root at `/mnt/cas/root` in the
+  source guest (the NixOS guest's bash plus the `/nix/store` libraries that
+  `LD_TRACE_LOADED_OBJECTS` lists); after migration B replayed three
+  bash-builtin commands as `env -i GREETING=... PATH=/bin "$CHROOT"
+  /mnt/cas/root /bin/bash -lc 'cd /work && ...'`. Retained stdout:
+  `hello-from-chroot /work` (the recorded env and cwd inside the chroot),
+  `bin/ etc/ nix/ tmp/ work/` and `5.3.9(1)-release` (the chroot's own
+  bash). Cold pass 443 ms with 646 destination GETs (the chroot's bash and
+  libraries fetched from A), warm pass 262 ms with 0 GETs; time to working
+  set 20.95 s of which boot 18.21 s; downtime 21.58 s. `results.json`
+  `working_set` records `chroot`, `guest_cwd` (`/work`), `env` and the
+  exact per-command script. Development evidence (nested KVM, loop files).
+- `r0.sh --nvme-tcp-check` on cas-build: modules `nvmet`, `nvmet-tcp`,
+  `nvme-tcp`, `nvme-fabrics` missing, `nvme` CLI missing, configfs missing,
+  root ok; exit 1. The Freestyle kernel has no module tree, so the nvme-tcp
+  phase could not run there; on Spark (NixOS) the same check finds the four
+  modules and reports only `nvme-cli` and `root` missing. The phase is
+  therefore shipped with its self-check only; its configfs sequence follows
+  `docs/review/transport.md` and has not been executed.
+- `campaign.py dry-run` (`c0f7df4`, `dev-loopback.json`, nodes file with
+  the placeholder `expected_revision`, `r0_nvme_tcp` default): **3 runnable,
+  9 blocked of 12**, exit 2, nothing launched. New blocks since the previous
+  entry: `r0 floor` ("nvme-tcp prerequisites missing: module-nvmet=missing;
+  ...") and `native-zfs g1` ("node 0 has no zfs_storage_mount/zfs_device
+  for the ZFS arm"); the other seven as before (runner without the flag
+  settings, guest-cpu budget). The loopback layout bypasses the SMT and
+  revision-pin rules, which are unit-tested.
+- Campaign `dev-r0-003` (`r0_nvme_tcp: false`): R0 unit done (99 s), export
+  and end inventories as before. `campaign.py repeats`: "0 unit(s) to
+  repeat; keep d1 r0 floor spread=0.0 measured=1/1", plan written with an
+  empty day list.
+- `setup.sh` at `d954ff7` with `--skip-smt` (the persistent VM's grub is not
+  ours to change; the step's runtime path was not exercised): all other
+  steps as before; inventory `skipped` now lists `smt`.
+
+### Failures and retries
+
+- Rehearsal 003's first launch ran the previous revision's `setup.sh`
+  (the driver lacked the bundle checkout before `setup.sh`), which rejected
+  `--skip-smt` (usage, exit 2); relaunched with a bootstrap step.
+- `ws-chroot-001` attempt 1: the runner rejected the config ("burst regions
+  must fit the image"): the 128 MiB test image needs an explicit small burst
+  block even for a resume-only case. Attempt 2 (`d954ff7`): the setup script
+  built the chroot (bash plus its `/nix/store` libraries) but the replay
+  failed with `env: 'chroot': No such file or directory`: `env -i` resolves
+  its program in the *new* environment (`PATH=/bin`), where the NixOS guest
+  has no `chroot`. Fixed in `4cae14c` (`CHROOT=$(command -v chroot)` on the
+  guest, then `env -i ... "$CHROOT"`), with a unit test that runs the wrapper
+  through `sh -eu`. Attempt 3 (`4cae14c`): all three commands ran correctly
+  in the chroot (retained stdout) but the runner crashed after the warm pass
+  with `NameError: name 'commands' is not defined` in `replay_working_set`'s
+  return value, which the unit tests had not covered. Fixed in `c0f7df4`
+  with a test that drives `replay_working_set` against fake agents.
+  Attempts 2 and 3 are retained as `ws-chroot-001-attempt-{2,3}`.
+- The bridge's exec channel times out when a command backgrounds a process
+  inside `( ... &)`; the processes still start. Launches now use `setsid
+  nohup` and are confirmed by a second command.
+
+### Evidence
+
+`results/cloudlab-campaign/evidence/campaign-rehearsal-003.tgz` with
+`SHA256SUMS` (driver and step logs, `out/dev-dry-003`, `out/dev-r0-003` with
+`day4-repeats.json`, the setup inventory, `native-2g-baseline`,
+`native-2g-pressure`, `ws-chroot-001` and its attempt 2, the configs), plus
+`driver3.sh`, `rerun-chroot.sh`, `rerun-chroot2.sh` and the nodes files.
+
+### Conclusions and limits
+
+The native runner boots N guests with their own disks and jobs and writes
+per-guest and aggregate results (N=2 exercised; 16 is a bound, not a tested
+load); the ZFS acceptance for the raw backend is unit-tested only, no ZFS
+pool exists on the VM. The two-host chroot working set replays a recorded cwd and environment
+inside the data disk's root, shown with a synthetic bash-only root; a real
+Stage A root image has not been replayed.
+The nvme-tcp floor row is unexecuted code with a self-check. The repeats
+generator ran on one unit; its p99 rules per case are unit-tested on
+synthetic results. Everything is development evidence on one shared VM.
+
+## 2026-11-13 — CloudLab campaign driver rehearsal on cas-build
+
+Branch `feat/cloudlab-campaign` from `feat/burst-harness` (`5a69820`).
+**Tested revisions `5633fb9` (rehearsal 001) and `4e0e65e` (rehearsal 002)**,
+both clean on the VM checkout; this record and two small fixes (`r0.sh`
+fdatasync sample count, `inventory.py` NIC summary; the exact files were
+verified standalone on the VM, see below) are a later commit. Only
+`experiments/cloudlab/` and `docs/` changed; nothing under `crates/`, so
+the daemon is still the `ebbe157` build (`cas-host`
+`cc1c4ae4…`, `cas-fleet` `8ccdb986…`). Nothing pushed or merged.
+
+Spark handled edits, git bundles, unit tests and evidence; every build and
+run used the persistent Freestyle VM `cas-build`
+(`vm-7ecd8e364c624bcb8654fa4dbd92767e`, x86_64, 8 vCPU, 16 GiB, Linux
+6.1.102, nested KVM) through the sandbox-corpus `control.py` bridge (scoped
+SSH; files over SFTP). A new clone `/root/cas-campaign` was made from the
+bundle. No VM was created, resized or deleted.
+
+### Commands
+
+```sh
+# Spark
+uv run --no-project python -m unittest discover -s experiments/cloudlab      # 22 pass
+# cas-build, /root/campaign/driver.sh then driver2.sh (loopback layout: both
+# members on the VM, loop-backed XFS at /mnt/fleet-a and /mnt/fleet-b, daemons
+# 0-1 / 2-3, guests 4-7, nodes-*.json with "loopback": true)
+bash $SRC/experiments/cloudlab/setup.sh --bundle campaign.bundle --revision $REV \
+  --source /root/cas-campaign --skip-disk --skip-irq --skip-nix --cores 6 --out out/node-inventory-setup.json
+python3 $SRC/experiments/cloudlab/campaign.py dry-run --nodes nodes-dry.json --plan $SRC/experiments/cloudlab/plans/dev-loopback.json
+python3 $SRC/experiments/cloudlab/campaign.py start   --nodes nodes-r0.json --plan plan-r0.json --export /root/campaign/export
+python3 $SRC/experiments/cloudlab/campaign.py status  --nodes nodes-r0.json
+python3 $SRC/experiments/cloudlab/campaign.py run     --nodes nodes-r0.json --plan plan-r0.json --export /root/campaign/export [--redo]
+```
+
+### Outcomes
+
+- Unit tests: **22 pass** on Spark (plan loader shapes/rejections/rotation,
+  arm validation of every checked-in config against its own pinning sets,
+  `check_pinning` rules, placeholders, the race-budget rule, bundle working
+  set, unit states, `decide`, the driver's skip/refuse/redo path through
+  `Campaign.step`, wrapper parsing, runner-support detection, node
+  validation, inventory NIC parsing).
+- `setup.sh` without disk work (`--skip-disk --skip-irq --skip-nix`): all
+  steps exit 0 in 43 s (bootstrap clone, `checkout` at the pinned SHA,
+  `nix build .#two-host` and `.#native` from cache, `limits`, `inventory`);
+  `build.json` records both wrappers' build-info paths and binary hashes;
+  `node-inventory.json` lists `skipped: ["disk", "build", "irq"]` for the
+  inventory-only snapshots. 69 hardware records, 22 recorded as unavailable
+  on the VM (no `nvme`, `dmidecode`, ZFS, cpufreq).
+- `campaign.py dry-run` with `plans/dev-loopback.json`: **4 runnable, 8
+  blocked of 12 units**, exit 2, nothing launched. Blocked for the intended
+  reasons: `fast`, `raced`, `resume` units because the built runner at this
+  revision does not know `settings.fast_settled_reads` ("the arm would be
+  mislabelled"); `fast reads-storage-g8`, `native-cas g4` and `burst
+  burst-images` because 8/8/16 guest cpus exceed the loopback set of 4;
+  `native-zfs g1` because `cas-native-run` requires XFS. Manifest bound to
+  revision and binary hashes, identical on both members.
+- Campaign `dev-r0-002` (revision `4e0e65e`): `start` detached the worker
+  via `systemd-run --unit cas-campaign-dev-r0-002` with PATH/HOME handed
+  over; the R0 unit ran end to end (**done, 97.2 s**), `SHA256SUMS` written
+  per unit and campaign, rsync export to `/root/campaign/export/dev-r0-002/`,
+  start and end inventories for both members. A second `run` kept the unit
+  ("kept from an earlier run", nothing launched); `run --redo` moved it to
+  `d1-r0-floor-r1.attempt-1` and reran it (done, 98.6 s). `status` prints
+  the one-screen table at every stage.
+- R0 on the loopback layout (development numbers: loop-file XFS over the
+  VM's virtual disk, both members on the same host, Python ping-pong over
+  127.0.0.1→127.0.0.2): 4 KiB QD1 direct random read p50 26.8 µs, p99
+  82–92 µs, ~31 k IOPS per member; 4 KiB QD1 write p50 32–35 µs; fdatasync
+  p50 129.5 µs, p99 485 µs (from the standalone check of the fixed `r0.sh`,
+  5 s run); ping-pong RTT p50 44–48 µs, p99 71 µs, 605 k round trips in 30 s,
+  tool labelled `python-tcp-pingpong`.
+
+### Failures and retries
+
+- First upload through the bridge's Freestyle `write` API hung for 15
+  minutes with nothing created on the VM; stopped and replaced by SFTP over
+  the same scoped transport (helper kept with the evidence).
+- Campaign `dev-r0-001` (revision `5633fb9`): the `systemd-run` worker had
+  no Nix profile in its environment, so `r0.sh --check` found no fio and
+  the unit was **blocked** in the detached run; the foreground resume pass
+  on the same campaign then ran it successfully (done, 95.6 s). Fixed in
+  `4e0e65e` (`--setenv` PATH/HOME, Nix profile lookup without `~`) and
+  re-proven by `dev-r0-002`.
+- fio 3.41 reports `sync.total_ios = 0` for `--fdatasync=1` jobs and counts
+  samples in `sync.lat_ns.N`, so the first R0 summaries had an empty
+  `fdatasync` block (the raw `json+` files hold the distribution). Fixed in
+  `r0.sh` (`sha256 1528fba4d1fc…`), verified standalone on the VM from
+  `/root/campaign/r0-fix/` (26,988 samples). The inventory NIC summary
+  matched `ethtool-c-*` records as interfaces; fixed in `inventory.py`
+  (`sha256 14e507a1a081…`) and verified against the recorded inventory records.
+- `systemctl status` after the run reports the unit as not found: `--collect`
+  removes it on exit; it is visible while running.
+
+### Evidence
+
+Retained under ignored `results/cloudlab-campaign/evidence/` with
+`SHA256SUMS`, digests matching the VM: `campaign-rehearsal-001.tgz`
+(driver log, step logs/statuses, `out/` with both campaigns' directories,
+inventories, manifests, status, dry-run report, R0 unit, export tree),
+`campaign-rehearsal-002.tgz` (the same for revision `4e0e65e` plus the
+resume/redo passes and `attempt-1`), `campaign-rehearsal-002-r0fix.tgz`
+(the fixed scripts and their standalone outputs). Loop images were
+unmounted; `/root/campaign` and `/root/cas-campaign` remain on the VM.
+
+### Conclusions and limits
+
+The driver's plan loading, validation, pinning checks, manifest binding,
+detached execution, resume/refuse/redo, per-unit export with hashes and
+status display work on a loopback development layout. No guest was
+launched: the two-host and native arms were validated by the dry run only,
+and at this revision every flagged arm is correctly blocked until the
+integration branch's runner is the pinned build. R0 numbers are development
+evidence (virtual disk, loopback, Python loop), not a testbed floor. Disk
+formatting, IRQ pinning and the Nix install steps were not exercised.
+
 ## 2026-11-12 — Offline raw-image importer (`casctl import`)
 
 Branch `feat/offline-import` from `main` (`ebbe157`). **Tested revision:
@@ -1299,62 +1546,6 @@ logs, both hosts' daemon/guest/fio logs, command lines and `qemu.json`),
 (SHA256 `7cf68f26…2a1a`) and `results.json` copies sit beside them. Loop
 images were unmounted and deleted after archiving; `/root/burst` remains on
 the persistent VM.
-
-### Addendum (same day) — review fixes, rerun at `c0bca19`
-
-Code review of the branch raised ten items; fixed in `9559587` (measurement:
-provision freezes sources *before* the timed window again, as at `ebbe157`;
-the resume boot stamp precedes the anchor RPC and post-handoff report so
-`handoff_ns` excludes harness work; calibration skips and counts
-multi-record reads; explicit `reads-memory-gN` arms get the cache-headroom
-check at plan time; `fio.guests` stays the count with per-guest jobs under
-`fio.per_guest`) and `c0bca19` (declared per-request RPC budgets with an
-exhausted budget raised as `RuntimeError`, one `marker_probe(path)` sharing
-its statistics tail with `guest_stat`, fio errors counted once per job,
-`peer_delta` as a projection of `peer_counters`, `ring_since` reuse, payload
-digest hashed once and persisted). **Tested revision
-`c0bca1930a9b7b76179a6fa75b0617dd97dd8795`**, clean. Unit tests: **35 pass**
-on Spark and cas-build (one new: RPC budgets and the probe tail).
-
-Rerun `native-ws-002` on cas-build (same VM, driver `/root/burst/ws-driver-2.sh`,
-fresh loop XFS files, same settings) for `flows-k1, reads-memory-g2,
-burst-images, resume-elsewhere`: **all four passed** (`success: true`, 257 s).
-
-- `flows-k1` (legacy control, provision window now excludes the freeze as
-  before): provision 173 ms, 124,877 provision-flow bytes; boot/verify
-  19.95 s; downtime 20.89 s = 0.52 s stop + 0.43 s handoff (0.33 s cold
-  recovery) + 19.95 s boot/verify/continue — consistent with the 2026-11-12
-  regression run (19.18 s on a different day).
-- `reads-memory-g2` (two readers, aggregate, p50/p99 from merged bins; owner
-  served everything from memory, 0 store): random QD1 5,795 IOPS,
-  0.208 / 2.867 ms; sequential QD1 5,154 IOPS, 0.247 / 2.998 ms; sequential
-  QD4 8,603 IOPS, 0.489 / 4.489 ms; contention 5,413 IOPS, 0.189 / 3.195 ms
-  with overlap verified. `fio.guests` = 2 with both jobs under `fio.per_guest`.
-- `burst-images` N=2: boot 19.71 / 19.91 s, SSH 20.02 / 20.02 s, marker
-  21.69 / 21.90 s (launches 2.4 ms apart); first useful IO 8.33 s (8.30–8.36)
-  after the first launch; 115 GETs by the last marker (4.4 %); **time to
-  working set 22.33 / 22.34 s**, cold replays 0.39 / 0.40 s (96 / 90 / 208 ms,
-  96 / 98 / 209 ms) with 1,138 GETs / 4,688,560 bytes aggregate, warm 0.25 /
-  0.25 s with 128 GETs; 1,627 GETs (61.7 %) by the end of verification.
-  Calibration 13 of 32 reads remote, 0 ambiguous, bracket 57 ms.
-- `resume-elsewhere`: handoff bracket on B 54 ms; launch delay 6.5 ms;
-  **boot 17.97 s**; SSH 18.28 s; first command 19.75 s; marker 20.16 s;
-  **first useful IO 7.41 s** (7.38–7.44) after the handoff; **time to working
-  set 20.70 s**, cold replay 0.38 s (107 / 128 / 149 ms) with 313 GETs /
-  1,289,560 bytes, warm 0.30 s (112 / 112 / 80 ms) with 68 GETs; final
-  checksum 122 ms, 0 GETs. **Re-derived downtime 21.33 s = 0.72 s stop +
-  0.32 s handoff (0.26 s cold recovery, 131,072 manifest bytes, 20,664
-  staging-tail bytes) + 20.30 s boot/marker/continue**: the handoff term
-  fell from 0.50 s in `native-ws-001` because the anchor RPC and the
-  post-handoff full-fleet report no longer sit inside it. 48 GETs from boot
-  to the epoch continue, 429 to the end of the final checksum. Calibration
-  19 of 32 remote, 0 ambiguous, bracket 64 ms.
-
-Same caveats as above: nested-KVM loop-file development checks on one shared
-VM, single repetition; they certify the harness, schema and interval
-arithmetic only. Evidence: `native-ws-002.tgz` and `native-ws-002-results.json`
-appended to `results/burst-harness/evidence/SHA256SUMS` (all five entries
-re-verified), copies in `/root/burst/archive`; loop images unmounted.
 
 ## 2026-11-09 — Integration of C5, peer fetch and 16 KiB chunks
 

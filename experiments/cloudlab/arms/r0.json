@@ -1,0 +1,39 @@
+{
+ "arm": "r0",
+ "runner": "r0",
+ "description": "Testbed floor: fio 4 KiB QD1 direct random read and 4 KiB QD1 write+fdatasync on each node's experiment XFS, and a TCP ping-pong A->B on the experiment link. With nvme_tcp, B also exports a file-backed nvmet namespace on its XFS over the experiment link and A reads it through kernel nvme-tcp (disable per campaign with nodes config r0_nvme_tcp false).",
+ "seconds": 30,
+ "pinning": {
+  "r6615": {
+   "logical_cpus": 32,
+   "irq": "0-1",
+   "daemon": "2-5",
+   "controller": "6-7",
+   "guests": "8-23",
+   "note": "SMT off (setup.sh nosmt): 32 physical cores; irq, daemon and guest sets on distinct cores, 24-31 idle"
+  },
+  "c6525-25g": {
+   "logical_cpus": 16,
+   "irq": "0-1",
+   "daemon": "2-5",
+   "controller": "6-7",
+   "guests": "8-15",
+   "note": "SMT off (setup.sh nosmt): 16 physical cores; eight guest cores, so the g16 units and the 16-image burst are not in this node type's plan"
+  },
+  "loopback-8": {
+   "logical_cpus": 8,
+   "irq": "0",
+   "daemon": [
+    "0-1",
+    "2-3"
+   ],
+   "controller": "2-3",
+   "guests": "4-7",
+   "note": "development: both members on one 8-vCPU VM, as in the 2026-11-13 harness validation"
+  }
+ },
+ "cases": [
+  "floor"
+ ],
+ "nvme_tcp": true
+}

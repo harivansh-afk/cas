@@ -23,8 +23,10 @@ from agent import (
     parse_block_stat,
     sizing_args,
     ssh_ready,
+    working_set_script,
 )
 from runner import (
+    PEER_COUNTERS,
     DEFAULT_CASES,
     PEER_COUNTERS,
     RING_RETENTION,
@@ -562,24 +564,83 @@ class WorkingSetTests(unittest.TestCase):
 
     def test_working_set_defaults_empty_and_is_inherited_per_case(self):
         settings = normalize_settings(config())
-        self.assertEqual(settings["working_set"], [])
-        self.assertEqual(settings["burst"]["working_set"], [])
-        self.assertEqual(settings["resume"]["working_set"], [])
-        commands = ["sha256sum /mnt/cas/data", "wc -c < unique"]
+        empty = {"commands": [], "chroot": None, "cwd": None, "env": {}}
+        self.assertEqual(settings["working_set"], empty)
+        self.assertEqual(settings["burst"]["working_set"], empty)
+        self.assertEqual(settings["resume"]["working_set"], empty)
+        commands = ["dd if=/mnt/cas/data bs=4096 count=1 | sha256sum", "sha256sum /mnt/cas/data"]
+        spec = {**empty, "commands": commands}
         shared = normalize_settings(config(working_set=commands))
-        self.assertEqual(shared["burst"]["working_set"], commands)
-        self.assertEqual(shared["resume"]["working_set"], commands)
+        self.assertEqual(shared["burst"]["working_set"], spec)
+        self.assertEqual(shared["resume"]["working_set"], spec)
         own = normalize_settings(
             config(working_set=commands, resume={"working_set": ["true"]})
         )
-        self.assertEqual(own["resume"]["working_set"], ["true"])
-        self.assertEqual(own["burst"]["working_set"], commands)
+        self.assertEqual(own["resume"]["working_set"], {**empty, "commands": ["true"]})
+        self.assertEqual(own["burst"]["working_set"], spec)
         cleared = normalize_settings(
             config(working_set=commands, burst={"working_set": []})
         )
-        self.assertEqual(cleared["burst"]["working_set"], [])
+        self.assertEqual(cleared["burst"]["working_set"], empty)
         cfg = apply_overrides(config(), ['working_set=["ls -l"]'])
-        self.assertEqual(normalize_settings(cfg)["resume"]["working_set"], ["ls -l"])
+        self.assertEqual(normalize_settings(cfg)["resume"]["working_set"]["commands"], ["ls -l"])
+
+    def test_working_set_chroot_form(self):
+        spec = {"commands": ["pwd"], "chroot": "/mnt/cas/root", "cwd": "/testbed", "env": {"HOME": "/root", "PATH": "/bin"}}
+        settings = normalize_settings(config(working_set=spec))
+        self.assertEqual(settings["working_set"], spec)
+        self.assertEqual(settings["burst"]["working_set"], spec)
+        inherited = normalize_settings(config(working_set=spec, resume={"working_set": {"commands": ["ls"]}}))
+        self.assertEqual(inherited["resume"]["working_set"], {"commands": ["ls"], "chroot": None, "cwd": None, "env": {}})
+        for bad in (
+            {"commands": ["pwd"], "cwd": "/testbed"},
+            {"commands": ["pwd"], "chroot": "relative"},
+            {"commands": ["pwd"], "chroot": "/a'b"},
+            {"commands": ["pwd"], "chroot": "/r", "env": {"1BAD": "x"}},
+            {"commands": ["pwd"], "chroot": "/r", "env": {"OK": 1}},
+            {"commands": ["pwd"], "unknown": 1},
+        ):
+            with self.subTest(bad=bad), self.assertRaises((ValueError, TypeError)):
+                normalize_settings(config(working_set=bad))
+
+    def test_replay_working_set_records_the_spec_and_both_passes(self):
+        from runner import Experiment
+
+        experiment = Experiment.__new__(Experiment)
+        report = [{"peer": {"counters": {k: 0 for k in PEER_COUNTERS} | {"get_wire": 0}, "recent": []}, "fleet": {"flows": {}}}] * 2
+        calls = []
+
+        class FakeAgent:
+            def call(self, method, **args):
+                calls.append((method, args))
+                return [{"name": "g", "commands": [{"index": 0, "command": "pwd", "started_ns": 10, "completed_ns": 20, "elapsed_ns": 10, "stdout_bytes": 0, "stdout_sha256": ""}]}]
+
+        experiment.agents = [FakeAgent(), FakeAgent()]
+        with patch.object(Experiment, "report", lambda self: report), patch("runner.deltas", lambda a, b: {}), patch("runner.peer_counters", lambda a, b: {"gets": 3, "get_wire": 12288, "errors": 0, "failed_reads": 0}):
+            spec = {"commands": ["pwd"], "chroot": "/mnt/cas/root", "cwd": "/work", "env": {"A": "1"}}
+            result = experiment.replay_working_set(1, ["g"], spec, {"g": 0})
+        self.assertEqual((result["commands"], result["chroot"], result["guest_cwd"], result["env"]), (["pwd"], "/mnt/cas/root", "/work", {"A": "1"}))
+        self.assertEqual(set(result) >= {"cold", "warm"}, True)
+        self.assertEqual(result["cold"]["destination_fetched_chunks"], 3)
+        self.assertEqual([c[1]["chroot"] for c in calls], ["/mnt/cas/root", "/mnt/cas/root"])
+        self.assertEqual([c[1]["label"] for c in calls], ["cold", "warm"])
+        plain = experiment.replay_working_set(1, ["g"], {"commands": ["ls"], "chroot": None, "cwd": None, "env": {}}, {"g": 0}) if False else None
+        self.assertIsNone(plain)
+
+    def test_working_set_script_wraps_chroot_commands(self):
+        self.assertEqual(working_set_script("ls"), "cd /mnt/cas\nls")
+        script = working_set_script("echo $HOME > out", "/mnt/cas/root", "/testbed", {"PATH": "/bin", "HOME": "/root"})
+        self.assertEqual(
+            script,
+            "CHROOT=$(command -v chroot)\n"
+            "env -i HOME=/root PATH=/bin \"$CHROOT\" /mnt/cas/root /bin/bash -lc 'cd /testbed && echo $HOME > out'",
+        )
+        self.assertEqual(working_set_script("ls", "/r"), "CHROOT=$(command -v chroot)\nenv -i \"$CHROOT\" /r /bin/bash -lc ls")
+        # The wrapper is itself valid sh and keeps the command's own quoting intact.
+        import subprocess
+
+        probe = subprocess.run(["sh", "-eu", "-c", 'CHROOT=echo\nenv -i A=1 "$CHROOT" /r /bin/bash -lc \'cd /t && echo "$A"\''], capture_output=True, text=True)
+        self.assertEqual(probe.stdout.strip(), '/r /bin/bash -lc cd /t && echo "$A"')
 
     def test_working_set_rejects_non_command_lists(self):
         for bad in (

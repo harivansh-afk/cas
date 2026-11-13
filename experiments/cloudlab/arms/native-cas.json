@@ -1,0 +1,70 @@
+{
+ "arm": "native-cas",
+ "runner": "native",
+ "backend": "cas",
+ "filesystem": "xfs",
+ "description": "Single-host CAS through cas-host on the experiment XFS (cas-native-run --backend cas). g1 runs; g4/g8/g16 are blocked until cas-native-run boots more than two guests (the two-host reads-*-gN arms cover CAS load per host in the meantime).",
+ "pinning": {
+  "r6615": {
+   "logical_cpus": 32,
+   "irq": "0-1",
+   "daemon": "2-5",
+   "controller": "6-7",
+   "guests": "8-23",
+   "note": "SMT off (setup.sh nosmt): 32 physical cores; irq, daemon and guest sets on distinct cores, 24-31 idle"
+  },
+  "c6525-25g": {
+   "logical_cpus": 16,
+   "irq": "0-1",
+   "daemon": "2-5",
+   "controller": "6-7",
+   "guests": "8-15",
+   "note": "SMT off (setup.sh nosmt): 16 physical cores; eight guest cores, so the g16 units and the 16-image burst are not in this node type's plan"
+  },
+  "loopback-8": {
+   "logical_cpus": 8,
+   "irq": "0",
+   "daemon": [
+    "0-1",
+    "2-3"
+   ],
+   "controller": "2-3",
+   "guests": "4-7",
+   "note": "development: both members on one 8-vCPU VM, as in the 2026-11-13 harness validation"
+  }
+ },
+ "cases": {
+  "g1": {
+   "guests": 1,
+   "script_args": [
+    "baseline",
+    "30",
+    "512"
+   ]
+  },
+  "g4": {
+   "guests": 4,
+   "script_args": [
+    "baseline",
+    "30",
+    "512"
+   ]
+  },
+  "g8": {
+   "guests": 8,
+   "script_args": [
+    "baseline",
+    "30",
+    "512"
+   ]
+  },
+  "g16": {
+   "guests": 16,
+   "script_args": [
+    "baseline",
+    "30",
+    "512"
+   ]
+  }
+ }
+}
