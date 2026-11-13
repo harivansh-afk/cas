@@ -120,7 +120,7 @@ impl Router {
     pub fn fetch_with_notify(
         &self,
         hash: [u8; 32],
-        notify: vmm_sys_util::eventfd::EventFd,
+        notify: std::os::fd::OwnedFd,
     ) -> io::Result<Ticket> {
         let index = self.owners(&hash).next().ok_or(io::ErrorKind::NotFound)?;
         self.shared.clients[index]

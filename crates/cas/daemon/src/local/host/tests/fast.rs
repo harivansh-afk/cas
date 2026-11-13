@@ -260,3 +260,78 @@ fn rejected_flush_does_not_cancel_the_in_flight_barrier_and_failed_gate_declines
     drop(local);
     shutdown(host);
 }
+
+/// Local exhaustion while joining the registry fails the read and its image
+/// but not the shared host gate: here the registry runs out of leader entries
+/// after the read's first block joined another leader as a waiter. No GET was
+/// sent, so nothing shared failed; the reactor likewise fails only the image
+/// for errors raised before its shared IO stage.
+#[test]
+fn registry_exhaustion_after_a_waiter_joined_fails_only_the_image() {
+    use cas_core::{
+        cache::fills::{Lookup, Registry},
+        chunk::Chunk,
+    };
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let resources = Arc::new(Resources {
+        peer: crate::peer::Config {
+            peer_address: Some(listener.local_addr().unwrap()),
+            peer_force_remote: true,
+            fast_settled_reads: true,
+            ..Default::default()
+        },
+        ..Resources::default()
+    });
+    let mut host = create(root.path(), 2, Arc::clone(&resources));
+    let mut local = attach(&mut host, 2);
+    let first = vec![0x11; BLOCK_SIZE];
+    let second = vec![0x22; BLOCK_SIZE];
+    write(&mut local, 1, 0, &first);
+    write(&mut local, 2, BLOCK_SIZE, &second);
+    let published = local.status.published;
+    drained(&mut local, published);
+    // Warm the manifest page through the reactor (a hole read), so the
+    // settled read below resolves inline instead of declining for a page load.
+    read_at(&mut local, 10, 8 * BLOCK_SIZE as u64, &[0; BLOCK_SIZE]);
+    assert_eq!(fast(&local, "declined_io"), 1);
+    // Hold every leader entry; the first one is this image's block 0 chunk,
+    // so the read joins it as a waiter before finding the registry full.
+    let fetches = host.shared.fetches.clone();
+    let mut held = Vec::new();
+    match Registry::lookup(&fetches, Chunk::new(&first).unwrap().hash()).unwrap() {
+        Some(Lookup::Leader(leader)) => held.push(leader),
+        _ => panic!("fresh registry has a leader entry"),
+    }
+    let mut filler = 0u64;
+    loop {
+        filler += 1;
+        match Registry::lookup(&fetches, *blake3::hash(&filler.to_le_bytes()).as_bytes()).unwrap() {
+            Some(Lookup::Leader(leader)) => held.push(leader),
+            Some(Lookup::Waiter(_)) => unreachable!("distinct hashes"),
+            None => break,
+        }
+    }
+    submit_read(&mut local, 3, 0, 2 * BLOCK_SIZE);
+    let failed = received(&mut local);
+    assert_eq!(failed.id, 3);
+    assert!(failed.result.is_err(), "{:?}", failed.result);
+    let CompletionData::Read(bytes) = failed.data else {
+        panic!("read response");
+    };
+    assert_eq!(bytes.as_slice(), &[0; 2 * BLOCK_SIZE][..]);
+    assert_eq!(fast(&local, "failed_reads"), 1);
+    assert_eq!(fast(&local, "shared_waits"), 1);
+    assert_eq!(fast(&local, "declined_capacity"), 0);
+    assert_eq!(fast(&local, "declined_io"), 1);
+    assert_eq!(host.report()["peer"]["counters"]["gets"], 0);
+    assert!(local.shared.health.lock().unwrap().failure.is_some());
+    assert!(
+        host.shared.gate.failure().is_none(),
+        "local exhaustion must not fail the shared host gate"
+    );
+    drop(held);
+    drop(local);
+    shutdown(host);
+}

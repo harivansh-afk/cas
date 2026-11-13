@@ -19,7 +19,7 @@ use cas_core::{
 };
 use std::{
     io,
-    os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd},
+    os::fd::{AsFd, AsRawFd, OwnedFd},
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -81,7 +81,7 @@ impl PendingKind {
     pub(crate) fn start(
         self,
         hash: [u8; 32],
-        notify: EventFd,
+        notify: OwnedFd,
         image: usize,
     ) -> io::Result<Challenger> {
         match self {
@@ -207,7 +207,7 @@ struct LocalSlot {
     bytes: [u8; BLOCK_SIZE],
     phases: Phases,
     error: Option<io::ErrorKind>,
-    notify: Option<EventFd>,
+    notify: Option<OwnedFd>,
 }
 struct LocalPool {
     slots: Vec<LocalSlot, BudgetAllocator>,
@@ -245,10 +245,10 @@ impl LocalSource {
         metrics: BudgetArc<Metrics>,
     ) -> io::Result<Self> {
         let grant = EventFd::new(libc::EFD_NONBLOCK | libc::EFD_CLOEXEC)?;
-        let bound = grant.try_clone()?.into_raw_fd();
-        // SAFETY: the freshly cloned eventfd transfers its unique FD owner here.
-        let bound = unsafe { OwnedFd::from_raw_fd(bound) };
-        scheduler.0.bind(scheduler.1, bound)?;
+        scheduler.0.bind(
+            scheduler.1,
+            cas_core::eventfd::duplicate(grant.as_raw_fd())?,
+        )?;
         let scheduling = scheduler::Scheduler::port(&scheduler.0, scheduler.1)?;
         let mut slots = crate::local::reserved_vec(LOCAL_SLOTS, budget)?;
         let mut free = crate::local::reserved_vec(LOCAL_SLOTS, budget)?;
@@ -323,7 +323,7 @@ impl LocalShared {
         shared: &BudgetArc<Self>,
         hash: [u8; 32],
         plan: Plan,
-        notify: EventFd,
+        notify: OwnedFd,
     ) -> io::Result<LocalTicket> {
         if shared.stop.load(Ordering::Acquire) {
             return Err(io::ErrorKind::BrokenPipe.into());
@@ -458,7 +458,7 @@ fn run_local(
         slot.done = true;
         if slot.owned {
             if let Some(notify) = &slot.notify {
-                let _ = notify.write(1);
+                let _ = cas_core::eventfd::notify(notify.as_fd());
             }
         } else {
             slot.notify = None;

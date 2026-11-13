@@ -29,7 +29,7 @@ mod direct;
 #[cfg(target_os = "linux")]
 mod directory;
 #[cfg(target_os = "linux")]
-mod eventfd;
+pub mod eventfd;
 pub mod import;
 #[cfg(target_os = "linux")]
 pub mod layout;

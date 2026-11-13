@@ -29,22 +29,22 @@
 //! frozen path may plan a read before or after a concurrent write publishes.
 //! Credits, the host admission entry and fairness release stay in the permit
 //! until completion, which flows through the same `receive` path as the
-//! reactor's. Remote chunks join the shared fetch registry: a leader fetches
-//! and publishes for every waiter, a waiter is woken through the frontend's
-//! own eventfd. Once a registry entry is held the read is never declined (a
-//! dropped leader would fail its waiters); it completes or fails exactly as a
-//! reactor read does. A remote failure fails the read, the image gate and the
-//! shared host gate like the frozen path. Reads that cannot establish these
-//! facts are sent to the reactor unchanged.
+//! reactor's. Remote chunks join the shared fetch registry through the state
+//! machine in `chunk.rs`: a leader fetches and publishes for every waiter, a
+//! waiter is woken through the frontend's own eventfd. Once a registry entry
+//! is held the read is never declined (a dropped leader would fail its
+//! waiters); it completes or fails exactly as a reactor read does. A failure
+//! of shared IO (a GET reply, a leader's publication, the cache fill) fails
+//! the read, the image gate and the shared host gate like the frozen path;
+//! local resource exhaustion while joining fails only the read and its image
+//! (see `Context::fail`). Reads that cannot establish these facts are sent to
+//! the reactor unchanged.
 use super::*;
-use crate::local::chunk::{Block, Sources, copy_chunk};
+use crate::local::chunk::{Block, Fetch, Joined, Sources, copy_chunk};
 use cas_core::{
-    aligned::AlignedBuffer,
-    cache::fills::{Leader, Lookup, Registry, Waiter},
-    chunk_index::Hash,
-    manifest::file::View,
+    aligned::AlignedBuffer, cache::fills::Waiter, chunk_index::Hash, manifest::file::View,
 };
-use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, OwnedFd};
 
 #[derive(Default, Clone, Copy, serde::Serialize)]
 pub(super) struct Counters {
@@ -58,14 +58,18 @@ pub(super) struct Counters {
     pub declined_capacity: u64,
     pub declined_failed: u64,
     pub failed_reads: u64,
+    /// The FLUSH table overflowed: every later read is declined (`declined_flush`)
+    /// until the image restarts. Cannot happen within the admission limit.
+    pub flush_overflow: u64,
 }
+
+type Count = fn(&mut Counters) -> &mut u64;
 
 enum Source {
     /// This read leads the fetch: its GET fills the cell for every waiter.
     Fetch {
         ticket: crate::peer::Ticket,
-        leader: Option<Leader<Fetched>>,
-        fetched: Option<BudgetArc<Fetched>>,
+        fetch: Option<Fetch>,
     },
     /// Another reader leads; its publication wakes the frontend.
     Wait(Waiter<Fetched>),
@@ -130,28 +134,24 @@ impl Context {
     pub fn has_pending(&self) -> bool {
         !self.pending.is_empty()
     }
-    fn decline(
-        &mut self,
-        count: fn(&mut Counters) -> &mut u64,
-        offset: u64,
-        buffer: AlignedBuffer,
-        permit: Permit,
-        id: u64,
-        boundary: u64,
-    ) -> io::Result<Outcome> {
+    /// Hand the request back to the reactor unchanged.
+    fn decline(&mut self, count: Count, io: Io) -> Outcome {
         *count(&mut self.counters) += 1;
-        Ok(Outcome::Declined(Io {
-            id,
-            operation: Operation::Read { offset, buffer },
-            permit,
-            boundary,
-        }))
+        Outcome::Declined(io)
     }
     pub fn flush_sent(&mut self, id: u64) {
         if self.flushes.len() < self.flushes.capacity() {
             self.flushes.push(id);
         } else {
-            // Cannot happen within the admission limit; stay conservative.
+            // Sized to the admission limit, so this needs a FLUSH completion
+            // the frontend never observed. Stay conservative, and say so.
+            self.counters.flush_overflow += 1;
+            if self.counters.flush_overflow == 1 {
+                eprintln!(
+                    "cas-daemon: fast-settled-reads FLUSH table overflowed; \
+                     inline reads are declined until the image restarts"
+                );
+            }
             self.flushes.clear();
             self.flushes.push(u64::MAX);
         }
@@ -163,9 +163,7 @@ impl Context {
     }
     /// A duplicate of the frontend wake for a registry waiter or a GET.
     fn wake(&self) -> io::Result<OwnedFd> {
-        let raw = self.notify.try_clone()?.into_raw_fd();
-        // SAFETY: the freshly cloned eventfd transfers its unique FD owner here.
-        Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+        cas_core::eventfd::duplicate(self.notify.as_raw_fd())
     }
 
     /// Serve the read inline, start its remote fetches, or decline it. The
@@ -173,33 +171,16 @@ impl Context {
     pub fn enqueue(
         &mut self,
         shared: &Shared,
-        io: Io,
+        mut io: Io,
         output: &mut BudgetQueue<Completed>,
     ) -> io::Result<Outcome> {
-        let Io {
-            id,
-            operation,
-            mut permit,
-            boundary,
-        } = io;
-        let admitted = boundary;
-        let Operation::Read { offset, buffer } = operation else {
-            return Ok(Outcome::Declined(Io {
-                id,
-                operation,
-                permit,
-                boundary,
-            }));
+        let admitted = io.boundary;
+        let Operation::Read { offset, buffer } = &io.operation else {
+            return Ok(Outcome::Declined(io));
         };
+        let (offset, bytes) = (*offset, buffer.as_slice().len());
         if !self.flushes.is_empty() {
-            return self.decline(
-                |c| &mut c.declined_flush,
-                offset,
-                buffer,
-                permit,
-                id,
-                boundary,
-            );
+            return Ok(self.decline(|c| &mut c.declined_flush, io));
         }
         if shared
             .health
@@ -208,50 +189,19 @@ impl Context {
             .failure
             .is_some()
         {
-            return self.decline(
-                |c| &mut c.declined_failed,
-                offset,
-                buffer,
-                permit,
-                id,
-                boundary,
-            );
+            return Ok(self.decline(|c| &mut c.declined_failed, io));
         }
         let status = *shared.final_status.lock().expect("status poisoned");
         if status.published != admitted || status.compacted != status.published {
-            return self.decline(
-                |c| &mut c.declined_unsettled,
-                offset,
-                buffer,
-                permit,
-                id,
-                boundary,
-            );
+            return Ok(self.decline(|c| &mut c.declined_unsettled, io));
         }
         let view = match &*shared.manifest.lock().expect("manifest poisoned") {
             Some((compacted, view)) if *compacted == status.compacted => view.clone(),
-            _ => {
-                return self.decline(
-                    |c| &mut c.declined_unsettled,
-                    offset,
-                    buffer,
-                    permit,
-                    id,
-                    boundary,
-                );
-            }
+            _ => return Ok(self.decline(|c| &mut c.declined_unsettled, io)),
         };
         if view.commit().durable != status.compacted {
-            return self.decline(
-                |c| &mut c.declined_unsettled,
-                offset,
-                buffer,
-                permit,
-                id,
-                boundary,
-            );
+            return Ok(self.decline(|c| &mut c.declined_unsettled, io));
         }
-        let bytes = buffer.as_slice().len();
         let end = offset.checked_add(bytes as u64);
         if bytes == 0
             || !bytes.is_multiple_of(BLOCK_SIZE)
@@ -260,57 +210,56 @@ impl Context {
             || bytes > MAX_REQUEST_BYTES
         {
             // The reactor returns the actual range error.
-            return self.decline(|c| &mut c.declined_io, offset, buffer, permit, id, boundary);
+            return Ok(self.decline(|c| &mut c.declined_io, io));
         }
         if self.pending.len() == self.pending.capacity() {
-            return self.decline(
-                |c| &mut c.declined_capacity,
-                offset,
-                buffer,
-                permit,
-                id,
-                boundary,
-            );
+            return Ok(self.decline(|c| &mut c.declined_capacity, io));
         }
         // Pass 1: resolve every block through the shared resolution before
         // touching the registry or the transport, so a decline holds nothing.
         // Holes are zeroed and cache hits copied by the resolution itself.
-        let mut buffer = buffer;
         let mut remote = BudgetVec::new_in(BudgetAllocator::new(Arc::clone(&self.metadata)));
-        for block in 0..bytes / BLOCK_SIZE {
-            let absolute = offset / BLOCK_SIZE as u64 + block as u64;
-            let destination =
-                &mut buffer.as_mut_slice()[block * BLOCK_SIZE..(block + 1) * BLOCK_SIZE];
-            match self.sources.resolve(&view, absolute, destination) {
-                Ok(Block::Hole | Block::Cached) => continue,
-                Ok(Block::Remote(hash))
-                    if self.peer.is_some() && view.chunk_size().bytes() == BLOCK_SIZE =>
-                {
-                    if remote.try_reserve(1).is_err() {
-                        return self.decline(
-                            |c| &mut c.declined_capacity,
-                            offset,
-                            buffer,
-                            permit,
-                            id,
-                            boundary,
-                        );
+        let declined = {
+            let Operation::Read { buffer, .. } = &mut io.operation else {
+                unreachable!()
+            };
+            let mut declined: Option<Count> = None;
+            for block in 0..bytes / BLOCK_SIZE {
+                let absolute = offset / BLOCK_SIZE as u64 + block as u64;
+                let destination =
+                    &mut buffer.as_mut_slice()[block * BLOCK_SIZE..(block + 1) * BLOCK_SIZE];
+                match self.sources.resolve(&view, absolute, destination) {
+                    Ok(Block::Hole | Block::Cached) => continue,
+                    Ok(Block::Remote(hash))
+                        if self.peer.is_some() && view.chunk_size().bytes() == BLOCK_SIZE =>
+                    {
+                        if remote.try_reserve(1).is_err() {
+                            declined = Some(|c| &mut c.declined_capacity);
+                            break;
+                        }
+                        remote.push((block, hash));
                     }
-                    remote.push((block, hash));
-                }
-                Ok(Block::Remote(_) | Block::Page { .. } | Block::Store(..)) | Err(_) => {
-                    return self.decline(
-                        |c| &mut c.declined_io,
-                        offset,
-                        buffer,
-                        permit,
-                        id,
-                        boundary,
-                    );
+                    Ok(Block::Remote(_) | Block::Page { .. } | Block::Store(..)) | Err(_) => {
+                        declined = Some(|c| &mut c.declined_io);
+                        break;
+                    }
                 }
             }
+            declined
+        };
+        if let Some(count) = declined {
+            return Ok(self.decline(count, io));
         }
         if remote.is_empty() {
+            let Io {
+                id,
+                operation,
+                mut permit,
+                ..
+            } = io;
+            let Operation::Read { buffer, .. } = operation else {
+                unreachable!()
+            };
             self.counters.inline_reads += 1;
             if let Some(trace) = &mut permit.trace {
                 trace.responded_ns = trace.at();
@@ -325,14 +274,7 @@ impl Context {
         }
         let mut sources = BudgetVec::new_in(BudgetAllocator::new(Arc::clone(&self.metadata)));
         if sources.try_reserve_exact(remote.len()).is_err() {
-            return self.decline(
-                |c| &mut c.declined_capacity,
-                offset,
-                buffer,
-                permit,
-                id,
-                boundary,
-            );
+            return Ok(self.decline(|c| &mut c.declined_capacity, io));
         }
         // Pass 2: join the shared fetch registry. Nothing is held until the
         // first entry; after that a problem fails the read like a reactor
@@ -342,72 +284,47 @@ impl Context {
             .peer
             .clone()
             .expect("remote chunk without a peer router");
-        let credits = permit
+        let credits = io
+            .permit
             ._read
             .as_ref()
             .expect("read byte reservation")
             .clone();
         let mut failure: Option<io::Error> = None;
         for &(block, hash) in &remote {
+            let absolute = offset / BLOCK_SIZE as u64 + block as u64;
+            let Operation::Read { buffer, .. } = &mut io.operation else {
+                unreachable!()
+            };
             let destination =
                 &mut buffer.as_mut_slice()[block * BLOCK_SIZE..(block + 1) * BLOCK_SIZE];
-            let lookup = match self.wake() {
-                Ok(wake) => Registry::lookup_with(&self.fetches, hash, Some(wake)),
-                Err(error) => Err(error),
-            };
-            let source = match lookup {
-                Ok(Some(Lookup::Waiter(waiter))) => {
+            let joined = self.wake().and_then(|wake| {
+                self.sources.join(
+                    &self.fetches,
+                    hash,
+                    BLOCK_SIZE,
+                    &credits,
+                    &self.metadata,
+                    &view,
+                    absolute,
+                    destination,
+                    Some(wake),
+                )
+            });
+            let source = match joined {
+                Ok(Joined::Wait(waiter)) => {
                     self.counters.shared_waits += 1;
                     Source::Wait(waiter)
                 }
-                Ok(Some(Lookup::Leader(leader))) => {
-                    let fetched =
-                        AlignedBuffer::try_new_in(BLOCK_SIZE, allocator_api2::alloc::Global)
-                            .and_then(|bytes| {
-                                BudgetArc::try_new(
-                                    Fetched {
-                                        remote: None,
-                                        bytes,
-                                        _credits: credits.clone(),
-                                    },
-                                    &self.metadata,
-                                )
-                            });
-                    let Ok(mut fetched) = fetched else {
-                        failure = Some(io::Error::new(
-                            io::ErrorKind::OutOfMemory,
-                            "fetch payload metadata exhausted",
-                        ));
-                        break;
-                    };
-                    // A previous leader may have filled the cache between the
-                    // miss and this lookup; publish it through the new cell.
-                    if let Some(bytes) = self.sources.peek(&hash) {
-                        destination.copy_from_slice(bytes.as_slice());
-                        fetched
-                            .get_mut()
-                            .expect("unpublished fetch is unique")
-                            .bytes
-                            .as_mut_slice()
-                            .copy_from_slice(bytes.as_slice());
-                        if let Err(error) = leader.complete(fetched) {
-                            failure = Some(error);
-                            break;
-                        }
-                        continue;
-                    }
-                    let ticket = match self.wake() {
-                        Ok(wake) => {
-                            // SAFETY: the owned eventfd transfers its unique FD owner here.
-                            let notify = unsafe { EventFd::from_raw_fd(wake.into_raw_fd()) };
-                            peer.fetch_with_notify(hash, notify)
-                        }
-                        Err(error) => Err(error),
-                    };
+                Ok(Joined::Served) => continue,
+                Ok(Joined::Lead(fetch)) => {
+                    let ticket = self
+                        .wake()
+                        .and_then(|wake| peer.fetch_with_notify(hash, wake));
                     let ticket = match ticket {
                         Ok(ticket) => ticket,
                         Err(error) => {
-                            drop(leader);
+                            drop(fetch);
                             failure = Some(error);
                             break;
                         }
@@ -422,35 +339,20 @@ impl Context {
                     }
                     Source::Fetch {
                         ticket,
-                        leader: Some(leader),
-                        fetched: Some(fetched),
+                        fetch: Some(fetch),
                     }
                 }
-                Ok(None) if sources.is_empty() => {
-                    return self.decline(
-                        |c| &mut c.declined_capacity,
-                        offset,
-                        buffer,
-                        permit,
-                        id,
-                        boundary,
-                    );
+                Ok(Joined::Full) if sources.is_empty() => {
+                    return Ok(self.decline(|c| &mut c.declined_capacity, io));
                 }
-                Ok(None) => {
+                Ok(Joined::Full) => {
                     failure = Some(io::Error::other(
                         "admitted read exceeded host fetch capacity",
                     ));
                     break;
                 }
                 Err(_) if sources.is_empty() => {
-                    return self.decline(
-                        |c| &mut c.declined_capacity,
-                        offset,
-                        buffer,
-                        permit,
-                        id,
-                        boundary,
-                    );
+                    return Ok(self.decline(|c| &mut c.declined_capacity, io));
                 }
                 Err(error) => {
                     failure = Some(error);
@@ -464,6 +366,15 @@ impl Context {
                 done: false,
             });
         }
+        let Io {
+            id,
+            operation,
+            mut permit,
+            ..
+        } = io;
+        let Operation::Read { buffer, .. } = operation else {
+            unreachable!()
+        };
         if let Some(metrics) = &self.peer_metrics {
             permit.remote = Some(crate::peer::metrics::Trace::new(
                 metrics.clone(),
@@ -480,7 +391,8 @@ impl Context {
             remote: sources,
         };
         if let Some(error) = failure {
-            self.fail(shared, pending, error, output)?;
+            // Local exhaustion while joining: no shared IO has failed.
+            self.fail(shared, pending, error, false, output)?;
             return Ok(Outcome::Taken);
         }
         self.pending.push(pending);
@@ -489,13 +401,20 @@ impl Context {
         Ok(Outcome::Taken)
     }
 
-    /// Fail closed like a reactor read: IOERR to the guest, the image gate and
-    /// the shared host gate failed, unfinished leaders fail their waiters.
+    /// Fail closed like a reactor read: IOERR to the guest with a zeroed
+    /// buffer, the image gate failed, unfinished leaders fail their waiters.
+    /// The shared host gate fails only when `shared_io` is set: the reactor
+    /// fails the host for a read whose shared IO (store or GET payload, a
+    /// publication it waited for, the cache fill) failed, and only the image
+    /// for errors before that stage. Here that means failures observed in
+    /// `poll`; exhaustion while joining (registry capacity after a waiter
+    /// joined, metadata budget, descriptor duplication, GET slots) is local.
     fn fail(
         &mut self,
         shared: &Shared,
         pending: Pending,
         error: io::Error,
+        shared_io: bool,
         output: &mut BudgetQueue<Completed>,
     ) -> io::Result<()> {
         let Pending {
@@ -514,7 +433,9 @@ impl Context {
             .lock()
             .map_err(|_| io::Error::other("completion gate poisoned"))?
             .fail(message.clone());
-        self.gate.fail(message);
+        if shared_io {
+            self.gate.fail(message);
+        }
         if let Some(trace) = &mut permit.trace {
             trace.responded_ns = trace.at();
         }
@@ -541,36 +462,30 @@ impl Context {
             } = &mut self.pending[index];
             let mut failure = None;
             for remote in remotes.iter_mut().filter(|r| !r.done) {
+                let absolute = *offset / BLOCK_SIZE as u64 + remote.block as u64;
                 let destination = &mut buffer.as_mut_slice()
                     [remote.block * BLOCK_SIZE..(remote.block + 1) * BLOCK_SIZE];
                 match &mut remote.source {
-                    Source::Fetch {
-                        ticket,
-                        leader,
-                        fetched,
-                    } => {
-                        let (phases, result) = ticket.finish(destination);
+                    Source::Fetch { ticket, fetch } => {
+                        let (phases, result) =
+                            ticket.finish(fetch.as_mut().expect("unpublished fetch").payload_mut());
                         match result {
                             Ok(false) => continue,
                             Ok(true) => {
-                                if let Err(error) =
-                                    self.sources.fill(remote.hash, destination, true)
-                                {
-                                    failure = Some(error);
-                                    break;
-                                }
-                                let mut cell = fetched.take().expect("unpublished fetch payload");
-                                let unique = cell.get_mut().expect("unpublished fetch is unique");
-                                unique.bytes.as_mut_slice().copy_from_slice(destination);
-                                unique.remote = Some(phases);
-                                if let Err(error) =
-                                    leader.take().expect("fetch leader").complete(cell)
-                                {
-                                    failure = Some(error);
-                                    break;
-                                }
                                 if let Some(trace) = &mut permit.remote {
                                     trace.fetched(phases);
+                                }
+                                let fetch = fetch.take().expect("unpublished fetch");
+                                if let Err(error) = fetch.publish(
+                                    &self.sources,
+                                    remote.hash,
+                                    Some(phases),
+                                    view,
+                                    absolute,
+                                    destination,
+                                ) {
+                                    failure = Some(error);
+                                    break;
                                 }
                                 remote.done = true;
                             }
@@ -586,7 +501,6 @@ impl Context {
                     Source::Wait(waiter) => match waiter.poll() {
                         Ok(None) => continue,
                         Ok(Some(fetched)) => {
-                            let absolute = *offset / BLOCK_SIZE as u64 + remote.block as u64;
                             if let Err(error) =
                                 copy_chunk(view, absolute, fetched.bytes.as_slice(), destination)
                             {
@@ -613,7 +527,8 @@ impl Context {
             }
             let pending = self.pending.swap_remove(index);
             if let Some(error) = failure {
-                self.fail(shared, pending, error, output)?;
+                // Shared IO failed: a reply, a publication or the fill.
+                self.fail(shared, pending, error, true, output)?;
                 continue;
             }
             let Pending {
@@ -640,10 +555,11 @@ impl Context {
         Ok(())
     }
 
-    /// Wait for a reply or a reactor completion while fast reads are pending.
+    /// Wait for a reply, a publication or a reactor completion while fast
+    /// reads are pending; every one of them signals the frontend wake.
     pub fn wait(&self, timeout_ms: i32) -> io::Result<()> {
         let mut descriptor = libc::pollfd {
-            fd: std::os::fd::AsRawFd::as_raw_fd(&self.notify),
+            fd: self.notify.as_raw_fd(),
             events: libc::POLLIN,
             revents: 0,
         };

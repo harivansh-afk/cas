@@ -925,9 +925,12 @@ impl Local {
                     self.status = status;
                     return Ok(Some(self.observe(completed)));
                 }
-                // Inline reads wait on the frontend wake, which remote
-                // replies and the reactor both signal.
-                None if wait => self.fast.as_ref().expect("pending fast reads").wait(10)?,
+                // Inline reads wait on the frontend wake. Remote replies,
+                // registry publications and the reactor (`notify(&self.wake.0)`
+                // after every mailbox send) all signal that one eventfd, so
+                // the wait is unbounded: a send racing this `try_recv` leaves
+                // the counter set and the wait returns at once.
+                None if wait => self.fast.as_ref().expect("pending fast reads").wait(-1)?,
                 None => return Ok(None),
             }
         }

@@ -3,10 +3,17 @@
 //! Holes and clean-cache hits are served here; everything else is handed back
 //! with what the scheduler needs: a manifest page to load, a verified local
 //! store plan, or a chunk only a peer can serve. The cache-fill rules live
-//! here too, so neither scheduler can drift from the other.
+//! here too, so neither scheduler can drift from the other, and so does the
+//! fetch-registry state machine: joining as leader or waiter, republishing a
+//! fill that landed between the miss and the lookup, and publishing a
+//! verified payload (fill rule, guest-block copy, waiter completion).
 use super::*;
 use cas_core::{
-    cache::Cache,
+    aligned::AlignedBuffer,
+    cache::{
+        Cache,
+        fills::{Leader, Lookup, Registry, Waiter},
+    },
     chunk_index::Hash,
     manifest::{
         file::{self as manifest, PageCache, View},
@@ -14,6 +21,7 @@ use cas_core::{
     },
     store::file::{self as store, Reader},
 };
+use std::os::fd::OwnedFd;
 
 pub(super) struct Sources {
     reader: Reader,
@@ -137,6 +145,111 @@ impl Sources {
             Err(error) if error.kind() == io::ErrorKind::OutOfMemory => Ok(()),
             Err(error) => Err(error),
         }
+    }
+}
+
+/// This reader's position for one chunk after joining the fetch registry.
+pub(super) enum Joined {
+    /// Another reader leads; its publication signals the waiter (through the
+    /// caller's wake when one was given).
+    Wait(Waiter<Fetched>),
+    /// This reader leads: it fetches the payload and must `Fetch::publish`
+    /// it; dropping the `Fetch` fails every waiter.
+    Lead(Fetch),
+    /// A previous leader's cache fill arrived between the miss and the
+    /// lookup; it was republished through a fresh cell and the destination
+    /// block is filled.
+    Served,
+    /// The registry has no entry left.
+    Full,
+}
+
+/// A led fetch: the registry entry and the payload cell waiters receive.
+pub(super) struct Fetch {
+    leader: Leader<Fetched>,
+    cell: BudgetArc<Fetched>,
+}
+
+impl Fetch {
+    /// The payload buffer a store read or a GET reply fills.
+    pub fn payload_mut(&mut self) -> &mut [u8] {
+        self.cell
+            .get_mut()
+            .expect("unpublished fetch is unique")
+            .bytes
+            .as_mut_slice()
+    }
+    pub fn payload(&self) -> &[u8] {
+        self.cell.bytes.as_slice()
+    }
+    /// Publish a verified payload: the cache-fill rule (local store payload
+    /// always, a remote reply only with `--peer-cache`), the guest block copy
+    /// into `destination`, then completion for every waiter. `remote` carries
+    /// the transport milestones of a GET reply.
+    pub fn publish(
+        mut self,
+        sources: &Sources,
+        hash: Hash,
+        remote: Option<crate::peer::metrics::Phases>,
+        view: &View,
+        block: u64,
+        destination: &mut [u8],
+    ) -> io::Result<()> {
+        self.cell
+            .get_mut()
+            .expect("unpublished fetch is unique")
+            .remote = remote;
+        sources.fill(hash, self.cell.bytes.as_slice(), remote.is_some())?;
+        copy_chunk(view, block, self.cell.bytes.as_slice(), destination)?;
+        self.leader.complete(self.cell)
+    }
+}
+
+impl Sources {
+    /// Join the fetch registry for `hash`. A leader's cell is allocated
+    /// (`chunk_bytes`, charged to `metadata`, pinning the read's credits)
+    /// before anything is published; `wake` is signalled instead of a fresh
+    /// eventfd when this reader becomes a waiter.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one registry join for both schedulers; every argument is the read's own state"
+    )]
+    pub fn join(
+        &self,
+        fetches: &Fetches,
+        hash: Hash,
+        chunk_bytes: usize,
+        credits: &BudgetArc<Credits>,
+        metadata: &Arc<Budget>,
+        view: &View,
+        block: u64,
+        destination: &mut [u8],
+        wake: Option<OwnedFd>,
+    ) -> io::Result<Joined> {
+        let leader = match Registry::lookup_with(fetches, hash, wake)? {
+            None => return Ok(Joined::Full),
+            Some(Lookup::Waiter(waiter)) => return Ok(Joined::Wait(waiter)),
+            Some(Lookup::Leader(leader)) => leader,
+        };
+        let bytes = AlignedBuffer::try_new_in(chunk_bytes, allocator_api2::alloc::Global)?;
+        let cell = BudgetArc::try_new(
+            Fetched {
+                remote: None,
+                bytes,
+                _credits: credits.clone(),
+            },
+            metadata,
+        )?;
+        let mut fetch = Fetch { leader, cell };
+        // A previous leader may have filled the cache between the miss and
+        // this lookup; publish that value through the new cell as well.
+        if let Some(bytes) = self.peek(&hash) {
+            fetch.payload_mut().copy_from_slice(bytes.as_slice());
+            copy_chunk(view, block, bytes.as_slice(), destination)?;
+            fetch.leader.complete(fetch.cell)?;
+            return Ok(Joined::Served);
+        }
+        Ok(Joined::Lead(fetch))
     }
 }
 
