@@ -6,14 +6,15 @@ use crate::{
     BLOCK_SIZE, MAX_REQUEST_BYTES,
     append::{
         self, Limits, Log,
-        format::{Builder, MAX_DESCRIPTORS, RequestId},
+        format::{Builder, MAX_BATCH_BYTES, MAX_DESCRIPTORS, RequestId},
     },
     budget::{Budget, Usage},
     catalog::{Catalog, Change, Entry, Kind},
     chunk::ChunkSize,
     encoding::require,
     id::hex,
-    manifest::file::{Identity, Manifest},
+    layout,
+    manifest::file::Manifest,
     segments::Tickets,
     store::file::{self, Store},
 };
@@ -24,7 +25,7 @@ use std::{
     os::unix::fs::{FileExt, MetadataExt},
     path::{Path, PathBuf},
     sync::Arc,
-    time::Instant,
+    time::{Instant, SystemTime},
 };
 
 /// Completed owner boundaries, exposed for process-crash controls and progress.
@@ -46,7 +47,8 @@ pub struct Request<'a> {
     pub input: &'a Path,
     /// Required geometry for a new root; checked against an existing root.
     pub chunk_size: Option<ChunkSize>,
-    /// WAL and chunk segment capacity for a new root; an existing root keeps its own.
+    /// WAL and chunk segment capacity for a new root, bounded by the host's
+    /// default staging limits so the root stays servable; an existing root keeps its own.
     pub segment_bytes: u64,
     /// Input bytes staged between FLUSH/compaction/reclamation passes.
     pub compaction_interval: u64,
@@ -75,6 +77,8 @@ pub struct Receipt {
     pub segment_bytes: u64,
     pub compaction_interval: u64,
     pub image_bytes: u64,
+    /// Digests of the bytes actually staged, read once in order; the input's
+    /// length, inode, mtime and ctime are rechecked at the end.
     pub input_sha256: String,
     pub input_blake3: String,
     /// WRITE payload bytes; zero runs at chunk granularity become ZERO mutations.
@@ -212,7 +216,26 @@ fn receipt(
 struct Input {
     file: File,
     bytes: u64,
-    modified: std::time::SystemTime,
+    identity: InputIdentity,
+}
+
+#[derive(PartialEq, Eq)]
+struct InputIdentity {
+    device: u64,
+    inode: u64,
+    modified: SystemTime,
+    changed: (i64, i64),
+}
+
+impl InputIdentity {
+    fn of(metadata: &fs::Metadata) -> io::Result<Self> {
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            modified: metadata.modified()?,
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        })
+    }
 }
 
 impl Input {
@@ -227,14 +250,14 @@ impl Input {
         Ok(Self {
             file,
             bytes,
-            modified: metadata.modified()?,
+            identity: InputIdentity::of(&metadata)?,
         })
     }
 
     fn require_unchanged(&self) -> io::Result<()> {
         let metadata = self.file.metadata()?;
         require(
-            metadata.len() == self.bytes && metadata.modified()? == self.modified,
+            metadata.len() == self.bytes && InputIdentity::of(&metadata)? == self.identity,
             "input changed during import",
         )
     }
@@ -258,8 +281,9 @@ struct Root {
 }
 
 impl Root {
-    /// An empty or missing root is created; an existing root is inspected and
-    /// recovered like a cold host open, without opening other images.
+    /// An existing empty directory becomes a new root; a root with recorded
+    /// geometry is inspected and recovered like a cold host open, without
+    /// opening other images. Every parameter is validated before any output.
     fn open(
         request: &Request<'_>,
         metadata: Arc<Budget>,
@@ -272,21 +296,21 @@ impl Root {
                     .is_multiple_of(MAX_REQUEST_BYTES as u64),
             "compaction interval must be a nonzero multiple of 1 MiB",
         )?;
-        fs::create_dir_all(request.root)?;
-        let tickets = Tickets::open(request.root, Arc::clone(&metadata))?;
-        let root = if request.root.join("chunk-format.v3").exists() {
-            Self::inspect(request, tickets, metadata, io_memory)?
-        } else {
-            Self::create(request, tickets, metadata, io_memory)?
-        };
-        let interval_blocks = (request.compaction_interval / BLOCK_SIZE as u64) as usize;
         require(
-            request.compaction_interval + 2 * root.config.segment_bytes
-                <= root.limits.staging_bytes
-                && interval_blocks + 2 * MAX_DESCRIPTORS <= root.limits.intervals,
-            "compaction interval exceeds staging capacity",
+            request.root.symlink_metadata().is_ok_and(|m| m.is_dir()),
+            "root must be an existing directory; an empty one becomes a new root",
         )?;
-        Ok(root)
+        let tickets = Tickets::open(request.root, Arc::clone(&metadata))?;
+        if Store::exists(&tickets)? {
+            return Self::inspect(request, tickets, metadata, io_memory);
+        }
+        validate_new_segment(request.store, request.segment_bytes)?;
+        validate_interval(request.segment_bytes, request.compaction_interval)?;
+        require(
+            fs::read_dir(request.root)?.next().transpose()?.is_none(),
+            "a new root must be an empty directory",
+        )?;
+        Self::create(request, tickets, metadata, io_memory)
     }
 
     fn inspect(
@@ -304,6 +328,7 @@ impl Root {
             request.chunk_size.is_none_or(|requested| requested == size),
             "requested chunk size differs from the root's fixed geometry",
         )?;
+        validate_interval(config.segment_bytes, request.compaction_interval)?;
         let catalog = Catalog::inspect(Arc::clone(&tickets), config.store, Arc::clone(&metadata))?;
         if catalog.contents().get(request.image).is_some() {
             return Err(io::Error::new(
@@ -324,47 +349,42 @@ impl Root {
             catalog: catalog.recover()?,
             config,
             size,
-            limits: limits(config.segment_bytes),
+            limits: Limits::default(),
             created: false,
             metadata,
             io_memory,
         })
     }
 
+    /// The catalog exists before the geometry marker, so a root that records
+    /// geometry always has a catalog; an interrupted creation leaves a
+    /// non-empty directory without geometry, which is refused above.
     fn create(
         request: &Request<'_>,
         tickets: Arc<Tickets>,
         metadata: Arc<Budget>,
         io_memory: Arc<Budget>,
     ) -> io::Result<Self> {
-        require(
-            fs::read_dir(request.root)?.next().transpose()?.is_none(),
-            "a new root must be an empty directory",
-        )?;
         let size = request.chunk_size.unwrap_or_default();
         let config = file::Config {
             store: request.store,
             segment_bytes: request.segment_bytes,
         };
-        config.validate()?;
-        let store = Store::create_sized(
+        let catalog = Catalog::create(Arc::clone(&tickets), config.store, Arc::clone(&metadata))?;
+        let store = layout::create_store(
             Arc::clone(&tickets),
             config,
             size,
             Arc::clone(&metadata),
             Arc::clone(&io_memory),
         )?;
-        fs::create_dir(request.root.join("images"))?;
-        fs::create_dir(request.root.join("snapshots"))?;
-        File::open(request.root)?.sync_all()?;
-        let catalog = Catalog::create(Arc::clone(&tickets), config.store, Arc::clone(&metadata))?;
         Ok(Self {
             tickets,
             store,
             catalog,
             config,
             size,
-            limits: limits(config.segment_bytes),
+            limits: Limits::default(),
             created: true,
             metadata,
             io_memory,
@@ -381,12 +401,44 @@ impl Root {
     }
 }
 
-/// The host default, widened so four segments of a larger geometry still fit.
-fn limits(segment_bytes: u64) -> Limits {
-    Limits {
-        staging_bytes: (4 * segment_bytes).max(Limits::default().staging_bytes),
-        ..Limits::default()
+/// A new root must stay servable by `cas-host`, which opens WALs with the
+/// default limits: the segment must fit them and leave room to roll over,
+/// the same rule host initialization applies.
+fn validate_new_segment(store: [u8; 16], segment_bytes: u64) -> io::Result<()> {
+    file::Config {
+        store,
+        segment_bytes,
     }
+    .validate()?;
+    append::Config {
+        store,
+        image: [1; 16],
+        image_bytes: BLOCK_SIZE as u64,
+        segment_bytes,
+    }
+    .validate(Limits::default())
+    .map_err(io::Error::other)?;
+    require(
+        u128::from(segment_bytes) * 100 < u128::from(Limits::default().staging_bytes) * 60,
+        "segment size prevents WAL rollover under the host's default staging limit",
+    )
+}
+
+/// Worst-case preallocated WAL bytes between two settle passes must fit the
+/// default staging limit: the current segment plus every segment a full
+/// interval of batches can open, counting one extra batch header per
+/// possible descriptor split in each window. The WAL index must also hold
+/// one mapping per block of the interval plus two batches of descriptors.
+fn validate_interval(segment_bytes: u64, interval: u64) -> io::Result<()> {
+    let limits = Limits::default();
+    let splits = (interval / MAX_REQUEST_BYTES as u64) * 5 * BLOCK_SIZE as u64;
+    let capacity = segment_bytes - (2 * BLOCK_SIZE + MAX_BATCH_BYTES) as u64;
+    let bound = segment_bytes * (1 + (interval + splits).div_ceil(capacity));
+    require(
+        bound <= limits.staging_bytes
+            && (interval / BLOCK_SIZE as u64) as usize + 2 * MAX_DESCRIPTORS <= limits.intervals,
+        "compaction interval exceeds staging capacity; lower it or the segment size",
+    )
 }
 
 struct Image {
@@ -402,26 +454,10 @@ impl Image {
         metadata: Arc<Budget>,
     ) -> io::Result<Self> {
         let directory = image_directory(request.root, request.image);
-        match directory.symlink_metadata() {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => (),
-            Err(error) => return Err(error),
-            Ok(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "image directory already exists; an interrupted import retains its directory, remove it to retry",
-                ));
-            }
+        if directory.symlink_metadata().is_ok() {
+            retain_rejected(&directory, request.image)?;
         }
-        fs::create_dir(&directory)?;
-        File::open(request.root.join("images"))?.sync_all()?;
-        let identity = Identity {
-            store: request.store,
-            image: request.image,
-            image_bytes,
-        };
-        let manifest =
-            Manifest::create_sized(&directory, identity, root.size, Arc::clone(&metadata))?;
-        let log = Log::create_shared(
+        let (log, manifest) = layout::create_image(
             Arc::clone(&root.tickets),
             append::Config {
                 store: request.store,
@@ -429,11 +465,10 @@ impl Image {
                 image_bytes,
                 segment_bytes: root.config.segment_bytes,
             },
+            root.size,
             root.limits,
             metadata,
-            manifest.view()?,
-        )
-        .map_err(io::Error::other)?;
+        )?;
         Ok(Self { manifest, log })
     }
 
@@ -480,6 +515,31 @@ impl Image {
     }
 }
 
+/// An interrupted import has no catalog entry (checked before this). Keep its
+/// output under another unreferenced image name, as the fleet importer does:
+/// `Tickets` scans those WAL names on every open, so no ticket is reused.
+fn retain_rejected(directory: &Path, image: [u8; 16]) -> io::Result<()> {
+    let parent = directory
+        .parent()
+        .ok_or_else(|| io::Error::other("image directory has no parent"))?;
+    let mut attempt = 0u64;
+    loop {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"CAS rejected import\0");
+        hasher.update(&image);
+        hasher.update(&attempt.to_le_bytes());
+        let id: [u8; 16] = hasher.finalize().as_bytes()[..16].try_into().unwrap();
+        let rejected = parent.join(hex(id));
+        if rejected.symlink_metadata().is_err() {
+            fs::rename(directory, rejected)?;
+            return File::open(parent)?.sync_all();
+        }
+        attempt = attempt
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("rejected import names exhausted"))?;
+    }
+}
+
 /// Stream the input in 1 MiB windows, settling every compaction interval and
 /// once more at the end, so the WAL never exceeds its staging capacity.
 fn ingest(
@@ -515,7 +575,10 @@ fn ingest(
             staged = 0;
         }
     }
-    image.settle(root, &mut counters)?;
+    if staged != 0 {
+        image.settle(root, &mut counters)?;
+        observe(Point::Settled { bytes: offset })?;
+    }
     let digests = Digests {
         sha256: format!("{:x}", sha256.finalize()),
         blake3: blake3.finalize().to_hex().to_string(),

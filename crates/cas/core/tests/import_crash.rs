@@ -10,7 +10,7 @@ use cas_core::{
     store::file::Store,
 };
 use import_support::*;
-use std::{fs, io, path::Path, sync::Arc};
+use std::{fs, path::Path, sync::Arc};
 
 const BLOCKS: u64 = 2048; // 8 MiB: four compaction intervals of the test request.
 const IMAGE: [u8; 16] = [7; 16];
@@ -63,6 +63,7 @@ fn import_crash_cuts_leave_a_recoverable_root() {
 }
 
 fn exercise(root: &Path, size: ChunkSize, cut: &str) {
+    fs::create_dir(root).unwrap();
     let input = root.with_extension("raw");
     let image = synthetic(&input, BLOCKS, |_| 3, zero);
     let expected = expected_chunks(&[&image], size);
@@ -89,13 +90,14 @@ fn exercise(root: &Path, size: ChunkSize, cut: &str) {
     if listed {
         assert_eq!(retained, expected.len());
     } else {
-        // An interrupted import keeps its directory; a retry refuses until it
-        // is removed, then deduplicates against the retained chunks.
-        let retry = import::run(request(root, IMAGE, &input, Some(size)), memory(), memory());
-        assert_eq!(retry.err().unwrap().kind(), io::ErrorKind::AlreadyExists);
-        fs::remove_dir_all(image_directory(root, IMAGE)).unwrap();
+        // An interrupted import keeps its output under an unreferenced image
+        // name; the retry deduplicates against the retained chunks and the
+        // moved WAL still pins its tickets.
+        let highest = Tickets::open(root, memory()).unwrap().status().highest;
         let receipt =
             import::run(request(root, IMAGE, &input, Some(size)), memory(), memory()).unwrap();
+        assert_eq!(fs::read_dir(root.join("images")).unwrap().count(), 2);
+        assert!(Tickets::open(root, memory()).unwrap().status().highest > highest);
         assert!(!receipt.created_root);
         assert_eq!(receipt.store_before.chunks, retained);
         assert_eq!(receipt.store_after.chunks, expected.len());

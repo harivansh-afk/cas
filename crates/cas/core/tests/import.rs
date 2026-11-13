@@ -35,6 +35,7 @@ fn two_images_share_half_and_read_back_exactly() {
     assert!(a[half..] != b[half..]);
     for size in [ChunkSize::K4, ChunkSize::K16] {
         let root = dir.path().join(format!("root-{}", size.bytes()));
+        fs::create_dir(&root).unwrap();
         let only_a = expected_chunks(&[&a], size);
         let union = expected_chunks(&[&a, &b], size);
         assert!(only_a.len() < union.len() && union.len() < 2 * only_a.len());
@@ -133,6 +134,7 @@ fn two_images_share_half_and_read_back_exactly() {
             )
             .is_err()
         );
+        refusals_before_output(&dir.path().join(format!("empty-{}", size.bytes())), &b_path);
         println!(
             "chunk_bytes={} unique_a={} union={} elapsed_a={:.3}s elapsed_b={:.3}s",
             size.bytes(),
@@ -142,4 +144,26 @@ fn two_images_share_half_and_read_back_exactly() {
             second.elapsed_seconds
         );
     }
+}
+
+/// Invalid geometry or an unusable root directory is refused before any output.
+fn refusals_before_output(root: &std::path::Path, input: &std::path::Path) {
+    assert!(import::run(request(root, A, input, None), memory(), memory()).is_err());
+    assert!(!root.exists(), "a missing root was created implicitly");
+    fs::create_dir(root).unwrap();
+    // 192 MiB segments fit a WAL but cannot roll over under the host's default limits.
+    let mut large = request(root, A, input, None);
+    large.segment_bytes = 192 * 1024 * 1024;
+    assert!(import::run(large, memory(), memory()).is_err());
+    let mut interval = request(root, A, input, None);
+    interval.compaction_interval = 256 * 1024 * 1024;
+    assert!(import::run(interval, memory(), memory()).is_err());
+    assert!(
+        fs::read_dir(root).unwrap().next().is_none(),
+        "refusal wrote output"
+    );
+    // A non-empty directory without recorded geometry is neither a root nor empty.
+    fs::write(root.join("stray"), b"x").unwrap();
+    assert!(import::run(request(root, A, input, None), memory(), memory()).is_err());
+    assert_eq!(fs::read_dir(root).unwrap().count(), 1);
 }
