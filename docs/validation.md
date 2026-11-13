@@ -103,6 +103,58 @@ Ignored evidence in the research repository under `results/measure-flags/`:
 `check-full2.log`, `totals.log`, `shipping-window.json`, the VM ledger
 `resources.json` and the control scripts.
 
+### Review follow-up (same day)
+
+Code review found nine issues; fixed in three grouped commits on the branch,
+**tested revision `39214ec`** (`82944e7` attach window and metadata cap,
+`d0c8ed1` per-image verified bytes, `39214ec` shipper queue and clock), on a
+fresh Freestyle VM `cas-build-flags` (`vm-e3e10c29fcfe488b9b2633981b01a95a`,
+same shape and procedure as above; `/tmp` on ext4), deleted after export.
+
+- Attach window: it now starts when recovery completes in both cold modes
+  (before, ordinary cold mode armed it before recovery). Help text and docs
+  say so. New test `attach_window_starts_after_recovery_completes` uses a
+  test-only `recovery_delay` (400 ms) with a 300 ms window: the service fails
+  after at least 700 ms through the unchanged `recovery deadline expired`
+  path with no `startup_error`, where the old sequencing failed at attach.
+- `--metadata-bytes` is capped at physical memory (`physical_memory_bytes`,
+  sysconf); a value above it is `InvalidInput` before any output exists.
+  Sizing text corrected: 16 GiB at 4 KiB is 4,194,304 chunks, 168–336 MB.
+- Per-image `verified_bytes` is credited once at transport verification to
+  the image whose read issued the GET (each image holds a `Router::for_image`
+  view of the shared connections; the request slot carries the image index).
+  Coalesced waiters count as reads and chunks, not bytes, so the bytes equal
+  `4096 × counters.verified` even when reads coalesce. New test
+  `coalesced_remote_reads_credit_verified_bytes_to_the_issuing_image_once`
+  holds a mock peer's reply until the second image has joined the first's
+  fetch (`fetches.counters.joined`): one GET, one verified chunk, bytes only
+  on the issuer. The slot limit is checked once in `make_image`;
+  `Metrics::bind` is infallible.
+- Shipper: the queue holds `(hash, Option<queued_ns>)` pairs, rescans carry
+  `None` (`null` in the report), batches copy up to 63 hashes into a fixed
+  array for the unchanged `ship()`, and times come from the peer metrics
+  clock shared with `peer.recent` (the report's `clock` field says so). The
+  two-process test waits on the sender's `fleet.ship.put_acked_chunks`.
+
+Outcomes: `nix develop -c just check` **pass** — **579 Rust tests passed,
+0 failed, 30 ignored**, 13 Python tests, strict Clippy, fmt, whitespace.
+Targeted suites (`recovery::service`, `peer`, `fleet` incl. subprocess
+fixtures, `peer::tests`): 32 passed, 5 ignored entry points. Retained ring
+(`shipping-window-review.json`): two batches, windows 337 ms and 640 ms
+against the 300 ms owner delay, `window_ns_sum = 977,932,642`,
+`rescan_batches = 0`.
+
+Failures and retries: a shadowed `config` binding and a missing SAFETY
+comment (`clippy::undocumented_unsafe_blocks`) failed the first compile; one
+`cargo fmt` hunk failed the first full check. All fixed and squashed into
+their commits. A probe with `TMPDIR=/dev/shm` fails every host test in the
+shared fixture at `Store::create_sized` (O_DIRECT on tmpfs), before any test
+body, so the new cold-serve test is not ignored: it runs wherever its
+siblings run. The XFS-ignored `failed_cold_image_protocol_leaves_the_other_socket_usable`
+passed on ext4; `cold_host_supervises_both...` still needs XFS
+(`Snapshot::create`). Evidence: `review1.log`, `review2.log`,
+`review-check.log`, `review-check2.log`, `probe-cold.log`.
+
 ## 2026-11-09 — Integration of C5, peer fetch and 16 KiB chunks
 
 Branch `integration/2026-11-09` from `main` (`9c60e72`), merged in order:
