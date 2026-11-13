@@ -4,7 +4,7 @@
 //! read; the loser keeps its slot until its transport finishes and never
 //! publishes bytes. Nothing here changes admission, ordering or cache fills.
 use super::{
-    client::{Client, SlotRef, Ticket},
+    client::{self, SlotRef, Ticket},
     metrics::{self, Metrics, Phases},
     wire::verify,
 };
@@ -67,54 +67,34 @@ impl Challenger {
     }
 }
 
-/// What the race will ask once the budget elapses.
-pub(crate) enum Kind {
-    /// Index into the router's client table (the next owning member).
-    Remote(usize),
+/// The second source a race will ask, with the transport handle to ask it.
+pub(crate) enum PendingKind {
+    /// The next owning member's GET transport.
+    Remote(BudgetArc<client::Shared>),
     /// A verified local store plan captured when the primary GET was sent.
-    Local(Plan),
+    Local(Plan, BudgetArc<LocalShared>),
+}
+impl PendingKind {
+    /// Issue the challenger; it signals `notify` when it finishes.
+    pub(crate) fn start(self, hash: [u8; 32], notify: EventFd) -> io::Result<Challenger> {
+        match self {
+            Self::Remote(shared) => client::Shared::fetch(&shared, hash, Some(notify), false, true)
+                .map(Challenger::Remote),
+            Self::Local(plan, shared) => {
+                LocalShared::fetch(&shared, hash, plan, notify).map(Challenger::Local)
+            }
+        }
+    }
+}
+/// A race armed on a primary slot but not started yet.
+pub(crate) struct PendingRace {
+    pub kind: PendingKind,
+    pub budget_us: u32,
 }
 
 pub(crate) struct Armed {
     pub deadline: Instant,
-    pub hash: [u8; 32],
     pub first: SlotRef,
-    pub kind: Kind,
-    pub budget_us: u32,
-}
-
-/// Issue the challenger now, unless the primary already finished or its
-/// reader went away. The primary slot's eventfd is also signalled by the
-/// challenger, so the reader's existing poll observes either completion.
-pub(crate) fn start(
-    clients: &[(u8, Client)],
-    local: Option<&LocalSource>,
-    metrics: &Metrics,
-    armed: Armed,
-) {
-    let Some(notify) = armed.first.notify() else {
-        return;
-    };
-    let challenger = match armed.kind {
-        Kind::Remote(index) => clients[index]
-            .1
-            .fetch_with(armed.hash, Some(notify), false, true)
-            .map(Challenger::Remote),
-        Kind::Local(plan) => match local {
-            Some(source) => source
-                .fetch(armed.hash, plan, notify)
-                .map(Challenger::Local),
-            None => return,
-        },
-    };
-    // An exhausted slot pool is not an error for the read: it stays unraced.
-    let Ok(challenger) = challenger else {
-        return;
-    };
-    metrics.count(|c| c.races_started += 1);
-    // A primary that completed meanwhile drops the challenger here; its
-    // reply is then discarded through the ordinary unowned-slot path.
-    armed.first.attach(challenger, armed.budget_us);
 }
 
 struct RacerState {
@@ -127,18 +107,15 @@ struct RacerShared {
 }
 
 /// Starts challengers when their budgets elapse. Zero budgets never reach
-/// this thread; the router starts those inline on the reader's thread.
+/// this thread; the router starts those inline on the reader's thread, and a
+/// primary that fails earlier starts its own challenger from the transport.
 pub struct Racer {
     shared: Arc<RacerShared>,
     worker: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Racer {
-    pub(crate) fn new(
-        budget: &Arc<Budget>,
-        clients: BudgetArc<super::router::Shared>,
-        metrics: BudgetArc<Metrics>,
-    ) -> io::Result<Self> {
+    pub(crate) fn new(budget: &Arc<Budget>) -> io::Result<Self> {
         let shared = Arc::new(RacerShared {
             state: Mutex::new(RacerState {
                 armed: crate::local::reserved_vec(crate::local::pools::HOST_REQUESTS, budget)?,
@@ -149,7 +126,7 @@ impl Racer {
         let owner = Arc::clone(&shared);
         let worker = thread::Builder::new()
             .name("cas-peer-race".into())
-            .spawn(move || run_racer(owner, clients, metrics))?;
+            .spawn(move || run_racer(owner))?;
         Ok(Self {
             shared,
             worker: Mutex::new(Some(worker)),
@@ -192,11 +169,7 @@ impl Drop for Racer {
     }
 }
 
-fn run_racer(
-    shared: Arc<RacerShared>,
-    router: BudgetArc<super::router::Shared>,
-    metrics: BudgetArc<Metrics>,
-) {
+fn run_racer(shared: Arc<RacerShared>) {
     let mut state = shared.state.lock().expect("racer poisoned");
     loop {
         if shared.stop.load(Ordering::Acquire) {
@@ -207,7 +180,7 @@ fn run_racer(
         if let Some(index) = state.armed.iter().position(|a| a.deadline <= now) {
             let armed = state.armed.swap_remove(index);
             drop(state);
-            start(&router.clients, router.local.as_ref(), &metrics, armed);
+            armed.first.due();
             state = shared.state.lock().expect("racer poisoned");
             continue;
         }
@@ -240,7 +213,7 @@ struct LocalPool {
     free: Vec<usize, BudgetAllocator>,
     queued: Queue<usize>,
 }
-struct LocalShared {
+pub(crate) struct LocalShared {
     pool: Mutex<LocalPool>,
     changed: Condvar,
     stop: AtomicBool,
@@ -310,33 +283,8 @@ impl LocalSource {
         })
     }
 
-    pub(crate) fn fetch(
-        &self,
-        hash: [u8; 32],
-        plan: Plan,
-        notify: EventFd,
-    ) -> io::Result<LocalTicket> {
-        if self.shared.stop.load(Ordering::Acquire) {
-            return Err(io::ErrorKind::BrokenPipe.into());
-        }
-        let mut pool = self.shared.pool.lock().expect("local race pool poisoned");
-        let index = pool.free.pop().ok_or(io::ErrorKind::WouldBlock)?;
-        let slot = &mut pool.slots[index];
-        slot.owned = true;
-        slot.done = false;
-        slot.used = false;
-        slot.hash = hash;
-        slot.plan = Some(plan);
-        slot.phases = Phases::default();
-        slot.error = None;
-        slot.notify = Some(notify);
-        pool.queued.push_back(index);
-        drop(pool);
-        self.shared.changed.notify_one();
-        Ok(LocalTicket {
-            shared: self.shared.clone(),
-            index,
-        })
+    pub(crate) fn handle(&self) -> BudgetArc<LocalShared> {
+        self.shared.clone()
     }
 
     pub fn shutdown(&self) -> io::Result<()> {
@@ -367,6 +315,37 @@ impl Drop for LocalSource {
         {
             let _ = worker.join();
         }
+    }
+}
+
+impl LocalShared {
+    pub(crate) fn fetch(
+        shared: &BudgetArc<Self>,
+        hash: [u8; 32],
+        plan: Plan,
+        notify: EventFd,
+    ) -> io::Result<LocalTicket> {
+        if shared.stop.load(Ordering::Acquire) {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
+        let mut pool = shared.pool.lock().expect("local race pool poisoned");
+        let index = pool.free.pop().ok_or(io::ErrorKind::WouldBlock)?;
+        let slot = &mut pool.slots[index];
+        slot.owned = true;
+        slot.done = false;
+        slot.used = false;
+        slot.hash = hash;
+        slot.plan = Some(plan);
+        slot.phases = Phases::default();
+        slot.error = None;
+        slot.notify = Some(notify);
+        pool.queued.push_back(index);
+        drop(pool);
+        shared.changed.notify_one();
+        Ok(LocalTicket {
+            shared: shared.clone(),
+            index,
+        })
     }
 }
 

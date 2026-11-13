@@ -2,7 +2,7 @@
 use super::{
     Client, Config, Ticket,
     metrics::Metrics,
-    race::{self, Armed, Kind, LocalSource, Racer},
+    race::{Armed, LocalSource, PendingKind, PendingRace, Racer},
 };
 use allocator_api2::vec::Vec;
 use cas_core::{
@@ -19,7 +19,6 @@ pub(crate) struct Shared {
 
 pub struct Router {
     shared: BudgetArc<Shared>,
-    metrics: BudgetArc<Metrics>,
     racer: Option<Racer>,
     budget: Option<Duration>,
     budget_us: u32,
@@ -76,12 +75,11 @@ impl Router {
         )?;
         let budget_us = config.peer_race_us.unwrap_or(0);
         let racer = match config.peer_race_us {
-            Some(us) if us > 0 => Some(Racer::new(budget, shared.clone(), metrics.clone())?),
+            Some(us) if us > 0 => Some(Racer::new(budget)?),
             _ => None,
         };
         Ok(Self {
             shared,
-            metrics,
             racer,
             budget: config
                 .peer_race_us
@@ -121,33 +119,33 @@ impl Router {
     }
     /// Arm the race for `ticket`: the next owning member if the fleet has
     /// one, else the local copy when a plan was captured. No second source
-    /// leaves the read unraced. A zero budget starts the challenger now.
+    /// leaves the read unraced. The challenger starts at the deadline, at
+    /// once for a zero budget, or as soon as the primary fails.
     pub fn race(&self, ticket: &Ticket, hash: [u8; 32], local: Option<Plan>) {
         let Some(budget) = self.budget else {
             return;
         };
         let kind = match self.owners(&hash).nth(1) {
-            Some(index) => Kind::Remote(index),
+            Some(index) => PendingKind::Remote(self.shared.clients[index].1.handle()),
             None => match (local, &self.shared.local) {
-                (Some(plan), Some(_)) => Kind::Local(plan),
+                (Some(plan), Some(source)) => PendingKind::Local(plan, source.handle()),
                 _ => return,
             },
         };
-        let armed = Armed {
-            deadline: std::time::Instant::now() + budget,
-            hash,
-            first: ticket.slot_ref(),
+        let first = ticket.slot_ref();
+        let pending = PendingRace {
             kind,
             budget_us: self.budget_us,
         };
         match &self.racer {
-            Some(racer) if !budget.is_zero() => racer.arm(armed),
-            _ => race::start(
-                &self.shared.clients,
-                self.shared.local.as_ref(),
-                &self.metrics,
-                armed,
-            ),
+            Some(racer) if !budget.is_zero() => {
+                first.arm(pending, false);
+                racer.arm(Armed {
+                    deadline: std::time::Instant::now() + budget,
+                    first,
+                });
+            }
+            _ => first.arm(pending, true),
         }
     }
     pub fn shutdown(&self) -> io::Result<()> {

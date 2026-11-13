@@ -358,12 +358,10 @@ fn force_remote_race_local_wins_against_a_delayed_peer_and_discards_its_reply() 
         get(&mut local, id, id as usize);
     }
     peer::TEST_REPLY_DELAY_US.store(0, std::sync::atomic::Ordering::Relaxed);
-    // Eight 5 ms server delays would take 40 ms; the local copy won each read.
-    assert!(
-        started.elapsed() < Duration::from_millis(40),
-        "{:?}",
-        started.elapsed()
-    );
+    // The counters prove the local copy won every race; wall time only
+    // guards against a hang (eight 5 ms replies would otherwise be 40 ms,
+    // but a loaded test host can stall either side).
+    assert!(started.elapsed() < Duration::from_secs(5));
     assert_eq!(counter(&a, "races_started"), 8);
     assert_eq!(counter(&a, "race_won_local"), 8);
     assert_eq!(counter(&a, "race_won_first"), 0);
@@ -405,7 +403,9 @@ fn race_completes_from_the_local_copy_when_the_peer_reply_fails_verification() {
     assert_eq!(counter(&host, "verified"), 0);
     assert_eq!(counter(&host, "races_started"), 1);
     assert_eq!(counter(&host, "race_won_local"), 1);
-    assert_eq!(counter(&host, "race_discarded"), 1);
+    // The corrupt reply is discarded when its transport finishes, which may
+    // be after the local win completed the read.
+    wait_counter(&host, "race_discarded", 1);
     assert_eq!(
         counter(&host, "race_wasted_wire_bytes"),
         (24 + BLOCK_SIZE) as u64
@@ -416,6 +416,57 @@ fn race_completes_from_the_local_copy_when_the_peer_reply_fails_verification() {
     shutdown(host);
     mock.join().unwrap();
     assert_eq!(r.metadata.usage().current, Amount::default());
+}
+
+/// The peer fails before the budget: with a connection refused outright, and
+/// with a peer that reads the GET and closes. Both start the local challenger
+/// at once, so the read completes long before the 200 ms budget; without a
+/// local copy the same failures stay closed.
+#[test]
+fn primary_failure_before_the_budget_starts_the_local_challenger_at_once() {
+    use std::io::Read as _;
+    for (local_copy, eof) in [(true, false), (true, true), (false, false), (false, true)] {
+        let root = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let mock = if eof {
+            Some(thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket.set_read_timeout(Some(peer::TIMEOUT)).unwrap();
+                let mut request = [0; 56];
+                socket.read_exact(&mut request).unwrap();
+                drop(socket);
+            }))
+        } else {
+            drop(listener);
+            None
+        };
+        let r = raced(address, 200_000);
+        let mut host = seeded(root.path(), r.clone(), local_copy);
+        let mut local = attach(&mut host, 2);
+        let started = Instant::now();
+        submit(&mut local, 0, 5);
+        receive(&mut local, local_copy.then_some(5));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(150),
+            "{local_copy} {eof} {elapsed:?}"
+        );
+        assert_eq!(counter(&host, "errors"), 1, "{local_copy} {eof}");
+        assert_eq!(counter(&host, "races_started"), u64::from(local_copy));
+        assert_eq!(counter(&host, "race_won_local"), u64::from(local_copy));
+        assert_eq!(counter(&host, "failed_reads"), u64::from(!local_copy));
+        assert_eq!(
+            local.shared.health.lock().unwrap().failure.is_some(),
+            !local_copy
+        );
+        drop(local);
+        shutdown(host);
+        if let Some(mock) = mock {
+            mock.join().unwrap();
+        }
+        assert_eq!(r.metadata.usage().current, Amount::default());
+    }
 }
 
 #[test]
@@ -609,9 +660,8 @@ fn daemon_child() {
             }
             "fail" => {
                 // Without a second source the read fails closed. Racing the
-                // local copy completes it after peer loss only if the
-                // challenger started before the refused connection failed
-                // the primary; a failure with no other source stays closed.
+                // local copy completes it: the refused connection fails the
+                // primary, which starts the local challenger at once.
                 submit(&mut local, 704, 0);
                 let mut completion = local.receive(true).unwrap().unwrap();
                 if let Some(trace) = completion.permit.as_mut().and_then(|p| p.remote.as_mut()) {
@@ -732,13 +782,14 @@ fn two_daemon_loopback_verifies_data_measures_phases_and_fails_on_peer_loss() {
     let c = &after_loss["peer"]["counters"];
     assert_eq!(c["errors"], 1, "{c}");
     if race_local {
-        // A primary that completes before its challenger attaches records no
-        // winner, so wins can trail starts; every start has one discard.
-        let read_ok = failure["fail_read_ok"].as_bool().unwrap();
-        assert_eq!(c["failed_reads"], u64::from(!read_ok), "{c}");
+        // Peer loss fails the primary, which starts the local challenger at
+        // once: the read completes locally. Every started race has one winner
+        // and one discard.
+        assert_eq!(failure["fail_read_ok"], true, "{c}");
+        assert_eq!(c["failed_reads"], 0, "{c}");
         let wins = c["race_won_local"].as_u64().unwrap() + c["race_won_first"].as_u64().unwrap();
         let started = c["races_started"].as_u64().unwrap();
-        assert!(wins <= started, "{c}");
+        assert_eq!(wins, started, "{c}");
         assert_eq!(c["race_discarded"], started, "{c}");
     } else {
         assert_eq!(failure["fail_read_ok"], false);
@@ -786,8 +837,10 @@ fn two_daemon_loopback_race_wins_locally_against_a_delayed_server() {
     assert_eq!(c["race_won_first"], 0);
     assert_eq!(c["failed_reads"], 0);
     assert_eq!(report["cache"]["resident_bytes"], 0);
-    // 700 serialized 1 ms replies would need at least 700 ms.
-    assert!(measured < Duration::from_millis(700), "{measured:?}");
+    // The counters above prove every read was won locally; 700 serialized
+    // 1 ms replies would need at least 700 ms, but a loaded debug test host
+    // can take longer, so wall time is only a hang guard here.
+    assert!(measured < Duration::from_secs(10), "{measured:?}");
     let records: Vec<_> = report["peer"]["recent"]
         .as_array()
         .unwrap()

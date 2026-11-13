@@ -1,7 +1,7 @@
 use super::{
     TIMEOUT,
     metrics::{self, Metrics, Phases},
-    race::{Challenger, Outcome},
+    race::{Challenger, Outcome, PendingRace},
     wire::*,
 };
 use allocator_api2::vec::Vec;
@@ -85,6 +85,9 @@ struct Slot {
     notify: Option<EventFd>,
     /// The second source, owned by the primary request's slot.
     challenger: Option<Challenger>,
+    /// An armed race not started yet: started by the racer at its deadline,
+    /// or at once when this primary fails.
+    pending: Option<PendingRace>,
     racing: bool,
     used: bool,
     wire_bytes: u64,
@@ -105,7 +108,7 @@ struct Pool {
     first: u64,
     last_receive: u64,
 }
-struct Shared {
+pub(crate) struct Shared {
     pool: Mutex<Pool>,
     wake: EventFd,
     stop: AtomicBool,
@@ -156,6 +159,7 @@ impl Client {
                 generation: 0,
                 notify: None,
                 challenger: None,
+                pending: None,
                 racing: false,
                 used: false,
                 wire_bytes: 0,
@@ -225,10 +229,26 @@ impl Client {
         inline: bool,
         racing: bool,
     ) -> io::Result<Ticket> {
-        if self.shared.stop.load(Ordering::Acquire) {
+        Shared::fetch(&self.shared, hash, notify, inline, racing)
+    }
+    /// The transport handle a race stores to issue a challenger GET later.
+    pub(crate) fn handle(&self) -> BudgetArc<Shared> {
+        self.shared.clone()
+    }
+}
+impl Shared {
+    pub(crate) fn fetch(
+        shared: &BudgetArc<Self>,
+        hash: [u8; 32],
+        notify: Option<EventFd>,
+        inline: bool,
+        racing: bool,
+    ) -> io::Result<Ticket> {
+        let this = &**shared;
+        if this.stop.load(Ordering::Acquire) {
             return Err(io::ErrorKind::BrokenPipe.into());
         }
-        let mut pool = self.shared.pool.lock().expect("peer pool poisoned");
+        let mut pool = this.pool.lock().expect("peer pool poisoned");
         let index = pool.free.pop().ok_or(io::ErrorKind::WouldBlock)?;
         let slot = &mut pool.slots[index];
         let _ = slot.event.read();
@@ -241,39 +261,67 @@ impl Client {
         slot.generation = slot.generation.wrapping_add(1);
         slot.notify = notify;
         slot.challenger = None;
+        slot.pending = None;
         slot.racing = racing;
         slot.used = false;
         slot.wire_bytes = 0;
         slot.race_budget_us = 0;
         pool.queued.push_back(index);
-        self.shared.metrics.count(|c| c.gets += 1);
+        this.metrics.count(|c| c.gets += 1);
         // The image reactor may send and consume a fast reply itself. Bound
         // polling so a slow peer cannot monopolize mutation/FLUSH processing.
         if pool.stream.is_some() && inline {
-            self.shared.metrics.count(|c| c.inline_attempts += 1);
-            let until = Instant::now() + self.shared.inline;
+            this.metrics.count(|c| c.inline_attempts += 1);
+            let until = Instant::now() + this.inline;
             loop {
-                pool.drive(&self.shared.metrics);
+                pool.drive(&this.metrics);
                 if pool.slots[index].done || Instant::now() >= until {
                     break;
                 }
                 std::hint::spin_loop();
             }
             if pool.slots[index].done {
-                self.shared.metrics.count(|c| c.inline_completed += 1);
+                this.metrics.count(|c| c.inline_completed += 1);
             }
         } else if pool.stream.is_some() {
-            pool.drive(&self.shared.metrics);
+            pool.drive(&this.metrics);
         }
         // A completed inline GET needs no worker handoff. Slow replies and
         // connection failures refresh the worker's socket/deadline snapshot.
         if pool.active() || pool.stream.is_none() {
-            self.shared.wake.write(1)?;
+            this.wake.write(1)?;
         }
         Ok(Ticket {
-            shared: self.shared.clone(),
+            shared: shared.clone(),
             index,
         })
+    }
+}
+impl Slot {
+    /// Issue the pending challenger now. Called with this pool locked; the
+    /// challenger's pool (a higher member index, or the local source) is
+    /// locked inside, never the reverse. A challenger that already finished
+    /// re-signals the reader, which otherwise would wait on the primary.
+    fn start_pending(&mut self, metrics: &Metrics) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        let Ok(notify) = self.notify.as_ref().unwrap_or(&self.event).try_clone() else {
+            return;
+        };
+        let challenger = pending.kind.start(self.hash, notify);
+        // An exhausted challenger pool is not an error for the read.
+        let Ok(challenger) = challenger else {
+            return;
+        };
+        metrics.count(|c| c.races_started += 1);
+        self.racing = true;
+        self.race_budget_us = pending.budget_us;
+        let finished = challenger.peek().done;
+        self.challenger = Some(challenger);
+        if finished {
+            let _ = self.notify.as_ref().unwrap_or(&self.event).write(1);
+        }
     }
 }
 impl Ticket {
@@ -378,33 +426,41 @@ impl Ticket {
     }
 }
 impl SlotRef {
-    /// A fresh handle to whatever the primary's reader waits on: its external
-    /// notify when the frontend issued it, else its own slot eventfd. `None`
-    /// while the primary is no longer owned or already done cancels the race.
-    pub(crate) fn notify(&self) -> Option<EventFd> {
-        let pool = self.shared.pool.lock().expect("peer pool poisoned");
-        let slot = &pool.slots[self.index];
-        if slot.generation != self.generation || !slot.owned || slot.done {
-            return None;
-        }
-        slot.notify.as_ref().unwrap_or(&slot.event).try_clone().ok()
-    }
-    /// Attach a started challenger. A primary that verified meanwhile, or
-    /// whose reader is gone, drops it; a primary that failed meanwhile keeps
-    /// it, so the reader waiting on that failure can still be rescued by a
-    /// verified reply.
-    pub(crate) fn attach(&self, challenger: Challenger, budget_us: u32) {
+    /// Arm a race on the primary. A primary that already verified, or whose
+    /// reader is gone, needs none. A primary that already failed starts the
+    /// challenger now; otherwise it starts when the primary fails or when the
+    /// racer reaches the deadline, whichever is first. `now` starts it at once.
+    pub(crate) fn arm(&self, pending: PendingRace, now: bool) {
         let mut pool = self.shared.pool.lock().expect("peer pool poisoned");
+        let metrics = self.shared.metrics.clone();
+        let slot = &mut pool.slots[self.index];
+        if slot.generation != self.generation
+            || !slot.owned
+            || (slot.done && slot.error.is_none())
+            || slot.challenger.is_some()
+        {
+            drop(pool);
+            drop(pending);
+            return;
+        }
+        slot.pending = Some(pending);
+        if now || slot.done {
+            slot.start_pending(&metrics);
+        }
+    }
+    /// The racer's deadline: start the pending challenger if still wanted.
+    pub(crate) fn due(&self) {
+        let mut pool = self.shared.pool.lock().expect("peer pool poisoned");
+        let metrics = self.shared.metrics.clone();
         let slot = &mut pool.slots[self.index];
         if slot.generation != self.generation || !slot.owned || (slot.done && slot.error.is_none())
         {
+            let pending = slot.pending.take();
             drop(pool);
-            drop(challenger);
+            drop(pending);
             return;
         }
-        slot.racing = true;
-        slot.race_budget_us = budget_us;
-        slot.challenger = Some(challenger);
+        slot.start_pending(&metrics);
     }
 }
 impl Drop for Ticket {
@@ -415,6 +471,7 @@ impl Drop for Ticket {
         // A loser's late completion must not signal a reused primary slot.
         slot.notify = None;
         let challenger = slot.challenger.take();
+        let pending = slot.pending.take();
         if slot.done {
             if slot.racing && !slot.used {
                 let wasted = slot.wire_bytes;
@@ -428,6 +485,7 @@ impl Drop for Ticket {
         // Pending abandoned slots are recycled only after transport completion.
         drop(pool);
         drop(challenger);
+        drop(pending);
     }
 }
 impl Drop for Client {
@@ -464,12 +522,18 @@ impl Pool {
             c.verified += u64::from(error.is_none());
             c.errors += u64::from(error.is_some());
         });
+        // A primary that fails before its budget starts the challenger now,
+        // so a verified second source can still complete the read.
+        if error.is_some() && slot.owned {
+            slot.start_pending(metrics);
+        }
         if let Some(notify) = &slot.notify {
             let _ = notify.write(1);
         }
         if slot.owned {
             let _ = slot.event.write(1);
         } else {
+            slot.pending = None;
             // Abandoned by its reader: a raced loser's bytes were wasted.
             slot.notify = None;
             if slot.racing && !slot.used {
