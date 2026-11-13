@@ -70,7 +70,13 @@ fn failed_retained_negotiation_cancels_an_unconnected_peer_without_repair() {
     let config = config(root.path(), transport.path(), Mode::Retained);
     let (done, result) = mpsc::channel();
     let server = thread::spawn(move || done.send(host_service::serve(config)).unwrap());
-    let mut frontend = super::frontend::connect(&transport.path().join("2.sock"));
+    let mut frontend = match super::frontend::try_connect(&transport.path().join("2.sock")) {
+        Ok(frontend) => frontend,
+        Err(error) => panic!(
+            "frontend connection: {error}; host.json: {}",
+            fs::read_to_string(transport.path().join("host.json")).unwrap_or_default()
+        ),
+    };
     assert!(frontend.get_inflight_fd(&inflight()).is_err());
     assert!(
         result

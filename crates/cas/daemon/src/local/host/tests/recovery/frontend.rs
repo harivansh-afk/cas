@@ -342,6 +342,15 @@ fn retained_captured_queue_changes_fail_before_repair() {
 }
 
 pub(super) fn connect_stream(socket: &Path) -> UnixStream {
+    match try_connect_stream(socket) {
+        Ok(stream) => stream,
+        Err(error) => panic!("frontend connection: {error}"),
+    }
+}
+
+/// Wait up to five seconds for the service to bind `socket`; the error is
+/// returned so a caller can report why the service never got there.
+pub(super) fn try_connect_stream(socket: &Path) -> io::Result<UnixStream> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let stream = loop {
         match UnixStream::connect(socket) {
@@ -355,27 +364,33 @@ pub(super) fn connect_stream(socket: &Path) -> UnixStream {
             {
                 thread::sleep(Duration::from_millis(1))
             }
-            Err(error) => panic!("frontend connection: {error}"),
+            Err(error) => return Err(error),
         }
     };
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    stream
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    Ok(stream)
 }
 
-pub(super) fn connect(socket: &Path) -> Frontend {
-    let mut frontend = Frontend::from_stream(connect_stream(socket), 4);
+/// Connect and negotiate like QEMU does, so a later inflight request is sent
+/// to the service. Only the socket wait is fallible: the connection error is
+/// returned so the caller can report why the service never bound the socket.
+pub(super) fn try_connect(socket: &Path) -> io::Result<Frontend> {
+    let mut frontend = Frontend::from_stream(try_connect_stream(socket)?, 4);
     frontend.set_owner().unwrap();
     let features = frontend.get_features().unwrap();
     frontend.set_features(features).unwrap();
     let protocol = frontend.get_protocol_features().unwrap();
     assert!(protocol.contains(VhostUserProtocolFeatures::INFLIGHT_SHMFD));
     frontend.set_protocol_features(protocol).unwrap();
-    frontend
+    Ok(frontend)
+}
+
+pub(super) fn connect(socket: &Path) -> Frontend {
+    match try_connect(socket) {
+        Ok(frontend) => frontend,
+        Err(error) => panic!("frontend connection: {error}"),
+    }
 }
 
 #[test]

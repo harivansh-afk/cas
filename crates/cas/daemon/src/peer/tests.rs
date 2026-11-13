@@ -545,6 +545,19 @@ fn nofile() -> libc::rlimit {
 #[test]
 #[ignore = "subprocess entry point for the descriptor-limit regression"]
 fn descriptor_limit_child() {
+    let limit = libc::rlimit {
+        rlim_cur: std::env::var("CAS_PEER_NOFILE_SOFT")
+            .unwrap()
+            .parse()
+            .unwrap(),
+        rlim_max: std::env::var("CAS_PEER_NOFILE_HARD")
+            .unwrap()
+            .parse()
+            .unwrap(),
+    };
+    // SAFETY: setrlimit reads one initialized rlimit; lowering this process's
+    // own limits needs no privilege.
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
     let budget = memory();
     let metrics = Metrics::new(&budget, 1).unwrap();
     let result = Router::new(&four_member_config(), &budget, metrics, None);
@@ -578,8 +591,16 @@ fn descriptor_limit_child() {
     }
 }
 
+/// The child lowers its own descriptor limit from the environment before
+/// anything in it opens files. No `pre_exec` hook: with one, `Command` must
+/// `fork()` this large multi-threaded test binary, and between fork and exec
+/// the child holds a copy of every open description, including the
+/// flock-held roots and stores of tests running in parallel (locks live on
+/// the description, so the parent's close does not release them). That
+/// window is milliseconds and made concurrent tests fail with `WouldBlock`.
+/// Without the hook `Command` uses `posix_spawn` (vfork), whose window is
+/// microseconds and whose caller is suspended until the exec.
 fn descriptor_child(soft: libc::rlim_t, hard: libc::rlim_t, expect: &str) -> bool {
-    use std::os::unix::process::CommandExt;
     let mut command = std::process::Command::new(std::env::current_exe().unwrap());
     command
         .args([
@@ -588,20 +609,9 @@ fn descriptor_child(soft: libc::rlim_t, hard: libc::rlim_t, expect: &str) -> boo
             "--ignored",
             "--nocapture",
         ])
-        .env("CAS_PEER_NOFILE_EXPECT", expect);
-    // SAFETY: the hook calls only async-signal-safe setrlimit before exec.
-    unsafe {
-        command.pre_exec(move || {
-            let limit = libc::rlimit {
-                rlim_cur: soft,
-                rlim_max: hard,
-            };
-            if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
+        .env("CAS_PEER_NOFILE_EXPECT", expect)
+        .env("CAS_PEER_NOFILE_SOFT", soft.to_string())
+        .env("CAS_PEER_NOFILE_HARD", hard.to_string());
     command.status().unwrap().success()
 }
 
