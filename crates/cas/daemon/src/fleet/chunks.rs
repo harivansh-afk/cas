@@ -1,10 +1,11 @@
 //! Sealed logical chunk segments: one receiver Store::insert and one data fence.
 use super::{Client, Flow, Metrics, Placement};
+use crate::peer::metrics::Metrics as PeerMetrics;
 use allocator_api2::vec::Vec;
 use cas_core::{
     BLOCK_SIZE,
     aligned::AlignedBuffer,
-    budget::{Budget, BudgetAllocator},
+    budget::{Budget, BudgetAllocator, BudgetArc},
     chunk::Chunk,
     store::{file::Reader, format::MAX_CHUNKS},
 };
@@ -16,7 +17,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 pub(crate) const HAS: u8 = 1;
@@ -123,19 +124,20 @@ pub(crate) fn ship(
 const QUEUE: usize = 16384;
 /// Shipped batches retained for the durability-window distribution.
 pub(crate) const WINDOW_RETAIN: usize = 1024;
+/// A published hash with its queue time on the peer metrics clock; inventory
+/// rescans carry no queue time.
+type Queued = ([u8; 32], Option<u64>);
 struct Pending {
-    hashes: Vec<[u8; 32], BudgetAllocator>,
-    /// Queue time of each hash, parallel to `hashes`; one host-local clock.
-    queued: Vec<u64, BudgetAllocator>,
+    hashes: Vec<Queued, BudgetAllocator>,
     rescan: bool,
     sync: Option<cas_core::budget::channel::Sender<io::Result<u64>>>,
 }
 /// One acknowledged PUT. `queued_ns` is when the batch's first hash was queued
-/// after compaction publication, zero for inventory rescans; `acked_ns` is when
-/// the owner's durable acknowledgement arrived. Same origin as `peer.recent`.
+/// after compaction publication (absent for inventory rescans); `acked_ns` is
+/// when the owner's durable acknowledgement arrived. Same clock as `peer.recent`.
 #[derive(Default, Clone, Copy, Debug, serde::Serialize)]
 pub struct Shipped {
-    pub queued_ns: u64,
+    pub queued_ns: Option<u64>,
     pub acked_ns: u64,
     pub chunks: u64,
     pub bytes: u64,
@@ -161,11 +163,12 @@ impl Window {
         totals.batches += 1;
         totals.chunks += shipped.chunks;
         totals.bytes += shipped.bytes;
-        if shipped.queued_ns == 0 {
-            totals.rescan_batches += 1;
-        } else {
-            totals.window_batches += 1;
-            totals.window_ns_sum += shipped.acked_ns.saturating_sub(shipped.queued_ns);
+        match shipped.queued_ns {
+            None => totals.rescan_batches += 1,
+            Some(queued) => {
+                totals.window_batches += 1;
+                totals.window_ns_sum += shipped.acked_ns.saturating_sub(queued);
+            }
         }
         if self.recent.len() < WINDOW_RETAIN {
             self.recent.push(shipped);
@@ -178,18 +181,11 @@ impl Window {
 struct Shared {
     pending: Mutex<Pending>,
     window: Mutex<Window>,
-    origin: Instant,
+    /// The host's one monotonic clock, shared with the GET timing ring.
+    clock: BudgetArc<PeerMetrics>,
     stop: AtomicBool,
     paused: AtomicBool,
     active: AtomicBool,
-}
-impl Shared {
-    fn now(&self) -> u64 {
-        Instant::now()
-            .saturating_duration_since(self.origin)
-            .as_nanos()
-            .min(u128::from(u64::MAX)) as u64
-    }
 }
 pub(crate) struct Shipper {
     budget: Arc<Budget>,
@@ -204,15 +200,12 @@ impl Shipper {
         budget: &Arc<Budget>,
         metrics: Arc<Metrics>,
         scheduler: cas_core::budget::BudgetArc<cas_core::scheduler::Scheduler>,
-        origin: Instant,
+        clock: BudgetArc<PeerMetrics>,
     ) -> io::Result<Self> {
         let (placement, store) = membership;
-        let hashes = crate::local::reserved_vec(QUEUE, budget)?;
-        let queued = crate::local::reserved_vec(QUEUE, budget)?;
         let shared = Arc::new(Shared {
             pending: Mutex::new(Pending {
-                hashes,
-                queued,
+                hashes: crate::local::reserved_vec(QUEUE, budget)?,
                 rescan: true,
                 sync: None,
             }),
@@ -221,7 +214,7 @@ impl Shipper {
                 cursor: 0,
                 totals: WindowTotals::default(),
             }),
-            origin,
+            clock,
             stop: AtomicBool::new(false),
             paused: AtomicBool::new(false),
             active: AtomicBool::new(false),
@@ -259,9 +252,8 @@ impl Shipper {
                         Flow::Ship
                     };
                     let result = (|| -> io::Result<u64> {
-                        let mut hashes = Vec::new_in(BudgetAllocator::new(budget.clone()));
-                        // Queue times stay parallel to `hashes`; a rescan has none.
-                        let mut queued = Vec::new_in(BudgetAllocator::new(budget.clone()));
+                        let mut hashes: Vec<Queued, _> =
+                            Vec::new_in(BudgetAllocator::new(budget.clone()));
                         let rescan = {
                             let mut pending = owner.pending.lock().unwrap();
                             let rescan = pending.rescan;
@@ -271,38 +263,32 @@ impl Shipper {
                                     .try_reserve_exact(pending.hashes.len())
                                     .map_err(|_| io::ErrorKind::OutOfMemory)?;
                                 hashes.extend_from_slice(&pending.hashes);
-                                queued
-                                    .try_reserve_exact(pending.queued.len())
-                                    .map_err(|_| io::ErrorKind::OutOfMemory)?;
-                                queued.extend_from_slice(&pending.queued);
                             }
                             pending.hashes.clear();
-                            pending.queued.clear();
                             rescan
                         };
                         if rescan {
-                            hashes = reader.inventory(budget.clone())?;
+                            let inventory = reader.inventory(budget.clone())?;
+                            hashes
+                                .try_reserve_exact(inventory.len())
+                                .map_err(|_| io::ErrorKind::OutOfMemory)?;
+                            hashes.extend(inventory.iter().map(|hash| (*hash, None)));
                         }
                         let mut count = 0u64;
                         let mut failed = None;
                         for (node, address) in &addresses {
                             let result = (|| -> io::Result<u64> {
-                                let mut selected =
+                                let mut selected: Vec<Queued, _> =
                                     Vec::new_in(BudgetAllocator::new(budget.clone()));
                                 selected
                                     .try_reserve_exact(hashes.len())
                                     .map_err(|_| io::ErrorKind::OutOfMemory)?;
-                                let mut selected_queued =
-                                    Vec::new_in(BudgetAllocator::new(budget.clone()));
-                                selected_queued
-                                    .try_reserve_exact(hashes.len())
-                                    .map_err(|_| io::ErrorKind::OutOfMemory)?;
-                                for (i, hash) in hashes.iter().enumerate() {
-                                    if placement.owns(hash, *node) {
-                                        selected.push(*hash);
-                                        selected_queued.push(queued.get(i).copied().unwrap_or(0));
-                                    }
-                                }
+                                selected.extend(
+                                    hashes
+                                        .iter()
+                                        .filter(|(hash, _)| placement.owns(hash, *node))
+                                        .copied(),
+                                );
                                 if selected.is_empty() {
                                     return Ok(0);
                                 }
@@ -315,19 +301,20 @@ impl Shipper {
                                     *node,
                                 )?;
                                 let mut sent = 0;
-                                for (batch, times) in selected
-                                    .chunks(MAX_CHUNKS)
-                                    .zip(selected_queued.chunks(MAX_CHUNKS))
-                                {
+                                let mut batch_hashes = [[0; 32]; MAX_CHUNKS];
+                                for batch in selected.chunks(MAX_CHUNKS) {
                                     if owner.stop.load(Ordering::Acquire)
                                         || owner.paused.load(Ordering::Acquire)
                                     {
                                         return Err(io::ErrorKind::Interrupted.into());
                                     }
+                                    for (out, (hash, _)) in batch_hashes.iter_mut().zip(batch) {
+                                        *out = *hash;
+                                    }
                                     let count = ship(
                                         &mut client,
                                         &reader,
-                                        batch,
+                                        &batch_hashes[..batch.len()],
                                         frame.as_mut_slice(),
                                         page.as_mut_slice(),
                                         payload.as_mut_slice(),
@@ -336,8 +323,8 @@ impl Shipper {
                                         // The PUT reply is the owner's durable acknowledgement;
                                         // the batch's first hash was queued earliest.
                                         owner.window.lock().unwrap().record(Shipped {
-                                            queued_ns: times[0],
-                                            acked_ns: owner.now(),
+                                            queued_ns: batch[0].1,
+                                            acked_ns: owner.clock.now(),
                                             chunks: count as u64,
                                             bytes: (4 + count * RECORD + 32) as u64,
                                             owner: *node,
@@ -392,15 +379,14 @@ impl Shipper {
             .map_err(|_| io::ErrorKind::TimedOut)?
     }
     pub fn enqueue(&self, hashes: impl Iterator<Item = [u8; 32]>) {
-        let now = self.shared.now();
+        let now = Some(self.shared.clock.now());
         let mut pending = self.shared.pending.lock().unwrap();
         for hash in hashes {
             if pending.hashes.len() == pending.hashes.capacity() {
                 pending.rescan = true;
                 break;
             }
-            pending.hashes.push(hash);
-            pending.queued.push(now);
+            pending.hashes.push((hash, now));
         }
     }
     /// Durability window of local-first writes: acknowledged batches with their
@@ -411,7 +397,9 @@ impl Shipper {
         value["recent"] = serde_json::to_value(&*window.recent).expect("shipping ring");
         value["retention"] = WINDOW_RETAIN.into();
         value["next_slot"] = window.cursor.into();
-        value["clock"] = "nanoseconds since peer runtime start; monotonic, host local".into();
+        value["clock"] =
+            "nanoseconds on the peer metrics clock, shared with peer.recent; monotonic, host local"
+                .into();
         value
     }
     pub fn pause(&self) {

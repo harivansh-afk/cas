@@ -290,6 +290,17 @@ fn wait_chunks(host: &mut Daemon, count: usize) {
         thread::sleep(Duration::from_millis(10));
     }
 }
+fn wait_acked(host: &mut Daemon, chunks: u64) {
+    let until = Instant::now() + Duration::from_secs(20);
+    loop {
+        let report = host.command(json!({"op":"report"}));
+        if report["fleet"]["ship"]["put_acked_chunks"].as_u64() == Some(chunks) {
+            return;
+        }
+        assert!(Instant::now() < until, "{report}");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
 fn attached(host: &mut Daemon, image: u8) {
     assert_eq!(
         host.command(json!({"op":"attach","image":image}))["ok"],
@@ -342,7 +353,9 @@ fn shipping_window_ring_records_a_delayed_owner_acknowledgement() {
     attached(&mut a, 2);
     let started = Instant::now();
     a.command(json!({"op":"seed"}));
-    wait_chunks(&mut b, 64);
+    // The sender's own acknowledgement count orders the ring update; the
+    // owner's store count would race the reply.
+    wait_acked(&mut a, 64);
     let report = a.command(json!({"op":"report"}));
     let shipping = &report["fleet"]["shipping"];
     evidence("shipping-window", shipping);
@@ -378,7 +391,7 @@ fn shipping_window_ring_records_a_delayed_owner_acknowledgement() {
     assert_eq!(owner["fleet"]["shipping"]["batches"], 0);
     assert_eq!(owner["fleet"]["shipping"]["recent"], json!([]));
     assert_eq!(owner["fleet"]["ship"]["put_acked_chunks"], 0);
-    assert_eq!(report["fleet"]["ship"]["put_acked_chunks"], 64);
+    assert_eq!(owner["store"]["chunks"], 64);
     a.command(json!({"op":"stop"}));
     b.command(json!({"op":"stop"}));
 }

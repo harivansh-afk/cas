@@ -282,8 +282,8 @@ pub(super) fn start(
         shared.io_scheduler.clone(),
         shared
             .peer_metrics
-            .as_ref()
-            .map_or_else(Instant::now, |metrics| metrics.origin()),
+            .clone()
+            .ok_or_else(|| io::Error::other("fleet shipping requires the peer metrics clock"))?,
     )?;
     runtime
         .shipper
