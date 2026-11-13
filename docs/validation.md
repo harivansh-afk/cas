@@ -1,5 +1,136 @@
 # Validation
 
+## 2026-11-13 — Campaign follow-ups: N-guest native runner, chroot working set, nvme-tcp floor, repeats
+
+Branch `feat/cloudlab-campaign`. **Tested revisions `d954ff7`** (native
+runner, two-host chroot form, r0.sh nvme-tcp, campaign changes; rehearsal
+003), **`4cae14c`** (the chroot wrapper's `command -v chroot` fix and the
+driver's native-ZFS storage selection) **and `c0f7df4`** (the replay result
+records the working-set spec; the passing chroot run and the final dry
+run), all clean on the VM checkout; this record is a later commit. Changes
+in `crates/harnesses/src/native.rs` and `native/runtime.rs` (harness only,
+no daemon code), `experiments/native/workload.sh`, `experiments/two-host/
+{runner,agent,test_runner}.py`, `experiments/cloudlab/` and docs. Nothing
+pushed or merged. Same hosts as the entry above: Spark for edits, bundles,
+Python unit tests and `cargo check`; every build, Rust test and run on the
+persistent Freestyle VM `cas-build` (loop-backed XFS, nested KVM). No VM
+created or deleted; the loop images were unmounted afterwards.
+
+### Commands (cas-build, `/root/campaign/driver3.sh`, `rerun-chroot2.sh`)
+
+```sh
+bash $SRC/experiments/cloudlab/setup.sh --bundle campaign4.bundle --revision $REV --source $SRC \
+  --skip-disk --skip-irq --skip-nix --skip-smt --cores 6 --out out/node-inventory-setup-3.json
+nix develop -c cargo test --locked -p cas-harness native
+nix develop -c uv run --no-project python -m unittest discover -s experiments/two-host   # 36
+nix develop -c uv run --no-project python -m unittest discover -s experiments/cloudlab   # 28
+taskset -c 0-7 $SRC/result-native/bin/cas-native-run --backend raw --guests 2 --device $LOOPA \
+  --storage /mnt/fleet-a/native-2g-baseline --output native-2g-baseline \
+  --script $SRC/experiments/native/workload.sh --script-arg baseline --script-arg 5 --script-arg 64 --allow-loop-device
+# the same with --script-arg pressure
+$SRC/result-two-host/bin/cas-two-host --config ws-chroot-001-config.json --output ws-chroot-001/controller
+bash $SRC/experiments/cloudlab/r0.sh --nvme-tcp-check
+python3 campaign.py dry-run --nodes nodes-dry3.json --plan plans/dev-loopback.json
+python3 campaign.py run --nodes nodes-r03.json --plan plan-r0.json --export /root/campaign/export   # r0_nvme_tcp false
+python3 campaign.py repeats --nodes nodes-r03.json --out out/dev-r0-003/day4-repeats.json
+```
+
+### Outcomes
+
+- `cargo test -p cas-harness native`: **5 pass** (guest bound 1..16, raw-only
+  ZFS, pool-membership parsing, the two existing refusals). Python: 36 and
+  28 pass on the VM and on Spark. `nix build .#native` and `.#two-host` at
+  both revisions.
+- `cas-native-run --backend raw --guests 2`, `baseline 5 64` and `pressure 5
+  64` on the loop-backed XFS: both `outcome.json` `success: true` (111 s and
+  102 s). Per-guest fio JSON under `guest-1/`, `guest-2/`; `aggregate-<label>
+  .json` per label. Baseline `read-q1`: 2 guests, 16,560 IOPS summed, per-
+  guest clat p50/p99/p99.9 max 80/175/289 µs; `write-q1` 12,912 IOPS;
+  `flush` 3,343 IOPS; errors 0. Pressure: `reader-alone` 1 reader 8,636
+  IOPS p99 167 µs; `mixed-8m-reader` 8,739 IOPS p99 159 µs; `mixed-0m-reader`
+  (uncapped writer) 8,043 IOPS p99 220 µs. `identity.json` records
+  `guests: 2`, `storage_fstype: xfs`, `native_media: false`. Development
+  numbers on a shared VM's virtual disk.
+- `ws-chroot-001` (`c0f7df4`, two-host `resume-elsewhere` on the loopback
+  layout, 128 MiB image, 2 MiB setup): **`success: true`** (58 s). The
+  resume `setup_script` built a synthetic root at `/mnt/cas/root` in the
+  source guest (the NixOS guest's bash plus the `/nix/store` libraries that
+  `LD_TRACE_LOADED_OBJECTS` lists); after migration B replayed three
+  bash-builtin commands as `env -i GREETING=... PATH=/bin "$CHROOT"
+  /mnt/cas/root /bin/bash -lc 'cd /work && ...'`. Retained stdout:
+  `hello-from-chroot /work` (the recorded env and cwd inside the chroot),
+  `bin/ etc/ nix/ tmp/ work/` and `5.3.9(1)-release` (the chroot's own
+  bash). Cold pass 443 ms with 646 destination GETs (the chroot's bash and
+  libraries fetched from A), warm pass 262 ms with 0 GETs; time to working
+  set 20.95 s of which boot 18.21 s; downtime 21.58 s. `results.json`
+  `working_set` records `chroot`, `guest_cwd` (`/work`), `env` and the
+  exact per-command script. Development evidence (nested KVM, loop files).
+- `r0.sh --nvme-tcp-check` on cas-build: modules `nvmet`, `nvmet-tcp`,
+  `nvme-tcp`, `nvme-fabrics` missing, `nvme` CLI missing, configfs missing,
+  root ok; exit 1. The Freestyle kernel has no module tree, so the nvme-tcp
+  phase could not run there; on Spark (NixOS) the same check finds the four
+  modules and reports only `nvme-cli` and `root` missing. The phase is
+  therefore shipped with its self-check only; its configfs sequence follows
+  `docs/review/transport.md` and has not been executed.
+- `campaign.py dry-run` (`c0f7df4`, `dev-loopback.json`, nodes file with
+  the placeholder `expected_revision`, `r0_nvme_tcp` default): **3 runnable,
+  9 blocked of 12**, exit 2, nothing launched. New blocks since the previous
+  entry: `r0 floor` ("nvme-tcp prerequisites missing: module-nvmet=missing;
+  ...") and `native-zfs g1` ("node 0 has no zfs_storage_mount/zfs_device
+  for the ZFS arm"); the other seven as before (runner without the flag
+  settings, guest-cpu budget). The loopback layout bypasses the SMT and
+  revision-pin rules, which are unit-tested.
+- Campaign `dev-r0-003` (`r0_nvme_tcp: false`): R0 unit done (99 s), export
+  and end inventories as before. `campaign.py repeats`: "0 unit(s) to
+  repeat; keep d1 r0 floor spread=0.0 measured=1/1", plan written with an
+  empty day list.
+- `setup.sh` at `d954ff7` with `--skip-smt` (the persistent VM's grub is not
+  ours to change; the step's runtime path was not exercised): all other
+  steps as before; inventory `skipped` now lists `smt`.
+
+### Failures and retries
+
+- Rehearsal 003's first launch ran the previous revision's `setup.sh`
+  (the driver lacked the bundle checkout before `setup.sh`), which rejected
+  `--skip-smt` (usage, exit 2); relaunched with a bootstrap step.
+- `ws-chroot-001` attempt 1: the runner rejected the config ("burst regions
+  must fit the image"): the 128 MiB test image needs an explicit small burst
+  block even for a resume-only case. Attempt 2 (`d954ff7`): the setup script
+  built the chroot (bash plus its `/nix/store` libraries) but the replay
+  failed with `env: 'chroot': No such file or directory`: `env -i` resolves
+  its program in the *new* environment (`PATH=/bin`), where the NixOS guest
+  has no `chroot`. Fixed in `4cae14c` (`CHROOT=$(command -v chroot)` on the
+  guest, then `env -i ... "$CHROOT"`), with a unit test that runs the wrapper
+  through `sh -eu`. Attempt 3 (`4cae14c`): all three commands ran correctly
+  in the chroot (retained stdout) but the runner crashed after the warm pass
+  with `NameError: name 'commands' is not defined` in `replay_working_set`'s
+  return value, which the unit tests had not covered. Fixed in `c0f7df4`
+  with a test that drives `replay_working_set` against fake agents.
+  Attempts 2 and 3 are retained as `ws-chroot-001-attempt-{2,3}`.
+- The bridge's exec channel times out when a command backgrounds a process
+  inside `( ... &)`; the processes still start. Launches now use `setsid
+  nohup` and are confirmed by a second command.
+
+### Evidence
+
+`results/cloudlab-campaign/evidence/campaign-rehearsal-003.tgz` with
+`SHA256SUMS` (driver and step logs, `out/dev-dry-003`, `out/dev-r0-003` with
+`day4-repeats.json`, the setup inventory, `native-2g-baseline`,
+`native-2g-pressure`, `ws-chroot-001` and its attempt 2, the configs), plus
+`driver3.sh`, `rerun-chroot.sh`, `rerun-chroot2.sh` and the nodes files.
+
+### Conclusions and limits
+
+The native runner boots N guests with their own disks and jobs and writes
+per-guest and aggregate results (N=2 exercised; 16 is a bound, not a tested
+load); the ZFS acceptance for the raw backend is unit-tested only, no ZFS
+pool exists on the VM. The two-host chroot working set replays a recorded cwd and environment
+inside the data disk's root, shown with a synthetic bash-only root; a real
+Stage A root image has not been replayed.
+The nvme-tcp floor row is unexecuted code with a self-check. The repeats
+generator ran on one unit; its p99 rules per case are unit-tested on
+synthetic results. Everything is development evidence on one shared VM.
+
 ## 2026-11-13 — CloudLab campaign driver rehearsal on cas-build
 
 Branch `feat/cloudlab-campaign` from `feat/burst-harness` (`5a69820`).
