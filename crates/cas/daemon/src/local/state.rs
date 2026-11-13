@@ -14,6 +14,14 @@ use std::{
 #[derive(Default)]
 pub(super) struct HostGate {
     failure: Mutex<Option<String>>,
+    /// A failure recorded by a thread that may hold `failure` higher in its
+    /// call chain (the frontend's IO thread inside the fast path); applied by
+    /// the next `failure()` or `Gate::lock()`.
+    pending: Mutex<Option<String>>,
+}
+
+fn take_pending(pending: &Mutex<Option<String>>) -> Option<String> {
+    pending.lock().unwrap_or_else(|e| e.into_inner()).take()
 }
 
 impl HostGate {
@@ -22,14 +30,25 @@ impl HostGate {
     }
 
     pub fn failure(&self) -> Option<String> {
-        self.failure
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        let mut failure = self.failure.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(message) = take_pending(&self.pending) {
+            failure.get_or_insert(message);
+        }
+        failure.clone()
     }
 
     pub fn fail(&self, message: String) {
         self.failure
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert(message);
+    }
+
+    /// Fail without taking the gate: for the frontend thread, which holds the
+    /// completion gate across admission and publication and would deadlock
+    /// on `fail`. The failure lands at the next `failure()` or `Gate::lock()`.
+    pub fn fail_pending(&self, message: String) {
+        self.pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get_or_insert(message);
@@ -40,6 +59,10 @@ pub struct Gate {
     writer_fenced: AtomicBool,
     image: Mutex<ImageState>,
     host: Option<BudgetArc<HostGate>>,
+    /// Mirror of `image.failure.is_some()`, written when a guard drops, so a
+    /// thread already holding the gate can read the state without locking.
+    failed: AtomicBool,
+    pending: Mutex<Option<String>>,
 }
 
 impl Gate {
@@ -48,31 +71,68 @@ impl Gate {
         host: Option<BudgetArc<HostGate>>,
         metadata: &Arc<Budget>,
     ) -> io::Result<BudgetArc<Self>> {
+        let image_failed = image.failure.is_some();
         BudgetArc::try_new(
             Self {
                 writer_fenced: AtomicBool::new(false),
                 image: Mutex::new(image),
                 host,
+                failed: AtomicBool::new(image_failed),
+                pending: Mutex::new(None),
             },
             metadata,
         )
     }
 
     pub fn lock(&self) -> io::Result<Guard<'_>> {
-        let host = self
+        let mut host = self
             .host
             .as_ref()
             .map(|host| host.failure.lock())
             .transpose()
             .map_err(|_| io::Error::other("host completion gate poisoned"))?;
+        if let (Some(host), Some(state)) = (&self.host, host.as_deref_mut())
+            && let Some(message) = take_pending(&host.pending)
+        {
+            state.get_or_insert(message);
+        }
         let mut image = self
             .image
             .lock()
             .map_err(|_| io::Error::other("image completion gate poisoned"))?;
+        if let Some(message) = take_pending(&self.pending) {
+            image.fail(message);
+        }
         if let Some(message) = host.as_deref().and_then(|state| state.as_ref()) {
             image.fail(message.clone());
         }
-        Ok(Guard { image, _host: host })
+        Ok(Guard {
+            image,
+            _host: host,
+            failed: &self.failed,
+        })
+    }
+
+    /// Whether the image has recorded a failure, without taking the gate.
+    /// The frontend's IO thread holds the gate across admission, so the fast
+    /// path reads this instead of locking. A failure recorded under a guard
+    /// becomes visible when that guard drops; a pending one at once.
+    pub fn is_failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire)
+            || self
+                .pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some()
+    }
+
+    /// Fail without taking the gate (see `is_failed`); applied by the next
+    /// `lock()`.
+    pub fn fail_pending(&self, message: String) {
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert(message);
     }
 
     // Admission may already hold the completion gate. This terminal flag is
@@ -98,6 +158,14 @@ impl Gate {
 pub struct Guard<'a> {
     image: MutexGuard<'a, ImageState>,
     _host: Option<MutexGuard<'a, Option<String>>>,
+    failed: &'a AtomicBool,
+}
+
+impl Drop for Guard<'_> {
+    fn drop(&mut self) {
+        self.failed
+            .store(self.image.failure.is_some(), Ordering::Release);
+    }
 }
 
 impl Guard<'_> {

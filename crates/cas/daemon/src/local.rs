@@ -936,10 +936,13 @@ impl Local {
                 }
                 // Inline reads wait on the frontend wake. Remote replies,
                 // registry publications and the reactor (`notify(&self.wake.0)`
-                // after every mailbox send) all signal that one eventfd, so
-                // the wait is unbounded: a send racing this `try_recv` leaves
-                // the counter set and the wait returns at once.
-                None if wait => self.fast.as_ref().expect("pending fast reads").wait(-1)?,
+                // after every mailbox send) all signal that one eventfd; a
+                // send racing this `try_recv` leaves the counter set and the
+                // wait returns at once. The bound is a safety net only: a
+                // vhost-user backend's epoll handler drains the same eventfd
+                // (`Storage::wait_complete` in a drain), so a signal it has
+                // already consumed must not block this wait forever.
+                None if wait => self.fast.as_ref().expect("pending fast reads").wait(100)?,
                 None => return Ok(None),
             }
         }

@@ -366,3 +366,36 @@ fn inline_completion_signals_the_frontend_completion_eventfd() {
     drop(local);
     shutdown(host);
 }
+
+/// The vhost-user backend holds the image completion gate while it enqueues
+/// and while it publishes completions. The fast path runs on that thread and
+/// must neither lock the gate (a self-deadlock that stalled a booting guest)
+/// nor fail it directly; a failure it records lands at the next gate lock.
+#[test]
+fn fast_path_never_locks_the_completion_gate_the_frontend_holds() {
+    let root = tempfile::tempdir().unwrap();
+    let resources = Arc::new(Resources {
+        peer: crate::peer::Config {
+            fast_settled_reads: true,
+            ..Default::default()
+        },
+        ..Resources::default()
+    });
+    let mut host = create(root.path(), 2, Arc::clone(&resources));
+    let mut local = attach(&mut host, 2);
+    let health = local.shared.health.clone();
+    let guard = health.lock().unwrap();
+    // Inline hole read with the gate held: served, not deadlocked.
+    submit_read(&mut local, 1, 0, BLOCK_SIZE);
+    assert_eq!(fast(&local, "inline_reads"), 1);
+    let done = received(&mut local);
+    expect_read(done, 1, &[0; BLOCK_SIZE]);
+    drop(guard);
+    // A failure recorded under the gate is visible once the guard drops, and
+    // the fast path declines without locking.
+    health.lock().unwrap().fail("held failure".into());
+    assert!(health.is_failed());
+    let _guard = health.lock().unwrap();
+    submit_read(&mut local, 2, 0, BLOCK_SIZE);
+    assert_eq!(fast(&local, "declined_failed"), 1);
+}

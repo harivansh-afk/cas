@@ -37,7 +37,10 @@
 //! of shared IO (a GET reply, a leader's publication, the cache fill) fails
 //! the read, the image gate and the shared host gate like the frozen path;
 //! local resource exhaustion while joining fails only the read and its image
-//! (see `Context::fail`). Reads that cannot establish these facts are sent to
+//! (see `Context::fail`). The frontend's IO thread holds the image completion
+//! gate across admission and publication, so nothing here locks that gate:
+//! the failed state is read lock-free and failures are recorded for the next
+//! gate holder. Reads that cannot establish these facts are sent to
 //! the reactor unchanged.
 use super::*;
 use crate::local::chunk::{Block, Fetch, Joined, Sources, copy_chunk};
@@ -190,13 +193,9 @@ impl Context {
         if !self.flushes.is_empty() {
             return Ok(self.decline(|c| &mut c.declined_flush, io));
         }
-        if shared
-            .health
-            .lock()
-            .map_err(|_| io::Error::other("completion gate poisoned"))?
-            .failure
-            .is_some()
-        {
+        // The frontend's IO thread holds the completion gate across
+        // admission; never lock it here.
+        if shared.health.is_failed() {
             return Ok(self.decline(|c| &mut c.declined_failed, io));
         }
         let status = *shared.final_status.lock().expect("status poisoned");
@@ -437,14 +436,12 @@ impl Context {
         drop(remote);
         self.counters.failed_reads += 1;
         buffer.as_mut_slice().fill(0);
+        // Recorded without taking either gate (the frontend holds them
+        // across admission and publication); applied at the next lock.
         let message = error.to_string();
-        shared
-            .health
-            .lock()
-            .map_err(|_| io::Error::other("completion gate poisoned"))?
-            .fail(message.clone());
+        shared.health.fail_pending(message.clone());
         if shared_io {
-            self.gate.fail(message);
+            self.gate.fail_pending(message);
         }
         if let Some(trace) = &mut permit.trace {
             trace.responded_ns = trace.at();
