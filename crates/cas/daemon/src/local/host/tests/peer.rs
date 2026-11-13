@@ -13,6 +13,10 @@ fn data(block: usize) -> [u8; BLOCK_SIZE] {
     [block as u8 + 1; BLOCK_SIZE]
 }
 fn seeded(root: &Path, resources: Arc<Resources>, local_copy: bool) -> Host {
+    seeded_images(root, resources, local_copy, &[2])
+}
+/// Every image holds the same 64 blocks, so one remote owner serves them all.
+fn seeded_images(root: &Path, resources: Arc<Resources>, local_copy: bool, ids: &[u8]) -> Host {
     let tickets = Tickets::open(root, Arc::clone(&resources.metadata)).unwrap();
     let mut store = Store::create(
         Arc::clone(&tickets),
@@ -22,45 +26,6 @@ fn seeded(root: &Path, resources: Arc<Resources>, local_copy: bool) -> Host {
     )
     .unwrap();
     fs::create_dir(root.join("images")).unwrap();
-    let directory = path(root, 2);
-    fs::create_dir(&directory).unwrap();
-    let mut manifest =
-        Manifest::create(&directory, identity(2), Arc::clone(&resources.metadata)).unwrap();
-    let mut log = Log::create_shared(
-        Arc::clone(&tickets),
-        append::Config {
-            store: STORE.store,
-            image: [2; 16],
-            image_bytes: IMAGE_BYTES,
-            segment_bytes: 2 * MAX_REQUEST_BYTES as u64,
-        },
-        append::Limits::default(),
-        Arc::clone(&resources.metadata),
-        manifest.view().unwrap(),
-    )
-    .unwrap();
-    let mut builder =
-        cas_core::append::format::Builder::new(IMAGE_BYTES, BLOCKS * BLOCK_SIZE).unwrap();
-    builder
-        .write(
-            cas_core::append::format::RequestId {
-                attachment: 1,
-                serial: 1,
-                queue: 0,
-                head: 0,
-            },
-            0,
-            BLOCKS * BLOCK_SIZE,
-            |bytes| {
-                for (block, bytes) in bytes.as_chunks_mut::<BLOCK_SIZE>().0.iter_mut().enumerate() {
-                    bytes.copy_from_slice(&data(block));
-                }
-                Ok(())
-            },
-        )
-        .unwrap();
-    log.append(builder).unwrap();
-    log.flush().unwrap();
     // Test-only absent-index fixture: compact into another store, keeping the
     // original local store empty. Production uses force-remote on full replicas.
     let remote_root = tempfile::tempdir().unwrap();
@@ -79,18 +44,63 @@ fn seeded(root: &Path, resources: Arc<Resources>, local_copy: bool) -> Host {
             .unwrap(),
         )
     };
-    while let Some(selection) = log
-        .select_compaction(Arc::clone(&resources.metadata), resources.read_memory())
-        .unwrap()
-    {
-        let input = selection.load().unwrap();
-        let compacted = input
-            .write(remote_store.as_mut().unwrap_or(&mut store), &mut manifest)
+    let mut images = Vec::new();
+    for &id in ids {
+        let directory = path(root, id);
+        fs::create_dir(&directory).unwrap();
+        let mut manifest =
+            Manifest::create(&directory, identity(id), Arc::clone(&resources.metadata)).unwrap();
+        let mut log = Log::create_shared(
+            Arc::clone(&tickets),
+            append::Config {
+                store: STORE.store,
+                image: [id; 16],
+                image_bytes: IMAGE_BYTES,
+                segment_bytes: 2 * MAX_REQUEST_BYTES as u64,
+            },
+            append::Limits::default(),
+            Arc::clone(&resources.metadata),
+            manifest.view().unwrap(),
+        )
+        .unwrap();
+        let mut builder =
+            cas_core::append::format::Builder::new(IMAGE_BYTES, BLOCKS * BLOCK_SIZE).unwrap();
+        builder
+            .write(
+                cas_core::append::format::RequestId {
+                    attachment: 1,
+                    serial: 1,
+                    queue: 0,
+                    head: 0,
+                },
+                0,
+                BLOCKS * BLOCK_SIZE,
+                |bytes| {
+                    for (block, bytes) in
+                        bytes.as_chunks_mut::<BLOCK_SIZE>().0.iter_mut().enumerate()
+                    {
+                        bytes.copy_from_slice(&data(block));
+                    }
+                    Ok(())
+                },
+            )
             .unwrap();
-        log.publish_compaction(compacted).unwrap();
+        log.append(builder).unwrap();
+        log.flush().unwrap();
+        while let Some(selection) = log
+            .select_compaction(Arc::clone(&resources.metadata), resources.read_memory())
+            .unwrap()
+        {
+            let input = selection.load().unwrap();
+            let compacted = input
+                .write(remote_store.as_mut().unwrap_or(&mut store), &mut manifest)
+                .unwrap();
+            log.publish_compaction(compacted).unwrap();
+        }
+        images.push((log, manifest));
     }
     drop(remote_store);
-    Host::new(resources, store, vec![(log, manifest)]).unwrap()
+    Host::new(resources, store, images).unwrap()
 }
 fn resources(config: peer::Config) -> Arc<Resources> {
     Arc::new(Resources {
@@ -191,6 +201,66 @@ fn local_index_miss_fetches_verified_bytes_caches_optionally_and_has_reports_dur
     drop(local);
     shutdown(a);
     shutdown(b);
+    for r in [ra, rb] {
+        assert_eq!(r.metadata.usage().current, Amount::default());
+    }
+}
+
+#[test]
+fn per_image_remote_read_attribution_sums_to_the_host_counters() {
+    let root_b = tempfile::tempdir().unwrap();
+    let root_a = tempfile::tempdir().unwrap();
+    let rb = resources(peer::Config {
+        peer_listen: Some("127.0.0.1:0".parse().unwrap()),
+        ..Default::default()
+    });
+    let b = seeded(root_b.path(), rb.clone(), true);
+    let ra = resources(peer::Config {
+        peer_address: Some(b.peer_address().unwrap()),
+        ..Default::default()
+    });
+    let mut a = seeded_images(root_a.path(), ra.clone(), false, &[2, 3]);
+    let mut first = attach(&mut a, 2);
+    let mut second = attach(&mut a, 3);
+    for id in 0..5 {
+        get(&mut first, id, id as usize);
+    }
+    for id in 0..3 {
+        get(&mut second, 100 + id, 10 + id as usize);
+    }
+    // Stop the owner: the next remote read on image 3 fails and is attributed there.
+    shutdown(b);
+    submit(&mut second, 103, 20);
+    receive(&mut second, None);
+    let report = a.report();
+    let image = |id: u8| report["peer"]["images"][format!("{id:02x}").repeat(16)].clone();
+    assert_eq!(
+        image(2),
+        serde_json::json!({"completed_reads": 5, "failed_reads": 0, "chunks": 5,
+            "verified_bytes": 5 * BLOCK_SIZE})
+    );
+    // The failed read attempted one more remote chunk but verified no payload.
+    assert_eq!(
+        image(3),
+        serde_json::json!({"completed_reads": 4, "failed_reads": 1, "chunks": 4,
+            "verified_bytes": 3 * BLOCK_SIZE})
+    );
+    assert_eq!(report["peer"]["images"].as_object().unwrap().len(), 2);
+    let counters = &report["peer"]["counters"];
+    assert_eq!(counters["completed_reads"], 9);
+    assert_eq!(counters["failed_reads"], 1);
+    assert_eq!(counters["verified"], 8);
+    assert_eq!(
+        a.shared.peer_metrics.as_ref().unwrap().image([3; 16]),
+        peer::metrics::ImageCounters {
+            completed_reads: 4,
+            failed_reads: 1,
+            chunks: 4,
+            verified_bytes: 3 * BLOCK_SIZE as u64,
+        }
+    );
+    drop((first, second));
+    shutdown(a);
     for r in [ra, rb] {
         assert_eq!(r.metadata.usage().current, Amount::default());
     }

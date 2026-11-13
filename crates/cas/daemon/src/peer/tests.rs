@@ -59,7 +59,7 @@ fn pipelined_gets_handle_fragmentation_without_growing_transport_memory() {
         }
     });
     let budget = memory();
-    let metrics = Metrics::new(&budget).unwrap();
+    let metrics = Metrics::new(&budget, 1).unwrap();
     let client = Client::new(address, &budget, metrics.clone()).unwrap();
     let before = budget.usage();
     let hash = *blake3::hash(&[7; BLOCK_SIZE]).as_bytes();
@@ -123,7 +123,7 @@ fn peer_down_short_reads_bad_hash_identity_and_status_never_publish_bytes() {
             }))
         };
         let budget = memory();
-        let metrics = Metrics::new(&budget).unwrap();
+        let metrics = Metrics::new(&budget, 1).unwrap();
         let client = Client::new(address, &budget, metrics.clone()).unwrap();
         let ticket = client
             .fetch(*blake3::hash(&[7; BLOCK_SIZE]).as_bytes())
@@ -159,7 +159,7 @@ fn cancellation_retains_transport_slot_until_reply() {
             .unwrap();
     });
     let budget = memory();
-    let metrics = Metrics::new(&budget).unwrap();
+    let metrics = Metrics::new(&budget, 1).unwrap();
     let client = Client::new(address, &budget, metrics.clone()).unwrap();
     let hash = *blake3::hash(&[7; BLOCK_SIZE]).as_bytes();
     drop(client.fetch(hash).unwrap());
@@ -191,7 +191,7 @@ fn failed_connection_is_replaced_for_the_next_request() {
         second.write_all(&response(h, &[7; BLOCK_SIZE])).unwrap();
     });
     let budget = memory();
-    let metrics = Metrics::new(&budget).unwrap();
+    let metrics = Metrics::new(&budget, 1).unwrap();
     let client = Client::new(address, &budget, metrics.clone()).unwrap();
     let hash = *blake3::hash(&[7; BLOCK_SIZE]).as_bytes();
     let first = client.fetch(hash).unwrap();
@@ -226,7 +226,7 @@ fn coalesced_missing_and_success_frames_keep_their_own_payloads() {
         socket.write_all(&joined).unwrap();
     });
     let budget = memory();
-    let metrics = Metrics::new(&budget).unwrap();
+    let metrics = Metrics::new(&budget, 1).unwrap();
     let client = Client::with_inline(address, &budget, metrics.clone(), 20).unwrap();
     let hash = *blake3::hash(&[7; BLOCK_SIZE]).as_bytes();
     let first = client.fetch(hash).unwrap();
@@ -259,7 +259,7 @@ fn inline_get_has_a_bounded_poll_and_retains_slow_reply_ownership() {
             .unwrap();
     });
     let budget = memory();
-    let metrics = Metrics::new(&budget).unwrap();
+    let metrics = Metrics::new(&budget, 1).unwrap();
     let client = Client::with_inline(address, &budget, metrics.clone(), 20).unwrap();
     let hash = *blake3::hash(&[7; BLOCK_SIZE]).as_bytes();
     let first = client.fetch(hash).unwrap();
@@ -312,7 +312,7 @@ fn nofile() -> libc::rlimit {
 #[ignore = "subprocess entry point for the descriptor-limit regression"]
 fn descriptor_limit_child() {
     let budget = memory();
-    let metrics = Metrics::new(&budget).unwrap();
+    let metrics = Metrics::new(&budget, 1).unwrap();
     let result = Router::new(&four_member_config(), &budget, metrics);
     let limit = nofile();
     let required = 3 * client::CLIENT_DESCRIPTORS + 1024;

@@ -659,7 +659,7 @@ fn get_progresses_and_verifies_while_compaction_put_waits_for_durable_ack() {
         thread::sleep(Duration::from_millis(5));
     }
     let budget = crate::local::metadata_budget();
-    let metrics = crate::peer::metrics::Metrics::new(&budget).unwrap();
+    let metrics = crate::peer::metrics::Metrics::new(&budget, 1).unwrap();
     let client = crate::peer::Client::new(addresses[1], &budget, metrics.clone()).unwrap();
     let expected = [2; BLOCK_SIZE];
     let hash = *blake3::hash(&expected).as_bytes();

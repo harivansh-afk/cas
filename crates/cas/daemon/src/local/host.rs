@@ -291,7 +291,7 @@ impl Host {
         let peer_metrics = (resources.peer.peer_listen.is_some()
             || resources.peer.peer_address.is_some()
             || !resources.peer.peer_get_member.is_empty())
-        .then(|| crate::peer::metrics::Metrics::new(&metadata))
+        .then(|| crate::peer::metrics::Metrics::new(&metadata, slots))
         .transpose()?;
         let peer = if resources.peer.peer_address.is_some()
             || !resources.peer.peer_get_member.is_empty()
@@ -735,8 +735,11 @@ impl Port {
     pub fn peer_config(&self) -> &crate::peer::Config {
         &self.shared.resources.peer
     }
-    pub fn peer_metrics(&self) -> Option<BudgetArc<crate::peer::metrics::Metrics>> {
-        self.shared.peer_metrics.clone()
+    pub fn peer_metrics(&self) -> Option<crate::peer::metrics::ImageMetrics> {
+        self.shared
+            .peer_metrics
+            .clone()
+            .map(|metrics| crate::peer::metrics::ImageMetrics::new(metrics, self.index))
     }
     pub fn reader(&self) -> Reader {
         self.shared.reader.clone()
@@ -1109,6 +1112,9 @@ fn make_image(
     let (output, events) = mailbox::bounded(1, &shared.resources.metadata)?;
     let (reply, replies) = mailbox::bounded(1, &shared.resources.metadata)?;
     let image = manifest.current().image;
+    if let Some(metrics) = &shared.peer_metrics {
+        metrics.bind(index, image)?;
+    }
     let endpoint = worker::Endpoint {
         retired: false,
         fleet: shared.fleet.clone(),

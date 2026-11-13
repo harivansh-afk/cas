@@ -43,10 +43,26 @@ pub struct Counters {
     pub completed_reads: u64,
     pub failed_reads: u64,
 }
+/// Race-independent per-image remote-read attribution. Cumulative; restarts
+/// with the host. `chunks` counts remote chunks the image's reads attempted, as
+/// `recent[].chunks` does; `verified_bytes` counts only BLAKE3-verified payload.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ImageCounters {
+    pub completed_reads: u64,
+    pub failed_reads: u64,
+    pub chunks: u64,
+    pub verified_bytes: u64,
+}
+#[derive(Default, Clone, Copy)]
+struct ImageSlot {
+    image: Option<[u8; 16]>,
+    counters: ImageCounters,
+}
 struct State {
     counters: Counters,
     recent: Vec<Record, BudgetAllocator>,
     cursor: usize,
+    images: Vec<ImageSlot, BudgetAllocator>,
 }
 pub struct Metrics {
     wire_sent: AtomicU64,
@@ -55,7 +71,10 @@ pub struct Metrics {
     state: Mutex<State>,
 }
 impl Metrics {
-    pub fn new(budget: &Arc<Budget>) -> io::Result<BudgetArc<Self>> {
+    /// `slots` preallocates one per-image attribution slot per host image slot.
+    pub fn new(budget: &Arc<Budget>, slots: usize) -> io::Result<BudgetArc<Self>> {
+        let mut images = crate::local::reserved_vec(slots, budget)?;
+        images.resize(slots, ImageSlot::default());
         BudgetArc::try_new(
             Self {
                 wire_sent: AtomicU64::new(0),
@@ -65,10 +84,35 @@ impl Metrics {
                     counters: Counters::default(),
                     recent: crate::local::reserved_vec(RETAIN, budget)?,
                     cursor: 0,
+                    images,
                 }),
             },
             budget,
         )
+    }
+    /// Name the image served from a preallocated slot. Attribution before
+    /// binding is retained under the slot's later name.
+    pub fn bind(&self, slot: usize, image: [u8; 16]) -> io::Result<()> {
+        let mut state = self.state.lock().expect("peer metrics poisoned");
+        let entry = state
+            .images
+            .get_mut(slot)
+            .ok_or_else(|| io::Error::other("peer metrics image slot limit exceeded"))?;
+        entry.image = Some(image);
+        Ok(())
+    }
+    pub fn origin(&self) -> Instant {
+        self.origin
+    }
+    pub fn image(&self, image: [u8; 16]) -> ImageCounters {
+        let state = self.state.lock().expect("peer metrics poisoned");
+        state
+            .images
+            .iter()
+            .filter(|slot| slot.image == Some(image))
+            .fold(ImageCounters::default(), |sum, slot| {
+                sum.plus(slot.counters)
+            })
     }
     pub fn at(&self, time: Instant) -> u64 {
         time.saturating_duration_since(self.origin)
@@ -83,7 +127,25 @@ impl Metrics {
     }
     pub fn report(&self) -> serde_json::Value {
         let state = self.state.lock().expect("peer metrics poisoned");
-        serde_json::json!({"counters": state.counters, "recent": &*state.recent,
+        // Keyed by image ID; a returning migration reuses the ID in a new
+        // slot, so equal IDs are summed here rather than on the IO path.
+        let mut totals = std::collections::BTreeMap::<[u8; 16], ImageCounters>::new();
+        for slot in state.images.iter() {
+            if let Some(image) = slot.image {
+                let total = totals.entry(image).or_default();
+                *total = total.plus(slot.counters);
+            }
+        }
+        let images: serde_json::Map<String, serde_json::Value> = totals
+            .into_iter()
+            .map(|(image, counters)| {
+                (
+                    format!("{:032x}", u128::from_be_bytes(image)),
+                    serde_json::to_value(counters).expect("image counters"),
+                )
+            })
+            .collect();
+        serde_json::json!({"counters": state.counters, "recent": &*state.recent, "images": images,
             "get_wire":{"sent":self.wire_sent.load(Ordering::Relaxed),"received":self.wire_received.load(Ordering::Relaxed)},
             "retention": RETAIN, "next_slot": state.cursor,
             "clock": "nanoseconds since peer runtime start; monotonic, host local"})
@@ -96,10 +158,18 @@ impl Metrics {
         };
         count.fetch_add(bytes as u64, Ordering::Relaxed);
     }
-    fn complete(&self, record: Record) {
+    fn complete(&self, record: Record, slot: usize, verified: u64) {
         let mut state = self.state.lock().expect("peer metrics poisoned");
         state.counters.completed_reads += 1;
         state.counters.failed_reads += u64::from(!record.success);
+        if let Some(image) = state.images.get_mut(slot) {
+            image.counters = image.counters.plus(ImageCounters {
+                completed_reads: 1,
+                failed_reads: u64::from(!record.success),
+                chunks: record.chunks,
+                verified_bytes: verified * cas_core::BLOCK_SIZE as u64,
+            });
+        }
         let cursor = state.cursor;
         if state.recent.len() < RETAIN {
             state.recent.push(record);
@@ -110,19 +180,44 @@ impl Metrics {
     }
 }
 
-pub(crate) struct Trace {
+impl ImageCounters {
+    fn plus(self, other: Self) -> Self {
+        Self {
+            completed_reads: self.completed_reads + other.completed_reads,
+            failed_reads: self.failed_reads + other.failed_reads,
+            chunks: self.chunks + other.chunks,
+            verified_bytes: self.verified_bytes + other.verified_bytes,
+        }
+    }
+}
+
+/// The shared host metrics seen from one image slot; cloning is pointer-sized.
+#[derive(Clone)]
+pub struct ImageMetrics {
     metrics: BudgetArc<Metrics>,
+    slot: usize,
+}
+impl ImageMetrics {
+    pub(crate) fn new(metrics: BudgetArc<Metrics>, slot: usize) -> Self {
+        Self { metrics, slot }
+    }
+}
+
+pub(crate) struct Trace {
+    metrics: ImageMetrics,
     record: Record,
+    verified: u64,
 }
 impl Trace {
-    pub fn new(metrics: BudgetArc<Metrics>, id: u64, received: Instant) -> Self {
+    pub fn new(metrics: ImageMetrics, id: u64, received: Instant) -> Self {
         Self {
             record: Record {
                 id,
-                received_ns: metrics.at(received),
+                received_ns: metrics.metrics.at(received),
                 ..Record::default()
             },
             metrics,
+            verified: 0,
         }
     }
     pub fn fetched(&mut self, phases: Phases) {
@@ -133,12 +228,16 @@ impl Trace {
             self.record.phases.verified_ns = phases.verified_ns;
         }
         self.record.chunks += 1;
+        // A failed chunk reports zero milestones; only verified payload counts.
+        self.verified += u64::from(phases.verified_ns != 0);
     }
     pub fn finish(&mut self, success: bool) {
         if self.record.chunks != 0 && self.record.completed_ns == 0 {
-            self.record.completed_ns = self.metrics.now();
+            self.record.completed_ns = self.metrics.metrics.now();
             self.record.success = success;
-            self.metrics.complete(self.record);
+            self.metrics
+                .metrics
+                .complete(self.record, self.metrics.slot, self.verified);
         }
     }
 }
