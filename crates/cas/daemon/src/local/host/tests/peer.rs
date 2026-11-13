@@ -584,10 +584,11 @@ fn race_completes_from_the_local_copy_when_the_peer_reply_fails_verification() {
     let mut host = seeded(root.path(), r.clone(), true);
     let mut local = attach(&mut host, 2);
     get(&mut local, 0, 3);
-    assert_eq!(counter(&host, "errors"), 1);
-    assert_eq!(counter(&host, "verified"), 0);
-    assert_eq!(counter(&host, "races_started"), 1);
-    assert_eq!(counter(&host, "race_won_local"), 1);
+    let report = host.report();
+    assert_eq!(counter(&host, "errors"), 1, "{report}");
+    assert_eq!(counter(&host, "verified"), 0, "{report}");
+    assert_eq!(counter(&host, "races_started"), 1, "{report}");
+    assert_eq!(counter(&host, "race_won_local"), 1, "{report}");
     // The corrupt reply is discarded when its transport finishes, which may
     // be after the local win completed the read.
     wait_counter(&host, "race_discarded", 1);
@@ -1001,13 +1002,15 @@ fn two_daemon_loopback_verifies_data_measures_phases_and_fails_on_peer_loss() {
     }
 }
 
-/// Two processes: B delays every GET reply by 1 ms, A races its local copy
-/// after 100 µs. Every measured read must be won locally, every late reply
-/// must be verified, discarded and counted as wasted wire bytes, and the
-/// discarded replies never reach a guest buffer (each read checks its bytes).
+/// Two processes: B delays every GET reply by 10 ms, A races its local copy
+/// after 100 µs. Every measured read must be won locally (a local win costs
+/// well under a millisecond; 10 ms leaves room for a loaded debug test host
+/// to deschedule the local worker), every late reply must be verified,
+/// discarded and counted as wasted wire bytes, and the discarded replies
+/// never reach a guest buffer (each read checks its bytes).
 #[test]
 fn two_daemon_loopback_race_wins_locally_against_a_delayed_server() {
-    let mut b = Daemon::start_with(None, &[("CAS_PEER_SERVER_DELAY_US", "1000")]);
+    let mut b = Daemon::start_with(None, &[("CAS_PEER_SERVER_DELAY_US", "10000")]);
     let ready = b.reply();
     let address: SocketAddr = ready["address"].as_str().unwrap().parse().unwrap();
     let mut a = Daemon::start_with(
@@ -1024,9 +1027,8 @@ fn two_daemon_loopback_race_wins_locally_against_a_delayed_server() {
     assert_eq!(c["race_won_first"], 0, "{c}");
     assert_eq!(c["failed_reads"], 0, "{c}");
     assert_eq!(report["cache"]["resident_bytes"], 0);
-    // The counters above prove every read was won locally; 700 serialized
-    // 1 ms replies would need at least 700 ms, but a loaded debug test host
-    // can take longer, so wall time is only a hang guard here.
+    // The counters above prove every read was won locally; wall time is
+    // only a hang guard here.
     assert!(measured < Duration::from_secs(10), "{measured:?}");
     let records: Vec<_> = report["peer"]["recent"]
         .as_array()
