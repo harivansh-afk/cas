@@ -1,5 +1,123 @@
 # Validation
 
+## 2026-11-13 — Review fixes for raced fetch and inline settled reads
+
+Code review of `feat/raced-read` (`f5e693b`) reported 13 findings. They are
+fixed on the same branch in five commits grouped by kind, each re-verified on a
+fresh Freestyle VM `vm-109d634404a646c5b80ac443c8d797fd` (`cas-build-readpath`,
+`freestyle/ubuntu-lg`, 8 vCPU, 16 GiB, Determinate Nix, `nix develop` Rust
+1.98.1, `ulimit -n 65536`), then deleted. Edited on Spark; nothing was built or
+measured there. Commands as in the 2026-11-12 entry.
+
+| Commit | Findings | Change |
+| --- | --- | --- |
+| `594f308` peer | 1, 2, 5-test | The armed race lives on the primary slot (`PendingRace` with the challenger's transport handle). It starts at the budget (racer), at once for budget 0, or immediately when the primary fails, from the transport's completion path under the pool lock. A challenger that already finished when attached re-signals the reader's notify. |
+| `1fd362e` local | 3, 4, 6 | FLUSH barrier tracked by sent request ids; a FLUSH rejected before it was sent cannot cancel one in flight. Inline reads decline while the completion gate holds a failure. Holes are zeroed per block; no pre-fill. |
+| `9e87915` local | 5 | `local/chunk.rs` owns the per-block resolution and the cache-fill rules; the reactor read and the inline read both use it. Inline remote chunks join the shared fetch registry (leader fetches and publishes; waiter is woken through the frontend eventfd via `Registry::lookup_with`); a held entry is never declined. |
+| `7a48c4b` peer | 7, 8, 9, 10 | `peer/worker.rs` stop/join protocol for the GET client, racer and local source. The local source blocks on a scheduler-bound grant eventfd. `race_dropped` counter and early return while stopping. One budget representation. |
+| `87a6f49` local, peer | 11, 12 | `Io` built once; inline path takes and returns it. Per-Server test reply delay carried by `Resources` (cfg(test)) replaces the process-global static. |
+
+### Outcomes
+
+Per commit, standalone on the VM (strict Clippy; `cargo test -p cas-daemon
+--lib peer` and `... fast`, `RUST_TEST_THREADS=4`), on the content of each
+commit before the last two test-only assertion changes were folded in (the
+code is identical): `594f308` Clippy clean, 26 peer tests passed, 1 fast test;
+`1fd362e` clean, 26 peer, 2 fast; `9e87915` clean, 27 peer (the registry
+coalescing test joins here), 3 fast; `7a48c4b` clean, 27 peer, 3 fast;
+`87a6f49` clean, 27 peer, 3 fast. Final tree (`92d0019`, same code): `just
+check` passed (fmt, strict Clippy, 583 Rust tests passed, 30 ignored, Python
+tests, diff check); fleet process suite passed with `CAS_PEER_RACE_US=50`,
+with `CAS_FAST_SETTLED_READS=1` and with both (19 passed, 1 ignored entry
+point, each); peer suite passed with no flags, fast, race and both (27 each);
+three release loopback runs per arm and both delayed-server runs passed. After
+the final test-only folds (`87a6f49`): strict Clippy clean, peer suite 27/27 in
+all four arms, fast tests 3/3, release delayed-server test passed. New
+coverage: primary failure before the budget (refused connection and EOF after
+the request) completes from the local copy and stays closed without one; the
+two-process fail phase asserts the post-loss read completes locally; a held
+FLUSH keeps declining the bypass while a rejected FLUSH completes; a failed
+gate declines; two inline reads of one chunk issue one GET through the
+registry (`shared_waits` 1, `fetches.joined` 1).
+
+Three test assertions were timing-dependent under the parallel debug suite and
+were changed to counter checks with hang guards: the delayed-peer wall-clock
+bounds (40 ms for 8 reads; 700 ms for 700 reads) and an immediate
+`race_discarded == 1` after a local win (the losing reply's discard lands when
+its transport finishes). Each failed once and passed in every other run; the
+counters they now rely on were asserted in the same tests all along.
+
+### Loopback re-measurement with the shared resolution
+
+Same harness and method as the 2026-11-12 entry (release, QD1, 4 KiB, 64
+chunks, 100 warmup + 600 measured, three runs per arm, nearest-rank quantiles
+from the ring, microseconds). Different VM instance from the previous entry;
+compare arms within this table, not across entries.
+
+| Arm | Receipt→send p50 | Receipt→send p99 | Verified→completion p50 | Verified→completion p99 | Total p50 | Total p99 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Flags off | 25.9–29.3 | 42.7–73.6 | 32.3–40.8 | 49.7–96.9 | 93.4–118.3 | 137.5–284.3 |
+| `--fast-settled-reads` | 7.9–12.2 | 17.9–26.0 | 14.8–19.6 | 34.6–43.4 | 80.0–81.7 | 134.1–155.6 |
+| Race 100 µs + local, fast off | 22.3–29.8 | 36.5–58.1 | 31.6–41.5 | 56.0–70.6 | 101.6–126.8 | 138.0–197.3 |
+| Race 100 µs + local + fast | 8.0–8.8 | 14.8–19.9 | 14.2–21.2 | 30.3–36.9 | 70.9–86.7 | 113.5–132.1 |
+
+Measured on tree `92d0019`, equal to the final commits except a test-only
+assertion change. The shared resolution did not change the shape of the
+result: the fast path still removes both reactor wakes (receipt→send ≈8–12 µs,
+verified→completion ≈15–20 µs) and the total median falls from roughly
+93–118 µs to 80–82 µs (both flags 71–87 µs); the off arm's 284 µs p99 is one
+run's tail on this VM. Fast-arm counters per run: `remote_reads` 698,
+`declined_io` 2 (the two manifest page loads), `shared_waits` 0 at QD1,
+`declined_unsettled` 0. The race arm started 11–64 races per 700 reads (3–11
+local wins), every start had one discard, `race_dropped` 0. Delayed server
+(1 ms reply, 100 µs budget): 700/700 local wins with and without the fast
+flag, `race_discarded` 700, `race_wasted_wire_bytes` 2,884,000,
+`race_dropped` 0, total median 462.0 µs (fast off) / 417.4 µs (fast on): the
+local source still costs ≈240–280 µs before its load starts (budget plus racer
+and worker hops, now a blocking grant wait instead of 20 µs sleeps) and
+≈130–180 µs for the scheduled load.
+
+### Findings I read differently
+
+- Finding 3: the `paused` path cannot reject a FLUSH while one is in flight,
+  because `Local::pause` is a barrier that waits for the reactor to drain.
+  The rejected-before-sent completions that can coexist with an in-flight FLUSH
+  come from `send` or `seal` failures, which the id-tracked barrier now covers;
+  the test forces the reject through the `paused` flag because that is the only
+  deterministic way to produce one.
+- Finding 8: the GET service (`peer/server.rs`) also polls `take()` with
+  100 µs sleeps; it does not block on a signal. The local race source now
+  binds a grant eventfd to its scheduler port and blocks on it; the server's
+  loop is unchanged and remains a separate cleanup.
+- Finding 2 changes the force-remote experiment's failure semantics with
+  `--peer-race-local`: a read after peer loss now completes locally whenever a
+  verified local plan exists, instead of failing closed. The documented
+  behaviour and the two-process fail phase assert that deterministically.
+
+### Failures, retries and fixes during this round
+
+- The first split of the correctness commits was wrong (a soft reset kept
+  every change staged, so the peer commit absorbed the local changes); the
+  commits were rebuilt by file set and the final tree checked to be identical.
+- Clippy under `cfg(test)`: `too_many_arguments` on the GET server once the
+  per-Server delay was a parameter (folded into `ServiceOptions`); a missing
+  `SAFETY` comment; an unused parameter in non-test builds; two borrow errors
+  in the reactor refactor; an unused import; a dead accessor.
+- Barrier test: the control permit must be taken before setting `paused`.
+- Coalescing test: an undelayed loopback owner could answer before the
+  second read joined; the owner is now a by-hash mock answering after 20 ms.
+- `force_remote_race_local_wins...` bounded eight reads at 40 ms of wall time
+  and failed once under the parallel suite (143 ms, before its counter checks
+  ran); the bound is now a hang guard and the counters carry the assertion.
+- A per-commit verification run was started on a mid-rebase tree and
+  discarded; the rebase conflict was resolved and the run repeated.
+- The fresh VM's first SSH attempt used the previous identity's token; the
+  helper now uses the identity granted on the VM.
+
+Evidence: `results/readpath/review/` (per-arm `reader-*.json`, delayed-server
+JSON, logs summarized here), `ledger.json` (both VM ids, identities, deletion).
+No CI, push, merge or deployment occurred.
+
 ## 2026-11-12 — Raced fetch and frontend-inline settled reads
 
 Branch `feat/raced-read` from `ebbe157`: `d6f7d4b` (peer: race a settled GET
