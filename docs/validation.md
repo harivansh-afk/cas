@@ -1,5 +1,53 @@
 # Validation
 
+## 2026-11-13 — Importer review fixes (`feat/offline-import`)
+
+Follow-up to the entry below on the same branch. **Tested revision:
+`1e4efee104f0ce4a04e2c41adbf6413e90be667d`**, clean; the intermediate commit
+`596084e` was format- and Clippy-checked on its own. This record is a later
+documentation-only commit. Nothing was pushed or merged. Same host, checkout,
+target directory and limits as below (`cas-build`, `/root/cas-import`, ext4
+root, `ulimit -n 65536`); Spark edited only.
+
+Changes under review: platform-free `cas_core::import` defaults so `casctl`
+builds off Linux; `cas_core::id` (`parse`, `hex`) shared by `cas-host`,
+`cas-fleet` and `casctl`; `cas_core::layout` holds the store/image creation
+recipe used by both `cas-host init` and the importer; `Store::exists`
+replaces the hard-coded geometry marker; a new root must be an existing empty
+directory, its segment size must satisfy the host's default staging limits
+including the 60% rollover rule, and the compaction interval is bounded by
+worst-case preallocated WAL bytes before any output; the catalog is created
+before the geometry marker; interrupted `images/<id>` output is renamed to an
+unreferenced image name (fleet-importer pattern) so retries proceed and
+tickets stay observed; the trailing settle runs only with staged bytes and
+emits its `Settled` point; input identity rechecks device, inode, mtime and
+ctime; progress prints by last GiB. The default path's WAL/compaction logic
+is unchanged.
+
+Outcomes at `1e4efee`: `just check` rc=0 (1m19s); `tests/import.rs` and
+`tests/import_crash.rs` passed for both arms with the same chunk counts as
+below (2,697/4,192 and 694/1,079; crash cuts 272/1,497 and 75/412 retained
+chunks), now also refusing a missing root, 192 MiB segments, a 256 MiB
+interval and a non-empty geometry-less directory without writing output, and
+retrying after a cut without manual cleanup (two image directories remain,
+ticket high-water increases). The 1 GiB benchmark re-ran at `d926e77`, whose
+`crates/cas/core/src` tree is identical to `1e4efee` (only a test assertion
+differs): random 4 KiB 56.0 MiB/s (262,144 chunks), half 101.5 (129,664),
+dedup 87.2 (0); 16 KiB 91.1 (65,536), 131.9 (32,768), 137.7 (0); every
+receipt kept the earlier digests, chunk counts, encoded bytes, index bytes
+(25,694,192 / 6,426,608), manifest bytes and D == E == P, with
+`settle_passes` 16 instead of 17 as intended.
+
+Failures and retries: the first review run failed because the tests still
+expected an implicitly created root; the second because the interval check
+ran after root creation (fixed by validating before output); the first
+intermediate commit failed `cargo fmt --check` on an import ordering and was
+recreated; a refusal test asserted `NotFound` where the importer now returns
+its own message. Evidence: `results/offline-import/check-final-review.log`
+(final check and tests), `check-bench-final.log` (intermediate check,
+`d926e77` check attempt, receipts), and `/root/check-final3.log`,
+`/root/import-bench` on `cas-build`.
+
 ## 2026-11-12 — Offline raw-image importer (`casctl import`)
 
 Branch `feat/offline-import` from `main` (`ebbe157`). **Tested revision:
@@ -52,9 +100,9 @@ cargo run --release --locked -p cas-core --example chunk-arm -- inspect root-ARM
   catalog publication) and `Published` points. After each cut the store and
   catalog inspected and recovered; the catalog listed the image only after
   `Published`; interrupted imports kept their `images/<id>` directory, a
-  retry was refused until it was removed, then deduplicated against the
-  retained chunks (4 KiB: 272 of 1,497 after `Settled`), and every arm/cut
-  read back exactly.
+  retry was refused until it was removed (behaviour changed by the 2026-11-13
+  entry), then deduplicated against the retained chunks (4 KiB: 272 of 1,497
+  after `Settled`), and every arm/cut read back exactly.
 - 1 GiB release-build imports at `0086071` (receipts in the evidence log),
   single process on the VM's ext4 root, 64 MiB segments and interval:
 
