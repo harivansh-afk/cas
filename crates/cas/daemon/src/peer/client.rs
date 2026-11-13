@@ -78,6 +78,8 @@ struct Slot {
     phases: Phases,
     error: Option<io::ErrorKind>,
     queued: Instant,
+    /// Image slot credited with the verified payload; `UNATTRIBUTED` otherwise.
+    image: usize,
 }
 struct Pool {
     slots: Vec<Slot, BudgetAllocator>,
@@ -136,6 +138,7 @@ impl Client {
                 phases: Phases::default(),
                 error: None,
                 queued: Instant::now(),
+                image: super::metrics::UNATTRIBUTED,
             });
             free.push(index);
         }
@@ -188,6 +191,9 @@ impl Client {
     }
 
     pub fn fetch(&self, hash: [u8; 32]) -> io::Result<Ticket> {
+        self.fetch_for(hash, super::metrics::UNATTRIBUTED)
+    }
+    pub(crate) fn fetch_for(&self, hash: [u8; 32], image: usize) -> io::Result<Ticket> {
         if self.shared.stop.load(Ordering::Acquire) {
             return Err(io::ErrorKind::BrokenPipe.into());
         }
@@ -201,6 +207,7 @@ impl Client {
         slot.phases = Phases::default();
         slot.error = None;
         slot.queued = Instant::now();
+        slot.image = image;
         pool.queued.push_back(index);
         self.shared.metrics.count(|c| c.gets += 1);
         // The image reactor may send and consume a fast reply itself. Bound
@@ -294,10 +301,7 @@ impl Pool {
         }
         slot.error = error;
         slot.done = true;
-        metrics.count(|c| {
-            c.verified += u64::from(error.is_none());
-            c.errors += u64::from(error.is_some());
-        });
+        metrics.transport_finished(slot.image, error.is_none());
         if slot.owned {
             let _ = slot.event.write(1);
         } else {

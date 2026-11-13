@@ -43,9 +43,13 @@ pub struct Counters {
     pub completed_reads: u64,
     pub failed_reads: u64,
 }
+/// GETs issued without an image slot (harness clients, HAS probes).
+pub(crate) const UNATTRIBUTED: usize = usize::MAX;
 /// Race-independent per-image remote-read attribution. Cumulative; restarts
-/// with the host. `chunks` counts remote chunks the image's reads attempted, as
-/// `recent[].chunks` does; `verified_bytes` counts only BLAKE3-verified payload.
+/// with the host. `completed_reads`, `failed_reads` and `chunks` count the
+/// image's reads and the remote chunks they resolved, including chunks a
+/// coalesced waiter inherited from another read's GET; `verified_bytes` is
+/// credited once, at transport verification, to the image that issued the GET.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct ImageCounters {
     pub completed_reads: u64,
@@ -90,19 +94,21 @@ impl Metrics {
             budget,
         )
     }
-    /// Name the image served from a preallocated slot. Attribution before
-    /// binding is retained under the slot's later name.
-    pub fn bind(&self, slot: usize, image: [u8; 16]) -> io::Result<()> {
+    /// Name the image served from a preallocated slot; the host checks the
+    /// slot limit once before creating the image.
+    pub fn bind(&self, slot: usize, image: [u8; 16]) {
         let mut state = self.state.lock().expect("peer metrics poisoned");
-        let entry = state
-            .images
-            .get_mut(slot)
-            .ok_or_else(|| io::Error::other("peer metrics image slot limit exceeded"))?;
-        entry.image = Some(image);
-        Ok(())
+        state.images[slot].image = Some(image);
     }
-    pub fn origin(&self) -> Instant {
-        self.origin
+    /// One GET finished in the transport: host counters, and the verified
+    /// payload credited to the issuing image (not to coalesced waiters).
+    pub(crate) fn transport_finished(&self, image: usize, verified: bool) {
+        let mut state = self.state.lock().expect("peer metrics poisoned");
+        state.counters.verified += u64::from(verified);
+        state.counters.errors += u64::from(!verified);
+        if verified && let Some(slot) = state.images.get_mut(image) {
+            slot.counters.verified_bytes += cas_core::BLOCK_SIZE as u64;
+        }
     }
     pub fn image(&self, image: [u8; 16]) -> ImageCounters {
         let state = self.state.lock().expect("peer metrics poisoned");
@@ -158,7 +164,7 @@ impl Metrics {
         };
         count.fetch_add(bytes as u64, Ordering::Relaxed);
     }
-    fn complete(&self, record: Record, slot: usize, verified: u64) {
+    fn complete(&self, record: Record, slot: usize) {
         let mut state = self.state.lock().expect("peer metrics poisoned");
         state.counters.completed_reads += 1;
         state.counters.failed_reads += u64::from(!record.success);
@@ -167,7 +173,7 @@ impl Metrics {
                 completed_reads: 1,
                 failed_reads: u64::from(!record.success),
                 chunks: record.chunks,
-                verified_bytes: verified * cas_core::BLOCK_SIZE as u64,
+                verified_bytes: 0,
             });
         }
         let cursor = state.cursor;
@@ -206,7 +212,6 @@ impl ImageMetrics {
 pub(crate) struct Trace {
     metrics: ImageMetrics,
     record: Record,
-    verified: u64,
 }
 impl Trace {
     pub fn new(metrics: ImageMetrics, id: u64, received: Instant) -> Self {
@@ -217,7 +222,6 @@ impl Trace {
                 ..Record::default()
             },
             metrics,
-            verified: 0,
         }
     }
     pub fn fetched(&mut self, phases: Phases) {
@@ -228,8 +232,6 @@ impl Trace {
             self.record.phases.verified_ns = phases.verified_ns;
         }
         self.record.chunks += 1;
-        // A failed chunk reports zero milestones; only verified payload counts.
-        self.verified += u64::from(phases.verified_ns != 0);
     }
     pub fn finish(&mut self, success: bool) {
         if self.record.chunks != 0 && self.record.completed_ns == 0 {
@@ -237,7 +239,7 @@ impl Trace {
             self.record.success = success;
             self.metrics
                 .metrics
-                .complete(self.record, self.metrics.slot, self.verified);
+                .complete(self.record, self.metrics.slot);
         }
     }
 }

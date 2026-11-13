@@ -71,7 +71,7 @@ impl Resources {
     pub const DEFAULT_CACHE_BYTES: usize = 256 * MAX_REQUEST_BYTES;
     /// Host metadata budget: indexes, manifests, queues and bounded rings. A
     /// rebuilt chunk index needs roughly 40–80 bytes per 4 KiB chunk, so roots
-    /// beyond about 1.5 million chunks need `--metadata-bytes` above this.
+    /// beyond about 1.7–3.4 million chunks need `--metadata-bytes` above this.
     pub const DEFAULT_METADATA_BYTES: usize = 128 * MAX_REQUEST_BYTES;
 
     pub fn read_memory(&self) -> Arc<Budget> {
@@ -701,6 +701,8 @@ pub(super) struct Port {
     rotation: Option<append::RotationKind>,
     rotation_retry: Instant,
     window: BudgetArc<window::Window>,
+    /// This image's view of the shared GET router, allocated at creation.
+    peer: Option<BudgetArc<crate::peer::Router>>,
 }
 
 impl Port {
@@ -730,7 +732,7 @@ impl Port {
     }
 
     pub fn peer(&self) -> Option<BudgetArc<crate::peer::Router>> {
-        self.shared.peer.clone()
+        self.peer.clone()
     }
     pub fn peer_config(&self) -> &crate::peer::Config {
         &self.shared.resources.peer
@@ -1111,10 +1113,19 @@ fn make_image(
     let wake = EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK)?;
     let (output, events) = mailbox::bounded(1, &shared.resources.metadata)?;
     let (reply, replies) = mailbox::bounded(1, &shared.resources.metadata)?;
+    // One host-level slot check covers every per-slot table below.
+    if index >= shared.compaction.len() {
+        return Err(io::Error::other("fleet host image slot limit exceeded"));
+    }
     let image = manifest.current().image;
     if let Some(metrics) = &shared.peer_metrics {
-        metrics.bind(index, image)?;
+        metrics.bind(index, image);
     }
+    let peer = shared
+        .peer
+        .as_ref()
+        .map(|router| BudgetArc::try_new(router.for_image(index), &shared.resources.metadata))
+        .transpose()?;
     let endpoint = worker::Endpoint {
         retired: false,
         fleet: shared.fleet.clone(),
@@ -1153,6 +1164,7 @@ fn make_image(
             rotation: None,
             rotation_retry: Instant::now(),
             window,
+            peer,
         },
     };
     Ok((attachment, endpoint))

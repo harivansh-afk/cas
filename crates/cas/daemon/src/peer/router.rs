@@ -4,9 +4,17 @@ use allocator_api2::vec::Vec;
 use cas_core::budget::{Budget, BudgetAllocator, BudgetArc};
 use std::{io, sync::Arc};
 
-pub struct Router {
+struct Members {
     placement: Option<crate::fleet::Placement>,
     clients: Vec<(u8, Client), BudgetAllocator>,
+}
+/// Shared member connections seen from one image slot. The host owns the
+/// unattributed router; each image gets a `for_image` view at creation, so a
+/// GET verified by the transport is attributed to the issuing image exactly
+/// once, whatever later readers coalesce on it.
+pub struct Router {
+    members: BudgetArc<Members>,
+    image: usize,
 }
 impl Router {
     pub fn new(
@@ -41,19 +49,30 @@ impl Router {
                 ));
             }
         }
-        Ok(Self { placement, clients })
+        Ok(Self {
+            members: BudgetArc::try_new(Members { placement, clients }, budget)?,
+            image: super::metrics::UNATTRIBUTED,
+        })
+    }
+    /// The same connections, attributing verified GETs to `image`'s slot.
+    pub fn for_image(&self, image: usize) -> Self {
+        Self {
+            members: self.members.clone(),
+            image,
+        }
     }
     pub fn fetch(&self, hash: [u8; 32]) -> io::Result<Ticket> {
-        let (_, client) = self
+        let members = &*self.members;
+        let (_, client) = members
             .clients
             .iter()
-            .find(|(node, _)| self.placement.is_none_or(|p| p.owns(&hash, *node)))
+            .find(|(node, _)| members.placement.is_none_or(|p| p.owns(&hash, *node)))
             .ok_or(io::ErrorKind::NotFound)?;
-        client.fetch(hash)
+        client.fetch_for(hash, self.image)
     }
     pub fn shutdown(&self) -> io::Result<()> {
         let mut result = Ok(());
-        for (_, client) in &self.clients {
+        for (_, client) in &self.members.clients {
             if let Err(error) = client.shutdown() {
                 result = Err(error);
             }
