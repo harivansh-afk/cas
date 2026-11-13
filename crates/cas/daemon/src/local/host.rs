@@ -304,14 +304,7 @@ impl Host {
         let peer = if resources.peer.peer_address.is_some()
             || !resources.peer.peer_get_member.is_empty()
         {
-            let local = if race_local {
-                Some(cas_core::scheduler::Scheduler::port(
-                    &io_scheduler,
-                    slots + service_ports,
-                )?)
-            } else {
-                None
-            };
+            let local = race_local.then(|| (io_scheduler.clone(), slots + service_ports));
             Some(BudgetArc::try_new(
                 crate::peer::Router::new(
                     &resources.peer,

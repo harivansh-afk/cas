@@ -3,6 +3,7 @@ use super::{
     metrics::{self, Metrics, Phases},
     race::{Challenger, Outcome, PendingRace},
     wire::*,
+    worker::Stoppable,
 };
 use allocator_api2::vec::Vec;
 use cas_core::{
@@ -17,7 +18,6 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    thread::{self, JoinHandle},
     time::Instant,
 };
 use vmm_sys_util::eventfd::EventFd;
@@ -117,7 +117,7 @@ pub(crate) struct Shared {
 }
 pub struct Client {
     shared: BudgetArc<Shared>,
-    worker: Mutex<Option<JoinHandle<()>>>,
+    worker: Stoppable,
 }
 pub struct Ticket {
     shared: BudgetArc<Shared>,
@@ -192,27 +192,18 @@ impl Client {
             budget,
         )?;
         let owner = shared.clone();
-        let worker = thread::Builder::new()
-            .name("cas-peer-get".into())
-            .spawn(move || run(owner, address))?;
-        Ok(Self {
-            shared,
-            worker: Mutex::new(Some(worker)),
-        })
+        let worker = Stoppable::spawn("cas-peer-get", move || run(owner, address))?;
+        Ok(Self { shared, worker })
     }
     pub fn shutdown(&self) -> io::Result<()> {
-        self.shared.stop.store(true, Ordering::Release);
-        self.shared.wake.write(1)?;
-        let mut worker = self.worker.lock().expect("peer worker poisoned");
-        if worker.as_ref().is_some_and(|w| !w.is_finished()) {
-            return Err(io::ErrorKind::WouldBlock.into());
-        }
-        if let Some(worker) = worker.take() {
-            worker
-                .join()
-                .map_err(|_| io::Error::other("peer worker panicked"))?;
-        }
-        Ok(())
+        let shared = &self.shared;
+        self.worker.shutdown(
+            &shared.stop,
+            || {
+                let _ = shared.wake.write(1);
+            },
+            "peer worker",
+        )
     }
 
     pub fn fetch(&self, hash: [u8; 32]) -> io::Result<Ticket> {
@@ -307,11 +298,13 @@ impl Slot {
             return;
         };
         let Ok(notify) = self.notify.as_ref().unwrap_or(&self.event).try_clone() else {
+            metrics.count(|c| c.race_dropped += 1);
             return;
         };
         let challenger = pending.kind.start(self.hash, notify);
         // An exhausted challenger pool is not an error for the read.
         let Ok(challenger) = challenger else {
+            metrics.count(|c| c.race_dropped += 1);
             return;
         };
         metrics.count(|c| c.races_started += 1);
@@ -490,11 +483,10 @@ impl Drop for Ticket {
 }
 impl Drop for Client {
     fn drop(&mut self) {
-        self.shared.stop.store(true, Ordering::Release);
-        let _ = self.shared.wake.write(1);
-        if let Some(worker) = self.worker.get_mut().expect("peer worker poisoned").take() {
-            let _ = worker.join();
-        }
+        let shared = self.shared.clone();
+        self.worker.join(&shared.stop, || {
+            let _ = shared.wake.write(1);
+        });
     }
 }
 

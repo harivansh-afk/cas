@@ -20,17 +20,17 @@ pub(crate) struct Shared {
 pub struct Router {
     shared: BudgetArc<Shared>,
     racer: Option<Racer>,
-    budget: Option<Duration>,
-    budget_us: u32,
+    /// The race budget in microseconds; `None` leaves every read unraced.
+    budget_us: Option<u32>,
 }
 impl Router {
-    /// `local` supplies an IO scheduler demand port when the force-remote
-    /// experiment races the local copy (`--peer-race-local`).
+    /// `local` supplies the host IO scheduler and a demand port index when the
+    /// force-remote experiment races the local copy (`--peer-race-local`).
     pub fn new(
         config: &Config,
         budget: &Arc<Budget>,
         metrics: BudgetArc<Metrics>,
-        local: Option<cas_core::scheduler::Port>,
+        local: Option<(BudgetArc<cas_core::scheduler::Scheduler>, usize)>,
     ) -> io::Result<Self> {
         let placement = config.fleet.placement()?;
         // Check the aggregate requirement before allocating any client.
@@ -60,8 +60,8 @@ impl Router {
             }
         }
         let local = match (config.peer_race_us, local) {
-            (Some(_), Some(scheduling)) if config.peer_race_local => {
-                Some(LocalSource::new(scheduling, budget, metrics.clone())?)
+            (Some(_), Some(scheduler)) if config.peer_race_local => {
+                Some(LocalSource::new(scheduler, budget, metrics.clone())?)
             }
             _ => None,
         };
@@ -73,18 +73,14 @@ impl Router {
             },
             budget,
         )?;
-        let budget_us = config.peer_race_us.unwrap_or(0);
         let racer = match config.peer_race_us {
-            Some(us) if us > 0 => Some(Racer::new(budget)?),
+            Some(us) if us > 0 => Some(Racer::new(budget, metrics)?),
             _ => None,
         };
         Ok(Self {
             shared,
             racer,
-            budget: config
-                .peer_race_us
-                .map(|us| Duration::from_micros(u64::from(us))),
-            budget_us,
+            budget_us: config.peer_race_us,
         })
     }
     fn owners(&self, hash: &[u8; 32]) -> impl Iterator<Item = usize> + '_ {
@@ -115,14 +111,14 @@ impl Router {
     /// True when a verified local plan should be captured for the race; the
     /// reader otherwise never consults the local store in force-remote mode.
     pub fn wants_local_plan(&self) -> bool {
-        self.budget.is_some() && self.shared.local.is_some()
+        self.budget_us.is_some() && self.shared.local.is_some()
     }
     /// Arm the race for `ticket`: the next owning member if the fleet has
     /// one, else the local copy when a plan was captured. No second source
     /// leaves the read unraced. The challenger starts at the deadline, at
     /// once for a zero budget, or as soon as the primary fails.
     pub fn race(&self, ticket: &Ticket, hash: [u8; 32], local: Option<Plan>) {
-        let Some(budget) = self.budget else {
+        let Some(budget_us) = self.budget_us else {
             return;
         };
         let kind = match self.owners(&hash).nth(1) {
@@ -133,15 +129,13 @@ impl Router {
             },
         };
         let first = ticket.slot_ref();
-        let pending = PendingRace {
-            kind,
-            budget_us: self.budget_us,
-        };
+        let pending = PendingRace { kind, budget_us };
         match &self.racer {
-            Some(racer) if !budget.is_zero() => {
+            Some(racer) if budget_us > 0 => {
                 first.arm(pending, false);
                 racer.arm(Armed {
-                    deadline: std::time::Instant::now() + budget,
+                    deadline: std::time::Instant::now()
+                        + Duration::from_micros(u64::from(budget_us)),
                     first,
                 });
             }

@@ -2,6 +2,7 @@
 mod client;
 mod race;
 mod router;
+mod worker;
 pub use router::Router;
 pub mod metrics;
 mod server;

@@ -7,6 +7,7 @@ use super::{
     client::{self, SlotRef, Ticket},
     metrics::{self, Metrics, Phases},
     wire::verify,
+    worker::Stoppable,
 };
 use allocator_api2::vec::Vec;
 use cas_core::{
@@ -18,12 +19,12 @@ use cas_core::{
 };
 use std::{
     io,
+    os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd},
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Instant,
 };
 use vmm_sys_util::eventfd::EventFd;
 
@@ -104,6 +105,7 @@ struct RacerShared {
     state: Mutex<RacerState>,
     changed: Condvar,
     stop: AtomicBool,
+    metrics: BudgetArc<Metrics>,
 }
 
 /// Starts challengers when their budgets elapse. Zero budgets never reach
@@ -111,32 +113,34 @@ struct RacerShared {
 /// primary that fails earlier starts its own challenger from the transport.
 pub struct Racer {
     shared: Arc<RacerShared>,
-    worker: Mutex<Option<JoinHandle<()>>>,
+    worker: Stoppable,
 }
 
 impl Racer {
-    pub(crate) fn new(budget: &Arc<Budget>) -> io::Result<Self> {
+    pub(crate) fn new(budget: &Arc<Budget>, metrics: BudgetArc<Metrics>) -> io::Result<Self> {
         let shared = Arc::new(RacerShared {
             state: Mutex::new(RacerState {
                 armed: crate::local::reserved_vec(crate::local::pools::HOST_REQUESTS, budget)?,
             }),
             changed: Condvar::new(),
             stop: AtomicBool::new(false),
+            metrics,
         });
         let owner = Arc::clone(&shared);
-        let worker = thread::Builder::new()
-            .name("cas-peer-race".into())
-            .spawn(move || run_racer(owner))?;
-        Ok(Self {
-            shared,
-            worker: Mutex::new(Some(worker)),
-        })
+        let worker = Stoppable::spawn("cas-peer-race", move || run_racer(owner))?;
+        Ok(Self { shared, worker })
     }
 
+    /// Bounded and stop-aware: a race the table cannot hold, or armed while
+    /// stopping, is counted as dropped and the read stays unraced.
     pub(crate) fn arm(&self, armed: Armed) {
+        if self.shared.stop.load(Ordering::Acquire) {
+            self.shared.metrics.count(|c| c.race_dropped += 1);
+            return;
+        }
         let mut state = self.shared.state.lock().expect("racer poisoned");
         if state.armed.len() == state.armed.capacity() {
-            // Bounded: drop this race rather than allocate.
+            self.shared.metrics.count(|c| c.race_dropped += 1);
             return;
         }
         state.armed.push(armed);
@@ -144,28 +148,17 @@ impl Racer {
     }
 
     pub fn shutdown(&self) -> io::Result<()> {
-        self.shared.stop.store(true, Ordering::Release);
-        self.shared.changed.notify_all();
-        let mut worker = self.worker.lock().expect("racer worker poisoned");
-        if worker.as_ref().is_some_and(|w| !w.is_finished()) {
-            return Err(io::ErrorKind::WouldBlock.into());
-        }
-        if let Some(worker) = worker.take() {
-            worker
-                .join()
-                .map_err(|_| io::Error::other("peer racer panicked"))?;
-        }
-        Ok(())
+        let shared = &self.shared;
+        self.worker
+            .shutdown(&shared.stop, || shared.changed.notify_all(), "peer racer")
     }
 }
 
 impl Drop for Racer {
     fn drop(&mut self) {
-        self.shared.stop.store(true, Ordering::Release);
-        self.shared.changed.notify_all();
-        if let Some(worker) = self.worker.get_mut().expect("racer worker poisoned").take() {
-            let _ = worker.join();
-        }
+        let shared = Arc::clone(&self.shared);
+        self.worker
+            .join(&shared.stop, || shared.changed.notify_all());
     }
 }
 
@@ -219,6 +212,8 @@ pub(crate) struct LocalShared {
     stop: AtomicBool,
     metrics: BudgetArc<Metrics>,
     scheduling: scheduler::Port,
+    /// Bound to the scheduler port: written when this demand source is selected.
+    grant: EventFd,
 }
 
 /// The local chunk store as a race source: a blocking, verified O_DIRECT
@@ -227,7 +222,7 @@ pub(crate) struct LocalShared {
 /// it is not the reactor's io_uring local read path.
 pub struct LocalSource {
     shared: BudgetArc<LocalShared>,
-    worker: Mutex<Option<JoinHandle<()>>>,
+    worker: Stoppable,
 }
 pub struct LocalTicket {
     shared: BudgetArc<LocalShared>,
@@ -235,11 +230,18 @@ pub struct LocalTicket {
 }
 
 impl LocalSource {
+    /// `scheduler` is the host IO scheduler and this source's demand port index.
     pub fn new(
-        scheduling: scheduler::Port,
+        scheduler: (BudgetArc<scheduler::Scheduler>, usize),
         budget: &Arc<Budget>,
         metrics: BudgetArc<Metrics>,
     ) -> io::Result<Self> {
+        let grant = EventFd::new(libc::EFD_NONBLOCK | libc::EFD_CLOEXEC)?;
+        let bound = grant.try_clone()?.into_raw_fd();
+        // SAFETY: the freshly cloned eventfd transfers its unique FD owner here.
+        let bound = unsafe { OwnedFd::from_raw_fd(bound) };
+        scheduler.0.bind(scheduler.1, bound)?;
+        let scheduling = scheduler::Scheduler::port(&scheduler.0, scheduler.1)?;
         let mut slots = crate::local::reserved_vec(LOCAL_SLOTS, budget)?;
         let mut free = crate::local::reserved_vec(LOCAL_SLOTS, budget)?;
         for index in 0..LOCAL_SLOTS {
@@ -267,6 +269,7 @@ impl LocalSource {
                 stop: AtomicBool::new(false),
                 metrics,
                 scheduling,
+                grant,
             },
             budget,
         )?;
@@ -274,13 +277,10 @@ impl LocalSource {
         let payload =
             AlignedBuffer::try_new_in(BLOCK_SIZE, BudgetAllocator::new(Arc::clone(budget)))?;
         let owner = shared.clone();
-        let worker = thread::Builder::new()
-            .name("cas-peer-race-local".into())
-            .spawn(move || run_local(owner, page, payload))?;
-        Ok(Self {
-            shared,
-            worker: Mutex::new(Some(worker)),
-        })
+        let worker = Stoppable::spawn("cas-peer-race-local", move || {
+            run_local(owner, page, payload)
+        })?;
+        Ok(Self { shared, worker })
     }
 
     pub(crate) fn handle(&self) -> BudgetArc<LocalShared> {
@@ -288,33 +288,25 @@ impl LocalSource {
     }
 
     pub fn shutdown(&self) -> io::Result<()> {
-        self.shared.stop.store(true, Ordering::Release);
-        self.shared.changed.notify_all();
-        let mut worker = self.worker.lock().expect("local race worker poisoned");
-        if worker.as_ref().is_some_and(|w| !w.is_finished()) {
-            return Err(io::ErrorKind::WouldBlock.into());
-        }
-        if let Some(worker) = worker.take() {
-            worker
-                .join()
-                .map_err(|_| io::Error::other("local race worker panicked"))?;
-        }
-        Ok(())
+        let shared = &self.shared;
+        self.worker.shutdown(
+            &shared.stop,
+            || {
+                shared.changed.notify_all();
+                let _ = shared.grant.write(1);
+            },
+            "local race worker",
+        )
     }
 }
 
 impl Drop for LocalSource {
     fn drop(&mut self) {
-        self.shared.stop.store(true, Ordering::Release);
-        self.shared.changed.notify_all();
-        if let Some(worker) = self
-            .worker
-            .get_mut()
-            .expect("local race worker poisoned")
-            .take()
-        {
-            let _ = worker.join();
-        }
+        let shared = self.shared.clone();
+        self.worker.join(&shared.stop, || {
+            shared.changed.notify_all();
+            let _ = shared.grant.write(1);
+        });
     }
 }
 
@@ -416,6 +408,9 @@ fn run_local(
         };
         let result = (|| -> io::Result<()> {
             let plan = plan.ok_or_else(|| io::Error::other("local race without a plan"))?;
+            // Demand-class grant: block on the scheduler's wake for this port
+            // instead of polling. A grant written before the poll is still
+            // pending in the eventfd, so no wake is lost.
             let _ = shared.scheduling.ready(true);
             let granted: io::Result<()> = (|| {
                 loop {
@@ -425,7 +420,14 @@ fn run_local(
                     if shared.scheduling.take(2 * BLOCK_SIZE, false)? {
                         return Ok(());
                     }
-                    thread::sleep(Duration::from_micros(20));
+                    let mut descriptor = libc::pollfd {
+                        fd: shared.grant.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    // SAFETY: the descriptor is live and the array covers one entry.
+                    unsafe { libc::poll(&mut descriptor, 1, 50) };
+                    let _ = shared.grant.read();
                 }
             })();
             let _ = shared.scheduling.ready(false);

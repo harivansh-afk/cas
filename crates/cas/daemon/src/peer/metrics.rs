@@ -62,6 +62,9 @@ pub struct Counters {
     pub race_won_local: u64,
     pub race_discarded: u64,
     pub race_wasted_wire_bytes: u64,
+    /// Armed races never started: racer table full or stopping, or the
+    /// challenger's slot pool exhausted.
+    pub race_dropped: u64,
 }
 struct State {
     counters: Counters,

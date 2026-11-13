@@ -176,9 +176,12 @@ The challenger notifies the primary slot's eventfd, so the reactor's existing
 poll observes either completion and re-arms while neither has verified. The
 local source is one bounded blocking worker using the verified store loader
 as an IO-scheduler demand source, like GET service; it is not the reactor's
-io_uring local read path. A zero budget starts the challenger on the reader's
-thread; a positive budget uses one timer thread per host. An exhausted
-challenger pool leaves the read unraced rather than allocating.
+io_uring local read path; it blocks on the scheduler's grant eventfd for its
+port. A zero budget starts the challenger on the reader's thread; a positive
+budget uses one timer thread per host, and a primary that fails before the
+budget starts its challenger from the transport at once. An exhausted
+challenger pool or racer table leaves the read unraced and counts
+`race_dropped`.
 
 ## Instrumentation and local validation
 
@@ -188,8 +191,10 @@ connections, peak outstanding GETs, server memory/store hits, missing chunks,
 HAS, direct/inline attempts and completions, and completed/failed remote reads.
 Race counters: `races_started`, `race_won_first`, `race_won_second`,
 `race_won_local`, `race_discarded` (replies from either source that lost, were
-cancelled, or arrived after a verified winner) and `race_wasted_wire_bytes`
-(frame bytes of discarded remote replies). `verified`/`errors` count every
+cancelled, or arrived after a verified winner), `race_wasted_wire_bytes`
+(frame bytes of discarded remote replies) and `race_dropped` (armed races
+never started: racer table full or stopping, or the challenger's slot pool
+exhausted). `verified`/`errors` count every
 reply from every source, so a discarded reply that verified still counts.
 An inline attempt includes the default single nonblocking visit; it does not
 necessarily indicate that a busy-poll window was enabled. No JSON formatting or file writes occur
