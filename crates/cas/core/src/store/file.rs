@@ -207,6 +207,11 @@ impl Store {
         self.shared.chunk_size
     }
 
+    /// Whether the root records store geometry, without opening or validating it.
+    pub fn exists(tickets: &Tickets) -> io::Result<bool> {
+        geometry::exists(tickets)
+    }
+
     pub fn recorded_geometry(
         tickets: &Tickets,
         metadata: Arc<Budget>,

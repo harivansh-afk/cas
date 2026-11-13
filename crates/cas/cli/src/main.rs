@@ -29,9 +29,9 @@ enum Command {
         /// Storage root: an empty/missing directory is initialized, an existing root is reused.
         #[arg(long)]
         root: PathBuf,
-        #[arg(long, value_parser = parse_id)]
+        #[arg(long, value_parser = cas_core::id::parse)]
         store: [u8; 16],
-        #[arg(long, value_parser = parse_id)]
+        #[arg(long, value_parser = cas_core::id::parse)]
         image: [u8; 16],
         /// Raw image of whole 4 KiB blocks; its length becomes the image size.
         #[arg(long)]
@@ -40,26 +40,15 @@ enum Command {
         #[arg(long)]
         chunk_bytes: Option<usize>,
         /// WAL and chunk segment capacity for a new root.
-        #[arg(long, default_value_t = cas_core::import::Request::DEFAULT_SEGMENT_BYTES)]
+        #[arg(long, default_value_t = cas_core::import::DEFAULT_SEGMENT_BYTES)]
         segment_bytes: u64,
         /// Input bytes staged between FLUSH/compaction/reclamation passes (multiple of 1 MiB).
-        #[arg(long, default_value_t = cas_core::import::Request::DEFAULT_COMPACTION_INTERVAL)]
+        #[arg(long, default_value_t = cas_core::import::DEFAULT_COMPACTION_INTERVAL)]
         compact_every_bytes: u64,
         /// Metadata budget cap (bytes): rebuilt chunk index, WAL index and manifest scratch.
         #[arg(long, default_value_t = 4 << 30)]
         metadata_bytes: usize,
     },
-}
-
-fn parse_id(value: &str) -> Result<[u8; 16], String> {
-    if value.len() != 32 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err("ID must contain exactly 32 hexadecimal digits".into());
-    }
-    let value = u128::from_str_radix(value, 16).map_err(|error| error.to_string())?;
-    if value == 0 {
-        return Err("ID cannot be zero".into());
-    }
-    Ok(value.to_be_bytes())
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -132,6 +121,7 @@ fn import(
         .map(cas_core::chunk::ChunkSize::from_bytes)
         .transpose()?;
     let budget = |bytes| Budget::new(Amount { bytes, requests: 0 });
+    let mut printed = 0;
     let receipt = cas_core::import::run_with(
         cas_core::import::Request {
             root: &root,
@@ -146,9 +136,10 @@ fn import(
         budget(256 * cas_core::MAX_REQUEST_BYTES),
         |point| {
             if let cas_core::import::Point::Settled { bytes } = point
-                && bytes.is_multiple_of(1 << 30)
+                && bytes >> 30 > printed
             {
-                eprintln!("casctl: imported {} GiB", bytes >> 30);
+                printed = bytes >> 30;
+                eprintln!("casctl: imported {printed} GiB");
             }
             Ok(())
         },

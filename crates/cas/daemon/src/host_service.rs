@@ -47,16 +47,7 @@ impl std::str::FromStr for Endpoint {
         })
     }
 }
-pub fn parse_id(value: &str) -> Result<[u8; 16], String> {
-    if value.len() != 32 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err("ID must contain exactly 32 hexadecimal digits".into());
-    }
-    let value = u128::from_str_radix(value, 16).map_err(|error| error.to_string())?;
-    if value == 0 {
-        return Err("ID cannot be zero".into());
-    }
-    Ok(value.to_be_bytes())
-}
+pub use cas_core::id::parse as parse_id;
 
 pub struct Config {
     pub peer: crate::peer::Config,
