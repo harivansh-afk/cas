@@ -1,5 +1,95 @@
 # Validation
 
+## 2026-11-13 — Integration of the burst harness and the CloudLab campaign driver
+
+On `integration/2026-11-13` after the measured-flags/importer/raced-read
+integration and its follow-ups (`9b80a02`): merged, with merge commits,
+`feat/burst-harness` at `4565a0d` as `da90544` and `feat/cloudlab-campaign`
+at `0e9c5a2` (branched from the former) as `1e09998`; then `6d5a7d6` makes the
+campaign's pinned revision a run-time input and `607f051` makes a new
+test's clock bracket inclusive. **Tested revision: `607f051cd550e5d924244931d1df180e181de205`**,
+clean on the VM. This record is a later documentation-only commit; nothing
+was pushed or merged into `main`. This head is the candidate measured
+revision: a clean tree with no revision value committed into it.
+
+### Merge resolution
+
+- `experiments/two-host/runner.py`: the harness's settings defaults
+  (`guests_per_host`, `guest`, `working_set`, `burst`, `resume`) kept beside
+  this branch's `peer_race_us` / `fast_settled_reads`; `test_runner.py`
+  keeps both test classes; `agent.py` keeps the campaign's
+  `working_set_script` beside this branch's `measurement_flags`, which still
+  builds the `cas-host` flags for every fleet host. The campaign's
+  `campaignlib.RUNNER_SETTINGS` names exactly those two settings, so its
+  "runner supports the arm's settings" check now passes for the `fast` and
+  `raced` arms.
+- `crates/harnesses` (native N guests, ZFS raw storage) merged without
+  conflict.
+- `docs/validation.md`: every entry kept, newest first; the campaign's
+  revision of the burst-harness entry taken.
+- `6d5a7d6` (coordinator decision): `expected_revision` is a run-time input
+  (`campaign.py --revision`, else `expected_revision` in a nodes file kept
+  outside the tree), required unless the loopback development layout,
+  verified against every node's checkout at `run` and recorded in the
+  manifest. `INTEGRATION_REVISION_PLACEHOLDER` is gone from the library, the
+  example and the doc; no self-referential pin commit exists.
+
+### Host and commands
+
+Fresh Freestyle VM `cas-build-integration` (`vm-ad8d75225752469cb239c4ae6a4fbd6d`, same
+shape, Nix and procedure as the entry above), deleted after export. Spark
+ran only the Python unit suites (two-host 39, campaign 28) and Git.
+
+```sh
+nix develop -c just check
+nix develop -c cargo test -p cas-harness --locked
+nix develop -c uv run --no-project python -m unittest discover -s experiments/cloudlab
+nix develop -c uv run --no-project python -m unittest discover -s experiments/two-host
+bash experiments/cloudlab/setup.sh --bundle /root/cas.bundle --revision 607f051cd550e5d924244931d1df180e181de205 \
+  --source /root/cas-campaign --skip-disk --skip-irq --skip-nix --cores 6 --out /root/campaign/setup.json
+python3 experiments/cloudlab/campaign.py dry-run --nodes nodes-dry.json \
+  --plan experiments/cloudlab/plans/dev-loopback.json      # loopback layout, two loop-XFS members
+```
+
+### Outcomes
+
+- `just check` on `607f051`: **602 Rust tests passed, 0 failed, 30
+  ignored**, 39 Python tests (two-host); `cargo test -p cas-harness`: **60
+  passed, 0 failed**; campaign unit tests **28 passed**; two-host unit tests
+  **39 passed** (also on Spark). A first `setup.sh` build on `6d5a7d6`
+  failed in the `cas` package's sandboxed release tests: the new ring-origin
+  test's strict `before < received` bracket met an equal reading;
+  `607f051` makes the bounds inclusive (nothing else changed) and the build
+  passed.
+- `setup.sh` (`--skip-disk --skip-irq --skip-nix`): bootstrap clone from the
+  bundle, checkout at the pinned revision, `nix build .#two-host` and
+  `.#native` (both from source on the fresh VM, the `cas` package's release
+  tests included), limits and inventory: exit 0.
+- `campaign.py dry-run` with `plans/dev-loopback.json` on a two-member
+  loopback layout (`loopback-8` node type, two 8 GiB loop-XFS mounts, one
+  shared `output_root`, no pinned revision as the layout allows): **5
+  runnable, 7 blocked of 12 units, exit 2, nothing launched**; manifest
+  bound to `607f051` and the binaries' hashes, equal on both members;
+  evidence label `development`. Runnable: `frozen reads-memory` ×2, `fast
+  reads-storage` ×2 and `raced reads-storage` — the `fast` and `raced` arms
+  are no longer blocked for "runner does not know the setting", because the
+  integrated runner carries `fast_settled_reads` / `peer_race_us`. Blocked
+  for the plan's intended reasons: `fast reads-storage-g8`, `native-cas g4`
+  and `burst burst-images` (8/8/16 guest cpus exceed the loopback set of 4;
+  `cas-native-run` boots at most 2 guests), `native-raw g1` and `native-zfs
+  g1` (no native runner path / no ZFS dataset in this nodes file), `r0
+  floor` (nvme-tcp prerequisites absent on the VM) and `resume
+  resume-elsewhere` (`WORKING_SET_FROM_BUNDLE` needs `bundle_actions`).
+- Open for a human: the dry-run was a loopback development layout; no
+  campaign unit ran here, and the native (`cas-native-run`) wrappers were
+  built but not exercised. The loop-XFS images were unmounted before the
+  VM was deleted (they had stalled the previous VM's IO, see the entry
+  above).
+
+Evidence: `results/integration-1113/chain-merge.log` and
+`evidence/evidence-3.tgz` (logs, setup and dry-run outputs) with its SHA-256
+in `evidence/export-3.log`; VM ledger `resources.json`.
+
 ## 2026-11-13 — Integration of measurement flags, offline import and raced reads
 
 Branch `integration/2026-11-13` from `main` (`35add83`), merged in order with
