@@ -882,3 +882,62 @@ fn two_daemon_loopback_race_wins_locally_against_a_delayed_server() {
         }
     }
 }
+
+/// Two frontend-inline reads of the same chunk coalesce through the shared
+/// fetch registry: the first leads one GET, the second waits on it and is
+/// woken through the frontend's own eventfd. One GET for the chunk, both
+/// reads verified. The mock owner answers by hash after 20 ms so the second
+/// read deterministically joins while the first GET is in flight.
+#[test]
+fn fast_reads_of_one_chunk_share_a_single_get_through_the_registry() {
+    use std::io::Read as _;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let mock = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket.set_read_timeout(Some(peer::TIMEOUT)).unwrap();
+        let mut served = 0;
+        loop {
+            let mut request = [0; 56];
+            if socket.read_exact(&mut request).is_err() {
+                break;
+            }
+            let block = (0..BLOCKS)
+                .find(|b| Chunk::new(&data(*b)).unwrap().hash() == request[24..56])
+                .expect("known chunk");
+            let mut response = [0; 24 + BLOCK_SIZE];
+            response[..24].copy_from_slice(&request[..24]);
+            response[..4].copy_from_slice(&((24 + BLOCK_SIZE) as u32).to_le_bytes());
+            response[24..].copy_from_slice(&data(block));
+            thread::sleep(Duration::from_millis(20));
+            socket.write_all(&response).unwrap();
+            served += 1;
+        }
+        served
+    });
+    let root = tempfile::tempdir().unwrap();
+    let r = resources(peer::Config {
+        peer_address: Some(address),
+        peer_force_remote: true,
+        fast_settled_reads: true,
+        ..Default::default()
+    });
+    let mut host = seeded(root.path(), r.clone(), false);
+    let mut local = attach(&mut host, 2);
+    // Warm the manifest page through the reactor, then coalesce two reads.
+    get(&mut local, 0, 1);
+    submit(&mut local, 1, 7);
+    submit(&mut local, 2, 7);
+    receive(&mut local, Some(7));
+    receive(&mut local, Some(7));
+    assert_eq!(counter(&host, "gets"), 2);
+    assert_eq!(counter(&host, "verified"), 2);
+    let fast = local.report()["fast"].clone();
+    assert_eq!(fast["remote_reads"], 2, "{fast}");
+    assert_eq!(fast["shared_waits"], 1, "{fast}");
+    assert_eq!(host.report()["fetches"]["counters"]["joined"], 1);
+    drop(local);
+    shutdown(host);
+    assert_eq!(mock.join().unwrap(), 2);
+    assert_eq!(r.metadata.usage().current, Amount::default());
+}

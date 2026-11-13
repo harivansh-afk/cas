@@ -62,12 +62,14 @@ read is handed to the reactor unchanged:
    precedence could select for any block.
 3. The manifest view the reactor published is the one at that D.
 4. No FLUSH admitted by this frontend is still outstanding.
-5. Every block resolves without local IO: its manifest lookup completes from
-   the page cache and is a hole (zeros), a clean-cache hit, or a chunk the
-   reactor path would also fetch from a peer (force-remote, or absent from the
-   local store). A manifest page load or a local store read declines.
+5. Every block resolves without local IO through the per-block resolution
+   shared with the reactor (`local/chunk.rs`): a hole (zeros), a clean-cache
+   hit, or a chunk the reactor path would also fetch from a peer
+   (force-remote, or absent from the local store). A manifest page load or a
+   local store read declines.
 6. Bounded state: one slot in a per-image table sized like the reactor
-   mailbox, and one GET slot per remote chunk; exhaustion declines.
+   mailbox, one fetch-registry entry and one GET slot per remote chunk;
+   exhaustion before anything is held declines.
 
 The frontend is the only admitter of mutations for its image, so under (2)
 every mutation that could precede the read in guest order is published and
@@ -80,11 +82,16 @@ its credits, host admission entry and fairness release until completion, which
 flows through the same receive path and the same completion gate as reactor
 completions; live-recovery bookkeeping is unchanged. A remote verification or
 transport failure fails the read, the image gate and the shared host gate like
-the frozen path, and zeroes the buffer. Inline remote fetches do not join the
-shared fetch registry, so a concurrent reactor read of the same chunk may issue
-its own GET; cache-fill rules (`--peer-cache`) are the same. Per-image
-`local.fast` counters report inline, remote, declined (unsettled, flush, IO,
-capacity) and failed reads.
+the frozen path, and zeroes the buffer. Remote chunks join the shared fetch
+registry: as leader the frontend's GET fills the cell for every waiter; as
+waiter it is woken through its own completion eventfd (the registry accepts a
+caller-provided signal), so one chunk is never fetched twice concurrently by
+the two schedulers. Once a registry entry is held the read is never declined
+(dropping a leader would fail its waiters); it completes, or fails closed
+exactly as a reactor read does. Cache-fill rules (`--peer-cache`) are shared
+through the same resolution code. Per-image `local.fast` counters report
+inline, remote, shared-wait, declined (unsettled, flush, IO, capacity, failed
+gate) and failed reads.
 
 ## Compaction and collection
 

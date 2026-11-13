@@ -2,6 +2,7 @@
 //! thread and gathers writes straight into their final append allocation;
 //! `Shared` holds the budgets, health gate and metrics that admission and the
 //! `Worker` (synchronous) or reactor (concurrent) execution both consult.
+mod chunk;
 mod fast;
 pub(crate) mod host;
 pub(crate) mod pools;

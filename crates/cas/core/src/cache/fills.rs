@@ -127,6 +127,17 @@ impl<T> Registry<T> {
     }
 
     pub fn lookup(owner: &BudgetArc<Self>, hash: Hash) -> io::Result<Option<Lookup<T>>> {
+        Self::lookup_with(owner, hash, None)
+    }
+
+    /// Like `lookup`, but a waiter is signalled through `wake` (a descriptor
+    /// the caller already polls, such as a frontend's completion eventfd)
+    /// instead of a fresh per-waiter eventfd.
+    pub fn lookup_with(
+        owner: &BudgetArc<Self>,
+        hash: Hash,
+        wake: Option<OwnedFd>,
+    ) -> io::Result<Option<Lookup<T>>> {
         let wait = crate::io_metrics::measure(0, |c| &mut c.fetch_registry_wait);
         let mut state = owner.state.lock().expect("fetch registry poisoned");
         drop(wait);
@@ -138,7 +149,10 @@ impl<T> Registry<T> {
                 return Ok(None);
             };
             let cell = entry.cell.clone();
-            let signal = Signal::new(&owner.metadata)?;
+            let signal = match wake {
+                Some(wake) => Signal::adopt(wake, &owner.metadata)?,
+                None => Signal::new(&owner.metadata)?,
+            };
             let wait = crate::io_metrics::measure(0, |c| &mut c.fetch_registry_wait);
             let mut completion = cell.completion.lock().expect("fetch cell poisoned");
             drop(wait);
@@ -290,6 +304,9 @@ impl<T> Drop for Waiter<T> {
 }
 
 impl Signal {
+    fn adopt(owned: OwnedFd, metadata: &Arc<Budget>) -> io::Result<BudgetArc<Self>> {
+        BudgetArc::try_new(Self(owned), metadata)
+    }
     fn new(metadata: &Arc<Budget>) -> io::Result<BudgetArc<Self>> {
         // SAFETY: eventfd takes scalar arguments and returns a new owned FD.
         let raw = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
