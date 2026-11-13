@@ -130,8 +130,10 @@ def fio(name):
     for direction in ("read", "write"):
         if job[direction]["total_ios"]:
             rows[direction] = {"iops": job[direction]["iops"], "total_ios": job[direction]["total_ios"], "clat_ns": {k: job[direction]["clat_ns"][k] for k in ("min", "max", "mean", "percentile")}}
-    if job.get("sync", {}).get("total_ios"):
-        rows["fdatasync"] = {"total_ios": job["sync"]["total_ios"], "lat_ns": {k: job["sync"]["lat_ns"][k] for k in ("min", "max", "mean", "percentile")}}
+    sync = job.get("sync", {})
+    # fio 3.41 leaves sync.total_ios at 0 and counts the samples in lat_ns.N.
+    if sync.get("lat_ns", {}).get("N") or sync.get("total_ios"):
+        rows["fdatasync"] = {"samples": sync["lat_ns"].get("N", sync.get("total_ios")), "lat_ns": {k: sync["lat_ns"][k] for k in ("min", "max", "mean", "percentile")}}
     rows["errors"] = job.get("error", 0)
     return rows
 pingpong = None

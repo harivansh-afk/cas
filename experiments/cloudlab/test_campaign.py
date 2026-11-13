@@ -13,6 +13,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import campaign  # noqa: E402
 import campaignlib as lib  # noqa: E402
+import inventory  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 
@@ -275,6 +276,27 @@ class Resume(unittest.TestCase):
             lines = lib.status_lines(c.status)
             self.assertTrue(any("units:" in line for line in lines))
             self.assertLessEqual(len(lines), 40)
+
+
+class Inventory(unittest.TestCase):
+    def test_derive_skips_ethtool_subrecords(self):
+        hardware = {
+            "nproc": "64\n",
+            "uname": "Linux node 6.8.0-45-generic #45 SMP x86_64",
+            "ethtool-enp65s0f0np0": "Settings for enp65s0f0np0:\n\tSpeed: 100000Mb/s\n\tLink detected: yes\n",
+            "ethtool-i-enp65s0f0np0": "driver: mlx5_core\nfirmware-version: 22.36.1010\n",
+            "ethtool-c-enp65s0f0np0": "Coalesce parameters",
+            "ethtool-g-enp65s0f0np0": "Ring parameters",
+            "mtu-enp65s0f0np0": "9000\n",
+            "cpufreq": "cpu0 performance 1500000 3250000\ncpu1 performance 1500000 3250000\n",
+        }
+        derived = inventory.derive(hardware)
+        self.assertEqual(derived["logical_cpus"], 64)
+        self.assertEqual(derived["kernel"], "6.8.0-45-generic")
+        self.assertEqual(list(derived["nics"]), ["enp65s0f0np0"])
+        nic = derived["nics"]["enp65s0f0np0"]
+        self.assertEqual((nic["speed"], nic["link"], nic["mtu"], nic["driver"], nic["firmware"]), ("100000Mb/s", "yes", "9000", "mlx5_core", "22.36.1010"))
+        self.assertEqual(derived["governors"], ["performance"])
 
 
 class Build(unittest.TestCase):

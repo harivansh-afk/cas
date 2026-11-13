@@ -44,7 +44,7 @@ def derive(hardware):
     kernel = str(hardware.get("uname", "")).split()[2] if hardware.get("uname") else None
     nics = {}
     for key, text in hardware.items():
-        match = re.fullmatch(r"ethtool-([^-].*)", key)
+        match = re.fullmatch(r"ethtool-(?!(?:i|g|c|k|l)-)(.+)", key)
         if not match or not isinstance(text, str):
             continue
         name = match[1]

@@ -1,5 +1,121 @@
 # Validation
 
+## 2026-11-13 — CloudLab campaign driver rehearsal on cas-build
+
+Branch `feat/cloudlab-campaign` from `feat/burst-harness` (`5a69820`).
+**Tested revisions `5633fb9` (rehearsal 001) and `4e0e65e` (rehearsal 002)**,
+both clean on the VM checkout; this record and two small fixes (`r0.sh`
+fdatasync sample count, `inventory.py` NIC summary; the exact files were
+verified standalone on the VM, see below) are a later commit. Only
+`experiments/cloudlab/` and `docs/` changed; nothing under `crates/`, so
+the daemon is still the `ebbe157` build (`cas-host`
+`cc1c4ae4…`, `cas-fleet` `8ccdb986…`). Nothing pushed or merged.
+
+Spark handled edits, git bundles, unit tests and evidence; every build and
+run used the persistent Freestyle VM `cas-build`
+(`vm-7ecd8e364c624bcb8654fa4dbd92767e`, x86_64, 8 vCPU, 16 GiB, Linux
+6.1.102, nested KVM) through the sandbox-corpus `control.py` bridge (scoped
+SSH; files over SFTP). A new clone `/root/cas-campaign` was made from the
+bundle. No VM was created, resized or deleted.
+
+### Commands
+
+```sh
+# Spark
+uv run --no-project python -m unittest discover -s experiments/cloudlab      # 22 pass
+# cas-build, /root/campaign/driver.sh then driver2.sh (loopback layout: both
+# members on the VM, loop-backed XFS at /mnt/fleet-a and /mnt/fleet-b, daemons
+# 0-1 / 2-3, guests 4-7, nodes-*.json with "loopback": true)
+bash $SRC/experiments/cloudlab/setup.sh --bundle campaign.bundle --revision $REV \
+  --source /root/cas-campaign --skip-disk --skip-irq --skip-nix --cores 6 --out out/node-inventory-setup.json
+python3 $SRC/experiments/cloudlab/campaign.py dry-run --nodes nodes-dry.json --plan $SRC/experiments/cloudlab/plans/dev-loopback.json
+python3 $SRC/experiments/cloudlab/campaign.py start   --nodes nodes-r0.json --plan plan-r0.json --export /root/campaign/export
+python3 $SRC/experiments/cloudlab/campaign.py status  --nodes nodes-r0.json
+python3 $SRC/experiments/cloudlab/campaign.py run     --nodes nodes-r0.json --plan plan-r0.json --export /root/campaign/export [--redo]
+```
+
+### Outcomes
+
+- Unit tests: **22 pass** on Spark (plan loader shapes/rejections/rotation,
+  arm validation of every checked-in config against its own pinning sets,
+  `check_pinning` rules, placeholders, the race-budget rule, bundle working
+  set, unit states, `decide`, the driver's skip/refuse/redo path through
+  `Campaign.step`, wrapper parsing, runner-support detection, node
+  validation, inventory NIC parsing).
+- `setup.sh` without disk work (`--skip-disk --skip-irq --skip-nix`): all
+  steps exit 0 in 43 s (bootstrap clone, `checkout` at the pinned SHA,
+  `nix build .#two-host` and `.#native` from cache, `limits`, `inventory`);
+  `build.json` records both wrappers' build-info paths and binary hashes;
+  `node-inventory.json` lists `skipped: ["disk", "build", "irq"]` for the
+  inventory-only snapshots. 69 hardware records, 22 recorded as unavailable
+  on the VM (no `nvme`, `dmidecode`, ZFS, cpufreq).
+- `campaign.py dry-run` with `plans/dev-loopback.json`: **4 runnable, 8
+  blocked of 12 units**, exit 2, nothing launched. Blocked for the intended
+  reasons: `fast`, `raced`, `resume` units because the built runner at this
+  revision does not know `settings.fast_settled_reads` ("the arm would be
+  mislabelled"); `fast reads-storage-g8`, `native-cas g4` and `burst
+  burst-images` because 8/8/16 guest cpus exceed the loopback set of 4;
+  `native-zfs g1` because `cas-native-run` requires XFS. Manifest bound to
+  revision and binary hashes, identical on both members.
+- Campaign `dev-r0-002` (revision `4e0e65e`): `start` detached the worker
+  via `systemd-run --unit cas-campaign-dev-r0-002` with PATH/HOME handed
+  over; the R0 unit ran end to end (**done, 97.2 s**), `SHA256SUMS` written
+  per unit and campaign, rsync export to `/root/campaign/export/dev-r0-002/`,
+  start and end inventories for both members. A second `run` kept the unit
+  ("kept from an earlier run", nothing launched); `run --redo` moved it to
+  `d1-r0-floor-r1.attempt-1` and reran it (done, 98.6 s). `status` prints
+  the one-screen table at every stage.
+- R0 on the loopback layout (development numbers: loop-file XFS over the
+  VM's virtual disk, both members on the same host, Python ping-pong over
+  127.0.0.1→127.0.0.2): 4 KiB QD1 direct random read p50 26.8 µs, p99
+  82–92 µs, ~31 k IOPS per member; 4 KiB QD1 write p50 32–35 µs; fdatasync
+  p50 129.5 µs, p99 485 µs (from the standalone check of the fixed `r0.sh`,
+  5 s run); ping-pong RTT p50 44–48 µs, p99 71 µs, 605 k round trips in 30 s,
+  tool labelled `python-tcp-pingpong`.
+
+### Failures and retries
+
+- First upload through the bridge's Freestyle `write` API hung for 15
+  minutes with nothing created on the VM; stopped and replaced by SFTP over
+  the same scoped transport (helper kept with the evidence).
+- Campaign `dev-r0-001` (revision `5633fb9`): the `systemd-run` worker had
+  no Nix profile in its environment, so `r0.sh --check` found no fio and
+  the unit was **blocked** in the detached run; the foreground resume pass
+  on the same campaign then ran it successfully (done, 95.6 s). Fixed in
+  `4e0e65e` (`--setenv` PATH/HOME, Nix profile lookup without `~`) and
+  re-proven by `dev-r0-002`.
+- fio 3.41 reports `sync.total_ios = 0` for `--fdatasync=1` jobs and counts
+  samples in `sync.lat_ns.N`, so the first R0 summaries had an empty
+  `fdatasync` block (the raw `json+` files hold the distribution). Fixed in
+  `r0.sh` (`sha256 1528fba4d1fc…`), verified standalone on the VM from
+  `/root/campaign/r0-fix/` (26,988 samples). The inventory NIC summary
+  matched `ethtool-c-*` records as interfaces; fixed in `inventory.py`
+  (`sha256 14e507a1a081…`) and verified against the recorded inventory records.
+- `systemctl status` after the run reports the unit as not found: `--collect`
+  removes it on exit; it is visible while running.
+
+### Evidence
+
+Retained under ignored `results/cloudlab-campaign/evidence/` with
+`SHA256SUMS`, digests matching the VM: `campaign-rehearsal-001.tgz`
+(driver log, step logs/statuses, `out/` with both campaigns' directories,
+inventories, manifests, status, dry-run report, R0 unit, export tree),
+`campaign-rehearsal-002.tgz` (the same for revision `4e0e65e` plus the
+resume/redo passes and `attempt-1`), `campaign-rehearsal-002-r0fix.tgz`
+(the fixed scripts and their standalone outputs). Loop images were
+unmounted; `/root/campaign` and `/root/cas-campaign` remain on the VM.
+
+### Conclusions and limits
+
+The driver's plan loading, validation, pinning checks, manifest binding,
+detached execution, resume/refuse/redo, per-unit export with hashes and
+status display work on a loopback development layout. No guest was
+launched: the two-host and native arms were validated by the dry run only,
+and at this revision every flagged arm is correctly blocked until the
+integration branch's runner is the pinned build. R0 numbers are development
+evidence (virtual disk, loopback, Python loop), not a testbed floor. Disk
+formatting, IRQ pinning and the Nix install steps were not exercised.
+
 ## 2026-11-13 — Working-set replay, boot split and first useful IO
 
 Branch `feat/burst-harness`. **Tested revision
