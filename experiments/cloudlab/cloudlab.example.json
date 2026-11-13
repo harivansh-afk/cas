@@ -1,0 +1,34 @@
+{
+ "campaign": "cloudlab-2026-11-18",
+ "export": "experiment@archive.example.org:/srv/evidence",
+ "bundle_actions": "/var/tmp/corpus/swe-bundles/astropy__astropy-12907/actions.json",
+ "race_budget_us": null,
+ "nodes": [
+  {
+   "name": "a",
+   "node_type": "r6615",
+   "address": "10.10.1.1",
+   "nic": "enp65s0f0np0",
+   "device": "/dev/disk/by-id/nvme-Dell_Ent_NVMe_P5600_MU_U.2_1.6TB_SERIAL-A",
+   "source": "/home/experiment/cas",
+   "runner": "/home/experiment/cas/result-two-host/bin/cas-two-host",
+   "native": "/home/experiment/cas/result-native/bin/cas-native-run",
+   "storage_mount": "/mnt/cas-exp",
+   "output_root": "/var/tmp/cas-campaign",
+   "zfs_parent": "tank/cas-bench"
+  },
+  {
+   "name": "b",
+   "ssh": "experiment@node-b",
+   "node_type": "r6615",
+   "address": "10.10.1.2",
+   "nic": "enp65s0f0np0",
+   "device": "/dev/disk/by-id/nvme-Dell_Ent_NVMe_P5600_MU_U.2_1.6TB_SERIAL-B",
+   "source": "/home/experiment/cas",
+   "runner": "/home/experiment/cas/result-two-host/bin/cas-two-host",
+   "storage_mount": "/mnt/cas-exp",
+   "output_root": "/var/tmp/cas-campaign",
+   "zfs_parent": "tank/cas-bench"
+  }
+ ]
+}

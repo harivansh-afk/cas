@@ -1,0 +1,19 @@
+{
+ "description": "Rehearsal plan for the loopback development layout (cas-build, 8 vCPUs): short units that fit four guest cpus, plus units that must be blocked (g8 pinning, native-zfs, native g4) so the dry run shows its checks working.",
+ "days": [
+  {"day": 1, "units": [
+   ["r0", "floor", 1],
+   ["frozen", "reads-memory", 2],
+   ["fast", "reads-storage", 2],
+   ["raced", "reads-storage", 1],
+   ["fast", "reads-storage-g8", 1],
+   ["native-raw", "g1", 1],
+   ["native-cas", "g4", 1],
+   ["native-zfs", "g1", 1]
+  ]},
+  {"day": 2, "units": [
+   ["burst", "burst-images", 1],
+   ["resume", "resume-elsewhere", 1]
+  ]}
+ ]
+}
