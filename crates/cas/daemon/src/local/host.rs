@@ -585,7 +585,7 @@ impl Host {
         serde_json::json!({ "failure": self.shared.gate.failure(), "store": self.store_status(),
             "admission": self.shared.admission.status(),
             "peer": self.shared.peer_metrics.as_ref().map(|metrics| metrics.report()),
-            "fleet": self.shared.fleet.as_ref().map(|fleet| fleet.metrics.report()),
+            "fleet": self.shared.fleet.as_ref().map(|fleet| fleet.report()),
             "cache": self.shared.cache.status(), "metadata_cache": self.shared.pages.status(),
             "fetches": self.shared.fetches.status(), "admission_scheduler":self.shared.fair.report(), "io_scheduler":self.shared.io_scheduler.status(),
             "collection": *self.shared.collection.lock().expect("collection status poisoned"),
