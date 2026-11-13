@@ -142,7 +142,8 @@ may also be requested directly in `cases`. Each arm boots N sources on A (its
 own image and seed each) and N provisioned readers on B, warms every image,
 then runs each fio cohort on all N readers at once. Cohorts record the
 aggregate (`fio`: summed IOPS/bytes, merged json+ latency histograms, bucket
-percentiles) and every guest's complete fio JSON under `fio.guests`, together
+percentiles, `fio.guests` the guest count) and every guest's complete fio JSON
+under `fio.per_guest`, together
 with the owner's GET counters and the reader's recent-ring phases. The
 contention cohort runs one shipping writer per source with the requested rate
 divided by N, so the aggregate requested rate matches the one-guest arm.

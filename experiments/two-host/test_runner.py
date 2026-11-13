@@ -297,6 +297,13 @@ class HarnessSchemaTests(unittest.TestCase):
             cfg["cases"] = bad
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 plan_cases(cfg, normalize_settings(cfg))
+        # An explicit memory arm is held to the same cache headroom rule.
+        tight = config(cache_bytes=2 * 8 * 1024**2 * 3)
+        tight["cases"] = ["reads-memory-g4"]
+        with self.assertRaises(ValueError):
+            plan_cases(tight, normalize_settings(tight))
+        tight["cases"] = ["reads-storage-g4"]
+        self.assertEqual(len(plan_cases(tight, normalize_settings(tight))), 1)
 
     def test_overrides_only_touch_known_settings(self):
         cfg = apply_overrides(config(seconds=9), ["guests_per_host=[2]", "seconds=5"])
@@ -358,6 +365,7 @@ class HarnessSchemaTests(unittest.TestCase):
 
         fio = aggregate_fio([job(10, {"1000": 5, "2000": 5}), job(30, {"2000": 90})])
         self.assertEqual(fio["guests"], 2)
+        self.assertNotIn("per_guest", fio)
         self.assertEqual(fio["read"]["iops"], 40)
         self.assertEqual(fio["read"]["total_ios"], 100)
         self.assertEqual(fio["read"]["lat_ns"]["bins"], {"1000": 5, "2000": 95})
@@ -613,9 +621,13 @@ class WorkingSetTests(unittest.TestCase):
         local_only = {"reads": [calibration["reads"][1]]}
         with self.assertRaises(ValueError):
             peer_clock_origin(local_only)
-        ambiguous = {"reads": [{**calibration["reads"][0], "completed_reads": 2}]}
+        # A read that added several records is skipped, not fatal.
+        ambiguous = {**calibration["reads"][0], "completed_reads": 2}
+        skipped = peer_clock_origin({"reads": calibration["reads"] + [ambiguous]})
+        self.assertEqual((skipped["lower_ns"], skipped["upper_ns"]), (950, 1050))
+        self.assertEqual(skipped["ambiguous_reads"], 1)
         with self.assertRaises(ValueError):
-            peer_clock_origin(ambiguous)
+            peer_clock_origin({"reads": [ambiguous]})
         disjoint = {
             "reads": [
                 calibration["reads"][0],

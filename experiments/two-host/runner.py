@@ -144,7 +144,7 @@ def normalize_settings(config):
             f"guests_per_host needs distinct integers from 1 to {MAX_GUESTS}"
         )
     settings["guests_per_host"] = guests
-    if settings["cache_bytes"] < settings["data_bytes"] * 2 * max(guests):
+    if not cache_fits(settings, max(guests)):
         raise ValueError(
             "memory cohort needs cache headroom for every guest's data and metadata"
         )
@@ -204,6 +204,11 @@ def normalize_settings(config):
     return settings
 
 
+def cache_fits(settings, guests):
+    """The memory cohort needs every guest's data and metadata in the owner cache."""
+    return settings["cache_bytes"] >= settings["data_bytes"] * 2 * guests
+
+
 def plan_cases(config, settings):
     """Expand the case list into (case name, handler, argument) rows.
 
@@ -219,6 +224,10 @@ def plan_cases(config, settings):
             for guests in arms:
                 if not 1 <= guests <= MAX_GUESTS:
                     raise ValueError(f"unsupported guest count in {case}")
+                if target == "memory" and not cache_fits(settings, guests):
+                    raise ValueError(
+                        f"{case}: cache_bytes lacks headroom for {guests} guests' data"
+                    )
                 plan.append((arm_name(target, guests), "reads", (target, guests)))
         elif case in ("flows-k1", "flows-k2"):
             plan.append((case, "flows", int(case[-1])))
@@ -334,14 +343,17 @@ def peer_clock_origin(calibration):
     A bracketed single-chunk read that added exactly one ring record places
     the origin in [started - received_ns, completed - completed_ns]. Reads
     that added no record hit locally owned chunks and carry no information;
-    reads that added several records are rejected as ambiguous.
+    reads that added several records are ambiguous and are counted, not used.
+    The daemon is expected to export the ring origin directly; this stays as
+    the fallback.
     """
-    lower, upper, used = None, None, 0
+    lower, upper, used, ambiguous = None, None, 0, 0
     for row in calibration["reads"]:
         if not row["records"]:
             continue
         if len(row["records"]) != 1 or row["completed_reads"] != 1:
-            raise ValueError("calibration read added more than one ring record")
+            ambiguous += 1
+            continue
         record = row["records"][0]
         if not record["success"] or record["completed_ns"] < record["received_ns"]:
             raise ValueError("calibration read failed or is nonmonotonic")
@@ -359,6 +371,7 @@ def peer_clock_origin(calibration):
         "upper_ns": upper,
         "width_ns": upper - lower,
         "remote_reads": used,
+        "ambiguous_reads": ambiguous,
         "reads": len(calibration["reads"]),
     }
 
@@ -824,12 +837,14 @@ class Experiment:
         self.sync()
         frozen = []
         images = []
-        before = self.report()
-        start = time.monotonic_ns()
         try:
+            # Freeze outside the timed window so provision.elapsed_ns and
+            # provision.wire keep their original meaning for every case.
             for guest in sources:
                 a.call("shell", guest=guest, script="fsfreeze -f /mnt/cas")
                 frozen.append(guest)
+            before = self.report()
+            start = time.monotonic_ns()
             for index, _ in enumerate(sources):
                 began = time.monotonic_ns()
                 result = self.fleet(
@@ -979,7 +994,7 @@ class Experiment:
         if len(readers) == 1:
             return jobs[0], before, self.report(), samples
         fio = aggregate_fio(jobs)
-        fio["guests"] = [
+        fio["per_guest"] = [
             {"name": guest, "fio": job}
             for guest, job in zip(readers, jobs, strict=True)
         ]
@@ -1341,10 +1356,12 @@ class Experiment:
             destination=self.config["nodes"][1]["bulk"],
             image=IMAGE,
         )
+        boot = time.monotonic_ns()
+        # The anchor RPC and the post-handoff report are harness work; they
+        # land in boot_verify_continue_ns, not in handoff_ns.
         handoff_b["after_ns"] = b.call("clock")["monotonic_ns"]
         anchor = handoff_b["after_ns"]
         migrated = self.report()
-        boot = time.monotonic_ns()
         probe = (
             "dd if=/mnt/cas/data bs=4096 count=1 iflag=direct status=none | tr -d '\\000'; echo;"
             " cat /sys/block/vda/stat; stat -f -c '%b %f %S' /mnt/cas"
