@@ -149,6 +149,19 @@ def qemu_record(pid, acceleration):
     raise RuntimeError("could not identify the running QEMU process")
 
 
+def measurement_flags(settings, fleet):
+    """`cas-host` flags for the read-path arms. The race needs peer
+    configuration, so it is passed only to fleet members; the inline path
+    applies to every host."""
+    flags = []
+    race = settings.get("peer_race_us")
+    if fleet and race is not None:
+        flags += ["--peer-race-us", str(int(race))]
+    if settings.get("fast_settled_reads"):
+        flags.append("--fast-settled-reads")
+    return flags
+
+
 class Agent:
     def __init__(self, build):
         self.build = build
@@ -332,6 +345,7 @@ class Agent:
                     "--peer-bulk-member",
                     member["bulk"],
                 ]
+        argv += measurement_flags(self.settings, fleet=bool(k))
         if force:
             argv.append("--peer-force-remote")
         for image in ((IMAGE, CLONE) if k else (IMAGE,)) if images is None else images:

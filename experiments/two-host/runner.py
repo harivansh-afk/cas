@@ -28,6 +28,9 @@ DEFAULTS = {
     "repeats": 5,
     "depths": [1, 4, 16, 64],
     "inline_us": 50,
+    # Measurement arms of the read path; both off is the frozen behaviour.
+    "peer_race_us": None,
+    "fast_settled_reads": False,
 }
 
 

@@ -190,3 +190,17 @@ class MeasurementTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MeasurementFlags(unittest.TestCase):
+    def test_flags_follow_settings_and_the_race_needs_a_fleet(self):
+        from agent import measurement_flags
+
+        off = {"peer_race_us": None, "fast_settled_reads": False}
+        self.assertEqual(measurement_flags(off, fleet=True), [])
+        both = {"peer_race_us": 100, "fast_settled_reads": True}
+        self.assertEqual(
+            measurement_flags(both, fleet=True),
+            ["--peer-race-us", "100", "--fast-settled-reads"],
+        )
+        self.assertEqual(measurement_flags(both, fleet=False), ["--fast-settled-reads"])
