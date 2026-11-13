@@ -87,9 +87,9 @@ def write_json(path, value):
     Path(path).write_text(json.dumps(value, indent=2) + "\n")
 
 
-def checked(argv, **kwargs):
+def checked(argv, timeout=600, **kwargs):
     result = subprocess.run(
-        argv, check=False, text=True, capture_output=True, timeout=600, **kwargs
+        argv, check=False, text=True, capture_output=True, timeout=timeout, **kwargs
     )
     if result.returncode:
         raise RuntimeError(

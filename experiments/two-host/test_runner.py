@@ -14,6 +14,7 @@ from agent import (
     CLONE,
     IMAGE,
     Agent,
+    checked,
     effective_sizing,
     fio_options,
     image_id,
@@ -690,6 +691,19 @@ class WorkingSetTests(unittest.TestCase):
             working_set_summary(replay, {"g0": 10, "g1": 20})
         with self.assertRaises(ValueError):
             working_set_summary([{"name": "g2", "commands": []}], {"g2": 0})
+
+    def test_checked_accepts_a_per_call_timeout(self):
+        self.assertEqual(checked([sys.executable, "-c", "print(1)"], timeout=30), "1\n")
+        agent = Agent({})
+        try:
+            agent.guests = {
+                "g": [sys.executable, "-c", "import sys; print(sys.argv[1])"]
+            }
+            self.assertEqual(
+                agent.shell("g", "echo hi", timeout=30), "sh -eu -c 'echo hi'\n"
+            )
+        finally:
+            agent.close()
 
     def test_agent_replays_commands_in_order_from_the_data_disk(self):
         with tempfile.TemporaryDirectory() as directory:
