@@ -1019,10 +1019,10 @@ fn two_daemon_loopback_race_wins_locally_against_a_delayed_server() {
     let report = a.command("measure");
     let measured = started.elapsed();
     let c = &report["peer"]["counters"];
-    assert_eq!(c["races_started"], 700);
-    assert_eq!(c["race_won_local"], 700);
-    assert_eq!(c["race_won_first"], 0);
-    assert_eq!(c["failed_reads"], 0);
+    assert_eq!(c["races_started"], 700, "{c}");
+    assert_eq!(c["race_won_local"], 700, "{c}");
+    assert_eq!(c["race_won_first"], 0, "{c}");
+    assert_eq!(c["failed_reads"], 0, "{c}");
     assert_eq!(report["cache"]["resident_bytes"], 0);
     // The counters above prove every read was won locally; 700 serialized
     // 1 ms replies would need at least 700 ms, but a loaded debug test host
