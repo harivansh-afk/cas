@@ -543,7 +543,10 @@ class Campaign:
         unit = f"cas-campaign-{self.name}"
         if shutil.which("systemd-run"):
             scope = [] if os.geteuid() == 0 else ["--user"]
-            argv = ["systemd-run", *scope, "--unit", unit, "--collect", "--same-dir", "-p", f"StandardOutput=append:{self.dir}/driver.out", "-p", f"StandardError=append:{self.dir}/driver.out", "--", *worker]
+            # The unit gets this shell's PATH and HOME, so the Nix profile
+            # (fio through nix develop, the runner wrappers) stays reachable.
+            env = [f"--setenv={k}={os.environ[k]}" for k in ("PATH", "HOME", "NIX_PATH", "SSH_AUTH_SOCK") if k in os.environ]
+            argv = ["systemd-run", *scope, "--unit", unit, "--collect", "--same-dir", *env, "-p", f"StandardOutput=append:{self.dir}/driver.out", "-p", f"StandardError=append:{self.dir}/driver.out", "--", *worker]
             result = subprocess.run(argv, capture_output=True, text=True)
             if result.returncode == 0:
                 self.set_status(launched=now(), launched_via=f"systemd-run unit {unit}")

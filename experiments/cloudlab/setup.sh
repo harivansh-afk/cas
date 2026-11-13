@@ -154,7 +154,9 @@ nix_env() {
   # shellcheck disable=SC1091
   { [[ -r /etc/profile.d/nix.sh ]] && . /etc/profile.d/nix.sh; } || true
   # shellcheck disable=SC1091
-  { [[ -r ~/.nix-profile/etc/profile.d/nix.sh ]] && . ~/.nix-profile/etc/profile.d/nix.sh; } || true
+  { [[ -r ${HOME:-/root}/.nix-profile/etc/profile.d/nix.sh ]] && . "${HOME:-/root}/.nix-profile/etc/profile.d/nix.sh"; } || true
+  # shellcheck disable=SC1091
+  { [[ -r /nix/var/nix/profiles/default/etc/profile.d/nix.sh ]] && . /nix/var/nix/profiles/default/etc/profile.d/nix.sh; } || true
   # shellcheck disable=SC1091
   { [[ -r /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]] && . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh; } || true
 }
