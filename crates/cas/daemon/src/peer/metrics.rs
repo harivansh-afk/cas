@@ -169,7 +169,7 @@ impl Metrics {
             .into_iter()
             .map(|(image, counters)| {
                 (
-                    format!("{:032x}", u128::from_be_bytes(image)),
+                    cas_core::id::hex(image),
                     serde_json::to_value(counters).expect("image counters"),
                 )
             })
