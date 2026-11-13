@@ -26,7 +26,7 @@ enum Command {
     /// into the shared chunk store, a committed manifest, then catalog publication.
     /// No host may hold the root. Prints a JSON receipt; progress goes to stderr.
     Import {
-        /// Storage root: an empty/missing directory is initialized, an existing root is reused.
+        /// Storage root: an existing empty directory is initialized, an existing root is reused; a missing directory is refused.
         #[arg(long)]
         root: PathBuf,
         #[arg(long, value_parser = cas_core::id::parse)]
