@@ -230,6 +230,62 @@ logs, both hosts' daemon/guest/fio logs, command lines and `qemu.json`),
 images were unmounted and deleted after archiving; `/root/burst` remains on
 the persistent VM.
 
+### Addendum (same day) — review fixes, rerun at `c0bca19`
+
+Code review of the branch raised ten items; fixed in `9559587` (measurement:
+provision freezes sources *before* the timed window again, as at `ebbe157`;
+the resume boot stamp precedes the anchor RPC and post-handoff report so
+`handoff_ns` excludes harness work; calibration skips and counts
+multi-record reads; explicit `reads-memory-gN` arms get the cache-headroom
+check at plan time; `fio.guests` stays the count with per-guest jobs under
+`fio.per_guest`) and `c0bca19` (declared per-request RPC budgets with an
+exhausted budget raised as `RuntimeError`, one `marker_probe(path)` sharing
+its statistics tail with `guest_stat`, fio errors counted once per job,
+`peer_delta` as a projection of `peer_counters`, `ring_since` reuse, payload
+digest hashed once and persisted). **Tested revision
+`c0bca1930a9b7b76179a6fa75b0617dd97dd8795`**, clean. Unit tests: **35 pass**
+on Spark and cas-build (one new: RPC budgets and the probe tail).
+
+Rerun `native-ws-002` on cas-build (same VM, driver `/root/burst/ws-driver-2.sh`,
+fresh loop XFS files, same settings) for `flows-k1, reads-memory-g2,
+burst-images, resume-elsewhere`: **all four passed** (`success: true`, 257 s).
+
+- `flows-k1` (legacy control, provision window now excludes the freeze as
+  before): provision 173 ms, 124,877 provision-flow bytes; boot/verify
+  19.95 s; downtime 20.89 s = 0.52 s stop + 0.43 s handoff (0.33 s cold
+  recovery) + 19.95 s boot/verify/continue — consistent with the 2026-11-12
+  regression run (19.18 s on a different day).
+- `reads-memory-g2` (two readers, aggregate, p50/p99 from merged bins; owner
+  served everything from memory, 0 store): random QD1 5,795 IOPS,
+  0.208 / 2.867 ms; sequential QD1 5,154 IOPS, 0.247 / 2.998 ms; sequential
+  QD4 8,603 IOPS, 0.489 / 4.489 ms; contention 5,413 IOPS, 0.189 / 3.195 ms
+  with overlap verified. `fio.guests` = 2 with both jobs under `fio.per_guest`.
+- `burst-images` N=2: boot 19.71 / 19.91 s, SSH 20.02 / 20.02 s, marker
+  21.69 / 21.90 s (launches 2.4 ms apart); first useful IO 8.33 s (8.30–8.36)
+  after the first launch; 115 GETs by the last marker (4.4 %); **time to
+  working set 22.33 / 22.34 s**, cold replays 0.39 / 0.40 s (96 / 90 / 208 ms,
+  96 / 98 / 209 ms) with 1,138 GETs / 4,688,560 bytes aggregate, warm 0.25 /
+  0.25 s with 128 GETs; 1,627 GETs (61.7 %) by the end of verification.
+  Calibration 13 of 32 reads remote, 0 ambiguous, bracket 57 ms.
+- `resume-elsewhere`: handoff bracket on B 54 ms; launch delay 6.5 ms;
+  **boot 17.97 s**; SSH 18.28 s; first command 19.75 s; marker 20.16 s;
+  **first useful IO 7.41 s** (7.38–7.44) after the handoff; **time to working
+  set 20.70 s**, cold replay 0.38 s (107 / 128 / 149 ms) with 313 GETs /
+  1,289,560 bytes, warm 0.30 s (112 / 112 / 80 ms) with 68 GETs; final
+  checksum 122 ms, 0 GETs. **Re-derived downtime 21.33 s = 0.72 s stop +
+  0.32 s handoff (0.26 s cold recovery, 131,072 manifest bytes, 20,664
+  staging-tail bytes) + 20.30 s boot/marker/continue**: the handoff term
+  fell from 0.50 s in `native-ws-001` because the anchor RPC and the
+  post-handoff full-fleet report no longer sit inside it. 48 GETs from boot
+  to the epoch continue, 429 to the end of the final checksum. Calibration
+  19 of 32 remote, 0 ambiguous, bracket 64 ms.
+
+Same caveats as above: nested-KVM loop-file development checks on one shared
+VM, single repetition; they certify the harness, schema and interval
+arithmetic only. Evidence: `native-ws-002.tgz` and `native-ws-002-results.json`
+appended to `results/burst-harness/evidence/SHA256SUMS` (all five entries
+re-verified), copies in `/root/burst/archive`; loop images unmounted.
+
 ## 2026-11-09 — Integration of C5, peer fetch and 16 KiB chunks
 
 Branch `integration/2026-11-09` from `main` (`9c60e72`), merged in order:
