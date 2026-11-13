@@ -250,11 +250,15 @@ fn per_image_remote_read_attribution_sums_to_the_host_counters() {
     // every read stamped after `before` lands after it and before now.
     let after = peer::metrics::monotonic_now_ns();
     let origin = a.report()["peer"]["origin_monotonic_ns"].as_u64().unwrap();
-    assert!(origin < before, "{origin} {before}");
+    assert!(origin <= before, "{origin} {before}");
     for record in a.report()["peer"]["recent"].as_array().unwrap() {
         let received = origin + record["received_ns"].as_u64().unwrap();
         let completed = origin + record["completed_ns"].as_u64().unwrap();
-        assert!(before < received && received <= completed && completed <= after);
+        // Inclusive: a fast release run can stamp within the same reading.
+        assert!(
+            before <= received && received <= completed && completed <= after,
+            "before {before} received {received} completed {completed} after {after}"
+        );
     }
     for id in 0..3 {
         get(&mut second, 100 + id, 10 + id as usize);
