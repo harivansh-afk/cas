@@ -210,10 +210,11 @@ pub(crate) const IMAGE_REQUEST_LIMIT: usize =
     pools::IMAGE_REQUESTS + pools::IMAGE_READ_REQUESTS + pools::IMAGE_CONTROL;
 
 pub(crate) fn metadata_budget() -> Arc<Budget> {
-    Budget::new(Amount {
-        bytes: 128 * MAX_REQUEST_BYTES,
-        requests: 0,
-    })
+    metadata_budget_sized(host::Resources::DEFAULT_METADATA_BYTES)
+}
+
+pub(crate) fn metadata_budget_sized(bytes: usize) -> Arc<Budget> {
+    Budget::new(Amount { bytes, requests: 0 })
 }
 
 pub struct Shared {

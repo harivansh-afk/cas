@@ -89,7 +89,16 @@ reconciles completed and pending requests before serving resumes.
 require a fresh attachment; this is not general hot-upgrade compatibility.
 
 Cold recovery inspects durable prefixes before repair. Rejected or incomplete
-suffixes must not be interpreted as acknowledged work. Shutdown, reset, socket
+suffixes must not be interpreted as acknowledged work. After cold recovery each
+image socket waits for its guest to connect and reach the virtio-blk driver;
+when that window expires the attachment fails with `recovery deadline expired`
+and the service reports `connection_ok: false`. `cas-host --attach-timeout-secs N`
+sets the window (default 60, the same length as the fixed recovery bound). It
+starts when recovery completes, in both ordinary and fleet cold mode, and a
+fleet cold member applies the same length to each image it activates later.
+Many guests booting together on one host can need more than 60 s; the flag
+lengthens the wait without changing the failure path, the recovery scan bound
+or retained reconnection. Shutdown, reset, socket
 failure, and host-wide failures have different ownership boundaries; their
 regressions live beside the implementations and in `crates/harnesses/`.
 
@@ -104,6 +113,21 @@ fleet cold serving can wait for explicitly configured incoming image sockets. Na
 KVM crash fixtures are not physical power-loss tests or production readiness.
 See [current work](../TODO.md) and [validation](validation.md) for open acceptance.
 
+
+## Host budgets
+
+`cas-host` holds a fixed metadata budget for indexes, manifests, queues and
+bounded instrumentation rings; the rebuilt chunk index is charged to it when a
+root is opened, and an index that does not fit fails startup with the explicit
+`chunk index metadata budget exhausted` error before any repair. The default
+is 128 MiB. Each 4 KiB chunk costs about 40–80 bytes of index: a 16 GiB image
+is 4,194,304 chunks, about 168–336 MB, so `--metadata-bytes N` raises the
+budget for such roots. The value must be nonzero and at most the host's
+physical memory; a budget no host could honour is rejected at startup, and the
+explicit budget error still fires below that cap. The clean cache
+(`--cache-bytes`), compaction and staging budgets are separate and do not
+change with it; `metadata.current`/`peak` in the host report show what the
+budget actually holds.
 
 ## Measuring chunk arms
 

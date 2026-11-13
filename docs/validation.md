@@ -1,5 +1,160 @@
 # Validation
 
+## 2026-11-13 — Measurement flags: attach window, metadata budget, per-image reads, shipping window
+
+Branch `feat/measure-flags` from `main` (`35add83`, code identical to the
+measured revision `ebbe157`). Four commits, each with tests and documentation:
+`7d7e2db` `--attach-timeout-secs`, `f0bbc1d` `--metadata-bytes`, `bc8aeb7`
+per-image remote-read attribution, `efa269d` shipping durability window.
+**Tested revision: `efa269d`**, clean checkout on the VM. The read path
+(`local/reactor/read.rs`) is untouched; the sibling `feat/raced-read` branch
+owns it. No flag changes a default: without flags the host keeps the 60 s
+attach window and the 128 MiB metadata budget, and the new report fields are
+additive (`peer.images`, `fleet.shipping`). Nothing was pushed or merged.
+
+### Host and commands
+
+No build or test ran on Spark (editing, Git bundles and provider calls only).
+Freestyle x86_64 VM `cas-build-flags` (`vm-e9edd5c6254c486c9d8f7aea18911e79`,
+snapshot `freestyle/ubuntu-lg`, Ubuntu 24.04.5, Linux 6.1.102, 8 vCPU, 16 GiB,
+64 GiB disk), created for this task with its own identity grant and deleted
+after export. Nix 2.35.6 (upstream multi-user installer, flakes enabled). The
+branch was shipped as a git bundle; `ulimit -n 65536`,
+`CARGO_TARGET_DIR=/root/target`, `CARGO_BUILD_JOBS=8`.
+
+```sh
+nix develop -c just check
+nix develop -c cargo test -p cas-daemon --locked --lib -- \
+  local::host::tests::recovery::service local::host::tests::peer \
+  local::host::tests::fleet peer::tests
+CAS_FLEET_EVIDENCE=/root/evidence nix develop -c cargo test -p cas-daemon \
+  --locked --lib -- shipping_window_ring
+```
+
+### Outcomes on `efa269d`
+
+- `just check`: **pass** — formatting, strict Clippy, **577 Rust tests passed,
+  0 failed, 30 ignored** (572/30 on the frozen revision; the five new tests
+  are listed below), 13 Python tests, `git diff --check`.
+- Peer/fleet suites (`local::host::tests::peer`, `local::host::tests::fleet`
+  including the two- and four-process fixtures, `peer::tests`): 27 passed,
+  3 ignored subprocess entry points; `two_daemon_loopback` and
+  `descriptor_limit` subprocess runs passed.
+- New tests, all passing:
+  - `tests::measurement_flags_keep_their_frozen_defaults_and_reject_zero`
+    (`cas-host` CLI): defaults 60 s / 134,217,728 bytes; `0` rejected.
+  - `recovery::frontend::cold_attachment_window_expires_with_the_configured_timeout_when_no_guest_connects`:
+    a 200 ms window with no frontend fails through the existing
+    `recovery deadline expired` path (`connection_ok: false`), the other image
+    stays attachable.
+  - `recovery::service::metadata_budget_decides_whether_a_large_rebuilt_index_can_be_served`:
+    a 4,096-chunk catalog root fails `host_service::serve` under a 256 KiB
+    budget with the existing `chunk index metadata budget exhausted` error,
+    no file changes, `startup_error` in `host.json`; the same root opens under
+    the default budget, its index allocation exceeds 256 KiB, and chunks
+    0/2048/4095 read back correctly.
+  - `peer::per_image_remote_read_attribution_sums_to_the_host_counters`:
+    two images on one host, 5 and 3 remote reads plus one failure after the
+    owner stops; per-image counts sum to the host counters.
+  - `fleet::process::shipping_window_ring_records_a_delayed_owner_acknowledgement`:
+    two processes, owner holding each PUT 300 ms (test-only
+    `CAS_FLEET_DELAY=put-before`).
+
+Retained ring from that test (`shipping-window.json`): two batches (63 and 1
+chunks, 260,100 and 4,164 PUT body bytes), both `queued_ns = 406,784,488`,
+windows 332 ms and 634 ms (the second PUT waits behind the first's delay),
+`window_ns_sum = 967,001,619`, `rescan_batches = 0`.
+
+### Failures and retries during development
+
+1. `--metadata-bytes` first used `value_parser!(usize).range(1..)`, which clap
+   does not provide; the flag is parsed as `u64` and converted. A test compared
+   `usize` chunks with `u64`. Fixed before any test ran.
+2. The per-image test expected `chunks = 3` for image 3, but the read path
+   records the failed GET's chunk with zero milestones (`recent[].chunks`
+   convention), so the first run reported `chunks = 4`,
+   `verified_bytes = 16,384`. `verified_bytes` now counts only chunks whose
+   `verified_ns` is nonzero (3 × 4,096); `chunks` keeps the ring convention.
+   This is the only runtime assertion that failed; documented in
+   `peer-fetch.md`.
+3. `just check` failed once on `cargo fmt` (two layout diffs); applied, then
+   passed in full.
+
+### Design notes and limits
+
+- The attach window still starts with the recovery scan (one deadline created
+  beside it), so the default is byte-for-byte the previous behaviour. Retained
+  reconnection and the recovery scan keep the fixed `RECOVERY_TIMEOUT`.
+- Only `resources.metadata` follows `--metadata-bytes`; the compaction budget,
+  cache, staging and `Shared::new` reference backends keep their constants.
+- No root with a real >128 MiB index was built: that needs more than about
+  1.5 million distinct chunks (6 GiB or more of compacted data). The test
+  demonstrates the mechanism at a 256 KiB budget against a 4,096-chunk root.
+  Opening a 16 GiB image under `--metadata-bytes 402653184` remains to be
+  observed on the study hosts.
+- `fleet.shipping` adds a key beside the flow counters; `runner.py` reads
+  flows by name and is unaffected (Python tests pass). The owner's PUT reply
+  means its `Store::insert` and sync completed, not fleet-class FLUSH.
+- Rescan-originated batches (startup inventory, full queue, retry after a
+  failed pass) carry `queued_ns = 0` and are excluded from the window sums.
+
+Ignored evidence in the research repository under `results/measure-flags/`:
+`test1.log`, `test2.log`, `test3.log`, `test4.log`, `check-full.log`,
+`check-full2.log`, `totals.log`, `shipping-window.json`, the VM ledger
+`resources.json` and the control scripts.
+
+### Review follow-up (same day)
+
+Code review found nine issues; fixed in three grouped commits on the branch,
+**tested revision `39214ec`** (`82944e7` attach window and metadata cap,
+`d0c8ed1` per-image verified bytes, `39214ec` shipper queue and clock), on a
+fresh Freestyle VM `cas-build-flags` (`vm-e3e10c29fcfe488b9b2633981b01a95a`,
+same shape and procedure as above; `/tmp` on ext4), deleted after export.
+
+- Attach window: it now starts when recovery completes in both cold modes
+  (before, ordinary cold mode armed it before recovery). Help text and docs
+  say so. New test `attach_window_starts_after_recovery_completes` uses a
+  test-only `recovery_delay` (400 ms) with a 300 ms window: the service fails
+  after at least 700 ms through the unchanged `recovery deadline expired`
+  path with no `startup_error`, where the old sequencing failed at attach.
+- `--metadata-bytes` is capped at physical memory (`physical_memory_bytes`,
+  sysconf); a value above it is `InvalidInput` before any output exists.
+  Sizing text corrected: 16 GiB at 4 KiB is 4,194,304 chunks, 168–336 MB.
+- Per-image `verified_bytes` is credited once at transport verification to
+  the image whose read issued the GET (each image holds a `Router::for_image`
+  view of the shared connections; the request slot carries the image index).
+  Coalesced waiters count as reads and chunks, not bytes, so the bytes equal
+  `4096 × counters.verified` even when reads coalesce. New test
+  `coalesced_remote_reads_credit_verified_bytes_to_the_issuing_image_once`
+  holds a mock peer's reply until the second image has joined the first's
+  fetch (`fetches.counters.joined`): one GET, one verified chunk, bytes only
+  on the issuer. The slot limit is checked once in `make_image`;
+  `Metrics::bind` is infallible.
+- Shipper: the queue holds `(hash, Option<queued_ns>)` pairs, rescans carry
+  `None` (`null` in the report), batches copy up to 63 hashes into a fixed
+  array for the unchanged `ship()`, and times come from the peer metrics
+  clock shared with `peer.recent` (the report's `clock` field says so). The
+  two-process test waits on the sender's `fleet.ship.put_acked_chunks`.
+
+Outcomes: `nix develop -c just check` **pass** — **579 Rust tests passed,
+0 failed, 30 ignored**, 13 Python tests, strict Clippy, fmt, whitespace.
+Targeted suites (`recovery::service`, `peer`, `fleet` incl. subprocess
+fixtures, `peer::tests`): 32 passed, 5 ignored entry points. Retained ring
+(`shipping-window-review.json`): two batches, windows 337 ms and 640 ms
+against the 300 ms owner delay, `window_ns_sum = 977,932,642`,
+`rescan_batches = 0`.
+
+Failures and retries: a shadowed `config` binding and a missing SAFETY
+comment (`clippy::undocumented_unsafe_blocks`) failed the first compile; one
+`cargo fmt` hunk failed the first full check. All fixed and squashed into
+their commits. A probe with `TMPDIR=/dev/shm` fails every host test in the
+shared fixture at `Store::create_sized` (O_DIRECT on tmpfs), before any test
+body, so the new cold-serve test is not ignored: it runs wherever its
+siblings run. The XFS-ignored `failed_cold_image_protocol_leaves_the_other_socket_usable`
+passed on ext4; `cold_host_supervises_both...` still needs XFS
+(`Snapshot::create`). Evidence: `review1.log`, `review2.log`,
+`review-check.log`, `review-check2.log`, `probe-cold.log`.
+
 ## 2026-11-09 — Integration of C5, peer fetch and 16 KiB chunks
 
 Branch `integration/2026-11-09` from `main` (`9c60e72`), merged in order:

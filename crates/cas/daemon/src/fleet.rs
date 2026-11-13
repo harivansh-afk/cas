@@ -33,6 +33,19 @@ pub(crate) fn crash_point(point: &str) {
     }
 }
 
+/// Test-only owner delay: holds a PUT before its durable insert so the shipping
+/// window ring can be checked against a known acknowledgement delay.
+#[cfg(test)]
+pub(crate) fn delay_point(point: &str) {
+    if std::env::var("CAS_FLEET_DELAY").as_deref() == Ok(point) {
+        let millis: u64 = std::env::var("CAS_FLEET_DELAY_MS")
+            .expect("delay harness duration")
+            .parse()
+            .expect("delay milliseconds");
+        std::thread::sleep(std::time::Duration::from_millis(millis));
+    }
+}
+
 #[derive(Clone, Debug, clap::Args)]
 #[group(id = "FleetConfig")]
 pub struct Config {

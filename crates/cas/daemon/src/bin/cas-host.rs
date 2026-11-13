@@ -35,6 +35,9 @@ struct Serve {
     /// Clean chunk-cache bytes; zero disables payload caching, bounded by the host cap.
     #[arg(long, default_value_t = cas_daemon::Resources::DEFAULT_CACHE_BYTES)]
     cache_bytes: usize,
+    /// Host metadata budget in bytes (indexes, manifests, queues); at most physical memory.
+    #[arg(long, default_value_t = cas_daemon::Resources::DEFAULT_METADATA_BYTES as u64, value_parser = clap::value_parser!(u64).range(1..))]
+    metadata_bytes: u64,
     /// Sample every 500 ms; fail the run if telemetry exceeds 64 MiB or 4,096 samples.
     #[arg(long)]
     telemetry: bool,
@@ -50,6 +53,9 @@ struct Serve {
     pause_after: std::num::NonZeroU64,
     #[arg(long, requires = "pause_compaction")]
     pause_wait_for_arm: bool,
+    /// Seconds a cold guest has, counted from the end of recovery, to connect and enable its queues.
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..))]
+    attach_timeout_secs: u64,
 }
 
 #[derive(Parser)]
@@ -116,6 +122,8 @@ fn main() -> std::io::Result<()> {
         endpoints: args.endpoints,
         reports: args.reports,
         cache_bytes: args.cache_bytes,
+        metadata_bytes: usize::try_from(args.metadata_bytes)
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "metadata bytes"))?,
         telemetry: args.telemetry,
         telemetry_rotate: args.telemetry_rotate,
         pause: args
@@ -126,12 +134,59 @@ fn main() -> std::io::Result<()> {
                 after: args.pause_after,
                 wait_for_arm: args.pause_wait_for_arm,
             }),
+        attach_timeout: std::time::Duration::from_secs(args.attach_timeout_secs),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn serve_args<'a>(extra: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
+        [
+            "cas-host",
+            "--root",
+            "/fixture",
+            "--store",
+            "01010101010101010101010101010101",
+            "--mode",
+            "cold",
+            "--reports",
+            "/reports",
+            "--image",
+            "02020202020202020202020202020202=/socket",
+        ]
+        .into_iter()
+        .chain(extra)
+        .collect()
+    }
+
+    #[test]
+    fn measurement_flags_keep_their_frozen_defaults_and_reject_zero() {
+        let matches = command()
+            .try_get_matches_from(serve_args(["--attach-timeout-secs", "240"]))
+            .unwrap();
+        let serve = Serve::from_arg_matches(&matches).unwrap();
+        assert_eq!(serve.attach_timeout_secs, 240);
+        assert_eq!(
+            serve.metadata_bytes,
+            cas_daemon::Resources::DEFAULT_METADATA_BYTES as u64
+        );
+        let matches = command()
+            .try_get_matches_from(serve_args(["--metadata-bytes", "402653184"]))
+            .unwrap();
+        assert_eq!(
+            Serve::from_arg_matches(&matches).unwrap().metadata_bytes,
+            384 * 1024 * 1024
+        );
+        for (flag, value) in [("--attach-timeout-secs", "0"), ("--metadata-bytes", "0")] {
+            assert!(
+                command()
+                    .try_get_matches_from(serve_args([flag, value]))
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn initialization_and_existing_serve_options_parse_without_mixing() {
@@ -162,10 +217,10 @@ mod tests {
                 "02020202020202020202020202020202=/socket",
             ]))
             .unwrap();
-        assert_eq!(
-            Serve::from_arg_matches(&matches).unwrap().endpoints.len(),
-            1
-        );
+        let serve = Serve::from_arg_matches(&matches).unwrap();
+        assert_eq!(serve.endpoints.len(), 1);
+        assert_eq!(serve.attach_timeout_secs, 60);
+        assert_eq!(serve.metadata_bytes, 128 * 1024 * 1024);
         assert!(
             command()
                 .try_get_matches_from(

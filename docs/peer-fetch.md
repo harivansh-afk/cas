@@ -169,6 +169,21 @@ use one monotonic host-local origin; clocks across hosts are not compared:
 - `phases.verified_ns`: complete payload has passed BLAKE3 verification.
 - `completed_ns`: guest status/used publication, or native harness receipt.
 
+`peer.images` attributes remote reads to images, keyed by image ID.
+`completed_reads`, `failed_reads` and `chunks` count the image's reads and the
+remote chunks they resolved as `recent[].chunks` does, including the chunk
+whose GET failed and chunks a coalesced waiter inherited from another read's
+GET. `verified_bytes` is credited once, at transport verification, to the image
+whose read issued the GET: a waiter on another image's fetch is attributed as a
+read but not as fetched bytes. Each image holds a view of the shared GET router
+and a slot preallocated with the host image slots; nothing is allocated on the
+IO path. The per-image values sum to the host
+`counters.completed_reads`/`failed_reads`, and the verified bytes to
+`4096 × counters.verified` even when reads coalesce. They are cumulative and
+restart with the host; a returning
+migration reuses the ID in a new slot and the report sums them. Race or
+fallback fields are not part of this table.
+
 `success` marks completion and `chunks` counts remote chunks for the request.
 Zero milestones mean an unreached phase on failure. Multi-chunk reads retain
 first send/first byte and last verification; coalesced waiters inherit their

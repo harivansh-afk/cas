@@ -68,9 +68,19 @@ pub struct Config {
     pub endpoints: Vec<Endpoint>,
     pub reports: PathBuf,
     pub cache_bytes: usize,
+    /// Host metadata budget; `Resources::DEFAULT_METADATA_BYTES` unless configured.
+    /// The separate compaction budget does not derive from it.
+    pub metadata_bytes: usize,
     pub telemetry: bool,
     pub telemetry_rotate: bool,
     pub pause: Option<crate::CompactionPause>,
+    /// Window, starting when recovery completes, for a cold guest to connect
+    /// and enable its virtio-blk queues before the attachment fails;
+    /// `RECOVERY_TIMEOUT` unless configured.
+    pub attach_timeout: Duration,
+    /// Test-only: hold recovery open for this long before it completes.
+    #[cfg(test)]
+    pub(crate) recovery_delay: Duration,
 }
 
 struct Output {
@@ -163,6 +173,20 @@ fn outputs(
     Ok((outputs, host_report))
 }
 
+/// Upper bound for `--metadata-bytes`: a budget above physical memory could
+/// never be honoured, so the explicit budget failure must still be reachable.
+pub fn physical_memory_bytes() -> io::Result<usize> {
+    // SAFETY: sysconf reads process-independent system constants.
+    let pages = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) };
+    // SAFETY: as above; no pointers are passed.
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if pages <= 0 || page <= 0 {
+        return Err(io::Error::other("physical memory size unavailable"));
+    }
+    usize::try_from(pages as u128 * page as u128)
+        .map_err(|_| io::Error::other("physical memory size overflow"))
+}
+
 pub fn serve(mut config: Config) -> io::Result<()> {
     if config.cache_bytes > Resources::DEFAULT_CACHE_BYTES {
         return Err(io::Error::new(
@@ -170,8 +194,15 @@ pub fn serve(mut config: Config) -> io::Result<()> {
             "clean cache exceeds host cap",
         ));
     }
+    if config.metadata_bytes == 0 || config.metadata_bytes > physical_memory_bytes()? {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "metadata budget must be nonzero and at most physical memory",
+        ));
+    }
     let mut resources = Resources::default();
     resources.cache_bytes = config.cache_bytes;
+    resources.metadata = crate::local::metadata_budget_sized(config.metadata_bytes);
     resources.peer = config.peer.clone();
     resources.peer.validate()?;
     let (outputs, report) = outputs(&mut config, &resources)?;
@@ -230,6 +261,9 @@ fn run(
     drop(config.endpoints);
     drop(config.reports);
     let deadline = Deadline::after(RECOVERY_TIMEOUT);
+    let attach_timeout = config.attach_timeout;
+    #[cfg(test)]
+    let recovery_delay = config.recovery_delay;
     let worker_resources = Arc::clone(resources);
     let mut ids = reserved_vec(outputs.len(), &resources.metadata)?;
     ids.extend(outputs.iter().map(|output| output.image));
@@ -247,6 +281,8 @@ fn run(
             },
             worker_resources,
         )?;
+        #[cfg(test)]
+        thread::sleep(recovery_delay);
         if !fleet_cold && inspected.images().map(|(id, _)| id).ne(ids) {
             return Err(io::Error::other(
                 "configured endpoints differ from the complete catalog image set",
@@ -272,13 +308,26 @@ fn run(
             )?)),
         }
     })?;
+    // The guest attachment window starts now that recovery has completed, in
+    // both serving modes; recovery itself keeps its own bound. Many guests
+    // cold-booting at once can need a longer window than recovery.
+    let attach_deadline = Deadline::after(attach_timeout);
     if fleet_cold {
-        return run_fleet_services(outputs, &mut runtime, &resources.metadata, telemetry);
+        return run_fleet_services(
+            outputs,
+            &mut runtime,
+            &resources.metadata,
+            telemetry,
+            attach_timeout,
+        );
     }
     let mut services = reserved_vec(outputs.len(), &resources.metadata)?;
     let mut controls = reserved_vec(outputs.len(), &resources.metadata)?;
     for output in outputs {
-        let service = Service::new(runtime.attach(output.image, deadline)?, output.report)?;
+        let service = Service::new(
+            runtime.attach(output.image, attach_deadline)?,
+            output.report,
+        )?;
         controls.push((output.image, service.control()?));
         services.push((output.socket, service));
     }
@@ -325,6 +374,7 @@ fn run_fleet_services(
     runtime: &mut Runtime,
     metadata: &Arc<Budget>,
     mut telemetry: Option<Telemetry>,
+    attach_timeout: Duration,
 ) -> io::Result<Outcome> {
     let mut pending = reserved_vec(outputs.len(), metadata)?;
     pending.extend(outputs.into_iter().map(Some));
@@ -346,11 +396,8 @@ fn run_fleet_services(
                 continue;
             }
             let output = slot.take().unwrap();
-            let backend = host.attach_cold(
-                output.image,
-                RECOVERY_TIMEOUT,
-                crate::fault::Fault::default(),
-            )?;
+            let backend =
+                host.attach_cold(output.image, attach_timeout, crate::fault::Fault::default())?;
             let service = Service::new(backend, output.report)?;
             controls.push((output.image, service.control()?));
             workers.push(Some((

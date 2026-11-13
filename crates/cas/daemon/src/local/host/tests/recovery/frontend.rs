@@ -469,3 +469,45 @@ fn retained_zero_variants_replace_written_data_without_gather_and_survive_compac
         assert_eq!(resources.metadata.usage().current.bytes, 0);
     }
 }
+
+#[test]
+fn cold_attachment_window_expires_with_the_configured_timeout_when_no_guest_connects() {
+    let root = tempfile::tempdir().unwrap();
+    let resources = Arc::new(Resources::default());
+    setup(root.path(), &resources, SnapshotFixture::Absent);
+    let mut host = scan(root.path(), &resources)
+        .unwrap()
+        .require(Prefixes::Cold)
+        .unwrap()
+        .recover_test(1024 * MAX_REQUEST_BYTES as u64)
+        .unwrap();
+    // The same failure path as the 60 s default, reached in 200 ms. host_service
+    // passes `--attach-timeout-secs` through this parameter.
+    let backend = host
+        .attach_cold(
+            [2; 16],
+            Duration::from_millis(200),
+            crate::fault::Fault::new(None),
+        )
+        .unwrap();
+    let transport = tempfile::tempdir_in("/dev/shm").unwrap();
+    let report = fs::File::create(transport.path().join("report.json")).unwrap();
+    let service = crate::service::Service::new(backend, report).unwrap();
+    let started = Instant::now();
+    let error = service
+        .serve(&transport.path().join("image.sock"))
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("recovery deadline expired"),
+        "{error}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let report: serde_json::Value =
+        serde_json::from_reader(fs::File::open(transport.path().join("report.json")).unwrap())
+            .unwrap();
+    assert_eq!(report["connection_ok"], false);
+    // The shared host and its other image are unaffected by one expired window.
+    let other = attach(&mut host, 3);
+    drop(other);
+    shutdown(host);
+}

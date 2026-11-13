@@ -58,6 +58,15 @@ impl Runtime {
             &resources.metadata,
         )?))
     }
+    /// Flow byte counters plus the shipper's durability-window ring.
+    pub fn report(&self) -> serde_json::Value {
+        let mut value = self.metrics.report();
+        value["shipping"] = self
+            .shipper
+            .get()
+            .map_or(serde_json::Value::Null, chunks::Shipper::report);
+        value
+    }
     pub fn writable(&self, image: [u8; 16]) -> io::Result<bool> {
         let state = self.state.lock().unwrap();
         Ok(!state.failed
@@ -94,7 +103,7 @@ impl fleet::Handler for Gateway {
     ) -> io::Result<usize> {
         if op == 7 && body.is_empty() {
             let runtime = self.shared.fleet.as_ref().unwrap();
-            let value = serde_json::json!({"fleet":runtime.metrics.report(),
+            let value = serde_json::json!({"fleet":runtime.report(),
                 "peer":self.shared.peer_metrics.as_ref().map(|metrics| metrics.report()),
                 "store":self.shared.reader.status(), "cache":self.shared.cache.status(),
                 "placement":runtime.state.lock().unwrap().placement});
@@ -271,6 +280,10 @@ pub(super) fn start(
         &shared.resources.metadata,
         runtime.metrics.clone(),
         shared.io_scheduler.clone(),
+        shared
+            .peer_metrics
+            .clone()
+            .ok_or_else(|| io::Error::other("fleet shipping requires the peer metrics clock"))?,
     )?;
     runtime
         .shipper
@@ -341,6 +354,8 @@ impl worker::Owner {
             chunks::decode(body, |chunks| {
                 #[cfg(test)]
                 fleet::crash_point("put-before");
+                #[cfg(test)]
+                fleet::delay_point("put-before");
                 self.store.insert(chunks)?;
                 #[cfg(test)]
                 fleet::crash_point("put-durable");
