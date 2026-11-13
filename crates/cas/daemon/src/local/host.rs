@@ -69,6 +69,10 @@ impl Resources {
     }
 
     pub const DEFAULT_CACHE_BYTES: usize = 256 * MAX_REQUEST_BYTES;
+    /// Host metadata budget: indexes, manifests, queues and bounded rings. A
+    /// rebuilt chunk index needs roughly 40–80 bytes per 4 KiB chunk, so roots
+    /// beyond about 1.5 million chunks need `--metadata-bytes` above this.
+    pub const DEFAULT_METADATA_BYTES: usize = 128 * MAX_REQUEST_BYTES;
 
     pub fn read_memory(&self) -> Arc<Budget> {
         Arc::clone(&self.pools.read)

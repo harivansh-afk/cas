@@ -113,6 +113,18 @@ KVM crash fixtures are not physical power-loss tests or production readiness.
 See [current work](../TODO.md) and [validation](validation.md) for open acceptance.
 
 
+## Host budgets
+
+`cas-host` holds a fixed metadata budget for indexes, manifests, queues and
+bounded instrumentation rings; the rebuilt chunk index is charged to it when a
+root is opened, and an index that does not fit fails startup with the explicit
+`chunk index metadata budget exhausted` error before any repair. The default
+is 128 MiB. Each 4 KiB chunk costs about 40–80 bytes of index (a 16 GiB image
+needs roughly 170–270 MB), so `--metadata-bytes N` raises the budget for such
+roots. The clean cache (`--cache-bytes`), compaction and staging budgets are
+separate and do not change with it; `metadata.current`/`peak` in the host
+report show what the budget actually holds.
+
 ## Measuring chunk arms
 
 Host reports and existing telemetry expose `store.index_memory`,

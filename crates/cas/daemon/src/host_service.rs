@@ -68,6 +68,9 @@ pub struct Config {
     pub endpoints: Vec<Endpoint>,
     pub reports: PathBuf,
     pub cache_bytes: usize,
+    /// Host metadata budget; `Resources::DEFAULT_METADATA_BYTES` unless configured.
+    /// The separate compaction budget does not derive from it.
+    pub metadata_bytes: usize,
     pub telemetry: bool,
     pub telemetry_rotate: bool,
     pub pause: Option<crate::CompactionPause>,
@@ -173,8 +176,15 @@ pub fn serve(mut config: Config) -> io::Result<()> {
             "clean cache exceeds host cap",
         ));
     }
+    if config.metadata_bytes == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "metadata budget must be nonzero",
+        ));
+    }
     let mut resources = Resources::default();
     resources.cache_bytes = config.cache_bytes;
+    resources.metadata = crate::local::metadata_budget_sized(config.metadata_bytes);
     resources.peer = config.peer.clone();
     resources.peer.validate()?;
     let (outputs, report) = outputs(&mut config, &resources)?;

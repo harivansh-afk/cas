@@ -10,6 +10,7 @@ fn config(root: &Path, transport: &Path, mode: Mode) -> ServiceConfig {
     ServiceConfig {
         peer: crate::peer::Config::default(),
         cache_bytes: Resources::DEFAULT_CACHE_BYTES,
+        metadata_bytes: Resources::DEFAULT_METADATA_BYTES,
         telemetry: false,
         telemetry_rotate: false,
         root: root.to_owned(),
@@ -191,4 +192,115 @@ fn failed_cold_image_protocol_leaves_the_other_socket_usable() {
         true
     );
     assert!(report(transport.path(), "host.json")["host"]["failure"].is_null());
+}
+
+/// A catalog root whose rebuilt chunk index is the dominant metadata cost:
+/// 4,096 distinct chunks need a 8,192-bucket table (about 330 KiB), and the
+/// allocator charges the old table while the replacement grows.
+const INDEX_CHUNKS: usize = 4096;
+const TIGHT_METADATA_BYTES: usize = 256 * 1024;
+fn chunk_pattern(chunk: usize) -> [u8; BLOCK_SIZE] {
+    let mut bytes = [0x5a; BLOCK_SIZE];
+    bytes[..8].copy_from_slice(&(chunk as u64).to_le_bytes());
+    bytes
+}
+fn large_index_root(root: &Path, resources: &Arc<Resources>) {
+    let image_bytes = (INDEX_CHUNKS * BLOCK_SIZE) as u64;
+    let (store, images) = create_images(
+        root,
+        1,
+        resources,
+        image_bytes,
+        append::Limits::default(),
+        Config {
+            segment_bytes: 2 * MAX_REQUEST_BYTES as u64,
+            ..STORE
+        },
+    );
+    let mut catalog = Catalog::create(
+        Arc::clone(store.tickets()),
+        STORE.store,
+        Arc::clone(&resources.metadata),
+    )
+    .unwrap();
+    let prepared = catalog
+        .prepare(Change::Insert(Entry {
+            id: [2; 16],
+            kind: EntryKind::Image { image_bytes },
+        }))
+        .unwrap();
+    catalog.publish(prepared).unwrap();
+    drop(catalog);
+    let mut host = start(Arc::clone(resources), store, images);
+    let mut local = attach(&mut host, 2);
+    let requests = INDEX_CHUNKS * BLOCK_SIZE / MAX_REQUEST_BYTES;
+    let mut bytes = vec![0; MAX_REQUEST_BYTES];
+    for request in 0..requests {
+        for (block, chunk) in bytes.as_chunks_mut::<BLOCK_SIZE>().0.iter_mut().enumerate() {
+            *chunk = chunk_pattern(request * (MAX_REQUEST_BYTES / BLOCK_SIZE) + block);
+        }
+        write(
+            &mut local,
+            request as u64 + 1,
+            request * MAX_REQUEST_BYTES,
+            &bytes,
+        );
+    }
+    let permit = local.prepare(Kind::Control).unwrap().unwrap();
+    local
+        .enqueue(requests as u64 + 1, Operation::Flush, permit)
+        .unwrap();
+    completed(&mut local);
+    drained(&mut local, requests as u64);
+    assert_eq!(host.store_status().chunks, INDEX_CHUNKS);
+    drop(local);
+    shutdown(host);
+}
+
+#[test]
+fn metadata_budget_decides_whether_a_large_rebuilt_index_can_be_served() {
+    let root = tempfile::tempdir().unwrap();
+    let transport = tempfile::tempdir_in("/dev/shm").unwrap();
+    large_index_root(root.path(), &Arc::new(Resources::default()));
+    let before = files(root.path());
+    // Below the index's need, host startup fails with the existing explicit
+    // budget error before any repair; `--metadata-bytes` sets this value.
+    let mut config = config(root.path(), transport.path(), Mode::Cold);
+    config.endpoints.truncate(1);
+    config.metadata_bytes = TIGHT_METADATA_BYTES;
+    let error = host_service::serve(config).unwrap_err();
+    assert!(
+        error.to_string().contains("metadata budget exhausted"),
+        "{error}"
+    );
+    assert_eq!(files(root.path()), before);
+    assert_eq!(
+        report(transport.path(), "host.json")["startup_error"],
+        error.to_string()
+    );
+    // The same root opens and serves every chunk under a sufficient budget.
+    let resources = Arc::new(Resources {
+        metadata: crate::local::metadata_budget_sized(Resources::DEFAULT_METADATA_BYTES),
+        ..Resources::default()
+    });
+    let mut host = scan(root.path(), &resources)
+        .unwrap()
+        .require(Prefixes::Cold)
+        .unwrap()
+        .recover_test(1024 * MAX_REQUEST_BYTES as u64)
+        .unwrap();
+    assert_eq!(host.store_status().chunks, INDEX_CHUNKS);
+    let index = host.store_status().index_memory.allocated_bytes;
+    assert!(index > TIGHT_METADATA_BYTES, "index uses {index} bytes");
+    let mut local = attach(&mut host, 2);
+    for chunk in [0, INDEX_CHUNKS / 2, INDEX_CHUNKS - 1] {
+        read_at(
+            &mut local,
+            chunk as u64,
+            (chunk * BLOCK_SIZE) as u64,
+            &chunk_pattern(chunk),
+        );
+    }
+    drop(local);
+    shutdown(host);
 }

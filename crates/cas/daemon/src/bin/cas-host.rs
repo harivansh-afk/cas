@@ -35,6 +35,9 @@ struct Serve {
     /// Clean chunk-cache bytes; zero disables payload caching, bounded by the host cap.
     #[arg(long, default_value_t = cas_daemon::Resources::DEFAULT_CACHE_BYTES)]
     cache_bytes: usize,
+    /// Host metadata budget in bytes (indexes, manifests, queues); the rebuilt chunk index must fit.
+    #[arg(long, default_value_t = cas_daemon::Resources::DEFAULT_METADATA_BYTES as u64, value_parser = clap::value_parser!(u64).range(1..))]
+    metadata_bytes: u64,
     /// Sample every 500 ms; fail the run if telemetry exceeds 64 MiB or 4,096 samples.
     #[arg(long)]
     telemetry: bool,
@@ -119,6 +122,8 @@ fn main() -> std::io::Result<()> {
         endpoints: args.endpoints,
         reports: args.reports,
         cache_bytes: args.cache_bytes,
+        metadata_bytes: usize::try_from(args.metadata_bytes)
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "metadata bytes"))?,
         telemetry: args.telemetry,
         telemetry_rotate: args.telemetry_rotate,
         pause: args
@@ -163,11 +168,24 @@ mod tests {
             .unwrap();
         let serve = Serve::from_arg_matches(&matches).unwrap();
         assert_eq!(serve.attach_timeout_secs, 240);
-        assert!(
-            command()
-                .try_get_matches_from(serve_args(["--attach-timeout-secs", "0"]))
-                .is_err()
+        assert_eq!(
+            serve.metadata_bytes,
+            cas_daemon::Resources::DEFAULT_METADATA_BYTES as u64
         );
+        let matches = command()
+            .try_get_matches_from(serve_args(["--metadata-bytes", "402653184"]))
+            .unwrap();
+        assert_eq!(
+            Serve::from_arg_matches(&matches).unwrap().metadata_bytes,
+            384 * 1024 * 1024
+        );
+        for (flag, value) in [("--attach-timeout-secs", "0"), ("--metadata-bytes", "0")] {
+            assert!(
+                command()
+                    .try_get_matches_from(serve_args([flag, value]))
+                    .is_err()
+            );
+        }
     }
 
     #[test]
@@ -202,6 +220,7 @@ mod tests {
         let serve = Serve::from_arg_matches(&matches).unwrap();
         assert_eq!(serve.endpoints.len(), 1);
         assert_eq!(serve.attach_timeout_secs, 60);
+        assert_eq!(serve.metadata_bytes, 128 * 1024 * 1024);
         assert!(
             command()
                 .try_get_matches_from(
