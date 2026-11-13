@@ -263,6 +263,70 @@ fn race_budget_starts_the_challenger_only_after_the_primary_is_late() {
     drop(metrics);
     assert_eq!(budget.usage().current, Amount::default());
 }
+/// A slot is reused while the racer still holds the previous occupant's
+/// deadline. When that stale deadline fires it must not cancel the new
+/// request's armed race: the second request still races and the second
+/// owner still wins against the slow first owner.
+#[test]
+fn stale_racer_deadline_does_not_cancel_a_reused_slots_race() {
+    let value = raced_value();
+    // First owner: prompt for request 1, 200 ms late for request 2.
+    let (first, first_server) = {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(TIMEOUT)).unwrap();
+            let h = request(&mut socket);
+            socket
+                .write_all(&response(h, &[value; BLOCK_SIZE]))
+                .unwrap();
+            let h = request(&mut socket);
+            thread::sleep(Duration::from_millis(200));
+            socket
+                .write_all(&response(h, &[value; BLOCK_SIZE]))
+                .unwrap();
+        });
+        (address, server)
+    };
+    let (second, second_server) = member(value, Duration::ZERO, false, 1);
+    let config = raced_config(30_000, first, second);
+    let budget = memory();
+    let metrics = Metrics::new(&budget, 1).unwrap();
+    let router = Router::new(&config, &budget, metrics.clone(), None).unwrap();
+    let hash = *blake3::hash(&[value; BLOCK_SIZE]).as_bytes();
+    let ticket = router.fetch(hash).unwrap();
+    router.race(&ticket, hash, None);
+    let (phases, result, _) = wait(&ticket);
+    result.unwrap();
+    assert_eq!(phases.race_winner, metrics::WINNER_NONE);
+    // The slot is free again while its 30 ms deadline is still armed; the
+    // next fetch reuses it (the free list is a stack) with a new generation.
+    drop(ticket);
+    let ticket = router.fetch(hash).unwrap();
+    router.race(&ticket, hash, None);
+    let started = Instant::now();
+    let (phases, result, bytes) = wait(&ticket);
+    result.unwrap();
+    assert_eq!(bytes, [value; BLOCK_SIZE]);
+    assert!(
+        started.elapsed() < Duration::from_millis(200),
+        "the reused slot's race was cancelled: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(phases.race_winner, metrics::WINNER_SECOND);
+    assert_eq!(phases.race_budget_us, 30_000);
+    assert_eq!(counter(&metrics, "races_started"), 1);
+    assert_eq!(counter(&metrics, "race_won_second"), 1);
+    assert_eq!(counter(&metrics, "race_dropped"), 0);
+    drop(ticket);
+    wait_counter(&metrics, "race_discarded", 1);
+    shutdown(router);
+    first_server.join().unwrap();
+    second_server.join().unwrap();
+    drop(metrics);
+    assert_eq!(budget.usage().current, Amount::default());
+}
 fn request(socket: &mut TcpStream) -> Header {
     let mut bytes = [0; HEADER + 32];
     socket.read_exact(&mut bytes).unwrap();

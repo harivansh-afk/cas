@@ -13,7 +13,7 @@ use cas_core::{
 use std::{
     io::{self, Read, Write},
     net::{SocketAddr, TcpStream},
-    os::fd::{AsRawFd, RawFd},
+    os::fd::{AsFd, AsRawFd, OwnedFd, RawFd},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -82,7 +82,7 @@ struct Slot {
     /// Reuse counter: a race armed for an earlier occupant must not attach.
     generation: u64,
     /// Also signalled on completion: the primary slot's eventfd of a race.
-    notify: Option<EventFd>,
+    notify: Option<OwnedFd>,
     /// The second source, owned by the primary request's slot.
     challenger: Option<Challenger>,
     /// An armed race not started yet: started by the racer at its deadline,
@@ -221,7 +221,7 @@ impl Client {
     pub(crate) fn fetch_with(
         &self,
         hash: [u8; 32],
-        notify: Option<EventFd>,
+        notify: Option<OwnedFd>,
         inline: bool,
         racing: bool,
         image: usize,
@@ -237,7 +237,7 @@ impl Shared {
     pub(crate) fn fetch(
         shared: &BudgetArc<Self>,
         hash: [u8; 32],
-        notify: Option<EventFd>,
+        notify: Option<OwnedFd>,
         inline: bool,
         racing: bool,
         image: usize,
@@ -305,7 +305,11 @@ impl Slot {
         let Some(pending) = self.pending.take() else {
             return;
         };
-        let Ok(notify) = self.notify.as_ref().unwrap_or(&self.event).try_clone() else {
+        let wake = self
+            .notify
+            .as_ref()
+            .map_or(self.event.as_raw_fd(), AsRawFd::as_raw_fd);
+        let Ok(notify) = cas_core::eventfd::duplicate(wake) else {
             metrics.count(|c| c.race_dropped += 1);
             return;
         };
@@ -322,7 +326,10 @@ impl Slot {
         let finished = challenger.peek().done;
         self.challenger = Some(challenger);
         if finished {
-            let _ = self.notify.as_ref().unwrap_or(&self.event).write(1);
+            let _ = match &self.notify {
+                Some(notify) => cas_core::eventfd::notify(notify.as_fd()),
+                None => self.event.write(1),
+            };
         }
     }
 }
@@ -451,12 +458,16 @@ impl SlotRef {
         }
     }
     /// The racer's deadline: start the pending challenger if still wanted.
+    /// A deadline armed for an earlier occupant of a reused slot belongs to
+    /// nobody now; the current occupant's own armed race must stay untouched.
     pub(crate) fn due(&self) {
         let mut pool = self.shared.pool.lock().expect("peer pool poisoned");
         let metrics = self.shared.metrics.clone();
         let slot = &mut pool.slots[self.index];
-        if slot.generation != self.generation || !slot.owned || (slot.done && slot.error.is_none())
-        {
+        if slot.generation != self.generation {
+            return;
+        }
+        if !slot.owned || (slot.done && slot.error.is_none()) {
             let pending = slot.pending.take();
             drop(pool);
             drop(pending);
@@ -528,7 +539,7 @@ impl Pool {
             slot.start_pending(metrics);
         }
         if let Some(notify) = &slot.notify {
-            let _ = notify.write(1);
+            let _ = cas_core::eventfd::notify(notify.as_fd());
         }
         if slot.owned {
             let _ = slot.event.write(1);
