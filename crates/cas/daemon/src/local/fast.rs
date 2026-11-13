@@ -37,17 +37,21 @@
 //! of shared IO (a GET reply, a leader's publication, the cache fill) fails
 //! the read, the image gate and the shared host gate like the frozen path;
 //! local resource exhaustion while joining fails only the read and its image
-//! (see `Context::fail`). The frontend's IO thread holds the image completion
-//! gate across admission and publication, so nothing here locks that gate:
-//! the failed state is read lock-free and failures are recorded for the next
-//! gate holder. Reads that cannot establish these facts are sent to
+//! (see `Context::fail`), and never a waiter on a leader this read already
+//! holds: those leaders stay in the table as orphans that fetch and publish
+//! for their waiters (a leader whose GET slot was exhausted retries on every
+//! poll), so no bystander ever sees the dropped-leader `Interrupted`. The
+//! frontend's IO thread holds the image completion gate across admission and
+//! publication, so nothing here locks that gate: the failed state is read
+//! lock-free and failures are recorded for the next gate holder. Reads that
+//! cannot establish these facts are sent to
 //! the reactor unchanged.
 use super::*;
 use crate::local::chunk::{Block, Fetch, Joined, Sources, copy_chunk};
 use cas_core::{
     aligned::AlignedBuffer, cache::fills::Waiter, chunk_index::Hash, manifest::file::View,
 };
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 
 #[derive(Default, Clone, Copy, serde::Serialize)]
 pub(super) struct Counters {
@@ -61,6 +65,10 @@ pub(super) struct Counters {
     pub declined_capacity: u64,
     pub declined_failed: u64,
     pub failed_reads: u64,
+    /// Leaders a failed read left behind to fetch and publish for their
+    /// waiters, and those that could not be completed (their waiters failed).
+    pub orphaned_leaders: u64,
+    pub orphans_failed: u64,
     /// The FLUSH table overflowed: every later read is declined (`declined_flush`)
     /// until the image restarts. Cannot happen within the admission limit.
     pub flush_overflow: u64,
@@ -70,8 +78,10 @@ type Count = fn(&mut Counters) -> &mut u64;
 
 enum Source {
     /// This read leads the fetch: its GET fills the cell for every waiter.
+    /// `ticket` is `None` while the GET slot pool was exhausted; the next
+    /// poll tries again.
     Fetch {
-        ticket: crate::peer::Ticket,
+        ticket: Option<crate::peer::Ticket>,
         fetch: Option<Fetch>,
     },
     /// Another reader leads; its publication wakes the frontend.
@@ -85,11 +95,17 @@ struct Remote {
     done: bool,
 }
 
-struct Pending {
+/// The guest read a pending entry completes; `None` for an orphan that only
+/// publishes the leaders a failed read left behind.
+struct Guest {
     id: u64,
-    offset: u64,
     buffer: AlignedBuffer,
     permit: Permit,
+}
+
+struct Pending {
+    guest: Option<Guest>,
+    offset: u64,
     view: View,
     remote: BudgetVec<Remote, BudgetAllocator>,
 }
@@ -106,6 +122,35 @@ pub(super) struct Context {
     /// Ids of FLUSHes sent to the reactor and not yet completed.
     flushes: BudgetVec<u64, BudgetAllocator>,
     pub(super) counters: Counters,
+}
+
+/// Issue a leader's GET, signalling `notify` on completion. `Ok(None)` means
+/// the slot pool is exhausted: the leader is kept and the next poll tries
+/// again.
+fn issue(
+    sources: &Sources,
+    notify: &EventFd,
+    peer: &crate::peer::Router,
+    hash: Hash,
+) -> io::Result<Option<crate::peer::Ticket>> {
+    let ticket = match cas_core::eventfd::duplicate(notify)
+        .and_then(|wake| peer.fetch_with_notify(hash, wake))
+    {
+        Ok(ticket) => ticket,
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    // A reply that already failed is raced too (the challenger starts at
+    // once); only a verified one is not.
+    if !ticket.verified() {
+        let local = if peer.wants_local_plan() {
+            sources.race_plan(hash)
+        } else {
+            None
+        };
+        peer.race(&ticket, hash, local);
+    }
+    Ok(Some(ticket))
 }
 
 #[expect(
@@ -166,7 +211,7 @@ impl Context {
     }
     /// A duplicate of the frontend wake for a registry waiter or a GET.
     fn wake(&self) -> io::Result<OwnedFd> {
-        cas_core::eventfd::duplicate(self.notify.as_raw_fd())
+        cas_core::eventfd::duplicate(&self.notify)
     }
     /// Signal the frontend's completion eventfd. A vhost-user backend learns
     /// of completions only through that descriptor (the reactor writes it
@@ -285,8 +330,8 @@ impl Context {
         }
         // Pass 2: join the shared fetch registry. Nothing is held until the
         // first entry; after that a problem fails the read like a reactor
-        // read, never declines it (declining would drop a leader and fail
-        // every waiter that joined it).
+        // read, never declines it, and the leaders already held stay behind
+        // as orphans that publish for their waiters.
         let peer = self
             .peer
             .clone()
@@ -305,52 +350,44 @@ impl Context {
             };
             let destination =
                 &mut buffer.as_mut_slice()[block * BLOCK_SIZE..(block + 1) * BLOCK_SIZE];
-            let joined = self.wake().and_then(|wake| {
-                self.sources.join(
-                    &self.fetches,
-                    hash,
-                    BLOCK_SIZE,
-                    &credits,
-                    &self.metadata,
-                    &view,
-                    absolute,
-                    destination,
-                    Some(wake),
-                )
-            });
+            let joined = self.sources.join(
+                &self.fetches,
+                hash,
+                BLOCK_SIZE,
+                &credits,
+                &self.metadata,
+                &view,
+                absolute,
+                destination,
+                Some(|| self.wake()),
+            );
             let source = match joined {
                 Ok(Joined::Wait(waiter)) => {
                     self.counters.shared_waits += 1;
                     Source::Wait(waiter)
                 }
                 Ok(Joined::Served) => continue,
-                Ok(Joined::Lead(fetch)) => {
-                    let ticket = self
-                        .wake()
-                        .and_then(|wake| peer.fetch_with_notify(hash, wake));
-                    let ticket = match ticket {
-                        Ok(ticket) => ticket,
-                        Err(error) => {
-                            drop(fetch);
-                            failure = Some(error);
-                            break;
+                Ok(Joined::Lead(fetch)) => match issue(&self.sources, &self.notify, &peer, hash) {
+                    Ok(ticket) => {
+                        // An exhausted slot pool leaves the leader held with
+                        // no ticket: the read fails below, the orphan retries.
+                        if ticket.is_none() {
+                            failure = Some(io::Error::new(
+                                io::ErrorKind::WouldBlock,
+                                "peer GET slots exhausted",
+                            ));
                         }
-                    };
-                    // A reply that already failed is raced too (the
-                    // challenger starts at once); only a verified one is not.
-                    if !ticket.verified() {
-                        let local = if peer.wants_local_plan() {
-                            self.sources.race_plan(hash)
-                        } else {
-                            None
-                        };
-                        peer.race(&ticket, hash, local);
+                        Source::Fetch {
+                            ticket,
+                            fetch: Some(fetch),
+                        }
                     }
-                    Source::Fetch {
-                        ticket,
-                        fetch: Some(fetch),
+                    Err(error) => {
+                        drop(fetch);
+                        failure = Some(error);
+                        break;
                     }
-                }
+                },
                 Ok(Joined::Full) if sources.is_empty() => {
                     return Ok(self.decline(|c| &mut c.declined_capacity, io));
                 }
@@ -374,6 +411,9 @@ impl Context {
                 source,
                 done: false,
             });
+            if failure.is_some() {
+                break;
+            }
         }
         let Io {
             id,
@@ -391,53 +431,72 @@ impl Context {
                 permit.received.unwrap_or_else(Instant::now),
             ));
         }
-        let pending = Pending {
-            id,
-            offset,
-            buffer,
-            permit,
-            view,
-            remote: sources,
-        };
+        let guest = Guest { id, buffer, permit };
         if let Some(error) = failure {
-            // Local exhaustion while joining: no shared IO has failed.
-            self.fail(shared, pending, error, false, output)?;
+            // Local exhaustion while joining: no shared IO has failed. The
+            // read fails; the leaders it holds are orphaned, not dropped.
+            self.fail(shared, guest, error, false, output)?;
+            self.orphan(offset, view, sources);
             return Ok(Outcome::Taken);
         }
-        self.pending.push(pending);
+        self.pending.push(Pending {
+            guest: Some(guest),
+            offset,
+            view,
+            remote: sources,
+        });
         // A reply that arrived inline completes without any wake.
         self.poll(shared, output)?;
         Ok(Outcome::Taken)
     }
 
+    /// Keep the leaders of a failed or finished read alive until they have
+    /// published for their waiters. Waiters this read held are released.
+    fn orphan(&mut self, offset: u64, view: View, mut remote: BudgetVec<Remote, BudgetAllocator>) {
+        remote.retain(|r| !r.done && matches!(r.source, Source::Fetch { .. }));
+        if remote.is_empty() {
+            return;
+        }
+        if self.pending.len() == self.pending.capacity() {
+            // No table slot: dropping the leaders fails their waiters.
+            self.counters.orphans_failed += remote.len() as u64;
+            return;
+        }
+        self.counters.orphaned_leaders += remote.len() as u64;
+        self.pending.push(Pending {
+            guest: None,
+            offset,
+            view,
+            remote,
+        });
+    }
+
     /// Fail closed like a reactor read: IOERR to the guest with a zeroed
-    /// buffer, the image gate failed, unfinished leaders fail their waiters.
-    /// The shared host gate fails only when `shared_io` is set: the reactor
-    /// fails the host for a read whose shared IO (store or GET payload, a
-    /// publication it waited for, the cache fill) failed, and only the image
-    /// for errors before that stage. Here that means failures observed in
-    /// `poll`; exhaustion while joining (registry capacity after a waiter
-    /// joined, metadata budget, descriptor duplication, GET slots) is local.
+    /// buffer, the image gate failed. The shared host gate fails only when
+    /// `shared_io` is set: the reactor fails the host for a read whose shared
+    /// IO (store or GET payload, a publication it waited for, the cache fill)
+    /// failed, and only the image for errors before that stage. Here that
+    /// means failures observed in `poll`; exhaustion while joining (registry
+    /// capacity after a waiter joined, metadata budget, descriptor
+    /// duplication, GET slots) is local. Leaders the read held are never
+    /// dropped on its account: see `orphan`.
+    /// Recorded without taking either gate (the frontend holds them across
+    /// admission and publication); applied at the next lock.
     fn fail(
         &mut self,
         shared: &Shared,
-        pending: Pending,
+        guest: Guest,
         error: io::Error,
         shared_io: bool,
         output: &mut BudgetQueue<Completed>,
     ) -> io::Result<()> {
-        let Pending {
+        let Guest {
             id,
             mut buffer,
             mut permit,
-            remote,
-            ..
-        } = pending;
-        drop(remote);
+        } = guest;
         self.counters.failed_reads += 1;
         buffer.as_mut_slice().fill(0);
-        // Recorded without taking either gate (the frontend holds them
-        // across admission and publication); applied at the next lock.
         let message = error.to_string();
         shared.health.fail_pending(message.clone());
         if shared_io {
@@ -455,31 +514,58 @@ impl Context {
         Ok(())
     }
 
-    /// Complete every pending read whose sources have all finished.
+    /// Complete every pending read whose sources have all finished; publish
+    /// orphaned leaders and retry their GETs when the slot pool had been
+    /// exhausted.
     pub fn poll(&mut self, shared: &Shared, output: &mut BudgetQueue<Completed>) -> io::Result<()> {
+        let peer = self.peer.clone();
         let mut index = 0;
         while index < self.pending.len() {
             let Pending {
+                guest,
                 offset,
-                buffer,
-                permit,
                 view,
                 remote: remotes,
-                ..
             } = &mut self.pending[index];
             let mut failure = None;
             for remote in remotes.iter_mut().filter(|r| !r.done) {
                 let absolute = *offset / BLOCK_SIZE as u64 + remote.block as u64;
-                let destination = &mut buffer.as_mut_slice()
-                    [remote.block * BLOCK_SIZE..(remote.block + 1) * BLOCK_SIZE];
+                // The guest's buffer block and its trace are disjoint fields.
+                let (destination, mut trace) = match guest.as_mut() {
+                    Some(Guest { buffer, permit, .. }) => (
+                        Some(
+                            &mut buffer.as_mut_slice()
+                                [remote.block * BLOCK_SIZE..(remote.block + 1) * BLOCK_SIZE],
+                        ),
+                        permit.remote.as_mut(),
+                    ),
+                    None => (None, None),
+                };
                 match &mut remote.source {
                     Source::Fetch { ticket, fetch } => {
-                        let (phases, result) =
-                            ticket.finish(fetch.as_mut().expect("unpublished fetch").payload_mut());
+                        if ticket.is_none() {
+                            match issue(
+                                &self.sources,
+                                &self.notify,
+                                peer.as_ref().expect("fetch without a router"),
+                                remote.hash,
+                            ) {
+                                Ok(Some(issued)) => *ticket = Some(issued),
+                                Ok(None) => continue,
+                                Err(error) => {
+                                    failure = Some(error);
+                                    break;
+                                }
+                            }
+                        }
+                        let (phases, result) = ticket
+                            .as_ref()
+                            .expect("issued GET")
+                            .finish(fetch.as_mut().expect("unpublished fetch").payload_mut());
                         match result {
                             Ok(false) => continue,
                             Ok(true) => {
-                                if let Some(trace) = &mut permit.remote {
+                                if let Some(trace) = trace.as_mut() {
                                     trace.fetched(phases);
                                 }
                                 let fetch = fetch.take().expect("unpublished fetch");
@@ -497,7 +583,7 @@ impl Context {
                                 remote.done = true;
                             }
                             Err(error) => {
-                                if let Some(trace) = &mut permit.remote {
+                                if let Some(trace) = trace.as_mut() {
                                     trace.fetched(phases);
                                 }
                                 failure = Some(error);
@@ -508,15 +594,18 @@ impl Context {
                     Source::Wait(waiter) => match waiter.poll() {
                         Ok(None) => continue,
                         Ok(Some(fetched)) => {
-                            if let Err(error) =
-                                copy_chunk(view, absolute, fetched.bytes.as_slice(), destination)
+                            if let Some(destination) = destination
+                                && let Err(error) = copy_chunk(
+                                    view,
+                                    absolute,
+                                    fetched.bytes.as_slice(),
+                                    destination,
+                                )
                             {
                                 failure = Some(error);
                                 break;
                             }
-                            if let (Some(phases), Some(trace)) =
-                                (fetched.remote, &mut permit.remote)
-                            {
+                            if let (Some(phases), Some(trace)) = (fetched.remote, trace.as_mut()) {
                                 trace.fetched(phases);
                             }
                             remote.done = true;
@@ -532,19 +621,32 @@ impl Context {
                 index += 1;
                 continue;
             }
-            let pending = self.pending.swap_remove(index);
+            let Pending {
+                guest,
+                offset,
+                view,
+                remote,
+            } = self.pending.swap_remove(index);
+            let Some(guest) = guest else {
+                // An orphan: its leaders have published, or one failed and
+                // its waiters have been told.
+                if failure.is_some() {
+                    self.counters.orphans_failed += 1;
+                }
+                continue;
+            };
             if let Some(error) = failure {
-                // Shared IO failed: a reply, a publication or the fill.
-                self.fail(shared, pending, error, true, output)?;
+                // Shared IO failed: a reply, a publication or the fill. The
+                // read's unfinished leaders still publish for their waiters.
+                self.fail(shared, guest, error, true, output)?;
+                self.orphan(offset, view, remote);
                 continue;
             }
-            let Pending {
+            let Guest {
                 id,
                 buffer,
                 mut permit,
-                remote,
-                ..
-            } = pending;
+            } = guest;
             // Losers and finished sources keep their transport slots until
             // their transport ends; none can touch this buffer again.
             drop(remote);
@@ -566,7 +668,7 @@ impl Context {
     /// reads are pending; every one of them signals the frontend wake.
     pub fn wait(&self, timeout_ms: i32) -> io::Result<()> {
         let mut descriptor = libc::pollfd {
-            fd: self.notify.as_raw_fd(),
+            fd: std::os::fd::AsRawFd::as_raw_fd(&self.notify),
             events: libc::POLLIN,
             revents: 0,
         };

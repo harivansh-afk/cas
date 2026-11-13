@@ -89,9 +89,16 @@ caller-provided signal), so one chunk is never fetched twice concurrently by
 the two schedulers. Once a registry entry is held the read is never declined
 (dropping a leader would fail its waiters); it completes, or fails closed
 exactly as a reactor read does. Cache-fill rules (`--peer-cache`) are shared
-through the same resolution code. Per-image `local.fast` counters report
-inline, remote, shared-wait, declined (unsettled, flush, IO, capacity, failed
-gate) and failed reads.
+through the same resolution code. A read that fails for local exhaustion
+after it already leads a fetch (registry capacity, metadata budget, GET
+slots) fails only itself and its image gate; the leaders it holds stay in
+the per-image table as orphans that fetch and publish for their waiters (a
+leader whose GET slot was exhausted retries on every poll), so a reactor
+waiter on another image never sees a dropped-leader error and the host gate
+is untouched. Per-image `local.fast` counters report inline, remote,
+shared-wait, declined (unsettled, flush, IO, capacity, failed gate) and
+failed reads, plus `orphaned_leaders` and `orphans_failed` (an orphan the
+table could not keep or whose own fetch failed; its waiters were told).
 
 ## Compaction and collection
 

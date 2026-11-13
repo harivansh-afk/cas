@@ -399,3 +399,283 @@ fn fast_path_never_locks_the_completion_gate_the_frontend_holds() {
     submit_read(&mut local, 2, 0, BLOCK_SIZE);
     assert_eq!(fast(&local, "declined_failed"), 1);
 }
+
+/// A mock owner that answers GETs only when told to, by hash, so a test can
+/// hold GET slots and release leaders in a chosen order.
+struct HeldPeer {
+    address: std::net::SocketAddr,
+    release: Option<mpsc::Sender<cas_core::chunk_index::Hash>>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+impl HeldPeer {
+    fn start(payloads: Vec<(cas_core::chunk_index::Hash, Vec<u8>)>) -> Self {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release, releases) = mpsc::channel::<cas_core::chunk_index::Hash>();
+        let thread = thread::spawn(move || {
+            // Serve every connection the client opens (it reconnects after a
+            // GET timeout); released hashes outlive a connection.
+            let mut wanted: Vec<cas_core::chunk_index::Hash> = Vec::new();
+            listener.set_nonblocking(true).unwrap();
+            loop {
+                // The test dropping its release sender ends the peer.
+                if matches!(releases.try_recv(), Err(mpsc::TryRecvError::Disconnected)) {
+                    return;
+                }
+                let mut socket = match listener.accept() {
+                    Ok((socket, _)) => socket,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => {
+                        eprintln!("held peer: accept failed: {error}");
+                        return;
+                    }
+                };
+                socket.set_nonblocking(false).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_millis(20)))
+                    .unwrap();
+                let mut requests: Vec<[u8; 56]> = Vec::new();
+                let mut request = [0u8; 56];
+                let mut filled = 0;
+                loop {
+                    match socket.read(&mut request[filled..]) {
+                        Ok(0) => {
+                            eprintln!("held peer: client closed the connection");
+                            break;
+                        }
+                        Ok(n) => {
+                            filled += n;
+                            if filled == 56 {
+                                requests.push(request);
+                                filled = 0;
+                            }
+                        }
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                            ) => {}
+                        Err(error) => {
+                            eprintln!("held peer: read failed: {error}");
+                            break;
+                        }
+                    }
+                    loop {
+                        match releases.try_recv() {
+                            Ok(hash) => wanted.push(hash),
+                            Err(mpsc::TryRecvError::Empty) => break,
+                            Err(mpsc::TryRecvError::Disconnected) => return,
+                        }
+                    }
+                    // Answer every released hash whose request has arrived.
+                    let mut answered = Vec::new();
+                    for (slot, hash) in wanted.iter().enumerate() {
+                        let Some(index) = requests.iter().position(|r| r[24..56] == *hash) else {
+                            continue;
+                        };
+                        answered.push(slot);
+                        let hash = *hash;
+                        let request = requests.remove(index);
+                        let payload = payloads
+                            .iter()
+                            .find(|(h, _)| *h == hash)
+                            .map(|(_, p)| p.clone())
+                            .unwrap_or_else(|| vec![0; BLOCK_SIZE]);
+                        let mut response = vec![0u8; 24 + BLOCK_SIZE];
+                        response[..24].copy_from_slice(&request[..24]);
+                        response[..4].copy_from_slice(&((24 + BLOCK_SIZE) as u32).to_le_bytes());
+                        response[24..].copy_from_slice(&payload);
+                        if let Err(error) = socket.write_all(&response) {
+                            eprintln!("held peer: write failed: {error}");
+                            break;
+                        }
+                    }
+                    for slot in answered.into_iter().rev() {
+                        wanted.remove(slot);
+                    }
+                }
+            }
+        });
+        Self {
+            address,
+            release: Some(release),
+            thread: Some(thread),
+        }
+    }
+    fn release(&self, hash: cas_core::chunk_index::Hash) {
+        self.release.as_ref().unwrap().send(hash).unwrap();
+    }
+}
+impl Drop for HeldPeer {
+    fn drop(&mut self) {
+        // Closing the channel ends the peer's loop; then join it.
+        drop(self.release.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// A read that fails for local exhaustion after it already leads a fetch
+/// must not fail that fetch's waiters: the leader stays behind as an orphan
+/// that publishes for them, and a leader whose GET slot was exhausted
+/// retries. Here the GET pool holds one free slot: the inline read's first
+/// block leads and sends its GET, its second block leads but finds no slot,
+/// the read fails (image only); a reactor read on another image then waits
+/// on the first leader, the owner answers it, and the waiter is served; the
+/// slots free up, the orphan issues the second GET and publishes too.
+#[test]
+fn local_exhaustion_after_a_held_leader_orphans_it_for_its_waiters() {
+    use cas_core::chunk::Chunk;
+    let root = tempfile::tempdir().unwrap();
+    let data = |block: usize| vec![block as u8 + 1; BLOCK_SIZE];
+    let hash = |block: usize| Chunk::new(&data(block)).unwrap().hash();
+    let peer = HeldPeer::start((0..8).map(|b| (hash(b), data(b))).collect());
+    let resources = Arc::new(Resources {
+        peer: crate::peer::Config {
+            peer_address: Some(peer.address),
+            peer_force_remote: true,
+            fast_settled_reads: true,
+            ..Default::default()
+        },
+        ..Resources::default()
+    });
+    let mut host = create(root.path(), 2, Arc::clone(&resources));
+    // Image 2 reads inline; image 3 reads through its reactor and shares
+    // the chunks (identical content, identical hashes, force-remote).
+    let mut fast_local = attach(&mut host, 2);
+    let mut reactor_local = attach(&mut host, 3);
+    for block in 0..8 {
+        write(
+            &mut fast_local,
+            1 + block as u64,
+            block * BLOCK_SIZE,
+            &data(block),
+        );
+        write(
+            &mut reactor_local,
+            1 + block as u64,
+            block * BLOCK_SIZE,
+            &data(block),
+        );
+    }
+    let published = fast_local.status.published;
+    drained(&mut fast_local, published);
+    let published = reactor_local.status.published;
+    drained(&mut reactor_local, published);
+    // Warm image 2's manifest page through the reactor: one GET, answered.
+    submit_read(&mut fast_local, 100, 5 * BLOCK_SIZE, BLOCK_SIZE);
+    thread::sleep(Duration::from_millis(50));
+    peer.release(hash(5));
+    let warm = received(&mut fast_local);
+    expect_read(warm, 100, &data(5));
+    assert_eq!(fast(&fast_local, "declined_io"), 1);
+    // Fill the GET pool with unanswered requests, then free exactly one.
+    let router = host.shared.peer.clone().unwrap();
+    let mut held = Vec::new();
+    let mut filler = 0u64;
+    loop {
+        filler += 1;
+        let fake = *blake3::hash(&filler.to_le_bytes()).as_bytes();
+        match router.fetch(fake) {
+            Ok(ticket) => held.push((fake, ticket)),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+            Err(error) => panic!("{error}"),
+        }
+    }
+    let pool = held.len() as u64;
+    let (freed, ticket) = held.pop().unwrap();
+    drop(ticket);
+    thread::sleep(Duration::from_millis(50));
+    peer.release(freed);
+    let until = Instant::now() + Duration::from_secs(5);
+    while host.report()["peer"]["counters"]["errors"] == 0 {
+        assert!(Instant::now() < until, "freed slot's reply not processed");
+        thread::sleep(Duration::from_millis(5));
+    }
+    // The inline two-block read: block 6 leads with the last slot, block 7
+    // leads with none. The read fails, the image gate fails, the host does
+    // not, and both leaders are orphaned.
+    submit_read(&mut fast_local, 200, 6 * BLOCK_SIZE, 2 * BLOCK_SIZE);
+    let failed = received(&mut fast_local);
+    assert_eq!(failed.id, 200);
+    assert!(failed.result.is_err(), "{:?}", failed.result);
+    assert_eq!(fast(&fast_local, "failed_reads"), 1);
+    assert_eq!(fast(&fast_local, "orphaned_leaders"), 2);
+    assert!(fast_local.shared.health.is_failed());
+    assert!(host.shared.gate.failure().is_none());
+    assert_eq!(host.report()["fetches"]["counters"]["failed"], 0);
+    // A reactor read on image 3 waits on the orphaned leader of block 6.
+    submit_read(&mut reactor_local, 300, 6 * BLOCK_SIZE, BLOCK_SIZE);
+    let until = Instant::now() + Duration::from_secs(5);
+    while host.report()["fetches"]["counters"]["joined"] == 0 {
+        assert!(Instant::now() < until, "{}", host.report()["fetches"]);
+        thread::sleep(Duration::from_millis(5));
+    }
+    // The owner answers block 6: the orphan publishes, the waiter is served.
+    peer.release(hash(6));
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(fast_local.receive(false).unwrap().is_none());
+        if let Some(done) = reactor_local.receive(false).unwrap() {
+            expect_read(done, 300, &data(6));
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "waiter not served: {}",
+            host.report()["fetches"]
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(host.shared.gate.failure().is_none());
+    assert!(
+        reactor_local
+            .shared
+            .health
+            .lock()
+            .unwrap()
+            .failure
+            .is_none()
+    );
+    // Free the pool: the orphan issues block 7's GET on the next poll and
+    // publishes once answered.
+    for (fake, _) in &held {
+        peer.release(*fake);
+    }
+    drop(held);
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(fast_local.receive(false).unwrap().is_none());
+        // Every pool slot, the warm read, and both blocks of the failed read.
+        if host.report()["peer"]["counters"]["gets"].as_u64().unwrap() >= pool + 3 {
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "{}",
+            host.report()["peer"]["counters"]
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    peer.release(hash(7));
+    let until = Instant::now() + Duration::from_secs(5);
+    while fast_local.report()["fast"]["orphans_failed"] == 0
+        && host.report()["fetches"]["counters"]["completed"]
+            .as_u64()
+            .unwrap()
+            < 3
+    {
+        assert!(fast_local.receive(false).unwrap().is_none());
+        assert!(Instant::now() < until, "{}", host.report()["fetches"]);
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(fast(&fast_local, "orphans_failed"), 0);
+    assert_eq!(host.report()["fetches"]["counters"]["failed"], 0);
+    drop((fast_local, reactor_local));
+    shutdown(host);
+}

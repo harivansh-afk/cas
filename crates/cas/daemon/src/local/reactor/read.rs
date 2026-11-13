@@ -221,7 +221,7 @@ impl Read {
             &view,
             block,
             destination,
-            None,
+            None::<fn() -> io::Result<std::os::fd::OwnedFd>>,
         )?;
         match joined {
             Joined::Wait(waiter) => {
@@ -373,7 +373,7 @@ impl Read {
             remote,
             &view,
             block,
-            destination,
+            Some(destination),
         )
     }
 
