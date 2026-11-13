@@ -1,5 +1,260 @@
 # Validation
 
+## 2026-11-13 — Integration of measurement flags, offline import and raced reads
+
+Branch `integration/2026-11-13` from `main` (`35add83`), merged in order with
+merge commits (no squash, no rebase): `feat/measure-flags` at `cbe027f` (code
+`39214ec`) as `388ab56`, `feat/offline-import` at `77c4081` as `1593fd2`, and
+`feat/raced-read` at `41bf61f` as `4873e1a`. One follow-up commit `7d55d8a`
+adds the race counters to a test's assertion message (test-only). **Tested
+revisions: `4873e1a`** (`just check`, flagged suites, importer) **and
+`7d55d8a`** (probes, loopback, C5; identical runtime code), clean on the VM.
+This record is a later documentation-only commit. Nothing was pushed or merged
+into `main`. These are Freestyle development checks, not CI, paper or
+native-hardware results.
+
+### Merge resolution
+
+The first two merges were clean apart from `docs/validation.md`. The third
+conflicted in `peer/client.rs`, `peer/router.rs`, `peer/tests.rs` and
+`docs/validation.md`; `local/fast.rs` auto-merged but no longer compiled.
+Every resolution keeps both features' invariants:
+
+- `peer/client.rs`: the raced-read `Slot` (generation, notify, challenger,
+  pending race, racing/used/wire bytes) gains measure-flags' `image` slot
+  index. `Client::fetch_with` and `Shared::fetch` carry `image`;
+  `Client::fetch` passes `UNATTRIBUTED`. `Pool::finish` calls
+  `Metrics::transport_finished(slot.image, verified)` (host `verified`/`errors`
+  plus the issuing image's `verified_bytes`) in place of the plain counter
+  update, keeping raced-read's failed-primary challenger start and `notify`.
+- `peer/race.rs`: `PendingKind::start` takes the primary's image, so a remote
+  challenger GET is credited to the same image as its primary; `Slot::start_pending`
+  passes `self.image`.
+- `peer/router.rs`: raced-read's `Shared` (placement, clients, local source)
+  also holds the `Racer`, so measure-flags' per-image `Router::for_image`
+  views share connections, racer and local source; `Router` is
+  `{shared, budget_us, image}`, `fetch`/`fetch_with_notify` pass `self.image`.
+  `Router::new` keeps raced-read's fourth argument (scheduler port for the
+  local race source).
+- `local/fast.rs`: `Context::peer_metrics` is `Option<ImageMetrics>`
+  (measure-flags' `Port::peer_metrics()` type); the inline path's `Trace`
+  therefore attributes its reads to the image like the reactor's. Its GETs go
+  through the image's router view, so inline fetches are credited at
+  transport verification exactly like reactor fetches.
+- `peer/tests.rs`: `Metrics::new(&budget, 1)` and `Router::new(.., None)`.
+- `docs/validation.md`: all five branch entries kept, in date order (three
+  2026-11-13 entries, then two 2026-11-12), above the 2026-11-09 entry.
+- Attribution decision for a race won by the local copy: there is no transport
+  verification, so no `verified_bytes` and no `verified`; the read counts as
+  completed with its chunk on the issuing image, and the late remote reply,
+  when it verifies, is still credited once to the issuing image and to
+  `counters.verified`. The sum `Σ images.verified_bytes = 4096 × counters.verified`
+  therefore holds with races, with coalescing and with inline reads. Written
+  into `docs/peer-fetch.md` (`peer.images` paragraph; `verified`/`errors`
+  count remote replies only).
+- Tests added at the merge: `assert_verified_bytes_sum` in
+  `local/host/tests/peer.rs`, asserted in the per-image, coalescing,
+  local-win, inline-registry and both loopback tests; the local-win test
+  asserts image 2 = {8 reads, 8 chunks, 8 × 4096 verified bytes}; the
+  inline-registry test asserts both inline GETs credit image 2; the
+  router-level second-owner race test fetches through `for_image(0)` and
+  asserts the challenger's win and the late loser's reply are both credited
+  to that image (`2 × 4096`). The peer test fixture now arms `CAS_PEER_RACE_US`
+  on every host that fetches (like the fleet fixture); `CAS_PEER_RACE_LOCAL`
+  stays test-explicit because it changes the force-remote failure semantics.
+- Docs: `docs/casctl.md` gains a flags table (every new `cas-host` and
+  `casctl import` flag with its default; no `cas-host` default changed);
+  `docs/peer-fetch.md` "Read path" now describes the two schedulers (reactor,
+  frontend-inline) over the shared per-block resolution in `local/chunk.rs`
+  and points to `docs/storage-design.md` for the inline conditions.
+
+### Host and commands
+
+No build or test ran on Spark (editing, Git bundles, provider calls and
+evidence reading only). Freestyle x86_64 VM `cas-build-integration`
+(`vm-ae4098253ad34f30867b5890f5702762`, snapshot `freestyle/ubuntu-lg`,
+Ubuntu 24.04.5, Linux 6.1.102, 8 vCPU, 16 GiB, 64 GiB ext4 root, `/dev/kvm`
+present), created for this task with its own identity grant and deleted after
+export. Nix 2.35.6 (upstream multi-user installer; `nix.conf`: flakes,
+`max-jobs = 2`, `cores = 8`), `nix develop` Rust 1.98.1. The branch was
+shipped as a git bundle; `ulimit -n 65536`, `CARGO_TARGET_DIR=/root/target`,
+`CARGO_BUILD_JOBS=8`. Everything ran as root, sequentially.
+
+```sh
+nix develop -c cargo fmt --all -- --check && nix develop -c cargo clippy --workspace --all-targets --locked -- -D warnings
+nix develop -c just check
+T="nix develop -c cargo test -p cas-daemon --locked --lib --"
+$T peer;  CAS_FAST_SETTLED_READS=1 $T peer
+CAS_PEER_RACE_US=100 CAS_PEER_RACE_LOCAL=1 $T peer
+CAS_PEER_RACE_US=100 CAS_PEER_RACE_LOCAL=1 CAS_FAST_SETTLED_READS=1 $T peer
+$T fleet; CAS_FAST_SETTLED_READS=1 $T fleet; CAS_PEER_RACE_US=100 $T fleet
+CAS_PEER_RACE_US=100 CAS_FAST_SETTLED_READS=1 $T fleet
+$T local::host::tests::fast; CAS_PEER_RACE_US=100 CAS_PEER_RACE_LOCAL=1 $T local::host::tests::fast
+$T local::host::tests::recovery::service
+nix develop -c cargo test -p cas-core --locked --test import --test import_crash
+CAS_PEER_EVIDENCE=... nix develop -c cargo test --release -p cas-daemon --lib --locked \
+  local::host::tests::peer::two_daemon_loopback_verifies -- --nocapture   # 3× per arm
+nix build .#checkpoints --out-link result-checkpoints; nix build .#cas --out-link result-cas
+nix develop -c result-checkpoints/bin/cas-checkpoints --checkpoint C5 --checkout . --output /root/c5/suite-01
+result-cas/bin/cas-harness verify-suite --output /root/c5/suite-01
+```
+
+### Outcomes
+
+- `cargo fmt --check` and strict Clippy: clean on the first compile of the
+  merged tree.
+- `just check` on `4873e1a`: **pass** — **593 Rust tests passed, 0 failed,
+  30 ignored** (579 on `feat/measure-flags`, 583 on `feat/raced-read`, 577 on
+  `feat/offline-import`'s base; the counts add up less the shared base plus
+  the merge's own assertions), 13 Python tests, `git diff --check`.
+- Peer suite (`peer` filter: `peer::tests`, `peer::wire::tests`,
+  `local::host::tests::peer`, plus two `recovery` tests and two fleet/chunk16
+  tests whose names contain "peer"; 31 selected, 2 ignored entry points):
+  flags off **29 passed** (first run 27/2, see failures), fast **31 passed**,
+  race (`--peer-race-us 100 --peer-race-local`) **29 passed** (first run 28/1),
+  both **31 passed**. The per-image attribution and coalescing tests and the
+  sum assertion passed in all four arms.
+- Fleet suite (`fleet` filter, incl. the two- and four-process fixtures):
+  **20 passed, 1 ignored** in each of off, fast, race (`CAS_PEER_RACE_US=100`)
+  and both.
+- `local::host::tests::fast`: 2 passed (off and race+local);
+  `recovery::service`: 4 passed, 2 ignored (XFS/subprocess).
+- Importer: `tests/import.rs` and `tests/import_crash.rs` passed (both chunk
+  arms, every crash cut).
+- Release loopback (below): 12/12 runs passed, delayed-server 2/2.
+- C5: **41/41 passed; the independent verifier passed** (exit 0, silent).
+  Suite 04:21:55–05:17:25 UTC (55.5 min, exit 0) on `7d55d8a` recorded by the
+  harness (`revision/`), default flags, as root on the VM's nested KVM; no
+  scenario was retried. `nix build .#checkpoints` and `.#cas` (release
+  package tests) passed first (04:16–04:21). `guest-pressure` counted 2
+  staging stops (`stops` 2 in the write-stage daemon telemetry; 2 of its 592
+  one-second samples caught `stopped`). No scenario was infeasible on the VM.
+
+| Scenario | Result | Seconds |
+|---|---|---:|
+| `async-after-active` | PASS | 17.91 |
+| `async-after-append-cqe` | PASS | 16.85 |
+| `async-after-prepared` | PASS | 17.52 |
+| `async-after-status` | PASS | 17.23 |
+| `async-after-storage` | PASS | 17.04 |
+| `async-after-sync` | PASS | 17.25 |
+| `async-after-used` | PASS | 17.42 |
+| `async-before-submit` | PASS | 16.59 |
+| `async-before-sync` | PASS | 16.53 |
+| `async-device-reset` | PASS | 19.13 |
+| `async-fresh-recovery` | PASS | 38.75 |
+| `async-io` | PASS | 37.67 |
+| `async-repeat-after-fence` | PASS | 17.23 |
+| `async-repeat-before-fence` | PASS | 17.23 |
+| `async-repeat-replay` | PASS | 17.65 |
+| `clippy` | PASS | 2.17 |
+| `diff-check` | PASS | 0.02 |
+| `fresh-recovery` | PASS | 36.28 |
+| `guest-pressure` | PASS | 472.72 |
+| `live-after-status` | PASS | 19.51 |
+| `live-after-storage` | PASS | 17.69 |
+| `live-after-used` | PASS | 17.98 |
+| `live-before-submit` | PASS | 18.33 |
+| `local-fresh-recovery` | PASS | 38.50 |
+| `local-sync` | PASS | 40.02 |
+| `nix-check` | PASS | 147.31 |
+| `nix-format` | PASS | 4.23 |
+| `persistence-model` | PASS | 12.95 |
+| `raw-daemon` | PASS | 23.89 |
+| `raw-qemu` | PASS | 18.85 |
+| `rust-format` | PASS | 0.97 |
+| `rust-tests` | PASS | 73.61 |
+| `shared-after-chunks` | PASS | 250.61 |
+| `shared-after-d` | PASS | 250.45 |
+| `shared-after-manifest` | PASS | 260.86 |
+| `shared-after-punch` | PASS | 256.29 |
+| `shared-after-unlink` | PASS | 265.05 |
+| `shared-before-chunks` | PASS | 227.77 |
+| `shared-replacement` | PASS | 242.43 |
+| `staging` | PASS | 25.55 |
+| `xfs-store` | PASS | 284.93 |
+
+### Release loopback, three runs per arm
+
+Same harness and method as the `feat/raced-read` entries (release, QD1,
+4 KiB, 64 chunks, 100 warmup + 600 measured reads, nearest-rank quantiles over
+ring ids 100–699, microseconds, ranges over three runs). Different VM
+instance; compare arms within this table only. Development evidence, not a
+paper result.
+
+| Arm | Receipt→send p50 | Receipt→send p99 | Verified→completion p50 | Verified→completion p99 | Total p50 | Total p99 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Flags off | 24.8–27.8 | 39.4–47.9 | 37.2–40.4 | 53.7–58.6 | 103.0–109.5 | 136.0–149.0 |
+| `--fast-settled-reads` | 8.4–13.1 | 16.3–30.9 | 15.8–16.1 | 31.6–33.2 | 62.4–89.7 | 97.0–131.7 |
+| Race 100 µs + local, fast off | 23.5–23.9 | 42.6–52.5 | 31.8–33.8 | 55.9–70.3 | 100.1–114.8 | 152.0–170.8 |
+| Race 100 µs + local + fast | 9.5–10.3 | 23.1–30.5 | 14.5–16.8 | 32.4–34.9 | 63.3–89.2 | 98.1–153.8 |
+
+Every run: 700 GETs, 700 verified, 0 errors, cache empty, and
+`Σ images.verified_bytes = 4096 × verified` in the measure, pipeline and
+post-loss reports. Race arms started 13–22 (race) and 7–27 (both) races per
+700 reads with 1–10 local wins, one discard per start, `race_dropped` 0,
+`race_won_second` 0 (two-host configuration: the only challenger is the
+local copy). Delayed server (1 ms reply, 100 µs budget): 700/700 local wins
+with and without the fast flag, `race_discarded` 700 once the late replies
+had landed, `race_wasted_wire_bytes` 2,884,000, `errors` 0; total median
+419.3 µs (fast off) / 405.0 µs (fast on). The sum invariant also held on the
+snapshot taken before the late replies arrived (258 and 244 verified).
+
+### Failures and retries
+
+1. First `peer` run, flags off: 27 passed, 2 failed —
+   `recovery::frontend::retained_collection_does_not_repair_before_all_inputs_and_abandonment_fails_peers`
+   (`Store` reopen `WouldBlock` in the test helper, `tests.rs:195`) and
+   `recovery::service::failed_retained_negotiation_cancels_an_unconnected_peer_without_repair`
+   (`frontend connection: No such file or directory` after the helper's 5 s
+   connect deadline). Both tests are unchanged from `main`, ran in parallel
+   with the subprocess-spawning loopback and descriptor-limit tests, and
+   passed in `just check`, standalone 3/3, and in two repeated `peer` runs
+   (29/29 each). The second failed again once in a repeated race-arm `peer`
+   run (28/1; 5.4 s run time versus 2.6 s when passing), so it is a
+   timing-sensitive test under this filter's concurrency: on `main` (`35add83`, same VM, own target
+   directory) the same filter selects 18 tests and passed 5/5; the merged tree
+   selects 31, adding the raced/inline loopback and descriptor-limit tests that
+   fork subprocesses. The likely mechanism is the one recorded on 2026-11-09
+   (failure 2): a child between fork and exec shares every open description,
+   so a concurrent test's `flock` sees `WouldBlock`; `host_service::serve`
+   failing its open that way before binding the socket would explain the 5 s
+   connect expiry (the test panics on the connection before reading the
+   service result, so the error is not retained). Not shown; left for a human:
+   extend the one-second lock retry to that path, or serialize the
+   fork-spawning tests. No bound or assertion was changed.
+2. First `peer` run, race arm: 28 passed, 1 failed —
+   `two_daemon_loopback_race_wins_locally_against_a_delayed_server` saw
+   `races_started` 699 of 700 (debug build, parallel suite). It passed 5/5
+   standalone under the same environment, in the repeated race-arm runs, in
+   the both arm, and in the release delayed-server runs (700/700 twice). The
+   assertion now prints the counters (`7d55d8a`) so a recurrence shows which
+   counter moved; no bound was changed.
+3. No other failure; no rebuild was needed after the merge.
+
+### Evidence and limits
+
+Ignored research-repository root `results/integration-1113/`: `vmctl.py`,
+`run.sh`, `suites.sh`, `probe.sh`, `loopback.sh`, `c5.sh`, `summarize.py`,
+the VM ledger `resources.json`, `nix-install.log`, `warm-build.log`,
+`compile1.log`, `suites.log`, `probe.log`, `loopback.log`, `c5.log`,
+`loopback/` (per-arm `reader.json`, `pipeline.json`, `server.json`,
+`failure.json`; delayed-server `race/reader.json` and `race/late.json`) and
+`evidence/evidence.tgz` (every VM log, the loopback JSON and the C5 suite
+directory without disk images) with its SHA-256 in `evidence/export.log`.
+The VM `vm-ae4098253ad34f30867b5890f5702762` was deleted through the provider
+API after export (ledger event `vm-deleted`); no other VM was touched.
+`evidence/evidence.tgz` SHA-256
+`2a627d5441e778750ccaa1473e5354c6fd18bcfa986ca2819372dfce8359a0a2` (21 MB;
+`xfs.img`, raw images, WAL segments and staging logs excluded);
+`evidence/c5-suite-01.json` is the suite receipt. A `main` checkout and its
+target directory were built on the VM only for the flake probe. Limits: one
+C5 run, as root, on nested KVM in a shared-provider VM; loopback timings are
+development observations on that VM (no pinning, no IRQ control) and exclude
+guest scheduling; no CI, push, merge, deployment, CloudLab, multi-host
+(`cas-two-host`) or guest-measured run occurred in this session. The
+multi-host N=2/N=4 suites from the 2026-11-09 entry were not repeated here.
+
 ## 2026-11-13 — Measurement flags: attach window, metadata budget, per-image reads, shipping window
 
 Branch `feat/measure-flags` from `main` (`35add83`, code identical to the
