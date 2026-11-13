@@ -6,14 +6,16 @@
   acceleration ? "kvm",
 }:
 let
+  # The build's default workload guest sizing; the runner's `settings.guest`
+  # overrides it per run and checks the live QEMU command line.
+  guestCores = 2;
+  guestMemoryMiB = 1024;
   guests = lib.genAttrs [ "raw" "cas" ] (
     backend:
     (lib.nixosSystem {
       specialArgs = {
-        inherit backend;
+        inherit backend guestCores guestMemoryMiB;
         probeTools = false;
-        guestCores = 2;
-        guestMemoryMiB = 1024;
         guestAcceleration = acceleration;
         guestQueues = 1;
         guestQueueSize = 128;
@@ -66,6 +68,10 @@ let
     builtins.toJSON {
       inherit (provenance) source_revision source_path;
       inherit acceleration;
+      guest_sizing = {
+        cores = guestCores;
+        memory_mib = guestMemoryMiB;
+      };
       system = pkgs.stdenv.hostPlatform.system;
       host = "${pkgs.cas}/bin/cas-host";
       fleet = "${pkgs.cas}/bin/cas-fleet";

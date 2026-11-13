@@ -45,6 +45,61 @@ Independent reads can bypass capacity-blocked writes within bounded descriptor
 metadata; overlapping operations and FLUSH barriers still constrain ordering.
 This is not a bound on worst-case read latency.
 
+### Frontend-inline settled reads
+
+`--fast-settled-reads` (off by default; the reactor path remains the frozen
+behaviour) lets the frontend complete a read without the reactor. The bypass
+is taken only when every condition below holds at enqueue, and otherwise the
+read is handed to the reactor unchanged:
+
+1. The image is host attached and concurrent, its gate is healthy and
+   admission is not paused.
+2. The reactor's last published status has `published == admitted` and
+   `compacted == published`. `admitted` counts every mutation this frontend
+   has ever admitted, including an unsealed batch, so the first equality
+   means no mutation is in flight; the second (D == P) means the staging
+   index retains no mapping newer than D, so no staged write exists that WAL
+   precedence could select for any block.
+3. The manifest view the reactor published is the one at that D.
+4. No FLUSH admitted by this frontend is still outstanding.
+5. Every block resolves without local IO through the per-block resolution
+   shared with the reactor (`local/chunk.rs`): a hole (zeros), a clean-cache
+   hit, or a chunk the reactor path would also fetch from a peer
+   (force-remote, or absent from the local store). A manifest page load or a
+   local store read declines.
+6. Bounded state: one slot in a per-image table sized like the reactor
+   mailbox, one fetch-registry entry and one GET slot per remote chunk;
+   exhaustion before anything is held declines.
+
+The frontend is the only admitter of mutations for its image, so under (2)
+every mutation that could precede the read in guest order is published and
+compacted, and the manifest at D is the complete image state. A mutation
+discovered after the check is younger than the read and may be excluded, as
+the reactor may already plan a read before or after a concurrent write
+publishes. Both status fields only advance and `admitted` is frontend-owned,
+so a stale snapshot can only decline, never admit, a bypass. The permit keeps
+its credits, host admission entry and fairness release until completion, which
+flows through the same receive path and the same completion gate as reactor
+completions; live-recovery bookkeeping is unchanged. A remote verification or
+transport failure fails the read, the image gate and the shared host gate like
+the frozen path, and zeroes the buffer. Remote chunks join the shared fetch
+registry: as leader the frontend's GET fills the cell for every waiter; as
+waiter it is woken through its own completion eventfd (the registry accepts a
+caller-provided signal), so one chunk is never fetched twice concurrently by
+the two schedulers. Once a registry entry is held the read is never declined
+(dropping a leader would fail its waiters); it completes, or fails closed
+exactly as a reactor read does. Cache-fill rules (`--peer-cache`) are shared
+through the same resolution code. A read that fails for local exhaustion
+after it already leads a fetch (registry capacity, metadata budget, GET
+slots) fails only itself and its image gate; the leaders it holds stay in
+the per-image table as orphans that fetch and publish for their waiters (a
+leader whose GET slot was exhausted retries on every poll), so a reactor
+waiter on another image never sees a dropped-leader error and the host gate
+is untouched. Per-image `local.fast` counters report inline, remote,
+shared-wait, declined (unsettled, flush, IO, capacity, failed gate) and
+failed reads, plus `orphaned_leaders` and `orphans_failed` (an orphan the
+table could not keep or whose own fetch failed; its waiters were told).
+
 ## Compaction and collection
 
 After a complete sweep reports capacity exhaustion, automatic collection waits
@@ -89,7 +144,16 @@ reconciles completed and pending requests before serving resumes.
 require a fresh attachment; this is not general hot-upgrade compatibility.
 
 Cold recovery inspects durable prefixes before repair. Rejected or incomplete
-suffixes must not be interpreted as acknowledged work. Shutdown, reset, socket
+suffixes must not be interpreted as acknowledged work. After cold recovery each
+image socket waits for its guest to connect and reach the virtio-blk driver;
+when that window expires the attachment fails with `recovery deadline expired`
+and the service reports `connection_ok: false`. `cas-host --attach-timeout-secs N`
+sets the window (default 60, the same length as the fixed recovery bound). It
+starts when recovery completes, in both ordinary and fleet cold mode, and a
+fleet cold member applies the same length to each image it activates later.
+Many guests booting together on one host can need more than 60 s; the flag
+lengthens the wait without changing the failure path, the recovery scan bound
+or retained reconnection. Shutdown, reset, socket
 failure, and host-wide failures have different ownership boundaries; their
 regressions live beside the implementations and in `crates/harnesses/`.
 
@@ -104,6 +168,21 @@ fleet cold serving can wait for explicitly configured incoming image sockets. Na
 KVM crash fixtures are not physical power-loss tests or production readiness.
 See [current work](../TODO.md) and [validation](validation.md) for open acceptance.
 
+
+## Host budgets
+
+`cas-host` holds a fixed metadata budget for indexes, manifests, queues and
+bounded instrumentation rings; the rebuilt chunk index is charged to it when a
+root is opened, and an index that does not fit fails startup with the explicit
+`chunk index metadata budget exhausted` error before any repair. The default
+is 128 MiB. Each 4 KiB chunk costs about 40–80 bytes of index: a 16 GiB image
+is 4,194,304 chunks, about 168–336 MB, so `--metadata-bytes N` raises the
+budget for such roots. The value must be nonzero and at most the host's
+physical memory; a budget no host could honour is rejected at startup, and the
+explicit budget error still fires below that cap. The clean cache
+(`--cache-bytes`), compaction and staging budgets are separate and do not
+change with it; `metadata.current`/`peak` in the host report show what the
+budget actually holds.
 
 ## Measuring chunk arms
 

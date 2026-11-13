@@ -76,6 +76,65 @@ In that operational mode, sampling errors stop the sampler and appear in
 failure gate closes. An image socket failure after activation ends that image;
 shared failures and incomplete retained recovery still stop all endpoints.
 
+## Offline import
+
+```sh
+casctl import --root /srv/cas/root --store 0101...0101 --image 0a0a...0a0a \
+  --from corpus/job-17.raw --chunk-bytes 4096
+```
+
+`import` ingests a raw image of whole 4 KiB blocks as a new catalog image
+without running a guest or `cas-host`. An existing empty directory is
+initialized with the requested chunk geometry (4096 by default) and 64 MiB
+segments, using the same creation recipe as `cas-host init`; segment sizes the
+host's default staging limit could not roll over are refused. An existing root
+keeps its geometry, must carry the same `--store` identity, and is inspected
+and recovered the way a cold host open does (torn chunk-segment tails are
+archived; other images are not opened). The command holds the root lock for
+its whole run, so it cannot share a root with a running host.
+
+The bytes take the normal durable path: 1 MiB WAL batches, FLUSH, compaction
+into the shared chunk store and copy-on-write manifest transactions, and WAL
+reclamation, every `--compact-every-bytes` (64 MiB) of input. All-zero units of
+the chunk size become ZERO mutations, everything else is WRITE payload; the
+compactor drops all-zero chunks into holes exactly as it does for guest writes.
+When every mutation is published, durable and compacted (D == E == P) the image
+is added to the catalog. Importing several images into one root deduplicates
+chunks across them through the recovered index.
+
+The JSON receipt records the SHA-256 and BLAKE3 of the bytes staged (the
+input's length, inode, mtime and ctime are rechecked at the end), image bytes, WRITE and
+ZERO bytes, mutation/batch/settle counts, the final WAL status, manifest bytes,
+chunk-store samples before and after (chunks, encoded and allocated bytes,
+index memory), unique chunks appended, catalog generation, metadata budget
+usage, elapsed seconds and MiB/s. It is a software receipt from one offline
+process: no device counters, guest latency or host serving behaviour is
+established by it.
+
+An interrupted import leaves the catalog unchanged. A retry moves the
+interrupted `images/<id>` output under another unreferenced image name, as the
+fleet importer does, so its tickets stay observed, then reuses the chunks it
+already appended. `--metadata-bytes` (4 GiB) caps the rebuilt
+chunk index and WAL index; a root whose index exceeds the serving host's fixed
+metadata budget cannot be opened by that host.
+
+## Flags added in this revision
+
+| Flag | Binary | Default | Effect |
+| --- | --- | --- | --- |
+| `--attach-timeout-secs N` | `cas-host` | 60 | Window after cold recovery for a guest to connect and enable its queues; see [storage design](storage-design.md) |
+| `--metadata-bytes N` | `cas-host` | 134,217,728 (128 MiB) | Host metadata budget (indexes, manifests, queues, rings); at most physical memory |
+| `--peer-race-us N` | `cas-host` | off | Race a settled GET against a second source after N µs (0 = at once); see [peer fetch](peer-fetch.md) |
+| `--peer-race-local` | `cas-host` | off | With `--peer-force-remote` and a race budget, let the race use the verified local copy |
+| `--fast-settled-reads` | `cas-host` | off | Complete fully settled reads on the frontend without the reactor; see [storage design](storage-design.md) |
+| `--chunk-bytes N` | `casctl import` | 4096 | Chunk geometry of a new root (an existing root keeps its own) |
+| `--segment-bytes N` | `casctl import` | 67,108,864 (64 MiB) | Chunk-segment size of a new root |
+| `--compact-every-bytes N` | `casctl import` | 67,108,864 (64 MiB) | Input bytes between FLUSH, compaction and WAL reclamation |
+| `--metadata-bytes N` | `casctl import` | 4 GiB | Importer metadata budget for the rebuilt chunk and WAL indexes |
+
+No `cas-host` default changes: without flags the host keeps the 60 s attach
+window, the 128 MiB metadata budget, unraced GETs and the reactor read path.
+
 ## What runs on the host
 
 A 4 GiB KVM host owns a dedicated XFS filesystem inside a fixed 4 GiB image.

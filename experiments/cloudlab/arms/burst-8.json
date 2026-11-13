@@ -1,0 +1,95 @@
+{
+ "arm": "burst-8",
+ "runner": "two-host",
+ "description": "Fast flags, k=1: eight distinct images (the c6525-25g variant of the burst arm) (1 GiB shared base + 64 MiB unique each) provisioned to B and launched back to back on a cold B; the working set is the first ten recorded actions of the corpus bundle named in the nodes config. The working set runs inside a chroot of the data disk (/mnt/cas) with the bundle's recorded cwd and environment.",
+ "requires_runner_settings": [
+  "fast_settled_reads"
+ ],
+ "pinning": {
+  "r6615": {
+   "logical_cpus": 32,
+   "irq": "0-1",
+   "daemon": "2-5",
+   "controller": "6-7",
+   "guests": "8-23",
+   "note": "SMT off (setup.sh nosmt): 32 physical cores; irq, daemon and guest sets on distinct cores, 24-31 idle"
+  },
+  "c6525-25g": {
+   "logical_cpus": 16,
+   "irq": "0-1",
+   "daemon": "2-5",
+   "controller": "6-7",
+   "guests": "8-15",
+   "note": "SMT off (setup.sh nosmt): 16 physical cores; eight guest cores, so the g16 units and the 16-image burst are not in this node type's plan"
+  },
+  "loopback-8": {
+   "logical_cpus": 8,
+   "irq": "0",
+   "daemon": [
+    "0-1",
+    "2-3"
+   ],
+   "controller": "2-3",
+   "guests": "4-7",
+   "note": "development: both members on one 8-vCPU VM, as in the 2026-11-13 harness validation"
+  }
+ },
+ "config": {
+  "settings": {
+   "seconds": 30,
+   "repeats": 1,
+   "depths": [
+    1,
+    4,
+    16,
+    64
+   ],
+   "image_bytes": 4294967296,
+   "data_bytes": 8388608,
+   "segment_bytes": 8388608,
+   "staging_bytes": 1073741824,
+   "cache_bytes": 268435456,
+   "ship_rate_bytes": 16777216,
+   "inline_us": 50,
+   "guests_per_host": [
+    1,
+    4,
+    8,
+    16
+   ],
+   "guest": {
+    "cores": 1,
+    "memory_mib": 1024
+   },
+   "fast_settled_reads": true,
+   "peer_race_us": null,
+   "working_set": [
+    "dd if=/mnt/cas/data bs=4096 count=1024 iflag=direct status=none | sha256sum",
+    "dd if=/mnt/cas/data bs=4096 count=1024 skip=16384 iflag=direct status=none | sha256sum",
+    "sha256sum /mnt/cas/data"
+   ],
+   "burst": {
+    "images": 8,
+    "base_bytes": 1073741824,
+    "unique_bytes": 67108864,
+    "k": 1,
+    "force_remote": false,
+    "owner_cache_bytes": 0,
+    "drop_page_cache": false,
+    "working_set": {
+     "chroot": "/mnt/cas",
+     "bundle": "WORKING_SET_FROM_BUNDLE"
+    }
+   },
+   "resume": {
+    "setup_bytes": 268435456,
+    "k": 1,
+    "settle": true,
+    "drop_page_cache": false
+   }
+  },
+  "cases": [
+   "burst-images"
+  ]
+ }
+}

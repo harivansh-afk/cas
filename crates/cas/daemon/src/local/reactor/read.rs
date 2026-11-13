@@ -1,7 +1,8 @@
 use super::*;
+use crate::local::chunk::{Block, Fetch, Joined, Located, Sources};
 use cas_core::{
     budget::BudgetAllocator,
-    cache::fills::{Leader, Lookup, Registry, Waiter},
+    cache::fills::Waiter,
     manifest::{file as manifest, tree::LookupState},
     store::file as store,
 };
@@ -21,13 +22,12 @@ pub(super) struct Read {
     scratch: Option<AlignedBuffer>,
     page: Option<AlignedBuffer<BudgetAllocator>>,
     plan: ReadPlan,
-    reader: Option<store::Reader>,
-    cache: Option<BudgetArc<cas_core::cache::Cache>>,
-    page_cache: Option<BudgetArc<manifest::PageCache>>,
+    /// Shared per-block resolution; `None` for a read with no manifest blocks.
+    sources: Option<Sources>,
     chunk_hash: Option<cas_core::chunk_index::Hash>,
     fetches: Option<Fetches>,
-    leader: Option<Leader<Fetched>>,
-    fetched: Option<BudgetArc<Fetched>>,
+    /// The led fetch of the current chunk (store payload or GET reply).
+    fetch: Option<Fetch>,
     metadata: Option<Arc<Budget>>,
     #[cfg(test)]
     control: Option<Arc<Mutex<host::tests::Control>>>,
@@ -36,8 +36,6 @@ pub(super) struct Read {
     block: usize,
     shared_io: bool,
     peer: Option<BudgetArc<crate::peer::Router>>,
-    force_remote: bool,
-    cache_remote: bool,
 }
 
 impl Read {
@@ -46,13 +44,10 @@ impl Read {
             scratch: None,
             page: None,
             plan,
-            reader: None,
-            cache: None,
-            page_cache: None,
+            sources: None,
             chunk_hash: None,
             fetches: None,
-            leader: None,
-            fetched: None,
+            fetch: None,
             metadata: None,
             #[cfg(test)]
             control: None,
@@ -61,8 +56,6 @@ impl Read {
             block: 0,
             shared_io: false,
             peer: None,
-            force_remote: false,
-            cache_remote: false,
         }
     }
 
@@ -72,8 +65,7 @@ impl Read {
         {
             let port = port.ok_or_else(|| io::Error::other("manifest read has no shared store"))?;
             self.peer = port.peer();
-            self.force_remote = port.peer_config().peer_force_remote;
-            self.cache_remote = port.peer_config().peer_cache;
+            self.sources = Some(Sources::new(port));
             if let Some(metrics) = port.peer_metrics() {
                 self.io.permit.remote = Some(crate::peer::metrics::Trace::new(
                     metrics,
@@ -81,9 +73,6 @@ impl Read {
                     self.io.permit.received.unwrap_or_else(Instant::now),
                 ));
             }
-            self.reader = Some(port.reader());
-            self.cache = Some(port.cache());
-            self.page_cache = Some(port.page_cache());
             self.fetches = Some(port.fetches());
             self.metadata = Some(port.metadata());
             #[cfg(test)]
@@ -129,6 +118,10 @@ impl Read {
         self.io
     }
 
+    fn absolute_block(&self) -> u64 {
+        self.plan.offset() / BLOCK_SIZE as u64 + self.block as u64
+    }
+
     fn next_block(&mut self) -> io::Result<()> {
         self.shared_io = false;
         self.stage = Stage::Done;
@@ -137,19 +130,38 @@ impl Read {
         };
         while self.block < self.plan.bytes() / BLOCK_SIZE {
             if !self.plan.staged(self.block) {
-                let mut read =
-                    view.lookup(self.plan.offset() / BLOCK_SIZE as u64 + self.block as u64)?;
-                match read.cached(self.page_cache.as_ref().expect("host page cache"))? {
-                    LookupState::Page { offset, .. } => {
+                let block = self.absolute_block();
+                let Operation::Read { buffer, .. } = &mut self.io.operation else {
+                    unreachable!()
+                };
+                let destination = &mut buffer.as_mut_slice()
+                    [self.block * BLOCK_SIZE..(self.block + 1) * BLOCK_SIZE];
+                let resolved = self.sources.as_ref().expect("host sources").resolve(
+                    &view,
+                    block,
+                    destination,
+                )?;
+                match resolved {
+                    Block::Hole => (),
+                    Block::Cached => {
+                        if let Some(trace) = self.trace() {
+                            trace.cache_hits += 1;
+                        }
+                    }
+                    Block::Page { read, offset } => {
                         self.stage = Stage::Manifest { read, offset };
                         return Ok(());
                     }
-                    LookupState::Complete(Some(hash)) => {
-                        if self.chunk(hash)? {
+                    Block::Store(hash, plan) => {
+                        if self.chunk_located(hash, Located::Store(plan))? {
                             return Ok(());
                         }
                     }
-                    LookupState::Complete(None) => (),
+                    Block::Remote(hash) => {
+                        if self.chunk_located(hash, Located::Remote)? {
+                            return Ok(());
+                        }
+                    }
                 }
             }
             self.block += 1;
@@ -159,89 +171,106 @@ impl Read {
 
     /// True requires an IO CQE; a hit already filled the current response block.
     fn chunk(&mut self, hash: cas_core::chunk_index::Hash) -> io::Result<bool> {
-        self.chunk_hash = Some(hash);
-        if (!self.force_remote || self.cache_remote)
-            && let Some(bytes) = self.cache.as_ref().and_then(|cache| cache.get(&hash))
-        {
+        let view = self.plan.manifest().cloned().expect("manifest chunk");
+        let block = self.absolute_block();
+        let Operation::Read { buffer, .. } = &mut self.io.operation else {
+            unreachable!()
+        };
+        let destination =
+            &mut buffer.as_mut_slice()[self.block * BLOCK_SIZE..(self.block + 1) * BLOCK_SIZE];
+        let located =
+            self.sources
+                .as_ref()
+                .expect("host sources")
+                .locate(&view, block, hash, destination)?;
+        if matches!(located, Located::Cached) {
             if let Some(trace) = self.trace() {
                 trace.cache_hits += 1;
             }
-            self.copy_chunk(bytes.as_slice())?;
             return Ok(false);
         }
-        match Registry::lookup(self.fetches.as_ref().expect("host fetch registry"), hash)? {
-            Some(Lookup::Waiter(waiter)) => {
+        self.chunk_located(hash, located)
+    }
+
+    /// Schedule a chunk the shared resolution could not serve from the cache:
+    /// coalesce through the fetch registry, then a local store read or a GET.
+    fn chunk_located(
+        &mut self,
+        hash: cas_core::chunk_index::Hash,
+        located: Located,
+    ) -> io::Result<bool> {
+        self.chunk_hash = Some(hash);
+        let view = self.plan.manifest().cloned().expect("manifest chunk");
+        let block = self.absolute_block();
+        let chunk_bytes = self.chunk_bytes();
+        let Operation::Read { buffer, .. } = &mut self.io.operation else {
+            unreachable!()
+        };
+        let destination =
+            &mut buffer.as_mut_slice()[self.block * BLOCK_SIZE..(self.block + 1) * BLOCK_SIZE];
+        let joined = self.sources.as_ref().expect("host sources").join(
+            self.fetches.as_ref().expect("host fetch registry"),
+            hash,
+            chunk_bytes,
+            self.io
+                .permit
+                ._read
+                .as_ref()
+                .expect("read byte reservation"),
+            self.metadata.as_ref().expect("host metadata"),
+            &view,
+            block,
+            destination,
+            None::<fn() -> io::Result<std::os::fd::OwnedFd>>,
+        )?;
+        match joined {
+            Joined::Wait(waiter) => {
                 self.shared_io = true;
                 self.stage = Stage::Waiting(waiter);
                 return Ok(true);
             }
-            Some(Lookup::Leader(leader)) => {
-                self.leader = Some(leader);
-                let bytes =
-                    AlignedBuffer::try_new_in(self.chunk_bytes(), allocator_api2::alloc::Global)?;
-                self.fetched = Some(BudgetArc::try_new(
-                    Fetched {
-                        remote: None,
-                        bytes,
-                        _credits: self
-                            .io
-                            .permit
-                            ._read
-                            .as_ref()
-                            .expect("read byte reservation")
-                            .clone(),
-                    },
-                    self.metadata.as_ref().expect("host metadata"),
-                )?);
+            Joined::Served => {
+                if let Some(trace) = self.trace() {
+                    trace.cache_hits += 1;
+                }
+                return Ok(false);
             }
-            None => {
+            Joined::Full => {
                 return Err(io::Error::other(
                     "admitted read exceeded host fetch capacity",
                 ));
             }
-        }
-        // A previous leader may have filled the cache between our miss and
-        // registry lookup. Publish that value through our new cell as well.
-        if (!self.force_remote || self.cache_remote)
-            && let Some(bytes) = self.cache.as_ref().and_then(|cache| cache.peek(&hash))
-        {
-            if let Some(trace) = self.trace() {
-                trace.cache_hits += 1;
-            }
-            let mut fetched = self.fetched.take().expect("owned fetch payload");
-            fetched
-                .get_mut()
-                .expect("unpublished fetch is unique")
-                .bytes
-                .as_mut_slice()
-                .copy_from_slice(bytes.as_slice());
-            self.copy_chunk(bytes.as_slice())?;
-            self.leader
-                .take()
-                .expect("fetch leader")
-                .complete(fetched)?;
-            return Ok(false);
+            Joined::Lead(fetch) => self.fetch = Some(fetch),
         }
         self.shared_io = true;
-        let read = if self.force_remote {
-            None
-        } else {
-            self.reader
-                .as_ref()
-                .ok_or_else(|| io::Error::other("missing chunk reader"))?
-                .plan(hash)?
+        self.stage = match located {
+            Located::Cached => unreachable!("cache hits never reach the registry"),
+            Located::Store(read) => Stage::Header(read),
+            Located::Remote => {
+                let peer = self
+                    .peer
+                    .as_ref()
+                    .ok_or_else(|| io::Error::other("manifest references an unavailable chunk"))?;
+                let ticket = peer.fetch(hash)?;
+                // A reply that already failed (refused connection, EOF, a
+                // corrupt payload) is raced too: arming starts the challenger
+                // now. Only a verified reply leaves nothing to race.
+                if !ticket.verified() {
+                    // Force-remote never consulted the store above; the race
+                    // arm may use a verified local plan explicitly.
+                    let local = if peer.wants_local_plan() {
+                        self.sources
+                            .as_ref()
+                            .and_then(|sources| sources.race_plan(hash))
+                    } else {
+                        None
+                    };
+                    peer.race(&ticket, hash, local);
+                }
+                Stage::Remote(ticket)
+            }
         };
-        self.stage = if let Some(read) = read {
-            Stage::Header(read)
-        } else {
-            let peer = self
-                .peer
-                .as_ref()
-                .ok_or_else(|| io::Error::other("manifest references an unavailable chunk"))?;
-            Stage::Remote(peer.fetch(hash)?)
-        };
-        if matches!(&self.stage, Stage::Remote(ticket) if ticket.ready()) {
-            self.finish_remote()?;
+        if matches!(&self.stage, Stage::Remote(ticket) if ticket.ready()) && self.finish_remote()? {
             self.stage = Stage::Done;
             return Ok(false);
         }
@@ -292,13 +321,10 @@ impl Read {
             ),
             Stage::Payload(read) => (
                 read.file(),
-                self.fetched
+                self.fetch
                     .as_mut()
-                    .unwrap()
-                    .get_mut()
-                    .expect("unpublished fetch is unique")
-                    .bytes
-                    .as_mut_slice()
+                    .expect("owned fetch payload")
+                    .payload_mut()
                     .as_mut_ptr(),
                 read.bytes(),
                 read.offset(),
@@ -329,27 +355,26 @@ impl Read {
             .map_or(BLOCK_SIZE, |view| view.chunk_size().bytes())
     }
 
-    fn copy_chunk(&mut self, bytes: &[u8]) -> io::Result<()> {
-        if bytes.len() != self.chunk_bytes() {
-            return Err(io::Error::other("fetched chunk geometry differs"));
-        }
-        let block = self.plan.offset() / BLOCK_SIZE as u64 + self.block as u64;
-        let offset = self
-            .plan
-            .manifest()
-            .expect("manifest chunk")
-            .chunk_size()
-            .offset(block);
-        self.response_block()
-            .copy_from_slice(&bytes[offset..offset + BLOCK_SIZE]);
-        Ok(())
-    }
-
-    fn response_block(&mut self) -> &mut [u8] {
+    /// Publish the current chunk's verified payload through the shared rules
+    /// (fill, guest-block copy, waiter completion).
+    fn publish(&mut self, remote: Option<crate::peer::metrics::Phases>) -> io::Result<()> {
+        let fetch = self.fetch.take().expect("owned fetch payload");
+        let view = self.plan.manifest().cloned().expect("manifest chunk");
+        let block = self.absolute_block();
+        let hash = self.chunk_hash.expect("planned chunk hash");
         let Operation::Read { buffer, .. } = &mut self.io.operation else {
             unreachable!()
         };
-        &mut buffer.as_mut_slice()[self.block * BLOCK_SIZE..(self.block + 1) * BLOCK_SIZE]
+        let destination =
+            &mut buffer.as_mut_slice()[self.block * BLOCK_SIZE..(self.block + 1) * BLOCK_SIZE];
+        fetch.publish(
+            self.sources.as_ref().expect("host sources"),
+            hash,
+            remote,
+            &view,
+            block,
+            Some(destination),
+        )
     }
 
     pub fn advance(&mut self) -> io::Result<bool> {
@@ -366,41 +391,26 @@ impl Read {
         result
     }
 
-    fn finish_remote(&mut self) -> io::Result<()> {
+    /// False keeps the remote stage armed: no source has verified yet.
+    fn finish_remote(&mut self) -> io::Result<bool> {
         let Stage::Remote(ticket) = &self.stage else {
             unreachable!()
         };
-        let fetched = self
-            .fetched
-            .as_mut()
-            .expect("remote fetch payload")
-            .get_mut()
-            .expect("unpublished fetch");
-        let (phases, result) = ticket.finish(fetched.bytes.as_mut_slice());
-        fetched.remote = Some(phases);
+        let (phases, result) = ticket.finish(
+            self.fetch
+                .as_mut()
+                .expect("remote fetch payload")
+                .payload_mut(),
+        );
+        if matches!(result, Ok(false)) {
+            return Ok(false);
+        }
         if let Some(trace) = &mut self.io.permit.remote {
             trace.fetched(phases);
         }
         result?;
-        let fetched = self.fetched.take().expect("remote fetch payload");
-        if self.cache_remote
-            && let Some(cache) = &self.cache
-        {
-            match cache.fill(
-                self.chunk_hash.expect("remote hash"),
-                fetched.bytes.as_slice(),
-            ) {
-                Ok(_) => (),
-                Err(e) if e.kind() == io::ErrorKind::OutOfMemory => (),
-                Err(e) => return Err(e),
-            }
-        }
-        self.copy_chunk(fetched.bytes.as_slice())?;
-        self.leader
-            .take()
-            .expect("fetch leader")
-            .complete(fetched)?;
-        Ok(())
+        self.publish(Some(phases))?;
+        Ok(true)
     }
 
     fn advance_inner(&mut self) -> io::Result<bool> {
@@ -428,7 +438,7 @@ impl Read {
                 match read.accept_cached(
                     *offset,
                     self.page.as_ref().unwrap().as_slice(),
-                    self.page_cache.as_ref().expect("host page cache"),
+                    self.sources.as_ref().expect("host sources").pages(),
                 )? {
                     LookupState::Page { offset: next, .. } => *offset = next,
                     LookupState::Complete(Some(hash)) => {
@@ -454,9 +464,7 @@ impl Read {
                 }
             }
             Stage::Payload(read) => {
-                let fetched = self.fetched.take().expect("owned fetch payload");
-                let bytes = fetched.bytes.as_slice();
-                read.verify(bytes)?;
+                read.verify(self.fetch.as_ref().expect("owned fetch payload").payload())?;
                 #[cfg(test)]
                 if let Some(control) = &self.control {
                     let pause = control.lock().unwrap().fetch.take();
@@ -464,25 +472,15 @@ impl Read {
                         pause.wait();
                     }
                 }
-                if let Some(cache) = &self.cache {
-                    match cache.fill(self.chunk_hash.expect("planned chunk hash"), bytes) {
-                        Ok(_) => (),
-                        Err(error) if error.kind() == io::ErrorKind::OutOfMemory => (),
-                        Err(error) => return Err(error),
-                    }
-                }
-                self.copy_chunk(bytes)?;
-                self.leader
-                    .take()
-                    .expect("fetch leader")
-                    .complete(fetched)?;
+                self.publish(None)?;
                 self.block += 1;
                 self.next_block()?;
             }
             Stage::Remote(_) => {
-                self.finish_remote()?;
-                self.block += 1;
-                self.next_block()?;
+                if self.finish_remote()? {
+                    self.block += 1;
+                    self.next_block()?;
+                }
             }
             Stage::Waiting(waiter) => {
                 let fetched = waiter
@@ -493,7 +491,18 @@ impl Read {
                 {
                     trace.fetched(phases);
                 }
-                self.copy_chunk(fetched.bytes.as_slice())?;
+                let view = self.plan.manifest().cloned().expect("manifest chunk");
+                let block = self.absolute_block();
+                let Operation::Read { buffer, .. } = &mut self.io.operation else {
+                    unreachable!()
+                };
+                crate::local::chunk::copy_chunk(
+                    &view,
+                    block,
+                    fetched.bytes.as_slice(),
+                    &mut buffer.as_mut_slice()
+                        [self.block * BLOCK_SIZE..(self.block + 1) * BLOCK_SIZE],
+                )?;
                 self.block += 1;
                 self.next_block()?;
             }

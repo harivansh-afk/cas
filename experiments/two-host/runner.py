@@ -15,7 +15,18 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from agent import CLONE, IMAGE, Agent, stop, wait_for, write_json
+from agent import (
+    CLONE,
+    IMAGE,
+    Agent,
+    image_id,
+    marker_probe,
+    parse_block_stat,
+    rpc_budget,
+    stop,
+    wait_for,
+    write_json,
+)
 
 DEFAULTS = {
     "image_bytes": 512 * 1024**2,
@@ -28,7 +39,469 @@ DEFAULTS = {
     "repeats": 5,
     "depths": [1, 4, 16, 64],
     "inline_us": 50,
+    # Concurrent workload guests per member for the reads cases; one arm per entry.
+    "guests_per_host": [1],
+    # Workload guest sizing; the pinned build defaults to two vCPUs and 1 GiB.
+    "guest": {"cores": 2, "memory_mib": 1024},
+    # Recorded guest shell commands replayed after boot on B; see the doc's
+    # working-set section. Empty disables the working-set phase.
+    "working_set": [],
+    "burst": {},
+    "resume": {},
+    # Measurement arms of the read path; both off is the frozen behaviour.
+    "peer_race_us": None,
+    "fast_settled_reads": False,
 }
+BURST_DEFAULTS = {
+    "images": 4,
+    "base_bytes": 64 * 1024**2,
+    "unique_bytes": 8 * 1024**2,
+    "k": 1,
+    "force_remote": False,
+    "owner_cache_bytes": 0,
+    "drop_page_cache": False,
+    "guest": None,
+    "working_set": None,
+}
+RESUME_DEFAULTS = {
+    "setup_bytes": None,
+    "setup_script": "",
+    "k": 1,
+    "settle": True,
+    "drop_page_cache": False,
+    "guest": None,
+    "working_set": None,
+}
+MAX_WORKING_SET_COMMANDS = 256
+RING_RETENTION = 1024
+CALIBRATION_READS = 32
+DEFAULT_CASES = [
+    "flows-k1",
+    "flows-k2",
+    "reads-memory",
+    "reads-storage",
+    "raw-rsync",
+    "zfs-incremental",
+    "independent-stores",
+]
+MAX_GUESTS = 16
+MAX_BURST_IMAGES = 32
+BASE_SEED = 1000
+UNIQUE_SEED = 2000
+RESUME_SEED = 4242
+PEER_COUNTERS = (
+    "gets",
+    "verified",
+    "errors",
+    "connections",
+    "server_memory",
+    "server_store",
+    "server_missing",
+    "server_errors",
+    "has",
+    "completed_reads",
+    "failed_reads",
+    "inline_attempts",
+    "inline_completed",
+)
+
+
+def sizing(value):
+    if not isinstance(value, dict) or set(value) != {"cores", "memory_mib"}:
+        raise ValueError("guest sizing needs exactly cores and memory_mib")
+    cores, memory = int(value["cores"]), int(value["memory_mib"])
+    if cores < 1 or memory < 128:
+        raise ValueError("guest sizing needs at least one core and 128 MiB")
+    return {"cores": cores, "memory_mib": memory}
+
+
+WORKING_SET_KEYS = {"commands", "chroot", "cwd", "env"}
+
+
+def working_set(value):
+    """Guest shell commands replayed in order, as a JSON list of strings or
+    an object `{"commands": [...], "chroot": PATH|null, "cwd": PATH|null,
+    "env": {NAME: VALUE}}`. With `chroot`, each command runs as
+    `chroot PATH /bin/bash -lc 'cd CWD && COMMAND'` under exactly the given
+    environment (a recorded trajectory's cwd and env); without it, from
+    /mnt/cas with `sh -eu`. Normalised to the object form."""
+    if isinstance(value, list):
+        value = {"commands": value}
+    if not isinstance(value, dict) or not set(value) <= WORKING_SET_KEYS:
+        raise TypeError(f"working_set must be a command list or an object with {sorted(WORKING_SET_KEYS)}")
+    commands = value.get("commands", [])
+    if not isinstance(commands, list) or any(
+        not isinstance(c, str) or not c.strip() or "\0" in c for c in commands
+    ):
+        raise TypeError("working_set commands must be non-empty shell command strings")
+    if len(commands) > MAX_WORKING_SET_COMMANDS:
+        raise ValueError(
+            f"working_set holds at most {MAX_WORKING_SET_COMMANDS} commands"
+        )
+    chroot, cwd, env = value.get("chroot"), value.get("cwd"), value.get("env") or {}
+    for name, path in (("chroot", chroot), ("cwd", cwd)):
+        if path is not None and (not isinstance(path, str) or not path.startswith("/") or "\0" in path or "'" in path):
+            raise ValueError(f"working_set {name} must be an absolute path without quotes")
+    if cwd is not None and chroot is None:
+        raise ValueError("working_set cwd needs a chroot")
+    if not isinstance(env, dict) or any(
+        not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k) or not isinstance(v, str) or "\0" in v
+        for k, v in env.items()
+    ):
+        raise TypeError("working_set env must map identifiers to strings")
+    return {"commands": list(commands), "chroot": chroot, "cwd": cwd, "env": dict(env)}
+
+
+def normalize_settings(config):
+    """Merge defaults and fail on inconsistent or mislabelable settings."""
+    settings = {**DEFAULTS, **config.get("settings", {})}
+    members = len(config["nodes"])
+    if not (0 < settings["data_bytes"] < settings["image_bytes"] // 2):
+        raise ValueError(
+            "data must fit the guest image with filesystem and drift headroom"
+        )
+    if not 1 <= settings["seconds"] <= 300 or not 1 <= settings["repeats"] <= 20:
+        raise ValueError("invalid run duration/repeat count")
+    guests = settings["guests_per_host"]
+    guests = [guests] if isinstance(guests, int) else list(guests)
+    if (
+        not guests
+        or any(not isinstance(n, int) or not 1 <= n <= MAX_GUESTS for n in guests)
+        or len(set(guests)) != len(guests)
+    ):
+        raise ValueError(
+            f"guests_per_host needs distinct integers from 1 to {MAX_GUESTS}"
+        )
+    settings["guests_per_host"] = guests
+    if not cache_fits(settings, max(guests)):
+        raise ValueError(
+            "memory cohort needs cache headroom for every guest's data and metadata"
+        )
+    settings["guest"] = sizing(settings["guest"])
+    settings["working_set"] = working_set(settings["working_set"])
+    burst = {**BURST_DEFAULTS, **settings["burst"]}
+    if set(burst) != set(BURST_DEFAULTS):
+        raise ValueError(
+            f"unknown burst settings: {sorted(set(burst) - set(BURST_DEFAULTS))}"
+        )
+    if not 1 <= burst["images"] <= MAX_BURST_IMAGES:
+        raise ValueError(f"burst images must be 1 to {MAX_BURST_IMAGES}")
+    for key in ("base_bytes", "unique_bytes"):
+        if burst[key] <= 0 or burst[key] % 4096:
+            raise ValueError(f"burst {key} must be a positive 4 KiB multiple")
+    if burst["base_bytes"] + burst["unique_bytes"] >= settings["image_bytes"] // 2:
+        raise ValueError("burst regions must fit the image with filesystem headroom")
+    if not 1 <= burst["k"] <= members:
+        raise ValueError("burst k must be between 1 and the member count")
+    if burst["force_remote"] and burst["k"] < 2:
+        raise ValueError(
+            "force_remote needs a nonlocal owner for every chunk: burst k must be at least 2"
+        )
+    burst["guest"] = sizing(burst["guest"] or settings["guest"])
+    burst["working_set"] = working_set(
+        settings["working_set"]
+        if burst["working_set"] is None
+        else burst["working_set"]
+    )
+    settings["burst"] = burst
+    resume = {**RESUME_DEFAULTS, **settings["resume"]}
+    if set(resume) != set(RESUME_DEFAULTS):
+        raise ValueError(
+            f"unknown resume settings: {sorted(set(resume) - set(RESUME_DEFAULTS))}"
+        )
+    if resume["setup_bytes"] is None:
+        resume["setup_bytes"] = settings["data_bytes"]
+    if (
+        resume["setup_bytes"] <= 0
+        or resume["setup_bytes"] % 4096
+        or resume["setup_bytes"] >= settings["image_bytes"] // 2
+    ):
+        raise ValueError(
+            "resume setup_bytes must be a 4 KiB multiple that fits the image"
+        )
+    if not 1 <= resume["k"] <= members:
+        raise ValueError("resume k must be between 1 and the member count")
+    if not isinstance(resume["setup_script"], str):
+        raise TypeError("resume setup_script must be a shell string")
+    resume["guest"] = sizing(resume["guest"] or settings["guest"])
+    resume["working_set"] = working_set(
+        settings["working_set"]
+        if resume["working_set"] is None
+        else resume["working_set"]
+    )
+    settings["resume"] = resume
+    return settings
+
+
+def cache_fits(settings, guests):
+    """The memory cohort needs every guest's data and metadata in the owner cache."""
+    return settings["cache_bytes"] >= settings["data_bytes"] * 2 * guests
+
+
+def plan_cases(config, settings):
+    """Expand the case list into (case name, handler, argument) rows.
+
+    `reads-memory` runs one arm per `guests_per_host` entry; the one-guest arm
+    keeps its historical name and schema, larger arms are suffixed `-gN`.
+    """
+    plan = []
+    for case in config.get("cases", DEFAULT_CASES):
+        match = re.fullmatch(r"reads-(memory|storage)(?:-g(\d+))?", case)
+        if match:
+            target, explicit = match[1], match[2]
+            arms = [int(explicit)] if explicit else settings["guests_per_host"]
+            for guests in arms:
+                if not 1 <= guests <= MAX_GUESTS:
+                    raise ValueError(f"unsupported guest count in {case}")
+                if target == "memory" and not cache_fits(settings, guests):
+                    raise ValueError(
+                        f"{case}: cache_bytes lacks headroom for {guests} guests' data"
+                    )
+                plan.append((arm_name(target, guests), "reads", (target, guests)))
+        elif case in ("flows-k1", "flows-k2"):
+            plan.append((case, "flows", int(case[-1])))
+        elif case in ("raw-rsync", "zfs-incremental", "independent-stores"):
+            plan.append((case, case.replace("-", "_"), None))
+        elif case == "burst-images":
+            plan.append((case, "burst", None))
+        elif case == "resume-elsewhere":
+            plan.append((case, "resume", None))
+        else:
+            raise ValueError(f"unknown case {case}")
+    if len({name for name, _, _ in plan}) != len(plan):
+        raise ValueError("duplicate case arms in plan")
+    return plan
+
+
+def arm_name(target, guests):
+    return f"reads-{target}" if guests == 1 else f"reads-{target}-g{guests}"
+
+
+def guest_names(prefix, count):
+    return [prefix] if count == 1 else [f"{prefix}-{i}" for i in range(count)]
+
+
+def merge_bins(bins):
+    merged = {}
+    for table in bins:
+        for key, count in table.items():
+            merged[key] = merged.get(key, 0) + count
+    return dict(sorted(merged.items(), key=lambda item: int(item[0])))
+
+
+def bin_percentiles(bins, percentiles=(50.0, 95.0, 99.0, 99.9)):
+    total = sum(bins.values())
+    if not total:
+        raise ValueError("no samples in merged latency bins")
+    result = {}
+    cumulative = 0
+    items = sorted(((int(k), v) for k, v in bins.items()), key=lambda item: item[0])
+    for percentile in percentiles:
+        target = percentile / 100 * total
+        cumulative = 0
+        for value, count in items:
+            cumulative += count
+            if cumulative >= target:
+                result[f"{percentile:.6f}"] = value
+                break
+    return result
+
+
+def aggregate_fio(results):
+    """Combine per-guest fio json+ jobs: summed throughput, merged histograms.
+
+    Percentiles come from the merged json+ bins, so they are bucket lower
+    bounds rather than fio's exact per-job percentile values.
+    """
+    jobs = [job for result in results for job in result["jobs"]]
+    if not jobs:
+        raise ValueError("no fio jobs to aggregate")
+    aggregate = {
+        "guests": len(results),
+        "jobs": len(jobs),
+        "errors": sum(1 for job in jobs if job["error"]),
+    }
+    for direction in ("read", "write"):
+        rows = [job[direction] for job in jobs]
+        summary = {
+            "io_bytes": sum(r["io_bytes"] for r in rows),
+            "total_ios": sum(r["total_ios"] for r in rows),
+            "iops": sum(r["iops"] for r in rows),
+            "bw_bytes": sum(r["bw_bytes"] for r in rows),
+            "runtime_ms_max": max(r["runtime"] for r in rows),
+        }
+        for key in ("lat_ns", "clat_ns"):
+            tables = [r[key]["bins"] for r in rows if "bins" in r.get(key, {})]
+            if tables and summary["total_ios"]:
+                bins = merge_bins(tables)
+                summary[key] = {
+                    "bins": bins,
+                    "N": sum(bins.values()),
+                    "min": min(r[key]["min"] for r in rows),
+                    "max": max(r[key]["max"] for r in rows),
+                    "percentile": bin_percentiles(bins),
+                }
+        aggregate[direction] = summary
+    if aggregate["errors"]:
+        raise ValueError("aggregated fio jobs include errors")
+    return aggregate
+
+
+def peer_counters(before, after):
+    result = {}
+    for key in PEER_COUNTERS:
+        delta = after["peer"]["counters"][key] - before["peer"]["counters"][key]
+        if delta < 0:
+            raise ValueError(f"peer counter {key} reset inside a measurement")
+        result[key] = delta
+    result["get_wire"] = {
+        k: after["peer"]["get_wire"][k] - before["peer"]["get_wire"][k]
+        for k in ("sent", "received")
+    }
+    result["max_inflight"] = {
+        "before": before["peer"]["counters"]["max_inflight"],
+        "after": after["peer"]["counters"]["max_inflight"],
+    }
+    return result
+
+
+def ring_since(report):
+    return max((r["completed_ns"] for r in report["peer"]["recent"]), default=0)
+
+
+def peer_clock_origin(calibration):
+    """Bounds on the ring origin (host monotonic ns at peer runtime start).
+
+    A bracketed single-chunk read that added exactly one ring record places
+    the origin in [started - received_ns, completed - completed_ns]. Reads
+    that added no record hit locally owned chunks and carry no information;
+    reads that added several records are ambiguous and are counted, not used.
+    The daemon is expected to export the ring origin directly; this stays as
+    the fallback.
+    """
+    lower, upper, used, ambiguous = None, None, 0, 0
+    for row in calibration["reads"]:
+        if not row["records"]:
+            continue
+        if len(row["records"]) != 1 or row["completed_reads"] != 1:
+            ambiguous += 1
+            continue
+        record = row["records"][0]
+        if not record["success"] or record["completed_ns"] < record["received_ns"]:
+            raise ValueError("calibration read failed or is nonmonotonic")
+        low = row["started_ns"] - record["received_ns"]
+        high = row["completed_ns"] - record["completed_ns"]
+        lower = low if lower is None else max(lower, low)
+        upper = high if upper is None else min(upper, high)
+        used += 1
+    if not used:
+        raise ValueError("no calibration read fetched a remote chunk")
+    if lower > upper:
+        raise ValueError("calibration brackets do not intersect")
+    return {
+        "lower_ns": lower,
+        "upper_ns": upper,
+        "width_ns": upper - lower,
+        "remote_reads": used,
+        "ambiguous_reads": ambiguous,
+        "reads": len(calibration["reads"]),
+    }
+
+
+def first_remote_read(samples, since):
+    """Earliest ring record received after `since` (both on the ring clock).
+
+    `samples` are ring snapshots in sampling order. The ring is bounded, so a
+    snapshot that holds only post-`since` records at full retention may have
+    evicted the earliest one; that is reported as censored, never estimated.
+    """
+    for sample in samples:
+        ring = sample["peer"]["recent"]
+        retention = sample["peer"].get("retention", RING_RETENTION)
+        later = [r["received_ns"] for r in ring if r["received_ns"] > since]
+        if not later:
+            continue
+        if len(ring) >= retention and len(later) == len(ring):
+            return {"received_ns": None, "censored": True, "retention": retention}
+        return {"received_ns": min(later), "censored": False}
+    return {"received_ns": None, "censored": False}
+
+
+def first_useful_io(first, origin, anchor_ns):
+    """Host-clock interval from `anchor_ns` to the first remote read.
+
+    The ring record is converted through the calibrated origin bounds; the
+    point value is the bracket midpoint and both bounds are retained. Without
+    a usable record or calibration the interval is null, never estimated.
+    """
+    result = {**first, "ns": None, "lower_ns": None, "upper_ns": None}
+    if first["received_ns"] is None:
+        result["reason"] = (
+            "earliest post-anchor record evicted from the bounded ring"
+            if first["censored"]
+            else "no remote read after the anchor"
+        )
+        return result
+    if "lower_ns" not in origin:
+        result["reason"] = origin["unavailable"]
+        return result
+    lower = origin["lower_ns"] + first["received_ns"] - anchor_ns
+    upper = origin["upper_ns"] + first["received_ns"] - anchor_ns
+    return {**result, "ns": (lower + upper) // 2, "lower_ns": lower, "upper_ns": upper}
+
+
+def working_set_summary(guests, anchors):
+    """Per-guest replay timing relative to each guest's anchor (host clock)."""
+    rows = []
+    for guest in guests:
+        commands = guest["commands"]
+        if not commands:
+            raise ValueError("working set replay recorded no commands")
+        if any(c["completed_ns"] < c["started_ns"] for c in commands):
+            raise ValueError("nonmonotonic working-set command timing")
+        anchor = anchors[guest["name"]]
+        rows.append(
+            {
+                "name": guest["name"],
+                "commands": commands,
+                "replay_ns": commands[-1]["completed_ns"] - commands[0]["started_ns"],
+                "time_to_working_set_ns": commands[-1]["completed_ns"] - anchor,
+                "per_command_completion_ns": [
+                    c["completed_ns"] - anchor for c in commands
+                ],
+            }
+        )
+    return rows
+
+
+def burst_guest_summary(guest, marker, chunk_bytes=4096):
+    """Per-guest boot milestones and guest-observed read fraction.
+
+    The daemon's GET counters are host wide, so a per-image fetched fraction
+    is guest-observed device reads over the image's used ext4 blocks. Under
+    force-remote every settled read is a GET; otherwise locally owned chunks
+    are read locally and the host-level GET delta bounds remote fetches.
+    """
+    lines = guest["probe"].splitlines()
+    if len(lines) < 3 or lines[0] != marker:
+        raise ValueError(f"guest {guest['name']} marker probe returned {lines[:1]}")
+    device = parse_block_stat(lines[1])
+    blocks, free, fragment = (int(v) for v in lines[2].split())
+    used_chunks = (blocks - free) * fragment // chunk_bytes
+    read_chunks = device["read_sectors"] * 512 // chunk_bytes
+    origin = guest["launched_ns"]
+    return {
+        "name": guest["name"],
+        "image": guest["image"],
+        "ready_ns": guest["ready_ns"] - origin,
+        "ssh_banner_ns": guest["ssh_banner_ns"] - origin,
+        "first_command_ns": guest["first_command_ns"] - origin,
+        "marker_ns": guest["probe_ns"] - origin,
+        "device_at_marker": device,
+        "used_chunks": used_chunks,
+        "read_chunks_at_marker": read_chunks,
+        "read_fraction_at_marker": read_chunks / used_chunks if used_chunks else None,
+    }
 
 
 def rsync_bytes(text):
@@ -59,8 +532,10 @@ def deltas(before, after):
 
 
 def peer_delta(before, after):
+    """The owner-side subset of peer_counters used by the read cohorts."""
+    counters = peer_counters(before, after)
     return {
-        key: after["peer"]["counters"][key] - before["peer"]["counters"][key]
+        key: counters[key]
         for key in ("gets", "verified", "errors", "server_memory", "server_store")
     }
 
@@ -151,10 +626,14 @@ class Remote:
         self.events = (directory / "rpc.jsonl").open("x")
 
     def call(self, method, **args):
-        request = {"method": method, "args": args}
+        budget = rpc_budget(method, args)
+        request = {"method": method, "args": args, "budget_s": budget}
         self.process.stdin.write(json.dumps(request) + "\n")
         self.process.stdin.flush()
-        value = self.replies.get(timeout=2400 if method == "boot" else 900)
+        try:
+            value = self.replies.get(timeout=budget)
+        except queue.Empty:
+            value = {"error": f"no reply within the {budget} s budget"}
         self.events.write(json.dumps({"request": request, "response": value}) + "\n")
         self.events.flush()
         if "error" in value:
@@ -183,20 +662,10 @@ def parallel(items, fn):
 class Experiment:
     def __init__(self, config, build_info, output):
         self.config = config
-        self.settings = {**DEFAULTS, **config.get("settings", {})}
         if not 2 <= len(config["nodes"]) <= 16:
             raise ValueError("runner supports 2 through 16 nodes")
-        if not (0 < self.settings["data_bytes"] < self.settings["image_bytes"] // 2):
-            raise ValueError(
-                "data must fit the guest image with filesystem and drift headroom"
-            )
-        if self.settings["cache_bytes"] < self.settings["data_bytes"] * 2:
-            raise ValueError("memory cohort needs cache headroom for data and metadata")
-        if (
-            not 1 <= self.settings["seconds"] <= 300
-            or not 1 <= self.settings["repeats"] <= 20
-        ):
-            raise ValueError("invalid run duration/repeat count")
+        self.settings = normalize_settings(config)
+        self.plan = plan_cases(config, self.settings)
         self.output = output
         self.agents = []
         for index, node in enumerate(config["nodes"]):
@@ -204,9 +673,10 @@ class Experiment:
             directory.mkdir()
             self.agents.append(Remote(node, build_info, directory))
         self.results = {
-            "schema_version": 1,
+            "schema_version": 3,
             "config": config,
             "settings": self.settings,
+            "planned_cases": [name for name, _, _ in self.plan],
             "started_unix_ns": time.time_ns(),
             "paper_result": False,
             "cases": {},
@@ -238,11 +708,16 @@ class Experiment:
             self.fleet("sync", address=node["bulk"]) for node in self.config["nodes"]
         ]
 
-    def start(self, name, k=None, cache=0, force=False):
+    def start(self, name, k=None, cache=0, force=False, guests=1):
         works = parallel(self.agents, lambda agent: agent.call("start_case", name=name))
+        self.sources = [image_id(IMAGE, i) for i in range(guests)]
+        self.clones = [image_id(CLONE, i) for i in range(guests)]
         if k:
             parallel(
-                range(len(self.agents)), lambda n: self.agents[n].call("init", node=n)
+                range(len(self.agents)),
+                lambda n: self.agents[n].call(
+                    "init", node=n, images=self.sources if n == 0 else None
+                ),
             )
             parallel(
                 range(len(self.agents)),
@@ -253,7 +728,7 @@ class Experiment:
                     members=self.config["nodes"],
                     cache=cache if n == 0 else 0,
                     force=force and n == 1,
-                    images=None if n < 2 else [],
+                    images=self.sources + self.clones if n < 2 else [],
                 ),
             )
 
@@ -272,47 +747,160 @@ class Experiment:
         parallel(self.agents, lambda agent: agent.call("end_case"))
         self.save()
 
-    def seed(self, backend="cas"):
-        a = self.agents[0]
-        a.call("boot", name="source", backend=backend, format=True)
-        self.fio(0, "source", "seed", "seed")
-        digest = a.call(
-            "shell",
-            guest="source",
-            script="cd /mnt/cas; sha256sum data; echo 0 > epoch; sync -f .",
-        ).split()[0]
-        return digest
+    def boot(self, node, name, **kwargs):
+        kwargs.setdefault("sizing", self.settings["guest"])
+        return self.agents[node].call("boot", name=name, **kwargs)
 
-    def verify(self, node, guest, digest, continue_work=False):
-        script = f'cd /mnt/cas; echo {shlex.quote(digest + "  data")} | sha256sum -c -; test "$(cat epoch)" = 0'
+    def seed(self, backend="cas"):
+        self.boot(0, "source", backend=backend, format=True)
+        self.fio(0, "source", "seed", "seed")
+        return self.epoch_digest(0, "source")
+
+    def epoch_digest(self, node, guest):
+        return (
+            self.agents[node]
+            .call(
+                "shell",
+                guest=guest,
+                script="cd /mnt/cas; sha256sum data; echo 0 > epoch; sync -f .",
+            )
+            .split()[0]
+        )
+
+    def boot_burst(
+        self, node, names, images, sizing, probe=None, format=False, sample_ring=False
+    ):
+        return self.agents[node].call(
+            "boot_burst",
+            guests=[
+                {"name": name, "image": image, "sizing": sizing, "format": format}
+                for name, image in zip(names, images, strict=True)
+            ],
+            probe=probe,
+            sample_ring=sample_ring,
+        )
+
+    def replay_working_set(self, node, guests, spec, anchors):
+        """Replay the recorded commands cold, then again warm as a control.
+
+        Remote-read counters bracket each whole pass on every member, so the
+        cold pass's destination GET delta is the working set actually fetched.
+        """
+        if not spec["commands"]:
+            return None
+        passes = {}
+        for label in ("cold", "warm"):
+            before = self.report()
+            replay = self.agents[node].call(
+                "run_commands", guests=guests, commands=spec["commands"], label=label,
+                chroot=spec["chroot"], cwd=spec["cwd"], env=spec["env"],
+            )
+            after = self.report()
+            peers = [peer_counters(x, y) for x, y in zip(before, after, strict=True)]
+            if any(p["errors"] or p["failed_reads"] for p in peers):
+                raise ValueError(f"remote read errors during the {label} working set")
+            passes[label] = {
+                "guests": working_set_summary(replay, anchors),
+                "wire": deltas(before, after),
+                "peer": peers,
+                "destination_fetched_chunks": peers[node]["gets"],
+                "destination_get_wire": peers[node]["get_wire"],
+            }
+        return {
+            "commands": spec["commands"],
+            "chroot": spec["chroot"],
+            "guest_cwd": spec["cwd"] if spec["chroot"] else "/mnt/cas",
+            "env": spec["env"],
+            **passes,
+        }
+
+    def ring_calibration(self, node, guest, path, size, chunk_bytes=16384):
+        reads = max(1, min(CALIBRATION_READS, size // chunk_bytes))
+        calibration = self.agents[node].call(
+            "calibrate_ring",
+            guest=guest,
+            path=path,
+            reads=reads,
+            chunk_bytes=chunk_bytes,
+        )
+        try:
+            origin = peer_clock_origin(calibration)
+        except ValueError as error:
+            origin = {"unavailable": str(error)}
+        return {"reads": calibration, "origin": origin}
+
+    def fio_many(self, node, guests, kind, tag, **kwargs):
+        agent = self.agents[node]
+        names = [tag if len(guests) == 1 else f"{tag}-{guest}" for guest in guests]
+        for guest, name in zip(guests, names, strict=True):
+            agent.call("fio", guest=guest, kind=kind, name=name, **kwargs)
+        return [agent.call("finish_fio", name=name) for name in names]
+
+    def seed_many(self, guests):
+        """Boot `guests` sources on A concurrently and seed each one."""
+        names = guest_names("source", guests)
+        if guests == 1:
+            return names, [self.seed()]
+        boots = self.boot_burst(
+            0, names, self.sources, self.settings["guest"], format=True
+        )
+        self.fio_many(0, names, "seed", "seed")
+        self.results["cases"][self.case]["source_boot"] = boots
+        return names, [self.epoch_digest(0, name) for name in names]
+
+    def verify(self, node, guest, digest, continue_work=False, epoch=0):
+        script = f'cd /mnt/cas; echo {shlex.quote(digest + "  data")} | sha256sum -c -; test "$(cat epoch)" = {epoch}'
         if continue_work:
             script += '; echo 1 > epoch; sync -f .; test "$(cat epoch)" = 1'
         return self.agents[node].call(
             "shell", guest=guest, script=script + "; sync -f ."
         )
 
-    def provision(self):
+    def continue_epoch(self, node, guest):
+        """Durably advance the application epoch without reading the data file."""
+        return self.agents[node].call(
+            "shell",
+            guest=guest,
+            script='cd /mnt/cas; test "$(cat epoch)" = 0; echo 1 > epoch; sync -f .; test "$(cat epoch)" = 1',
+        )
+
+    def provision(self, sources=("source",)):
+        """Freeze every source, copy each settled manifest to B, then thaw."""
         a = self.agents[0]
         a.call("settle")
         self.sync()
-        a.call("shell", guest="source", script="fsfreeze -f /mnt/cas")
-        before = self.report()
-        start = time.monotonic_ns()
+        frozen = []
+        images = []
         try:
-            result = self.fleet(
-                "provision",
-                source=self.config["nodes"][0]["bulk"],
-                destination=self.config["nodes"][1]["bulk"],
-                image=IMAGE,
-                target=CLONE,
-            )
+            # Freeze outside the timed window so provision.elapsed_ns and
+            # provision.wire keep their original meaning for every case.
+            for guest in sources:
+                a.call("shell", guest=guest, script="fsfreeze -f /mnt/cas")
+                frozen.append(guest)
+            before = self.report()
+            start = time.monotonic_ns()
+            for index, _ in enumerate(sources):
+                began = time.monotonic_ns()
+                result = self.fleet(
+                    "provision",
+                    source=self.config["nodes"][0]["bulk"],
+                    destination=self.config["nodes"][1]["bulk"],
+                    image=self.sources[index],
+                    target=self.clones[index],
+                )
+                images.append(
+                    {"daemon": result, "elapsed_ns": time.monotonic_ns() - began}
+                )
         finally:
-            a.call("shell", guest="source", script="fsfreeze -u /mnt/cas")
-        return {
-            "daemon": result,
+            for guest in frozen:
+                a.call("shell", guest=guest, script="fsfreeze -u /mnt/cas")
+        result = {
             "elapsed_ns": time.monotonic_ns() - start,
             "wire": deltas(before, self.report()),
         }
+        if len(sources) == 1:
+            return {"daemon": images[0]["daemon"], **result}
+        return {"images": images, **result}
 
     def flows(self, k):
         name = f"flows-k{k}"
@@ -322,7 +910,7 @@ class Experiment:
         digest = self.seed()
         result["provision"] = self.provision()
         start = time.monotonic_ns()
-        b.call("boot", name="clone", image=CLONE)
+        self.boot(1, "clone", image=CLONE)
         self.verify(1, "clone", digest)
         result["provision"]["boot_verify_ns"] = time.monotonic_ns() - start
         parallel(self.agents, lambda agent: agent.call("settle"))
@@ -385,7 +973,7 @@ class Experiment:
             image=IMAGE,
         )
         boot = time.monotonic_ns()
-        b.call("boot", name="resumed", image=IMAGE)
+        self.boot(1, "resumed", image=IMAGE)
         self.verify(1, "resumed", digest, continue_work=True)
         drift_after = b.call(
             "shell", guest="resumed", script="cd /mnt/cas; sha256sum drift"
@@ -408,11 +996,13 @@ class Experiment:
         b.call("stop_guest", name="resumed")
         self.end()
 
-    def observed_read(self, kind, name, depth=1):
+    def observed_read(self, kind, name, depth=1, readers=("reader",)):
         before = self.report()
         last = before
         samples = []
-        self.agents[1].call("fio", guest="reader", kind=kind, name=name, depth=depth)
+        names = [name if len(readers) == 1 else f"{name}-{guest}" for guest in readers]
+        for guest, job in zip(readers, names, strict=True):
+            self.agents[1].call("fio", guest=guest, kind=kind, name=job, depth=depth)
         started = time.monotonic()
         while True:
             if time.monotonic() - started > self.settings["seconds"] + 180:
@@ -432,42 +1022,61 @@ class Experiment:
                 }
             )
             last = current
-            if not self.agents[1].call("fio_running", name=name):
+            if not any(self.agents[1].call("fio_running", name=job) for job in names):
                 break
-        fio = self.agents[1].call("finish_fio", name=name)
+        jobs = [self.agents[1].call("finish_fio", name=job) for job in names]
+        if len(readers) == 1:
+            return jobs[0], before, self.report(), samples
+        fio = aggregate_fio(jobs)
+        fio["per_guest"] = [
+            {"name": guest, "fio": job}
+            for guest, job in zip(readers, jobs, strict=True)
+        ]
         return fio, before, self.report(), samples
 
-    def reads(self, target):
-        name = "reads-" + target
+    def reads(self, arm):
+        target, guests = arm
+        name = arm_name(target, guests)
+        self.case = name
         self.start(
             name,
             k=len(self.agents),
             cache=self.settings["cache_bytes"] if target == "memory" else 0,
             force=True,
+            guests=guests,
         )
         result = self.results["cases"][name] = {"cohorts": []}
+        if guests > 1:
+            result["guests_per_host"] = guests
+            result["guest_sizing"] = self.settings["guest"]
         a, b = self.agents[:2]
-        digest = self.seed()
-        result["provision"] = self.provision()
-        b.call("boot", name="reader", image=CLONE)
-        self.verify(1, "reader", digest)
+        sources, digests = self.seed_many(guests)
+        result["provision"] = self.provision(sources)
+        readers = guest_names("reader", guests)
+        if guests == 1:
+            self.boot(1, "reader", image=CLONE)
+        else:
+            result["reader_boot"] = self.boot_burst(
+                1, readers, self.clones, self.settings["guest"]
+            )
+        for reader, digest in zip(readers, digests, strict=True):
+            self.verify(1, reader, digest)
         # Read every block to warm the owner; B never fills its cache.
-        self.fio(1, "reader", "verify", "warm")
+        self.fio_many(1, readers, "verify", "warm")
         for repeat in range(self.settings["repeats"]):
             for depth in self.settings["depths"]:
                 for kind in ["random", "sequential"] if depth == 1 else ["sequential"]:
                     tag = f"r{repeat}-{kind}-qd{depth}"
-                    fio, before, after, samples = self.observed_read(kind, tag, depth)
+                    fio, before, after, samples = self.observed_read(
+                        kind, tag, depth, readers
+                    )
                     counters = classify(before[0], after[0], target)
                     if (
                         after[1]["peer"]["counters"]["verified"]
                         <= before[1]["peer"]["counters"]["verified"]
                     ):
                         raise ValueError("no verified remote reads")
-                    since = max(
-                        (r["completed_ns"] for r in before[1]["peer"]["recent"]),
-                        default=0,
-                    )
+                    since = ring_since(before[1])
                     result["cohorts"].append(
                         {
                             "name": tag,
@@ -483,24 +1092,30 @@ class Experiment:
                     )
                     self.save()
             # GET and shipping travel B->A and A->B respectively, on separate sockets.
+            # Every source guest ships; the aggregate requested rate stays fixed.
             tag = f"r{repeat}-contention"
-            a.call(
-                "fio",
-                guest="source",
-                kind="ship",
-                name=tag + "-writer",
-                seconds=self.settings["seconds"] + 10,
-                depth=4,
-            )
-            fio, before, after, samples = self.observed_read("random", tag)
+            writers = [
+                tag + "-writer" if guests == 1 else f"{tag}-writer-{source}"
+                for source in sources
+            ]
+            for source, writer in zip(sources, writers, strict=True):
+                a.call(
+                    "fio",
+                    guest=source,
+                    kind="ship",
+                    name=writer,
+                    seconds=self.settings["seconds"] + 10,
+                    depth=4,
+                    rate=self.settings["ship_rate_bytes"] // guests,
+                )
+            fio, before, after, samples = self.observed_read("random", tag, 1, readers)
             if not has_overlap(samples):
                 raise ValueError(
                     "contention run has no observed overlap of acknowledged PUT chunks and verified GETs"
                 )
-            writer = a.call("finish_fio", name=tag + "-writer")
-            since = max(
-                (r["completed_ns"] for r in before[1]["peer"]["recent"]), default=0
-            )
+            finished = [a.call("finish_fio", name=writer) for writer in writers]
+            writer = finished[0] if guests == 1 else finished
+            since = ring_since(before[1])
             result["cohorts"].append(
                 {
                     "name": tag,
@@ -521,12 +1136,357 @@ class Experiment:
                 "sweep",
                 member=[node["bulk"] for node in self.config["nodes"]],
             )
-            self.fio(1, "reader", "verify", tag + "-rewarm")
-        b.call("stop_guest", name="reader")
-        a.call("stop_guest", name="source")
+            self.fio_many(1, readers, "verify", tag + "-rewarm")
+        b.call("stop_guests", names=readers)
+        a.call("stop_guests", names=sources)
         self.end()
 
-    def independent(self):
+    def cold_member(self, node, images, drop_page_cache):
+        """Restart one member's daemon cold with an empty clean cache."""
+        agent = self.agents[node]
+        cut = time.monotonic_ns()
+        restart = agent.call("restart_host", images=images)
+
+        def recovered():
+            try:
+                return agent.call("report")
+            except RuntimeError as error:
+                if "cas-host exited" in str(error):
+                    raise
+                return False
+
+        wait_for(recovered, 120)
+        result = {
+            "restart": restart,
+            "cold_recovery_ns": time.monotonic_ns() - cut,
+            "page_cache": None,
+        }
+        if drop_page_cache:
+            # Fails loudly without the privilege instead of mislabelling the run.
+            result["page_cache"] = agent.call("drop_page_cache")
+        return result
+
+    def burst(self):
+        name = "burst-images"
+        burst = self.settings["burst"]
+        n = burst["images"]
+        self.start(
+            name,
+            k=burst["k"],
+            cache=burst["owner_cache_bytes"],
+            force=burst["force_remote"],
+            guests=n,
+        )
+        result = self.results["cases"][name] = {
+            "images": n,
+            "k": burst["k"],
+            "force_remote": burst["force_remote"],
+            "owner_cache_bytes": burst["owner_cache_bytes"],
+            "guest_sizing": burst["guest"],
+            "base_bytes": burst["base_bytes"],
+            "unique_bytes": burst["unique_bytes"],
+            "attribution": (
+                "GET/HAS counters are per member; per-image read fractions are "
+                "guest-observed device reads over used ext4 blocks"
+            ),
+        }
+        a, b = self.agents[:2]
+        sources = guest_names("source", n)
+        result["source_boot"] = self.boot_burst(
+            0, sources, self.sources, burst["guest"], format=True
+        )
+        # Every image shares the seeded base region and differs in its unique
+        # region, whose first block carries the marker read at boot on B.
+        contents = []
+        chunks_before = a.call("report")["store"]["chunks"]
+        for index, source in enumerate(sources):
+            marker = f"cas burst image {index} marker"
+            base = a.call(
+                "write_payload",
+                guest=source,
+                name="base",
+                seed=BASE_SEED,
+                size=burst["base_bytes"],
+            )
+            unique = a.call(
+                "write_payload",
+                guest=source,
+                name="unique",
+                seed=UNIQUE_SEED + index,
+                size=burst["unique_bytes"],
+                marker=marker,
+            )
+            a.call("settle")
+            chunks = a.call("report")["store"]["chunks"]
+            contents.append(
+                {
+                    "image": self.sources[index],
+                    "base": base,
+                    "unique": unique,
+                    "marker": marker,
+                    "store_chunk_delta": chunks - chunks_before,
+                }
+            )
+            chunks_before = chunks
+        result["contents"] = contents
+        self.save()
+        result["provision"] = self.provision(sources)
+        result["source_shutdown"] = a.call("stop_guests", names=sources)
+        result["destination_cold"] = self.cold_member(
+            1, self.clones, burst["drop_page_cache"]
+        )
+        before = self.report()
+        since = ring_since(before[1])
+        names = guest_names("burst", n)
+        probe = marker_probe("/mnt/cas/unique")
+        guests = self.boot_burst(
+            1, names, self.clones, burst["guest"], probe, sample_ring=True
+        )
+        at_marker = self.report()
+        result["guests"] = [
+            burst_guest_summary(guest, content["marker"])
+            for guest, content in zip(guests, contents, strict=True)
+        ]
+        result["guest_boots"] = guests
+        launches = [guest["launched_ns"] for guest in guests]
+        result["launch_spread_ns"] = max(launches) - min(launches)
+        # The recorded working set runs in every guest at once before any full
+        # read, so its cold pass sees only what boot and the marker fetched.
+        result["working_set"] = self.replay_working_set(
+            1,
+            names,
+            burst["working_set"],
+            {g["name"]: g["launched_ns"] for g in guests},
+        )
+        after_working_set = self.report()
+        # Full verification of both regions after the boot window.
+        verified = []
+        for guest, content in zip(names, contents, strict=True):
+            began = time.monotonic_ns()
+            output = b.call(
+                "shell", guest=guest, script="cd /mnt/cas; sha256sum base unique"
+            ).split()
+            if output[0::2] != [content["base"]["sha256"], content["unique"]["sha256"]]:
+                raise ValueError(f"burst guest {guest} content differs from its source")
+            verified.append(
+                {
+                    "name": guest,
+                    "verify_ns": time.monotonic_ns() - began,
+                    "stat": b.call("guest_stat", guest=guest),
+                }
+            )
+        result["verified"] = verified
+        after = self.report()
+        used = sum(guest["used_chunks"] for guest in result["guests"])
+        windows = {}
+        for label, end in (("to_marker", at_marker), ("to_verified", after)):
+            peers = [peer_counters(x, y) for x, y in zip(before, end, strict=True)]
+            windows[label] = {
+                "wire": deltas(before, end),
+                "peer": peers,
+                "destination_fetched_chunks": peers[1]["gets"],
+                "fetched_fraction_of_used": peers[1]["gets"] / used if used else None,
+            }
+            if any(p["errors"] or p["failed_reads"] for p in peers):
+                raise ValueError("remote read errors during the burst window")
+        if windows["to_marker"]["destination_fetched_chunks"] == 0:
+            raise ValueError("burst window observed no GETs on the destination")
+        result["windows"] = windows
+        result["recent_phases"] = phases(after[1], since)
+        result["before"] = before
+        result["after"] = after
+        result["loadavg"] = os.getloadavg()
+        # Ring clock calibration last: its reads must not enter any window.
+        result["ring_calibration"] = self.ring_calibration(
+            1, names[0], "/mnt/cas/base", burst["base_bytes"]
+        )
+        samples = sorted(guests, key=lambda g: g["report_at_ready_ns"])
+        first = first_remote_read(
+            [g["report_at_ready"] for g in samples]
+            + [at_marker[1], after_working_set[1]],
+            since,
+        )
+        result["intervals"] = {
+            "clock": "host B monotonic ns; ring records converted through ring_calibration",
+            "anchor": "first QEMU launch on B",
+            "anchor_ns": min(launches),
+            "boot_ns": [g["ready_ns"] - g["launched_ns"] for g in guests],
+            "ssh_ready_ns": [g["ssh_banner_ns"] - g["launched_ns"] for g in guests],
+            "first_useful_io": first_useful_io(
+                first, result["ring_calibration"]["origin"], min(launches)
+            ),
+            "time_to_working_set_ns": (
+                None
+                if result["working_set"] is None
+                else {
+                    g["name"]: g["time_to_working_set_ns"]
+                    for g in result["working_set"]["cold"]["guests"]
+                }
+            ),
+        }
+        b.call("stop_guests", names=names)
+        self.end()
+
+    def resume(self):
+        name = "resume-elsewhere"
+        resume = self.settings["resume"]
+        self.start(name, k=resume["k"])
+        result = self.results["cases"][name] = {
+            "k": resume["k"],
+            "settled_before_shutdown": resume["settle"],
+            "guest_sizing": resume["guest"],
+            "setup_bytes": resume["setup_bytes"],
+            "setup_script": resume["setup_script"],
+        }
+        a, b = self.agents[:2]
+        self.boot(0, "source", format=True, sizing=resume["guest"])
+        marker = "cas resume marker"
+        result["setup"] = a.call(
+            "write_payload",
+            guest="source",
+            name="data",
+            seed=RESUME_SEED,
+            size=resume["setup_bytes"],
+            marker=marker,
+        )
+        if resume["setup_script"]:
+            began = time.monotonic_ns()
+            result["setup_script_output"] = a.call(
+                "shell", guest="source", script=resume["setup_script"]
+            )
+            result["setup_script_ns"] = time.monotonic_ns() - began
+        digest = self.epoch_digest(0, "source")
+        result["verified_sha256"] = digest
+        if resume["settle"]:
+            a.call("settle")
+            result["placement_sync"] = self.sync()
+        result["before_shutdown"] = self.report()
+        start = time.monotonic_ns()
+        shutdown = a.call("stop_guest", name="source")
+        cut = time.monotonic_ns()
+        cold = parallel(
+            range(2),
+            lambda n: self.cold_member(
+                n, [IMAGE] if n == 1 else [], resume["drop_page_cache"] and n == 1
+            ),
+        )
+        recovered_at = time.monotonic_ns()
+        before = self.report()
+        since = ring_since(before[1])
+        # B's own clock brackets the handoff: every later milestone (launch,
+        # ready, commands, converted ring records) is on that clock.
+        handoff_b = {"before_ns": b.call("clock")["monotonic_ns"]}
+        transfer = self.fleet(
+            "migrate",
+            source=self.config["nodes"][0]["bulk"],
+            destination=self.config["nodes"][1]["bulk"],
+            image=IMAGE,
+        )
+        boot = time.monotonic_ns()
+        # The anchor RPC and the post-handoff report are harness work; they
+        # land in boot_verify_continue_ns, not in handoff_ns.
+        handoff_b["after_ns"] = b.call("clock")["monotonic_ns"]
+        anchor = handoff_b["after_ns"]
+        migrated = self.report()
+        probe = marker_probe("/mnt/cas/data")
+        guest = self.boot_burst(
+            1, ["resumed"], [IMAGE], resume["guest"], probe, sample_ring=True
+        )[0]
+        summary = burst_guest_summary(guest, marker)
+        self.continue_epoch(1, "resumed")
+        end = time.monotonic_ns()
+        continued = self.report()
+        # The recorded working set runs before any full read of the disk.
+        result["working_set"] = self.replay_working_set(
+            1, ["resumed"], resume["working_set"], {"resumed": anchor}
+        )
+        after_working_set = self.report()
+        began = time.monotonic_ns()
+        self.verify(1, "resumed", digest, epoch=1)
+        result["final_verify_ns"] = time.monotonic_ns() - began
+        verified = self.report()
+        post_sync = self.fleet("sync", address=self.config["nodes"][1]["bulk"])
+        after = self.report()
+        result["migration"] = {
+            "downtime_ns": end - start,
+            "stop_ns": cut - start,
+            "handoff_ns": boot - cut,
+            "cold_recovery_ns": recovered_at - cut,
+            "boot_verify_continue_ns": end - boot,
+            "first_command_ns": guest["first_command_ns"] - anchor,
+            "marker_ns": guest["probe_ns"] - anchor,
+            "handoff_b": handoff_b,
+            "guest": summary,
+            "shutdown": shutdown,
+            "cold": cold,
+            "daemon": transfer,
+            "verified_sha256": digest,
+            "continued_epoch": 1,
+        }
+        result["phases"] = {
+            "manifest_bytes": transfer["result"]["manifest_bytes"],
+            "staging_tail_bytes": transfer["result"]["tail_bytes"],
+            "migration_wire": deltas(before, migrated),
+            "missing_chunks": {
+                "boot_verify_wire": deltas(migrated, verified),
+                "peer": [
+                    peer_counters(x, y) for x, y in zip(migrated, verified, strict=True)
+                ],
+                "boot_continue_wire": deltas(migrated, continued),
+                "boot_continue_peer": [
+                    peer_counters(x, y)
+                    for x, y in zip(migrated, continued, strict=True)
+                ],
+                "final_verify_wire": deltas(after_working_set, verified),
+                "final_verify_peer": [
+                    peer_counters(x, y)
+                    for x, y in zip(after_working_set, verified, strict=True)
+                ],
+                "explicit_sync": post_sync,
+                "explicit_sync_wire": deltas(verified, after),
+            },
+        }
+        if any(p["errors"] for p in result["phases"]["missing_chunks"]["peer"]):
+            raise ValueError("remote read errors while resuming on B")
+        result["recent_phases"] = phases(after[1], since)
+        result["after"] = after
+        # Ring clock calibration last: its reads must not enter any window.
+        result["ring_calibration"] = self.ring_calibration(
+            1, "resumed", "/mnt/cas/data", resume["setup_bytes"]
+        )
+        first = first_remote_read(
+            [guest["report_at_ready"], continued[1], after_working_set[1]], since
+        )
+        origin = result["ring_calibration"]["origin"]
+        result["intervals"] = {
+            "clock": "host B monotonic ns; ring records converted through ring_calibration",
+            "anchor": "fenced handoff completion observed on B (handoff_b.after_ns)",
+            "anchor_ns": anchor,
+            "handoff_bracket_ns": handoff_b["after_ns"] - handoff_b["before_ns"],
+            "launch_delay_ns": guest["launched_ns"] - anchor,
+            "boot_ns": guest["ready_ns"] - guest["launched_ns"],
+            "ssh_ready_ns": guest["ssh_banner_ns"] - guest["launched_ns"],
+            "first_command_ns": guest["first_command_ns"] - guest["launched_ns"],
+            "marker_ns": guest["probe_ns"] - guest["launched_ns"],
+            "time_to_marker_ns": guest["probe_ns"] - anchor,
+            "first_useful_io": first_useful_io(first, origin, anchor),
+            "time_to_working_set_ns": (
+                None
+                if result["working_set"] is None
+                else result["working_set"]["cold"]["guests"][0][
+                    "time_to_working_set_ns"
+                ]
+            ),
+            "warm_replay_ns": (
+                None
+                if result["working_set"] is None
+                else result["working_set"]["warm"]["guests"][0]["replay_ns"]
+            ),
+        }
+        b.call("stop_guest", name="resumed")
+        self.end()
+
+    def independent_stores(self):
         self.start("independent-stores")
         parallel(self.agents, lambda agent: agent.call("init", node=0))
         parallel(
@@ -535,9 +1495,7 @@ class Experiment:
                 "host", node=n, k=0, members=self.config["nodes"], cache=0
             ),
         )
-        parallel(
-            self.agents, lambda agent: agent.call("boot", name="guest", format=True)
-        )
+        parallel(range(len(self.agents)), lambda n: self.boot(n, "guest", format=True))
         parallel(
             range(len(self.agents)), lambda n: self.fio(n, "guest", "seed", "seed")
         )
@@ -551,7 +1509,7 @@ class Experiment:
         parallel(self.agents, lambda agent: agent.call("stop_guest", name="guest"))
         self.end()
 
-    def baseline(self):
+    def raw_rsync(self):
         works = self.start("raw-rsync")
         a, b = self.agents[:2]
         result = self.results["cases"]["raw-rsync"] = {"cohorts": []}
@@ -576,13 +1534,13 @@ class Experiment:
         if not dest.get("ssh"):
             dest["url"] = b.call("raw_receiver")
         result["provision"] = a.call("rsync", destination=dest, target=CLONE)
-        b.call("boot", name="clone", image=CLONE, backend="raw")
+        self.boot(1, "clone", image=CLONE, backend="raw")
         self.verify(1, "clone", digest)
         result["provision"]["shutdown_copy_boot_verify_ns"] = (
             time.monotonic_ns() - provision_start
         )
         # Restart A to give the raw arm the same running-guest starting condition.
-        a.call("boot", name="drift-source", backend="raw")
+        self.boot(0, "drift-source", backend="raw")
         start = time.monotonic_ns()
         result["drift"] = parallel(
             range(2),
@@ -607,7 +1565,7 @@ class Experiment:
         cut = time.monotonic_ns()
         transfer = a.call("rsync", destination=dest, target=IMAGE)
         boot = time.monotonic_ns()
-        b.call("boot", name="resumed", backend="raw")
+        self.boot(1, "resumed", backend="raw")
         self.verify(1, "resumed", digest, continue_work=True)
         if (
             b.call("shell", guest="resumed", script="cd /mnt/cas; sha256sum drift")
@@ -629,7 +1587,7 @@ class Experiment:
         # Explicit full-image resynchronization control; --ignore-times prevents quick-check skipping.
         result["sync_full_image"] = a.call("rsync", destination=dest, target=CLONE)
         start = time.monotonic_ns()
-        b.call("boot", name="resynced", image=CLONE, backend="raw")
+        self.boot(1, "resynced", image=CLONE, backend="raw")
         self.verify(1, "resynced", digest)
         if (
             b.call("shell", guest="resynced", script="cd /mnt/cas; sha256sum drift")
@@ -671,7 +1629,7 @@ class Experiment:
             "received": received,
         }
 
-    def zfs_baseline(self):
+    def zfs_incremental(self):
         self.start("zfs-incremental")
         a, b = self.agents[:2]
         result = self.results["cases"]["zfs-incremental"] = {}
@@ -683,7 +1641,7 @@ class Experiment:
         # generated files with coincidentally equal bytes. Account for it separately.
         result["common_base_setup"] = self.zfs_transfer(base)
         self.save()
-        a.call("boot", name="updated-source", backend="raw")
+        self.boot(0, "updated-source", backend="raw")
         a.call("shell", guest="updated-source", script="fsfreeze -f /mnt/cas")
         try:
             provision = a.call("zfs_snapshot", name="provision")
@@ -691,7 +1649,7 @@ class Experiment:
             a.call("shell", guest="updated-source", script="fsfreeze -u /mnt/cas")
         result["provision"] = self.zfs_transfer(provision, base)
         start = time.monotonic_ns()
-        b.call("boot", name="clone", image=IMAGE, backend="raw")
+        self.boot(1, "clone", image=IMAGE, backend="raw")
         self.verify(1, "clone", digest)
         result["provision"]["boot_verify_ns"] = time.monotonic_ns() - start
         start = time.monotonic_ns()
@@ -719,7 +1677,7 @@ class Experiment:
         finally:
             a.call("shell", guest="updated-source", script="fsfreeze -u /mnt/cas")
         result["sync"] = self.zfs_transfer(drift, provision)
-        b.call("boot", name="synced", image=IMAGE, backend="raw")
+        self.boot(1, "synced", image=IMAGE, backend="raw")
         self.verify(1, "synced", digest)
         if (
             b.call("shell", guest="synced", script="cd /mnt/cas; sha256sum drift")
@@ -734,7 +1692,7 @@ class Experiment:
         handoff = a.call("zfs_snapshot", name="handoff")
         transfer = self.zfs_transfer(handoff, drift)
         boot = time.monotonic_ns()
-        b.call("boot", name="resumed", image=IMAGE, backend="raw")
+        self.boot(1, "resumed", image=IMAGE, backend="raw")
         self.verify(1, "resumed", digest, continue_work=True)
         if (
             b.call("shell", guest="resumed", script="cd /mnt/cas; sha256sum drift")
@@ -783,31 +1741,14 @@ class Experiment:
                 )
             self.results.update(source_revision=revisions[0], hosts=identities)
             self.save()
-            for case in self.config.get(
-                "cases",
-                [
-                    "flows-k1",
-                    "flows-k2",
-                    "reads-memory",
-                    "reads-storage",
-                    "raw-rsync",
-                    "zfs-incremental",
-                    "independent-stores",
-                ],
-            ):
+            for case, handler, argument in self.plan:
                 print(f"Running {case}", file=sys.stderr, flush=True)
-                if case in ("flows-k1", "flows-k2"):
-                    self.flows(int(case[-1]))
-                elif case in ("reads-memory", "reads-storage"):
-                    self.reads(case.removeprefix("reads-"))
-                elif case == "raw-rsync":
-                    self.baseline()
-                elif case == "zfs-incremental":
-                    self.zfs_baseline()
-                elif case == "independent-stores":
-                    self.independent()
+                self.case = case
+                method = getattr(self, handler)
+                if argument is None:
+                    method()
                 else:
-                    raise ValueError(f"unknown case {case}")
+                    method(argument)
             self.results["success"] = True
         except BaseException as error:
             self.results.update(success=False, error=repr(error))
@@ -817,6 +1758,17 @@ class Experiment:
             self.save()
             for agent in self.agents:
                 agent.close()
+
+
+def apply_overrides(config, overrides):
+    """`KEY=JSON` settings overrides; the effective config is retained."""
+    settings = dict(config.get("settings", {}))
+    for item in overrides:
+        key, separator, value = item.partition("=")
+        if not separator or not key or key not in DEFAULTS:
+            raise ValueError(f"override must name a known setting: {item}")
+        settings[key] = json.loads(value)
+    return {**config, "settings": settings}
 
 
 def serve(build):
@@ -842,6 +1794,13 @@ def main():
     parser.add_argument("--config")
     parser.add_argument("--output")
     parser.add_argument("--cases", help="Comma-separated override of config.cases")
+    parser.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="KEY=JSON",
+        help="Override one settings entry, e.g. guests_per_host=[4]",
+    )
     args = parser.parse_args()
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     if args.agent:
@@ -854,6 +1813,7 @@ def main():
         config = json.loads(Path(args.config).read_text())
         if args.cases:
             config["cases"] = args.cases.split(",")
+        config = apply_overrides(config, args.set)
         write_json(output / "config.json", config)
         Experiment(config, args.build_info, output).run()
 

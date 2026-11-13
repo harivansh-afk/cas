@@ -342,6 +342,15 @@ fn retained_captured_queue_changes_fail_before_repair() {
 }
 
 pub(super) fn connect_stream(socket: &Path) -> UnixStream {
+    match try_connect_stream(socket) {
+        Ok(stream) => stream,
+        Err(error) => panic!("frontend connection: {error}"),
+    }
+}
+
+/// Wait up to five seconds for the service to bind `socket`; the error is
+/// returned so a caller can report why the service never got there.
+pub(super) fn try_connect_stream(socket: &Path) -> io::Result<UnixStream> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let stream = loop {
         match UnixStream::connect(socket) {
@@ -355,27 +364,33 @@ pub(super) fn connect_stream(socket: &Path) -> UnixStream {
             {
                 thread::sleep(Duration::from_millis(1))
             }
-            Err(error) => panic!("frontend connection: {error}"),
+            Err(error) => return Err(error),
         }
     };
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    stream
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    Ok(stream)
 }
 
-pub(super) fn connect(socket: &Path) -> Frontend {
-    let mut frontend = Frontend::from_stream(connect_stream(socket), 4);
+/// Connect and negotiate like QEMU does, so a later inflight request is sent
+/// to the service. Only the socket wait is fallible: the connection error is
+/// returned so the caller can report why the service never bound the socket.
+pub(super) fn try_connect(socket: &Path) -> io::Result<Frontend> {
+    let mut frontend = Frontend::from_stream(try_connect_stream(socket)?, 4);
     frontend.set_owner().unwrap();
     let features = frontend.get_features().unwrap();
     frontend.set_features(features).unwrap();
     let protocol = frontend.get_protocol_features().unwrap();
     assert!(protocol.contains(VhostUserProtocolFeatures::INFLIGHT_SHMFD));
     frontend.set_protocol_features(protocol).unwrap();
-    frontend
+    Ok(frontend)
+}
+
+pub(super) fn connect(socket: &Path) -> Frontend {
+    match try_connect(socket) {
+        Ok(frontend) => frontend,
+        Err(error) => panic!("frontend connection: {error}"),
+    }
 }
 
 #[test]
@@ -468,4 +483,46 @@ fn retained_zero_variants_replace_written_data_without_gather_and_survive_compac
         shutdown(host);
         assert_eq!(resources.metadata.usage().current.bytes, 0);
     }
+}
+
+#[test]
+fn cold_attachment_window_expires_with_the_configured_timeout_when_no_guest_connects() {
+    let root = tempfile::tempdir().unwrap();
+    let resources = Arc::new(Resources::default());
+    setup(root.path(), &resources, SnapshotFixture::Absent);
+    let mut host = scan(root.path(), &resources)
+        .unwrap()
+        .require(Prefixes::Cold)
+        .unwrap()
+        .recover_test(1024 * MAX_REQUEST_BYTES as u64)
+        .unwrap();
+    // The same failure path as the 60 s default, reached in 200 ms. host_service
+    // passes `--attach-timeout-secs` through this parameter.
+    let backend = host
+        .attach_cold(
+            [2; 16],
+            Duration::from_millis(200),
+            crate::fault::Fault::new(None),
+        )
+        .unwrap();
+    let transport = tempfile::tempdir_in("/dev/shm").unwrap();
+    let report = fs::File::create(transport.path().join("report.json")).unwrap();
+    let service = crate::service::Service::new(backend, report).unwrap();
+    let started = Instant::now();
+    let error = service
+        .serve(&transport.path().join("image.sock"))
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("recovery deadline expired"),
+        "{error}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let report: serde_json::Value =
+        serde_json::from_reader(fs::File::open(transport.path().join("report.json")).unwrap())
+            .unwrap();
+    assert_eq!(report["connection_ok"], false);
+    // The shared host and its other image are unaffected by one expired window.
+    let other = attach(&mut host, 3);
+    drop(other);
+    shutdown(host);
 }

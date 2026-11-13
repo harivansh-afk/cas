@@ -25,10 +25,16 @@ fn resources(node: u8, k: u8, addresses: [SocketAddr; 4]) -> Arc<Resources> {
 fn member_resources(node: u8, k: u8, addresses: &[SocketAddr]) -> Arc<Resources> {
     let n = node as usize;
     let count = addresses.len() / 2;
+    // CAS_PEER_RACE_US arms the raced fetch for every member; k=2 fleets with
+    // two remote owners then race the second owner after that budget.
     Arc::new(Resources {
         peer: crate::peer::Config {
             peer_listen: Some(addresses[n]),
             peer_get_member: addresses[..count].to_vec(),
+            peer_race_us: std::env::var("CAS_PEER_RACE_US")
+                .ok()
+                .map(|v| v.parse().unwrap()),
+            fast_settled_reads: std::env::var_os("CAS_FAST_SETTLED_READS").is_some(),
             fleet: fleet::Config {
                 peer_node: Some(node),
                 peer_k: k,

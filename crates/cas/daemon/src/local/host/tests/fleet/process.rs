@@ -17,7 +17,18 @@ impl Daemon {
         Self::start_members(root, node, k, &addresses, pause)
     }
     fn start_members(root: &Path, node: u8, k: u8, addresses: &[SocketAddr], pause: &str) -> Self {
+        Self::start_with_env(root, node, k, addresses, pause, &[])
+    }
+    fn start_with_env(
+        root: &Path,
+        node: u8,
+        k: u8,
+        addresses: &[SocketAddr],
+        pause: &str,
+        env: &[(&str, &str)],
+    ) -> Self {
         let mut child = Command::new(std::env::current_exe().unwrap())
+            .envs(env.iter().copied())
             .args([
                 "--exact",
                 "local::host::tests::fleet::process::daemon_child",
@@ -279,6 +290,17 @@ fn wait_chunks(host: &mut Daemon, count: usize) {
         thread::sleep(Duration::from_millis(10));
     }
 }
+fn wait_acked(host: &mut Daemon, chunks: u64) {
+    let until = Instant::now() + Duration::from_secs(20);
+    loop {
+        let report = host.command(json!({"op":"report"}));
+        if report["fleet"]["ship"]["put_acked_chunks"].as_u64() == Some(chunks) {
+            return;
+        }
+        assert!(Instant::now() < until, "{report}");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
 fn attached(host: &mut Daemon, image: u8) {
     assert_eq!(
         host.command(json!({"op":"attach","image":image}))["ok"],
@@ -309,6 +331,82 @@ fn evidence(name: &str, value: &Value) {
         .unwrap();
     }
 }
+#[test]
+fn shipping_window_ring_records_a_delayed_owner_acknowledgement() {
+    const DELAY_MS: u64 = 300;
+    let roots = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+    let addresses = addresses();
+    let mut a = Daemon::start(roots[0].path(), 0, 2, addresses, "");
+    // The owner holds every PUT before its durable insert, so each shipped
+    // batch's acknowledgement arrives at least DELAY_MS after it was queued.
+    let mut b = Daemon::start_with_env(
+        roots[1].path(),
+        1,
+        2,
+        &addresses,
+        "",
+        &[
+            ("CAS_FLEET_DELAY", "put-before"),
+            ("CAS_FLEET_DELAY_MS", &DELAY_MS.to_string()),
+        ],
+    );
+    attached(&mut a, 2);
+    let started = Instant::now();
+    a.command(json!({"op":"seed"}));
+    // The sender's own acknowledgement count orders the ring update; the
+    // owner's store count would race the reply.
+    wait_acked(&mut a, 64);
+    let report = a.command(json!({"op":"report"}));
+    let shipping = &report["fleet"]["shipping"];
+    evidence("shipping-window", shipping);
+    let recent = shipping["recent"].as_array().unwrap();
+    let batches = shipping["batches"].as_u64().unwrap();
+    assert!(batches >= 1 && recent.len() as u64 == batches, "{shipping}");
+    assert_eq!(shipping["window_batches"], batches);
+    assert_eq!(shipping["rescan_batches"], 0);
+    assert_eq!(shipping["chunks"], 64);
+    assert_eq!(shipping["retention"], 1024);
+    let mut window_sum = 0;
+    let mut bytes = 0;
+    for shipped in recent {
+        assert_eq!(shipped["owner"], 1);
+        let queued = shipped["queued_ns"].as_u64().unwrap();
+        let acked = shipped["acked_ns"].as_u64().unwrap();
+        assert!(queued > 0 && acked >= queued, "{shipped}");
+        let window = acked - queued;
+        assert!(
+            window >= DELAY_MS * 1_000_000,
+            "window {window} ns below the owner delay: {shipped}"
+        );
+        assert!(window <= started.elapsed().as_nanos() as u64, "{shipped}");
+        window_sum += window;
+        let chunks = shipped["chunks"].as_u64().unwrap();
+        assert_eq!(shipped["bytes"], 4 + chunks * (32 + BLOCK_SIZE as u64) + 32);
+        bytes += shipped["bytes"].as_u64().unwrap();
+    }
+    assert_eq!(shipping["window_ns_sum"], window_sum);
+    assert_eq!(shipping["bytes"], bytes);
+    // Same origin as the GET ring, on CLOCK_MONOTONIC: every acknowledgement
+    // converts to a host instant before the report was taken.
+    let origin = shipping["origin_monotonic_ns"].as_u64().unwrap();
+    assert_eq!(report["peer"]["origin_monotonic_ns"], origin);
+    let now = crate::peer::metrics::monotonic_now_ns();
+    for shipped in recent {
+        assert!(
+            origin + shipped["acked_ns"].as_u64().unwrap() <= now,
+            "{shipped}"
+        );
+    }
+    // The owner shipped nothing back: its ring is empty and its totals zero.
+    let owner = b.command(json!({"op":"report"}));
+    assert_eq!(owner["fleet"]["shipping"]["batches"], 0);
+    assert_eq!(owner["fleet"]["shipping"]["recent"], json!([]));
+    assert_eq!(owner["fleet"]["ship"]["put_acked_chunks"], 0);
+    assert_eq!(owner["store"]["chunks"], 64);
+    a.command(json!({"op":"stop"}));
+    b.command(json!({"op":"stop"}));
+}
+
 #[test]
 fn migration_from_a_cold_backend_before_frontend_connection_finishes() {
     let roots = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
@@ -659,7 +757,7 @@ fn get_progresses_and_verifies_while_compaction_put_waits_for_durable_ack() {
         thread::sleep(Duration::from_millis(5));
     }
     let budget = crate::local::metadata_budget();
-    let metrics = crate::peer::metrics::Metrics::new(&budget).unwrap();
+    let metrics = crate::peer::metrics::Metrics::new(&budget, 1).unwrap();
     let client = crate::peer::Client::new(addresses[1], &budget, metrics.clone()).unwrap();
     let expected = [2; BLOCK_SIZE];
     let hash = *blake3::hash(&expected).as_bytes();

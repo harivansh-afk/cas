@@ -17,17 +17,317 @@ fn memory() -> Arc<Budget> {
         requests: 0,
     })
 }
+/// The reactor's contract: poll the primary eventfd, finish, and re-arm while
+/// no source has verified yet.
 fn wait(ticket: &Ticket) -> (metrics::Phases, std::io::Result<()>, [u8; BLOCK_SIZE]) {
-    let mut fd = libc::pollfd {
-        fd: ticket.notification(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    // SAFETY: fd is initialized and the ticket retains the live eventfd.
-    assert_eq!(unsafe { libc::poll(&mut fd, 1, 4000) }, 1);
     let mut bytes = [0xa5; BLOCK_SIZE];
-    let (phases, result) = ticket.finish(&mut bytes);
-    (phases, result, bytes)
+    let until = Instant::now() + Duration::from_secs(4);
+    loop {
+        let mut fd = libc::pollfd {
+            fd: ticket.notification(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: fd is initialized and the ticket retains the live eventfd.
+        assert_eq!(unsafe { libc::poll(&mut fd, 1, 4000) }, 1);
+        match ticket.finish(&mut bytes) {
+            (phases, Ok(true)) => return (phases, Ok(()), bytes),
+            (phases, Err(error)) => return (phases, Err(error), bytes),
+            (_, Ok(false)) => assert!(Instant::now() < until, "no source completed"),
+        }
+    }
+}
+fn counter(metrics: &Metrics, key: &str) -> u64 {
+    metrics.report()["counters"][key].as_u64().unwrap()
+}
+fn wait_counter(metrics: &Metrics, key: &str, value: u64) {
+    let until = Instant::now() + Duration::from_secs(4);
+    while counter(metrics, key) != value {
+        assert!(
+            Instant::now() < until,
+            "{key} stayed {} not {value}",
+            counter(metrics, key)
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+/// A mock owner serving `requests` GETs on one connection, each delayed and
+/// optionally corrupted so it fails BLAKE3 verification at the reader.
+fn member(
+    value: u8,
+    delay: Duration,
+    corrupt: bool,
+    requests: usize,
+) -> (std::net::SocketAddr, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket.set_read_timeout(Some(TIMEOUT)).unwrap();
+        socket.set_nodelay(true).unwrap();
+        for _ in 0..requests {
+            let h = request(&mut socket);
+            let mut frame = response(h, &[value; BLOCK_SIZE]);
+            if corrupt {
+                frame[HEADER] ^= 1;
+            }
+            thread::sleep(delay);
+            socket.write_all(&frame).unwrap();
+        }
+    });
+    (address, server)
+}
+/// A chunk value whose rendezvous owners in a three-member k=2 fleet are
+/// both remote members of node 0.
+fn raced_value() -> u8 {
+    let placement = crate::fleet::Placement::with_members(0, 2, 3).unwrap();
+    (0..=255u8)
+        .find(|v| {
+            let hash = *blake3::hash(&[*v; BLOCK_SIZE]).as_bytes();
+            placement.owns(&hash, 1) && placement.owns(&hash, 2)
+        })
+        .expect("a chunk owned by both remote members")
+}
+/// Node 0 of a three-member k=2 fleet with two mock remote owners.
+fn raced_config(race_us: u32, first: std::net::SocketAddr, second: std::net::SocketAddr) -> Config {
+    let listen: std::net::SocketAddr = "127.0.0.1:17380".parse().unwrap();
+    let bulk: Vec<std::net::SocketAddr> = (0..3)
+        .map(|i| format!("127.0.0.1:{}", 17_384 + i).parse().unwrap())
+        .collect();
+    Config {
+        peer_listen: Some(listen),
+        peer_get_member: vec![listen, first, second],
+        peer_race_us: Some(race_us),
+        fleet: crate::fleet::Config {
+            peer_node: Some(0),
+            peer_k: 2,
+            peer_bulk_listen: Some(bulk[0]),
+            peer_bulk_member: bulk,
+            ..crate::fleet::Config::default()
+        },
+        ..Config::default()
+    }
+}
+fn shutdown(router: Router) {
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        match router.shutdown() {
+            Ok(()) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(Instant::now() < until, "peer workers did not stop");
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(e) => panic!("{e}"),
+        }
+    }
+    drop(router);
+}
+
+#[test]
+fn race_completes_from_the_second_owner_and_discards_the_late_first_reply() {
+    let value = raced_value();
+    let (first, first_server) = member(value, Duration::from_millis(40), false, 1);
+    let (second, second_server) = member(value, Duration::ZERO, false, 1);
+    let config = raced_config(0, first, second);
+    let budget = memory();
+    let metrics = Metrics::new(&budget, 1).unwrap();
+    let router = Router::new(&config, &budget, metrics.clone(), None).unwrap();
+    // Issued through an image's view: the challenger inherits the image.
+    metrics.bind(0, [9; 16]);
+    let view = router.for_image(0);
+    let hash = *blake3::hash(&[value; BLOCK_SIZE]).as_bytes();
+    let ticket = view.fetch(hash).unwrap();
+    view.race(&ticket, hash, None);
+    let started = Instant::now();
+    let (phases, result, bytes) = wait(&ticket);
+    result.unwrap();
+    assert_eq!(bytes, [value; BLOCK_SIZE]);
+    assert!(started.elapsed() < Duration::from_millis(40));
+    assert_eq!(phases.race_winner, metrics::WINNER_SECOND);
+    assert_eq!(phases.race_budget_us, 0);
+    assert_eq!(counter(&metrics, "races_started"), 1);
+    assert_eq!(counter(&metrics, "race_won_second"), 1);
+    assert_eq!(counter(&metrics, "race_won_first"), 0);
+    assert_eq!(
+        metrics.image([9; 16]).verified_bytes,
+        BLOCK_SIZE as u64,
+        "the winning challenger is credited to the issuing image"
+    );
+    // The loser's bytes never reach a reader; its slot is recycled only after
+    // its transport finishes, and the whole frame counts as wasted.
+    drop(ticket);
+    wait_counter(&metrics, "race_discarded", 1);
+    assert_eq!(counter(&metrics, "race_wasted_wire_bytes"), FRAME as u64);
+    assert_eq!(counter(&metrics, "verified"), 2);
+    // The late loser verified too, once, to the same image: the sum invariant.
+    assert_eq!(metrics.image([9; 16]).verified_bytes, 2 * BLOCK_SIZE as u64);
+    drop(view);
+    shutdown(router);
+    first_server.join().unwrap();
+    second_server.join().unwrap();
+    drop(metrics);
+    assert_eq!(budget.usage().current, Amount::default());
+}
+
+#[test]
+fn race_masks_a_failed_source_only_with_a_verified_reply() {
+    // First owner answers at once with a corrupt payload; the second owner
+    // verifies later. Then both corrupt: the read fails with an IO error.
+    for both_fail in [false, true] {
+        let value = raced_value();
+        let (first, first_server) = member(value, Duration::ZERO, true, 1);
+        let (second, second_server) = member(value, Duration::from_millis(10), both_fail, 1);
+        let config = raced_config(0, first, second);
+        let budget = memory();
+        let metrics = Metrics::new(&budget, 1).unwrap();
+        let router = Router::new(&config, &budget, metrics.clone(), None).unwrap();
+        let hash = *blake3::hash(&[value; BLOCK_SIZE]).as_bytes();
+        let ticket = router.fetch(hash).unwrap();
+        router.race(&ticket, hash, None);
+        let (phases, result, bytes) = wait(&ticket);
+        if both_fail {
+            assert!(result.is_err());
+            assert_eq!(bytes, [0xa5; BLOCK_SIZE]);
+            assert_eq!(counter(&metrics, "errors"), 2);
+            assert_eq!(counter(&metrics, "race_won_second"), 0);
+        } else {
+            result.unwrap();
+            assert_eq!(bytes, [value; BLOCK_SIZE]);
+            assert_eq!(phases.race_winner, metrics::WINNER_SECOND);
+            assert_eq!(counter(&metrics, "errors"), 1);
+            assert_eq!(counter(&metrics, "verified"), 1);
+            assert_eq!(counter(&metrics, "race_won_second"), 1);
+        }
+        assert_eq!(counter(&metrics, "races_started"), 1);
+        drop(ticket);
+        shutdown(router);
+        first_server.join().unwrap();
+        second_server.join().unwrap();
+        drop(metrics);
+        assert_eq!(budget.usage().current, Amount::default());
+    }
+}
+
+#[test]
+fn race_budget_starts_the_challenger_only_after_the_primary_is_late() {
+    let value = raced_value();
+    // Two requests: the first owner is prompt for one, late for the other.
+    let (first, first_server) = {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(TIMEOUT)).unwrap();
+            let h = request(&mut socket);
+            socket
+                .write_all(&response(h, &[value; BLOCK_SIZE]))
+                .unwrap();
+            let h = request(&mut socket);
+            thread::sleep(Duration::from_millis(500));
+            socket
+                .write_all(&response(h, &[value; BLOCK_SIZE]))
+                .unwrap();
+        });
+        (address, server)
+    };
+    let (second, second_server) = member(value, Duration::ZERO, false, 1);
+    // A 100 ms budget: a prompt loopback reply stays far inside it even on a
+    // loaded parallel test host, and the 500 ms late reply far outside.
+    let config = raced_config(100_000, first, second);
+    let budget = memory();
+    let metrics = Metrics::new(&budget, 1).unwrap();
+    let router = Router::new(&config, &budget, metrics.clone(), None).unwrap();
+    let hash = *blake3::hash(&[value; BLOCK_SIZE]).as_bytes();
+    let ticket = router.fetch(hash).unwrap();
+    router.race(&ticket, hash, None);
+    let (phases, result, _) = wait(&ticket);
+    result.unwrap();
+    assert_eq!(phases.race_winner, metrics::WINNER_NONE);
+    drop(ticket);
+    thread::sleep(Duration::from_millis(120));
+    assert_eq!(counter(&metrics, "races_started"), 0);
+    let ticket = router.fetch(hash).unwrap();
+    router.race(&ticket, hash, None);
+    let started = Instant::now();
+    let (phases, result, bytes) = wait(&ticket);
+    result.unwrap();
+    assert_eq!(bytes, [value; BLOCK_SIZE]);
+    assert!(started.elapsed() >= Duration::from_millis(100));
+    assert!(started.elapsed() < Duration::from_millis(500));
+    assert_eq!(phases.race_winner, metrics::WINNER_SECOND);
+    assert_eq!(phases.race_budget_us, 100_000);
+    assert_eq!(counter(&metrics, "races_started"), 1);
+    drop(ticket);
+    wait_counter(&metrics, "race_discarded", 1);
+    shutdown(router);
+    first_server.join().unwrap();
+    second_server.join().unwrap();
+    drop(metrics);
+    assert_eq!(budget.usage().current, Amount::default());
+}
+/// A slot is reused while the racer still holds the previous occupant's
+/// deadline. When that stale deadline fires it must not cancel the new
+/// request's armed race: the second request still races and the second
+/// owner still wins against the slow first owner.
+#[test]
+fn stale_racer_deadline_does_not_cancel_a_reused_slots_race() {
+    let value = raced_value();
+    // First owner: prompt for request 1, 200 ms late for request 2.
+    let (first, first_server) = {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(TIMEOUT)).unwrap();
+            let h = request(&mut socket);
+            socket
+                .write_all(&response(h, &[value; BLOCK_SIZE]))
+                .unwrap();
+            let h = request(&mut socket);
+            thread::sleep(Duration::from_millis(500));
+            socket
+                .write_all(&response(h, &[value; BLOCK_SIZE]))
+                .unwrap();
+        });
+        (address, server)
+    };
+    let (second, second_server) = member(value, Duration::ZERO, false, 1);
+    let config = raced_config(100_000, first, second);
+    let budget = memory();
+    let metrics = Metrics::new(&budget, 1).unwrap();
+    let router = Router::new(&config, &budget, metrics.clone(), None).unwrap();
+    let hash = *blake3::hash(&[value; BLOCK_SIZE]).as_bytes();
+    let ticket = router.fetch(hash).unwrap();
+    router.race(&ticket, hash, None);
+    let (phases, result, _) = wait(&ticket);
+    result.unwrap();
+    assert_eq!(phases.race_winner, metrics::WINNER_NONE);
+    // The slot is free again while its 100 ms deadline is still armed; the
+    // next fetch reuses it (the free list is a stack) with a new generation.
+    drop(ticket);
+    let ticket = router.fetch(hash).unwrap();
+    router.race(&ticket, hash, None);
+    let started = Instant::now();
+    let (phases, result, bytes) = wait(&ticket);
+    result.unwrap();
+    assert_eq!(bytes, [value; BLOCK_SIZE]);
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "the reused slot's race was cancelled: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(phases.race_winner, metrics::WINNER_SECOND);
+    assert_eq!(phases.race_budget_us, 100_000);
+    assert_eq!(counter(&metrics, "races_started"), 1);
+    assert_eq!(counter(&metrics, "race_won_second"), 1);
+    assert_eq!(counter(&metrics, "race_dropped"), 0);
+    drop(ticket);
+    wait_counter(&metrics, "race_discarded", 1);
+    shutdown(router);
+    first_server.join().unwrap();
+    second_server.join().unwrap();
+    drop(metrics);
+    assert_eq!(budget.usage().current, Amount::default());
 }
 fn request(socket: &mut TcpStream) -> Header {
     let mut bytes = [0; HEADER + 32];
@@ -59,7 +359,7 @@ fn pipelined_gets_handle_fragmentation_without_growing_transport_memory() {
         }
     });
     let budget = memory();
-    let metrics = Metrics::new(&budget).unwrap();
+    let metrics = Metrics::new(&budget, 1).unwrap();
     let client = Client::new(address, &budget, metrics.clone()).unwrap();
     let before = budget.usage();
     let hash = *blake3::hash(&[7; BLOCK_SIZE]).as_bytes();
@@ -123,7 +423,7 @@ fn peer_down_short_reads_bad_hash_identity_and_status_never_publish_bytes() {
             }))
         };
         let budget = memory();
-        let metrics = Metrics::new(&budget).unwrap();
+        let metrics = Metrics::new(&budget, 1).unwrap();
         let client = Client::new(address, &budget, metrics.clone()).unwrap();
         let ticket = client
             .fetch(*blake3::hash(&[7; BLOCK_SIZE]).as_bytes())
@@ -159,7 +459,7 @@ fn cancellation_retains_transport_slot_until_reply() {
             .unwrap();
     });
     let budget = memory();
-    let metrics = Metrics::new(&budget).unwrap();
+    let metrics = Metrics::new(&budget, 1).unwrap();
     let client = Client::new(address, &budget, metrics.clone()).unwrap();
     let hash = *blake3::hash(&[7; BLOCK_SIZE]).as_bytes();
     drop(client.fetch(hash).unwrap());
@@ -191,7 +491,7 @@ fn failed_connection_is_replaced_for_the_next_request() {
         second.write_all(&response(h, &[7; BLOCK_SIZE])).unwrap();
     });
     let budget = memory();
-    let metrics = Metrics::new(&budget).unwrap();
+    let metrics = Metrics::new(&budget, 1).unwrap();
     let client = Client::new(address, &budget, metrics.clone()).unwrap();
     let hash = *blake3::hash(&[7; BLOCK_SIZE]).as_bytes();
     let first = client.fetch(hash).unwrap();
@@ -226,7 +526,7 @@ fn coalesced_missing_and_success_frames_keep_their_own_payloads() {
         socket.write_all(&joined).unwrap();
     });
     let budget = memory();
-    let metrics = Metrics::new(&budget).unwrap();
+    let metrics = Metrics::new(&budget, 1).unwrap();
     let client = Client::with_inline(address, &budget, metrics.clone(), 20).unwrap();
     let hash = *blake3::hash(&[7; BLOCK_SIZE]).as_bytes();
     let first = client.fetch(hash).unwrap();
@@ -259,7 +559,7 @@ fn inline_get_has_a_bounded_poll_and_retains_slow_reply_ownership() {
             .unwrap();
     });
     let budget = memory();
-    let metrics = Metrics::new(&budget).unwrap();
+    let metrics = Metrics::new(&budget, 1).unwrap();
     let client = Client::with_inline(address, &budget, metrics.clone(), 20).unwrap();
     let hash = *blake3::hash(&[7; BLOCK_SIZE]).as_bytes();
     let first = client.fetch(hash).unwrap();
@@ -311,9 +611,22 @@ fn nofile() -> libc::rlimit {
 #[test]
 #[ignore = "subprocess entry point for the descriptor-limit regression"]
 fn descriptor_limit_child() {
+    let limit = libc::rlimit {
+        rlim_cur: std::env::var("CAS_PEER_NOFILE_SOFT")
+            .unwrap()
+            .parse()
+            .unwrap(),
+        rlim_max: std::env::var("CAS_PEER_NOFILE_HARD")
+            .unwrap()
+            .parse()
+            .unwrap(),
+    };
+    // SAFETY: setrlimit reads one initialized rlimit; lowering this process's
+    // own limits needs no privilege.
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
     let budget = memory();
-    let metrics = Metrics::new(&budget).unwrap();
-    let result = Router::new(&four_member_config(), &budget, metrics);
+    let metrics = Metrics::new(&budget, 1).unwrap();
+    let result = Router::new(&four_member_config(), &budget, metrics, None);
     let limit = nofile();
     let required = 3 * client::CLIENT_DESCRIPTORS + 1024;
     match std::env::var("CAS_PEER_NOFILE_EXPECT").unwrap().as_str() {
@@ -344,8 +657,16 @@ fn descriptor_limit_child() {
     }
 }
 
+/// The child lowers its own descriptor limit from the environment before
+/// anything in it opens files. No `pre_exec` hook: with one, `Command` must
+/// `fork()` this large multi-threaded test binary, and between fork and exec
+/// the child holds a copy of every open description, including the
+/// flock-held roots and stores of tests running in parallel (locks live on
+/// the description, so the parent's close does not release them). That
+/// window is milliseconds and made concurrent tests fail with `WouldBlock`.
+/// Without the hook `Command` uses `posix_spawn` (vfork), whose window is
+/// microseconds and whose caller is suspended until the exec.
 fn descriptor_child(soft: libc::rlim_t, hard: libc::rlim_t, expect: &str) -> bool {
-    use std::os::unix::process::CommandExt;
     let mut command = std::process::Command::new(std::env::current_exe().unwrap());
     command
         .args([
@@ -354,20 +675,9 @@ fn descriptor_child(soft: libc::rlim_t, hard: libc::rlim_t, expect: &str) -> boo
             "--ignored",
             "--nocapture",
         ])
-        .env("CAS_PEER_NOFILE_EXPECT", expect);
-    // SAFETY: the hook calls only async-signal-safe setrlimit before exec.
-    unsafe {
-        command.pre_exec(move || {
-            let limit = libc::rlimit {
-                rlim_cur: soft,
-                rlim_max: hard,
-            };
-            if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
+        .env("CAS_PEER_NOFILE_EXPECT", expect)
+        .env("CAS_PEER_NOFILE_SOFT", soft.to_string())
+        .env("CAS_PEER_NOFILE_HARD", hard.to_string());
     command.status().unwrap().success()
 }
 

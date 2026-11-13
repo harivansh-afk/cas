@@ -1,18 +1,16 @@
-# Pinned vhost-user-backend extension
+# Vendored crates
 
-`vhost-user-backend-0.23.0/` starts from the published crate archive, SHA-256
-`555753b65bc33837bd011f981e2c6d52d8ddc330d92c2deb9aa3f0b378a58bcc`.
-Its recorded upstream commit is `4cc2d89ce4897fd90c4bbaf920a5f89a4420547c`
-in `rust-vmm/vhost`, subdirectory `vhost-user-backend`. Original source headers,
-metadata and tests are retained. The package is licensed Apache-2.0.
+Each directory is a published crate archive with one narrow CAS change. Every
+crate carries a `CAS-PATCH.md` with the archive SHA-256, the upstream commit,
+the exact change, why CAS needs it and the upgrade rule. Original headers,
+metadata, tests and licenses are retained; the root workspace excludes these
+packages from its own member and lint policy and selects them through
+`[patch.crates-io]`. Preserve upstream style and keep each patch narrow.
 
-The CAS change adds default-rejecting GET/SET_INFLIGHT_FD hooks to both backend
-traits, forwards them through Arc/Mutex/RwLock, and routes negotiated handler
-requests to those hooks. It changes no feature advertisement or queue processing.
-CAS's trailer, ownership and replay logic belong in the daemon, not this fork.
-See [the encoding decision](../../docs/inflight-format.md) and C3 validation.
+| Crate | Change | Record |
+|---|---|---|
+| `vhost-user-backend-0.23.0` | Default-rejecting `GET/SET_INFLIGHT_FD` hooks on both backend traits, forwarded through the wrappers and routed from the handler | [CAS-PATCH.md](vhost-user-backend-0.23.0/CAS-PATCH.md) |
+| `virtio-queue-0.18.0` | `DescriptorChain::new` made public so live recovery can walk a saved descriptor head with the ordinary parser | [CAS-PATCH.md](virtio-queue-0.18.0/CAS-PATCH.md) |
 
-The root workspace excludes the vendored package from its own member/lint
-policy while selecting it through `[patch.crates-io]`. Preserve upstream style
-and keep the patch narrow. Upgrade only with a new provenance record and rerun
-the reference, protocol, live-recovery and multiqueue checks.
+Upgrading either crate needs a new provenance record and a rerun of the
+reference, protocol, live-recovery and multiqueue checks.

@@ -10,6 +10,7 @@ fn config(root: &Path, transport: &Path, mode: Mode) -> ServiceConfig {
     ServiceConfig {
         peer: crate::peer::Config::default(),
         cache_bytes: Resources::DEFAULT_CACHE_BYTES,
+        metadata_bytes: Resources::DEFAULT_METADATA_BYTES,
         telemetry: false,
         telemetry_rotate: false,
         root: root.to_owned(),
@@ -18,6 +19,8 @@ fn config(root: &Path, transport: &Path, mode: Mode) -> ServiceConfig {
         staging_bytes: 1024 * MAX_REQUEST_BYTES as u64,
         mode,
         pause: None,
+        attach_timeout: crate::deadline::RECOVERY_TIMEOUT,
+        recovery_delay: Duration::ZERO,
         endpoints: (2..4)
             .map(|image| Endpoint {
                 image: [image; 16],
@@ -67,7 +70,13 @@ fn failed_retained_negotiation_cancels_an_unconnected_peer_without_repair() {
     let config = config(root.path(), transport.path(), Mode::Retained);
     let (done, result) = mpsc::channel();
     let server = thread::spawn(move || done.send(host_service::serve(config)).unwrap());
-    let mut frontend = super::frontend::connect(&transport.path().join("2.sock"));
+    let mut frontend = match super::frontend::try_connect(&transport.path().join("2.sock")) {
+        Ok(frontend) => frontend,
+        Err(error) => panic!(
+            "frontend connection: {error}; host.json: {}",
+            fs::read_to_string(transport.path().join("host.json")).unwrap_or_default()
+        ),
+    };
     assert!(frontend.get_inflight_fd(&inflight()).is_err());
     assert!(
         result
@@ -190,4 +199,156 @@ fn failed_cold_image_protocol_leaves_the_other_socket_usable() {
         true
     );
     assert!(report(transport.path(), "host.json")["host"]["failure"].is_null());
+}
+
+#[test]
+fn attach_window_starts_after_recovery_completes() {
+    let root = tempfile::tempdir().unwrap();
+    let transport = tempfile::tempdir_in("/dev/shm").unwrap();
+    let resources = Arc::new(Resources::default());
+    setup(root.path(), &resources, SnapshotFixture::Absent);
+    let mut config = config(root.path(), transport.path(), Mode::Cold);
+    // Recovery outlasts the attach window. A window armed before recovery
+    // would already have expired at attach time and fail startup; the window
+    // starts after recovery, so both sockets wait for guests that never come.
+    config.recovery_delay = Duration::from_millis(400);
+    config.attach_timeout = Duration::from_millis(300);
+    let started = Instant::now();
+    let error = host_service::serve(config).unwrap_err();
+    let elapsed = started.elapsed();
+    assert!(
+        error.to_string().contains("recovery deadline expired"),
+        "{error}"
+    );
+    assert!(elapsed >= Duration::from_millis(700), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+    let host = report(transport.path(), "host.json");
+    assert!(host["startup_error"].is_null(), "{host}");
+    assert_eq!(host["services_ok"], false);
+    for image in 2..4 {
+        assert_eq!(
+            report(
+                transport.path(),
+                &format!("{}.json", format!("{image:02x}").repeat(16))
+            )["connection_ok"],
+            false
+        );
+    }
+}
+
+/// A catalog root whose rebuilt chunk index is the dominant metadata cost:
+/// 4,096 distinct chunks need a 8,192-bucket table (about 330 KiB), and the
+/// allocator charges the old table while the replacement grows.
+const INDEX_CHUNKS: usize = 4096;
+const TIGHT_METADATA_BYTES: usize = 256 * 1024;
+fn chunk_pattern(chunk: usize) -> [u8; BLOCK_SIZE] {
+    let mut bytes = [0x5a; BLOCK_SIZE];
+    bytes[..8].copy_from_slice(&(chunk as u64).to_le_bytes());
+    bytes
+}
+fn large_index_root(root: &Path, resources: &Arc<Resources>) {
+    let image_bytes = (INDEX_CHUNKS * BLOCK_SIZE) as u64;
+    let (store, images) = create_images(
+        root,
+        1,
+        resources,
+        image_bytes,
+        append::Limits::default(),
+        Config {
+            segment_bytes: 2 * MAX_REQUEST_BYTES as u64,
+            ..STORE
+        },
+    );
+    let mut catalog = Catalog::create(
+        Arc::clone(store.tickets()),
+        STORE.store,
+        Arc::clone(&resources.metadata),
+    )
+    .unwrap();
+    let prepared = catalog
+        .prepare(Change::Insert(Entry {
+            id: [2; 16],
+            kind: EntryKind::Image { image_bytes },
+        }))
+        .unwrap();
+    catalog.publish(prepared).unwrap();
+    drop(catalog);
+    let mut host = start(Arc::clone(resources), store, images);
+    let mut local = attach(&mut host, 2);
+    let requests = INDEX_CHUNKS * BLOCK_SIZE / MAX_REQUEST_BYTES;
+    let mut bytes = vec![0; MAX_REQUEST_BYTES];
+    for request in 0..requests {
+        for (block, chunk) in bytes.as_chunks_mut::<BLOCK_SIZE>().0.iter_mut().enumerate() {
+            *chunk = chunk_pattern(request * (MAX_REQUEST_BYTES / BLOCK_SIZE) + block);
+        }
+        write(
+            &mut local,
+            request as u64 + 1,
+            request * MAX_REQUEST_BYTES,
+            &bytes,
+        );
+    }
+    let permit = local.prepare(Kind::Control).unwrap().unwrap();
+    local
+        .enqueue(requests as u64 + 1, Operation::Flush, permit)
+        .unwrap();
+    completed(&mut local);
+    drained(&mut local, requests as u64);
+    assert_eq!(host.store_status().chunks, INDEX_CHUNKS);
+    drop(local);
+    shutdown(host);
+}
+
+#[test]
+fn metadata_budget_decides_whether_a_large_rebuilt_index_can_be_served() {
+    let root = tempfile::tempdir().unwrap();
+    let transport = tempfile::tempdir_in("/dev/shm").unwrap();
+    large_index_root(root.path(), &Arc::new(Resources::default()));
+    let before = files(root.path());
+    // Below the index's need, host startup fails with the existing explicit
+    // budget error before any repair; `--metadata-bytes` sets this value.
+    let mut config = config(root.path(), transport.path(), Mode::Cold);
+    config.endpoints.truncate(1);
+    config.metadata_bytes = TIGHT_METADATA_BYTES;
+    let error = host_service::serve(config).unwrap_err();
+    assert!(
+        error.to_string().contains("metadata budget exhausted"),
+        "{error}"
+    );
+    assert_eq!(files(root.path()), before);
+    assert_eq!(
+        report(transport.path(), "host.json")["startup_error"],
+        error.to_string()
+    );
+    // A budget no host could honour is rejected before any output exists.
+    let mut capped = self::config(root.path(), transport.path(), Mode::Cold);
+    capped.metadata_bytes = host_service::physical_memory_bytes().unwrap() + 1;
+    let error = host_service::serve(capped).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("physical memory"), "{error}");
+    // The same root opens and serves every chunk under a sufficient budget.
+    let resources = Arc::new(Resources {
+        metadata: crate::local::metadata_budget_sized(Resources::DEFAULT_METADATA_BYTES),
+        ..Resources::default()
+    });
+    let mut host = scan(root.path(), &resources)
+        .unwrap()
+        .require(Prefixes::Cold)
+        .unwrap()
+        .recover_test(1024 * MAX_REQUEST_BYTES as u64)
+        .unwrap();
+    assert_eq!(host.store_status().chunks, INDEX_CHUNKS);
+    let index = host.store_status().index_memory.allocated_bytes;
+    assert!(index > TIGHT_METADATA_BYTES, "index uses {index} bytes");
+    let mut local = attach(&mut host, 2);
+    for chunk in [0, INDEX_CHUNKS / 2, INDEX_CHUNKS - 1] {
+        read_at(
+            &mut local,
+            chunk as u64,
+            (chunk * BLOCK_SIZE) as u64,
+            &chunk_pattern(chunk),
+        );
+    }
+    drop(local);
+    shutdown(host);
 }

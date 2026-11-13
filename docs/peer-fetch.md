@@ -18,6 +18,9 @@ The service is disabled unless configured. The serving options are:
 | `--peer-force-remote` | Bypass the local settled chunk store and, by default, its cache |
 | `--peer-cache` | Admit verified remote fills into the existing bounded clean cache |
 | `--peer-inline-us N` | Additional reactor-local polling window (0–1000 µs, default 0) |
+| `--peer-race-us N` | Race a settled GET against a second source after N µs (0 = at once; off by default) |
+| `--peer-race-local` | With force-remote, let the race use the verified local chunk copy |
+| `--fast-settled-reads` | Complete fully settled reads on the frontend; see [storage design](storage-design.md) |
 
 Force-remote and caching require a peer address. There is no implicit discovery,
 address resolution, self-fetch, or forwarding. Both hosts may have a listener
@@ -133,11 +136,14 @@ The embedding host's shutdown remains nonblocking while workers drain.
 
 ## Read path and failure semantics
 
-`local/reactor/read.rs` still resolves pinned WAL ranges first, then manifest
-holes/hashes, cache, shared fetch registry, and local store. Only an absent store
-plan (or force-remote) selects the new remote stage. Hash misses coalesce through
-the existing registry; the original read credits remain held through the final
-shared reader. The reply is verified before publication, optionally cached,
+A read is served by one of two schedulers over one per-block resolution
+(`local/chunk.rs`): the image reactor (`local/reactor/read.rs`, the default)
+or, with `--fast-settled-reads`, the frontend-inline path (`local/fast.rs`;
+see [storage design](storage-design.md)). Both resolve pinned WAL ranges
+first, then manifest holes/hashes, cache, shared fetch registry, and local
+store. Only an absent store plan (or force-remote) selects the remote stage.
+Hash misses coalesce through the registry whichever scheduler leads; the
+original read credits remain held through the final shared reader. The reply is verified before publication, optionally cached,
 then copied into the admitted read buffer. Neither compaction publication nor
 WAL reclamation, mutation order, admission limits, FLUSH, or recovery validation
 is relaxed. Newer staged writes and zeros override the remote manifest entry.
@@ -148,28 +154,98 @@ recovery/restart. There is no automatic local fallback in force-remote mode and
 no promise that an interrupted guest session recovers merely when a peer returns.
 The transport itself can reconnect, as checked independently of the host gate.
 
+### Raced reads
+
+`--peer-race-us N` arms a race for every settled GET that is not already
+complete when it is sent. When the budget elapses, the same chunk is requested
+from a second source: the next rendezvous owner when the fleet has one (k=2
+with two remote owners), otherwise the local chunk store when a verified local
+plan exists. In force-remote mode the local copy is never consulted unless
+`--peer-race-local` is given explicitly; this is the experiment arm for
+measuring the race against a retained replica. A legacy two-host
+`--peer-address` configuration therefore only races the local copy.
+
+The first BLAKE3-verified reply completes the read. The loser is dropped: its
+slot and buffer stay owned by its transport until that transport finishes (the
+cancelled-reader slot rule), it never publishes bytes, and a late loser cannot
+signal a reused slot. A failed source is masked only by the other source's
+verified reply; when both fail the read fails closed exactly as before. With
+`--peer-race-local` a read can therefore complete from the local copy after
+peer loss; without it the behaviour is unchanged. Ordering, admission credits,
+the shared fetch registry, cache-fill rules and WAL precedence are unchanged:
+the race happens entirely inside one chunk fetch.
+
+The challenger notifies the primary slot's eventfd, so the reactor's existing
+poll observes either completion and re-arms while neither has verified. The
+local source is one bounded blocking worker using the verified store loader
+as an IO-scheduler demand source, like GET service; it is not the reactor's
+io_uring local read path; it blocks on the scheduler's grant eventfd for its
+port. A zero budget starts the challenger on the reader's thread; a positive
+budget uses one timer thread per host, and a primary that fails before the
+budget starts its challenger from the transport at once. An exhausted
+challenger pool or racer table leaves the read unraced and counts
+`race_dropped`.
+
 ## Instrumentation and local validation
 
 When peer support is configured, `Host::report()` includes `peer`, also present
 in normal host reports and telemetry. Counters cover GETs, verification/errors,
 connections, peak outstanding GETs, server memory/store hits, missing chunks,
 HAS, direct/inline attempts and completions, and completed/failed remote reads.
+Race counters: `races_started`, `race_won_first`, `race_won_second`,
+`race_won_local`, `race_discarded` (replies from either source that lost, were
+cancelled, or arrived after a verified winner), `race_wasted_wire_bytes`
+(frame bytes of discarded remote replies) and `race_dropped` (armed races
+never started: racer table full or stopping, or the challenger's slot pool
+exhausted). `verified`/`errors` count every
+remote reply from either owner, so a discarded reply that verified still
+counts; the local race source is not a transport reply and counts in neither.
 An inline attempt includes the default single nonblocking visit; it does not
 necessarily indicate that a busy-poll window was enabled. No JSON formatting or file writes occur
 on the IO path.
 
 A fixed ring retains the most recent 1,024 remote-read records. Nanosecond values
-use one monotonic host-local origin; clocks across hosts are not compared:
+use one monotonic host-local origin; clocks across hosts are not compared.
+`origin_monotonic_ns` is the `CLOCK_MONOTONIC` value at which that origin was
+taken, so a ring timestamp `ns` is the host instant `origin_monotonic_ns +
+ns` on the same clock a harness reads with `clock_gettime(CLOCK_MONOTONIC)`;
+no calibration bracket is needed (the two origin reads are back to back,
+sub-microsecond apart). Milestones:
 
 - `received_ns`: descriptor discovery at the guest frontend, or submission at
-  the native harness (before admission attempts).
+  the native harness (before admission attempts). Frontend-inline reads
+  (`--fast-settled-reads`) record the same milestones; their GET is sent and
+  their reply consumed on the frontend thread.
 - `phases.send_ns`: client begins sending GET, including any worker queue delay
   before this point; connection establishment precedes this milestone.
 - `phases.first_byte_ns`: first successful userspace receive of the reply.
 - `phases.verified_ns`: complete payload has passed BLAKE3 verification.
 - `completed_ns`: guest status/used publication, or native harness receipt.
 
+`peer.images` attributes remote reads to images, keyed by image ID.
+`completed_reads`, `failed_reads` and `chunks` count the image's reads and the
+remote chunks they resolved as `recent[].chunks` does, including the chunk
+whose GET failed and chunks a coalesced waiter inherited from another read's
+GET. `verified_bytes` is credited once, at transport verification, to the image
+whose read issued the GET: a waiter on another image's fetch is attributed as a
+read but not as fetched bytes. Each image holds a view of the shared GET router
+and a slot preallocated with the host image slots; nothing is allocated on the
+IO path. The per-image values sum to the host
+`counters.completed_reads`/`failed_reads`, and the verified bytes to
+`4096 × counters.verified` even when reads coalesce or race. A raced
+challenger inherits its primary's image, so a second-owner win is credited to
+the issuing image, as is the late loser's reply when it verifies. A race won
+by the local copy adds a completed read and its chunk but no verified bytes
+(there was no transport verification); the discarded remote reply, once it
+verifies, still counts in `verified` and in the issuer's `verified_bytes`.
+Frontend-inline reads are attributed exactly like reactor reads. They are
+cumulative and restart with the host; a returning migration reuses the ID in a
+new slot and the report sums them. Race or fallback counters are host-wide and
+not part of this table.
+
 `success` marks completion and `chunks` counts remote chunks for the request.
+`race_budget_us` and `race_winner` describe the last raced chunk: 0 no race,
+1 first owner, 2 second owner, 3 local copy. The phases are the winner's.
 Zero milestones mean an unreached phase on failure. Multi-chunk reads retain
 first send/first byte and last verification; coalesced waiters inherit their
 leader's transport times, which can precede the waiter's receipt. Cancelled

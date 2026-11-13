@@ -1,13 +1,15 @@
 //! Static member GET transport, independent of the bulk/control connections.
 mod client;
+mod race;
 mod router;
+mod worker;
 pub use router::Router;
 pub mod metrics;
 mod server;
 mod wire;
 pub use client::{Client, Ticket};
 pub(crate) use server::CONNECTIONS;
-pub use server::{Server, has};
+pub use server::{Options as ServiceOptions, Server, has};
 use std::{io, net::SocketAddr, time::Duration};
 
 #[derive(Clone, Debug, Default, clap::Args)]
@@ -32,6 +34,18 @@ pub struct Config {
     /// Bounded reactor-local TCP polling before falling back to the IO worker.
     #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u32).range(0..=1000))]
     pub peer_inline_us: u32,
+    /// Race a settled GET against a second source after this many microseconds
+    /// (0 races immediately); off when absent. The first verified reply wins.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(0..=1_000_000))]
+    pub peer_race_us: Option<u32>,
+    /// With force-remote, let the race use the local chunk copy explicitly.
+    #[arg(long, requires = "peer_race_us")]
+    pub peer_race_local: bool,
+    /// Complete fully settled reads inline on the frontend (clean cache or a
+    /// verified remote reply) while the image has no staged or in-flight
+    /// mutation and no pending FLUSH; the reactor path remains the default.
+    #[arg(long)]
+    pub fast_settled_reads: bool,
 }
 impl Config {
     pub fn validate(&self) -> io::Result<()> {
@@ -50,13 +64,19 @@ impl Config {
                 "peer inline polling exceeds 1000 microseconds",
             ));
         }
-        if (self.peer_force_remote || self.peer_cache)
+        if (self.peer_force_remote || self.peer_cache || self.peer_race_us.is_some())
             && self.peer_address.is_none()
             && self.peer_get_member.is_empty()
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "remote mode requires a peer",
+            ));
+        }
+        if self.peer_race_local && (self.peer_race_us.is_none() || !self.peer_force_remote) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "racing the local copy requires --peer-race-us and --peer-force-remote",
             ));
         }
         if self

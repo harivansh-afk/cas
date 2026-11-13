@@ -1,5 +1,1707 @@
 # Validation
 
+## 2026-11-13 — Integration of the burst harness and the CloudLab campaign driver
+
+On `integration/2026-11-13` after the measured-flags/importer/raced-read
+integration and its follow-ups (`9b80a02`): merged, with merge commits,
+`feat/burst-harness` at `4565a0d` as `da90544` and `feat/cloudlab-campaign`
+at `0e9c5a2` (branched from the former) as `1e09998`; then `6d5a7d6` makes the
+campaign's pinned revision a run-time input and `607f051` makes a new
+test's clock bracket inclusive. **Tested revision: `607f051cd550e5d924244931d1df180e181de205`**,
+clean on the VM. This record is a later documentation-only commit; nothing
+was pushed or merged into `main`. This head is the candidate measured
+revision: a clean tree with no revision value committed into it.
+
+### Merge resolution
+
+- `experiments/two-host/runner.py`: the harness's settings defaults
+  (`guests_per_host`, `guest`, `working_set`, `burst`, `resume`) kept beside
+  this branch's `peer_race_us` / `fast_settled_reads`; `test_runner.py`
+  keeps both test classes; `agent.py` keeps the campaign's
+  `working_set_script` beside this branch's `measurement_flags`, which still
+  builds the `cas-host` flags for every fleet host. The campaign's
+  `campaignlib.RUNNER_SETTINGS` names exactly those two settings, so its
+  "runner supports the arm's settings" check now passes for the `fast` and
+  `raced` arms.
+- `crates/harnesses` (native N guests, ZFS raw storage) merged without
+  conflict.
+- `docs/validation.md`: every entry kept, newest first; the campaign's
+  revision of the burst-harness entry taken.
+- `6d5a7d6` (coordinator decision): `expected_revision` is a run-time input
+  (`campaign.py --revision`, else `expected_revision` in a nodes file kept
+  outside the tree), required unless the loopback development layout,
+  verified against every node's checkout at `run` and recorded in the
+  manifest. `INTEGRATION_REVISION_PLACEHOLDER` is gone from the library, the
+  example and the doc; no self-referential pin commit exists.
+
+### Host and commands
+
+Fresh Freestyle VM `cas-build-integration` (`vm-ad8d75225752469cb239c4ae6a4fbd6d`, same
+shape, Nix and procedure as the entry above), deleted after export. Spark
+ran only the Python unit suites (two-host 39, campaign 28) and Git.
+
+```sh
+nix develop -c just check
+nix develop -c cargo test -p cas-harness --locked
+nix develop -c uv run --no-project python -m unittest discover -s experiments/cloudlab
+nix develop -c uv run --no-project python -m unittest discover -s experiments/two-host
+bash experiments/cloudlab/setup.sh --bundle /root/cas.bundle --revision 607f051cd550e5d924244931d1df180e181de205 \
+  --source /root/cas-campaign --skip-disk --skip-irq --skip-nix --cores 6 --out /root/campaign/setup.json
+python3 experiments/cloudlab/campaign.py dry-run --nodes nodes-dry.json \
+  --plan experiments/cloudlab/plans/dev-loopback.json      # loopback layout, two loop-XFS members
+```
+
+### Outcomes
+
+- `just check` on `607f051`: **602 Rust tests passed, 0 failed, 30
+  ignored**, 39 Python tests (two-host); `cargo test -p cas-harness`: **60
+  passed, 0 failed**; campaign unit tests **28 passed**; two-host unit tests
+  **39 passed** (also on Spark). A first `setup.sh` build on `6d5a7d6`
+  failed in the `cas` package's sandboxed release tests: the new ring-origin
+  test's strict `before < received` bracket met an equal reading;
+  `607f051` makes the bounds inclusive (nothing else changed) and the build
+  passed.
+- `setup.sh` (`--skip-disk --skip-irq --skip-nix`): bootstrap clone from the
+  bundle, checkout at the pinned revision, `nix build .#two-host` and
+  `.#native` (both from source on the fresh VM, the `cas` package's release
+  tests included), limits and inventory: exit 0.
+- `campaign.py dry-run` with `plans/dev-loopback.json` on a two-member
+  loopback layout (`loopback-8` node type, two 8 GiB loop-XFS mounts, one
+  shared `output_root`, no pinned revision as the layout allows): **5
+  runnable, 7 blocked of 12 units, exit 2, nothing launched**; manifest
+  bound to `607f051` and the binaries' hashes, equal on both members;
+  evidence label `development`. Runnable: `frozen reads-memory` ×2, `fast
+  reads-storage` ×2 and `raced reads-storage` — the `fast` and `raced` arms
+  are no longer blocked for "runner does not know the setting", because the
+  integrated runner carries `fast_settled_reads` / `peer_race_us`. Blocked
+  for the plan's intended reasons: `fast reads-storage-g8`, `native-cas g4`
+  and `burst burst-images` (8/8/16 guest cpus exceed the loopback set of 4;
+  `cas-native-run` boots at most 2 guests), `native-raw g1` and `native-zfs
+  g1` (no native runner path / no ZFS dataset in this nodes file), `r0
+  floor` (nvme-tcp prerequisites absent on the VM) and `resume
+  resume-elsewhere` (`WORKING_SET_FROM_BUNDLE` needs `bundle_actions`).
+- Open for a human: the dry-run was a loopback development layout; no
+  campaign unit ran here, and the native (`cas-native-run`) wrappers were
+  built but not exercised. The loop-XFS images were unmounted before the
+  VM was deleted (they had stalled the previous VM's IO, see the entry
+  above).
+
+Evidence: `results/integration-1113/chain-merge.log` and
+`evidence/evidence-3.tgz` (logs, setup and dry-run outputs) with its SHA-256
+in `evidence/export-3.log`; VM ledger `resources.json`.
+
+### Follow-up (same day): final review, eight findings
+
+On the same branch after `d18ceb6`; **tested revision `cf17a830eb290e2bc14dace2e5db95504f0920e3`**,
+clean on a fresh Freestyle VM `cas-build-integration`
+(`vm-874eb58710564562a171842f1f154584`, same shape and procedure), deleted after export.
+
+- `f931ffb` (4, 6, 8-registry): the geometry marker is written to a
+  temporary name under the exclusive lock, the lock downgraded to shared,
+  then renamed into place — a reader can no longer see a zero-length
+  marker, and an inherited descriptor still cannot block readers (unit test
+  observes both); `eventfd::duplicate` borrows the owner (`&impl AsRawFd`);
+  `Registry::lookup_with` takes a wake factory called only on the waiter
+  branch before any state change.
+- `b24231c` (3, 8): a failed inline read orphans the leaders it holds
+  instead of dropping them (which failed bystander waiters with
+  `Interrupted`, escalated to the host gate by a reactor waiter in its
+  shared-IO state); orphans fetch and publish for their waiters, a leader
+  whose GET slot was exhausted retries on every poll, the cell is allocated
+  before the lookup so no error path holds a leader, and the frontend wake
+  is duplicated only for a waiter or an issued GET. Counters
+  `orphaned_leaders` / `orphans_failed`; `docs/storage-design.md`. Test
+  `local_exhaustion_after_a_held_leader_orphans_it_for_its_waiters`: a
+  reactor waiter on an inline leader plus GET-pool exhaustion; only the
+  inline read fails, the waiter is served, host gate and registry failures
+  stay at zero.
+- `0fad4fd` (2, 7): `is_partition_of` follows the kernel's naming rule
+  (`/dev/sda1` matches, `/dev/sdap` does not; unit tests); the native guest
+  limit lives in `crates/harnesses/native-limits.json` (inside the crate so the
+  packaged build includes it), read by the campaign
+  driver and asserted equal to `native::MAX_GUESTS` by a harness unit test,
+  so the 4/8/16-guest native cases are no longer blocked by a stale 2.
+- `2d261bc` (1): `start` forwards `--revision` (and every other run-time
+  input) to the detached worker; unit test.
+- `cf17a83` (5): `casctl import --root` help says what the importer does: an
+  existing empty directory is initialized, an existing root reused, a
+  missing directory refused (as `docs/casctl.md` says).
+
+#### Outcomes on `cf17a83`
+
+- fmt and strict Clippy clean; `just check`: **605 Rust tests passed, 0
+  failed, 30 ignored**, 39 Python tests (two-host); `cargo test -p
+  cas-harness`: **62 passed**; campaign unit tests **29 passed**; two-host
+  unit tests **39 passed**.
+- Peer suite in the four arms (off, fast, race+local, both): **32 passed**
+  each; fleet suite: **20 passed, 1 ignored** each; `local::host::tests::fast`
+  6/6 (off, both); five further `peer`-filter runs 5/5 (debug, parallel;
+  the loop-XFS images were mounted only for the dry-run, after the suites).
+- `setup.sh` (bootstrap, checkout at the tested revision, `nix build
+  .#two-host` and `.#native` with the `cas` package's release tests, limits,
+  inventory): exit 0. `campaign.py dry-run` with `plans/dev-loopback.json`
+  on the two-member loopback layout: **5 runnable, 7 blocked of 12, exit 2,
+  nothing launched**, manifest bound to this revision; `native-cas g4` is
+  blocked only by the loopback cpu set and the nodes file's missing native
+  runner path (the stale "boots at most 2 guests" reason is gone), the
+  rest as in the entry above.
+- Failures and retries during this round, all mine and all before any
+  retained run: a `poll` double borrow (compile), the new test's mock joined
+  a thread blocked in `accept` (hang) and off-by-one in its expected GET
+  count, a geometry unit test writing an unaligned buffer through O_DIRECT,
+  two rustfmt hunks, and `include_str!` of a file outside the crate that the
+  Nix package's source filter does not copy (moved into the crate).
+- Evidence: `results/integration-1113/chain-review{,2,3}.log`,
+  `chain-final{,2,3}.log`, `evidence/evidence-4.tgz` with its SHA-256 in
+  `evidence/export-4.log`; VM ledger `resources.json`.
+
+## 2026-11-13 — Integration of measurement flags, offline import and raced reads
+
+Branch `integration/2026-11-13` from `main` (`35add83`), merged in order with
+merge commits (no squash, no rebase): `feat/measure-flags` at `cbe027f` (code
+`39214ec`) as `388ab56`, `feat/offline-import` at `77c4081` as `1593fd2`, and
+`feat/raced-read` at `41bf61f` as `4873e1a`. One follow-up commit `7d55d8a`
+adds the race counters to a test's assertion message (test-only). **Tested
+revisions: `4873e1a`** (`just check`, flagged suites, importer) **and
+`7d55d8a`** (probes, loopback, C5; identical runtime code), clean on the VM.
+This record is a later documentation-only commit. Nothing was pushed or merged
+into `main`. These are Freestyle development checks, not CI, paper or
+native-hardware results.
+
+### Merge resolution
+
+The first two merges were clean apart from `docs/validation.md`. The third
+conflicted in `peer/client.rs`, `peer/router.rs`, `peer/tests.rs` and
+`docs/validation.md`; `local/fast.rs` auto-merged but no longer compiled.
+Every resolution keeps both features' invariants:
+
+- `peer/client.rs`: the raced-read `Slot` (generation, notify, challenger,
+  pending race, racing/used/wire bytes) gains measure-flags' `image` slot
+  index. `Client::fetch_with` and `Shared::fetch` carry `image`;
+  `Client::fetch` passes `UNATTRIBUTED`. `Pool::finish` calls
+  `Metrics::transport_finished(slot.image, verified)` (host `verified`/`errors`
+  plus the issuing image's `verified_bytes`) in place of the plain counter
+  update, keeping raced-read's failed-primary challenger start and `notify`.
+- `peer/race.rs`: `PendingKind::start` takes the primary's image, so a remote
+  challenger GET is credited to the same image as its primary; `Slot::start_pending`
+  passes `self.image`.
+- `peer/router.rs`: raced-read's `Shared` (placement, clients, local source)
+  also holds the `Racer`, so measure-flags' per-image `Router::for_image`
+  views share connections, racer and local source; `Router` is
+  `{shared, budget_us, image}`, `fetch`/`fetch_with_notify` pass `self.image`.
+  `Router::new` keeps raced-read's fourth argument (scheduler port for the
+  local race source).
+- `local/fast.rs`: `Context::peer_metrics` is `Option<ImageMetrics>`
+  (measure-flags' `Port::peer_metrics()` type); the inline path's `Trace`
+  therefore attributes its reads to the image like the reactor's. Its GETs go
+  through the image's router view, so inline fetches are credited at
+  transport verification exactly like reactor fetches.
+- `peer/tests.rs`: `Metrics::new(&budget, 1)` and `Router::new(.., None)`.
+- `docs/validation.md`: all five branch entries kept, in date order (three
+  2026-11-13 entries, then two 2026-11-12), above the 2026-11-09 entry.
+- Attribution decision for a race won by the local copy: there is no transport
+  verification, so no `verified_bytes` and no `verified`; the read counts as
+  completed with its chunk on the issuing image, and the late remote reply,
+  when it verifies, is still credited once to the issuing image and to
+  `counters.verified`. The sum `Σ images.verified_bytes = 4096 × counters.verified`
+  therefore holds with races, with coalescing and with inline reads. Written
+  into `docs/peer-fetch.md` (`peer.images` paragraph; `verified`/`errors`
+  count remote replies only).
+- Tests added at the merge: `assert_verified_bytes_sum` in
+  `local/host/tests/peer.rs`, asserted in the per-image, coalescing,
+  local-win, inline-registry and both loopback tests; the local-win test
+  asserts image 2 = {8 reads, 8 chunks, 8 × 4096 verified bytes}; the
+  inline-registry test asserts both inline GETs credit image 2; the
+  router-level second-owner race test fetches through `for_image(0)` and
+  asserts the challenger's win and the late loser's reply are both credited
+  to that image (`2 × 4096`). The peer test fixture now arms `CAS_PEER_RACE_US`
+  on every host that fetches (like the fleet fixture); `CAS_PEER_RACE_LOCAL`
+  stays test-explicit because it changes the force-remote failure semantics.
+- Docs: `docs/casctl.md` gains a flags table (every new `cas-host` and
+  `casctl import` flag with its default; no `cas-host` default changed);
+  `docs/peer-fetch.md` "Read path" now describes the two schedulers (reactor,
+  frontend-inline) over the shared per-block resolution in `local/chunk.rs`
+  and points to `docs/storage-design.md` for the inline conditions.
+
+### Host and commands
+
+No build or test ran on Spark (editing, Git bundles, provider calls and
+evidence reading only). Freestyle x86_64 VM `cas-build-integration`
+(`vm-ae4098253ad34f30867b5890f5702762`, snapshot `freestyle/ubuntu-lg`,
+Ubuntu 24.04.5, Linux 6.1.102, 8 vCPU, 16 GiB, 64 GiB ext4 root, `/dev/kvm`
+present), created for this task with its own identity grant and deleted after
+export. Nix 2.35.6 (upstream multi-user installer; `nix.conf`: flakes,
+`max-jobs = 2`, `cores = 8`), `nix develop` Rust 1.98.1. The branch was
+shipped as a git bundle; `ulimit -n 65536`, `CARGO_TARGET_DIR=/root/target`,
+`CARGO_BUILD_JOBS=8`. Everything ran as root, sequentially.
+
+```sh
+nix develop -c cargo fmt --all -- --check && nix develop -c cargo clippy --workspace --all-targets --locked -- -D warnings
+nix develop -c just check
+T="nix develop -c cargo test -p cas-daemon --locked --lib --"
+$T peer;  CAS_FAST_SETTLED_READS=1 $T peer
+CAS_PEER_RACE_US=100 CAS_PEER_RACE_LOCAL=1 $T peer
+CAS_PEER_RACE_US=100 CAS_PEER_RACE_LOCAL=1 CAS_FAST_SETTLED_READS=1 $T peer
+$T fleet; CAS_FAST_SETTLED_READS=1 $T fleet; CAS_PEER_RACE_US=100 $T fleet
+CAS_PEER_RACE_US=100 CAS_FAST_SETTLED_READS=1 $T fleet
+$T local::host::tests::fast; CAS_PEER_RACE_US=100 CAS_PEER_RACE_LOCAL=1 $T local::host::tests::fast
+$T local::host::tests::recovery::service
+nix develop -c cargo test -p cas-core --locked --test import --test import_crash
+CAS_PEER_EVIDENCE=... nix develop -c cargo test --release -p cas-daemon --lib --locked \
+  local::host::tests::peer::two_daemon_loopback_verifies -- --nocapture   # 3× per arm
+nix build .#checkpoints --out-link result-checkpoints; nix build .#cas --out-link result-cas
+nix develop -c result-checkpoints/bin/cas-checkpoints --checkpoint C5 --checkout . --output /root/c5/suite-01
+result-cas/bin/cas-harness verify-suite --output /root/c5/suite-01
+```
+
+### Outcomes
+
+- `cargo fmt --check` and strict Clippy: clean on the first compile of the
+  merged tree.
+- `just check` on `4873e1a`: **pass** — **593 Rust tests passed, 0 failed,
+  30 ignored** (579 on `feat/measure-flags`, 583 on `feat/raced-read`, 577 on
+  `feat/offline-import`'s base; the counts add up less the shared base plus
+  the merge's own assertions), 13 Python tests, `git diff --check`.
+- Peer suite (`peer` filter: `peer::tests`, `peer::wire::tests`,
+  `local::host::tests::peer`, plus two `recovery` tests and two fleet/chunk16
+  tests whose names contain "peer"; 31 selected, 2 ignored entry points):
+  flags off **29 passed** (first run 27/2, see failures), fast **31 passed**,
+  race (`--peer-race-us 100 --peer-race-local`) **29 passed** (first run 28/1),
+  both **31 passed**. The per-image attribution and coalescing tests and the
+  sum assertion passed in all four arms.
+- Fleet suite (`fleet` filter, incl. the two- and four-process fixtures):
+  **20 passed, 1 ignored** in each of off, fast, race (`CAS_PEER_RACE_US=100`)
+  and both.
+- `local::host::tests::fast`: 2 passed (off and race+local);
+  `recovery::service`: 4 passed, 2 ignored (XFS/subprocess).
+- Importer: `tests/import.rs` and `tests/import_crash.rs` passed (both chunk
+  arms, every crash cut).
+- Release loopback (below): 12/12 runs passed, delayed-server 2/2.
+- C5: **41/41 passed; the independent verifier passed** (exit 0, silent).
+  Suite 04:21:55–05:17:25 UTC (55.5 min, exit 0) on `7d55d8a` recorded by the
+  harness (`revision/`), default flags, as root on the VM's nested KVM; no
+  scenario was retried. `nix build .#checkpoints` and `.#cas` (release
+  package tests) passed first (04:16–04:21). `guest-pressure` counted 2
+  staging stops (`stops` 2 in the write-stage daemon telemetry; 2 of its 592
+  one-second samples caught `stopped`). No scenario was infeasible on the VM.
+
+| Scenario | Result | Seconds |
+|---|---|---:|
+| `async-after-active` | PASS | 17.91 |
+| `async-after-append-cqe` | PASS | 16.85 |
+| `async-after-prepared` | PASS | 17.52 |
+| `async-after-status` | PASS | 17.23 |
+| `async-after-storage` | PASS | 17.04 |
+| `async-after-sync` | PASS | 17.25 |
+| `async-after-used` | PASS | 17.42 |
+| `async-before-submit` | PASS | 16.59 |
+| `async-before-sync` | PASS | 16.53 |
+| `async-device-reset` | PASS | 19.13 |
+| `async-fresh-recovery` | PASS | 38.75 |
+| `async-io` | PASS | 37.67 |
+| `async-repeat-after-fence` | PASS | 17.23 |
+| `async-repeat-before-fence` | PASS | 17.23 |
+| `async-repeat-replay` | PASS | 17.65 |
+| `clippy` | PASS | 2.17 |
+| `diff-check` | PASS | 0.02 |
+| `fresh-recovery` | PASS | 36.28 |
+| `guest-pressure` | PASS | 472.72 |
+| `live-after-status` | PASS | 19.51 |
+| `live-after-storage` | PASS | 17.69 |
+| `live-after-used` | PASS | 17.98 |
+| `live-before-submit` | PASS | 18.33 |
+| `local-fresh-recovery` | PASS | 38.50 |
+| `local-sync` | PASS | 40.02 |
+| `nix-check` | PASS | 147.31 |
+| `nix-format` | PASS | 4.23 |
+| `persistence-model` | PASS | 12.95 |
+| `raw-daemon` | PASS | 23.89 |
+| `raw-qemu` | PASS | 18.85 |
+| `rust-format` | PASS | 0.97 |
+| `rust-tests` | PASS | 73.61 |
+| `shared-after-chunks` | PASS | 250.61 |
+| `shared-after-d` | PASS | 250.45 |
+| `shared-after-manifest` | PASS | 260.86 |
+| `shared-after-punch` | PASS | 256.29 |
+| `shared-after-unlink` | PASS | 265.05 |
+| `shared-before-chunks` | PASS | 227.77 |
+| `shared-replacement` | PASS | 242.43 |
+| `staging` | PASS | 25.55 |
+| `xfs-store` | PASS | 284.93 |
+
+### Release loopback, three runs per arm
+
+Same harness and method as the `feat/raced-read` entries (release, QD1,
+4 KiB, 64 chunks, 100 warmup + 600 measured reads, nearest-rank quantiles over
+ring ids 100–699, microseconds, ranges over three runs). Different VM
+instance; compare arms within this table only. Development evidence, not a
+paper result.
+
+| Arm | Receipt→send p50 | Receipt→send p99 | Verified→completion p50 | Verified→completion p99 | Total p50 | Total p99 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Flags off | 24.8–27.8 | 39.4–47.9 | 37.2–40.4 | 53.7–58.6 | 103.0–109.5 | 136.0–149.0 |
+| `--fast-settled-reads` | 8.4–13.1 | 16.3–30.9 | 15.8–16.1 | 31.6–33.2 | 62.4–89.7 | 97.0–131.7 |
+| Race 100 µs + local, fast off | 23.5–23.9 | 42.6–52.5 | 31.8–33.8 | 55.9–70.3 | 100.1–114.8 | 152.0–170.8 |
+| Race 100 µs + local + fast | 9.5–10.3 | 23.1–30.5 | 14.5–16.8 | 32.4–34.9 | 63.3–89.2 | 98.1–153.8 |
+
+Every run: 700 GETs, 700 verified, 0 errors, cache empty, and
+`Σ images.verified_bytes = 4096 × verified` in the measure, pipeline and
+post-loss reports. Race arms started 13–22 (race) and 7–27 (both) races per
+700 reads with 1–10 local wins, one discard per start, `race_dropped` 0,
+`race_won_second` 0 (two-host configuration: the only challenger is the
+local copy). Delayed server (1 ms reply, 100 µs budget): 700/700 local wins
+with and without the fast flag, `race_discarded` 700 once the late replies
+had landed, `race_wasted_wire_bytes` 2,884,000, `errors` 0; total median
+419.3 µs (fast off) / 405.0 µs (fast on). The sum invariant also held on the
+snapshot taken before the late replies arrived (258 and 244 verified).
+
+### Failures and retries
+
+1. First `peer` run, flags off: 27 passed, 2 failed —
+   `recovery::frontend::retained_collection_does_not_repair_before_all_inputs_and_abandonment_fails_peers`
+   (`Store` reopen `WouldBlock` in the test helper, `tests.rs:195`) and
+   `recovery::service::failed_retained_negotiation_cancels_an_unconnected_peer_without_repair`
+   (`frontend connection: No such file or directory` after the helper's 5 s
+   connect deadline). Both tests are unchanged from `main`, ran in parallel
+   with the subprocess-spawning loopback and descriptor-limit tests, and
+   passed in `just check`, standalone 3/3, and in two repeated `peer` runs
+   (29/29 each). The second failed again once in a repeated race-arm `peer`
+   run (28/1; 5.4 s run time versus 2.6 s when passing), so it is a
+   timing-sensitive test under this filter's concurrency: on `main` (`35add83`, same VM, own target
+   directory) the same filter selects 18 tests and passed 5/5; the merged tree
+   selects 31, adding the raced/inline loopback and descriptor-limit tests that
+   fork subprocesses. The likely mechanism is the one recorded on 2026-11-09
+   (failure 2): a child between fork and exec shares every open description,
+   so a concurrent test's `flock` sees `WouldBlock`; `host_service::serve`
+   failing its open that way before binding the socket would explain the 5 s
+   connect expiry (the test panics on the connection before reading the
+   service result, so the error is not retained). Not shown; left for a human:
+   extend the one-second lock retry to that path, or serialize the
+   fork-spawning tests. No bound or assertion was changed.
+2. First `peer` run, race arm: 28 passed, 1 failed —
+   `two_daemon_loopback_race_wins_locally_against_a_delayed_server` saw
+   `races_started` 699 of 700 (debug build, parallel suite). It passed 5/5
+   standalone under the same environment, in the repeated race-arm runs, in
+   the both arm, and in the release delayed-server runs (700/700 twice). The
+   assertion now prints the counters (`7d55d8a`) so a recurrence shows which
+   counter moved; no bound was changed.
+3. No other failure; no rebuild was needed after the merge.
+
+### Evidence and limits
+
+Ignored research-repository root `results/integration-1113/`: `vmctl.py`,
+`run.sh`, `suites.sh`, `probe.sh`, `loopback.sh`, `c5.sh`, `summarize.py`,
+the VM ledger `resources.json`, `nix-install.log`, `warm-build.log`,
+`compile1.log`, `suites.log`, `probe.log`, `loopback.log`, `c5.log`,
+`loopback/` (per-arm `reader.json`, `pipeline.json`, `server.json`,
+`failure.json`; delayed-server `race/reader.json` and `race/late.json`) and
+`evidence/evidence.tgz` (every VM log, the loopback JSON and the C5 suite
+directory without disk images) with its SHA-256 in `evidence/export.log`.
+The VM `vm-ae4098253ad34f30867b5890f5702762` was deleted through the provider
+API after export (ledger event `vm-deleted`); no other VM was touched.
+`evidence/evidence.tgz` SHA-256
+`2a627d5441e778750ccaa1473e5354c6fd18bcfa986ca2819372dfce8359a0a2` (21 MB;
+`xfs.img`, raw images, WAL segments and staging logs excluded);
+`evidence/c5-suite-01.json` is the suite receipt. A `main` checkout and its
+target directory were built on the VM only for the flake probe. Limits: one
+C5 run, as root, on nested KVM in a shared-provider VM; loopback timings are
+development observations on that VM (no pinning, no IRQ control) and exclude
+guest scheduling; no CI, push, merge, deployment, CloudLab, multi-host
+(`cas-two-host`) or guest-measured run occurred in this session. The
+multi-host N=2/N=4 suites from the 2026-11-09 entry were not repeated here.
+
+### Follow-up (same day): flake fix, review fixes, multi-host suites
+
+Coordinator follow-ups on the same branch; **tested revision `57acfcd5d67f690787ac9d5bca8f32710f672561`**
+(commits `1111965`…`57acfcd`), clean on a second fresh Freestyle VM
+`cas-build-integration` (`vm-0b06f9f7927c4a8093127b61daa71248`, same shape,
+Nix and procedure as above; the first VM had been deleted after the entry
+above). The VM was deleted after export. Nothing was pushed or merged.
+
+#### The `peer`-filter flake: two causes, both fixed at the source
+
+Reproduction on the unmodified head `15754ae`: `cargo test -p cas-daemon
+--lib -- peer` ten times → **4/10 failed** (`failed_retained_negotiation…`
+three times with `host.json` `startup_error: "operation would block"`, i.e.
+`host_service::serve` failed at the root lock before binding any socket, and
+`race_completes_from_the_local_copy…` once). Skipping the one test that
+spawns a subprocess with a `pre_exec` hook → **0/10 failed**; skipping the
+`posix_spawn` loopback tests instead → **3/10 failed**. With a `pre_exec`
+hook `Command` must `fork()` the large multi-threaded test binary, and
+between fork and exec the child holds a copy of every open description, so a
+`flock` another test has just released stays held for milliseconds (locks
+live on the description). Fix (`1111965`): the descriptor-limit child lowers
+its own `RLIMIT_NOFILE` from the environment and `Command` uses
+`posix_spawn`. A first attempt at lock-holder diagnostics was wrong twice
+(hex inode match against the decimal `/proc/locks` field; the "holder" it
+printed was its own contender descriptor) and its `/proc/*/fd` scan was slow
+enough to distort the retry budgets; that probe was discarded. The 10/10
+failures recorded while it was in place were mostly a second mistake of
+mine: the `try_connect` helper had dropped the feature/protocol negotiation,
+so the service never saw the inflight request; fixed before any kept run.
+
+With the fork window gone the `WouldBlock` still recurred once in 14 runs
+(`Log::create` in a test helper). Second cause: `geometry::config` read the
+immutable store marker `chunk-format.v3` through `direct::open`, which takes
+an **exclusive** `flock` for a transient read-only check; every WAL open
+(`append/shared.rs`) and every store inspection reads it, from several
+threads of one daemon and from fixtures beside it, so concurrent readers of
+one root collided. Fix (`4ba5520`): readers take a shared lock
+(`direct::open_readonly`); `create` keeps the exclusive one; unit test.
+
+A read-path bug surfaced by the same loops (`3ff5d42`): both schedulers armed
+the race only while the primary ticket was not `ready()`; a failure that
+landed first (refused connection, EOF, a corrupt payload verified on the
+worker thread) made the ticket ready, so the read was never raced and failed
+closed although the local copy or second owner would have served it —
+intermittent `ConnectionRefused` and `races_started 0` in the race tests.
+`Ticket::verified` now distinguishes a verified reply (nothing to race) from
+a failed one (raced; arming an already failed primary starts the challenger
+at once). Two timing assumptions in tests were widened to what a loaded
+debug host can honour: router-level race budgets 5 ms → 100 ms against
+500 ms late replies, and the delayed-server loopback test's server delay
+1 ms → 10 ms (`c463a3c`).
+
+Loops on the fixed tree (debug, parallel, 8 threads, `peer` filter = 32
+tests incl. the loopback subprocess tests): after the fork fix and the
+shared-reader change, 12/12 then 15/15 (ten flags off, five race arm) and
+three full daemon-lib runs; the full campaign on `97575b8` added 10/10 off +
+5/5 race with one `WouldBlock` in a `Log::create` of the parallel loop
+(1 in about 40 runs), traced to the marker's *creator* still taking an
+exclusive lock (`11c2f57`); 20 runs on that head: 18/20, the two misses
+being the delayed-server test counting a legitimately unraced read
+(`d94f345`); 20 runs on `d94f345`: 19/20, the miss a run in which two
+unrelated tests timed out together (11.7 s wall versus 2.7 s; a stall of
+the shared VM, not a code path); 10 runs on `57acfcd` (rustfmt of that test hunk): 10/10. The `just check`
+of that loop failed with eleven unrelated tests at their 5 s request
+deadline in one run and the daemon-lib binary at 110 s instead of 44 s;
+`dmesg` showed hung `xfs-sync/loop*` workqueues (`xfs_log_worker` pending)
+from the four 16 GiB XFS images loop-mounted for the multi-host runs,
+which also explains the loop-10 miss. With those images unmounted and
+detached, `just check` passed twice in a row on `57acfcd` (**599 passed, 0
+failed, 30 ignored**, 14 Python tests). Three timing assumptions in
+the race tests were corrected rather than tolerated along the way: the
+corrupt-reply test asserted the reply's error before its discard (the local
+copy can win before the transport has connected); the delayed-server test's
+"700/700 local wins" is a timing claim the debug parallel suite cannot
+honour (half the reads lost to the 1 ms reply under load once), so the 95 %
+floor applies to release builds and the debug build asserts exact accounting
+(wins sum to starts, one discard per start, wasted bytes equal local wins ×
+frame, 700 verified, 0 errors, unraced reads counted); the failed-primary
+test's 150 ms wall-time guard tripped at 158 ms and is now a loose guard
+against a 2 s budget. A 10 ms server delay was tried and rejected: 700
+serial replies back up past the 2 s GET timeout.
+
+#### Review fixes (nine findings)
+
+- `67c5cd6` (1) `SlotRef::due` on a generation mismatch no longer takes the
+  newer occupant's `pending`; test `stale_racer_deadline_does_not_cancel_a_reused_slots_race`.
+- `5c84944` (2) `fast.rs` fails the shared host gate only for failures of
+  shared IO (poll-time: a GET reply, a waited publication, the cache fill);
+  local exhaustion while joining fails only the read and its image. Test
+  `registry_exhaustion_after_a_waiter_joined_fails_only_the_image`.
+- `1905ffc` (3) `validate_interval` refuses a segment too small for one WAL
+  batch instead of underflowing; unit test at and below the floor.
+- `5c84944` (4) one fetch-registry state machine in `local/chunk.rs`
+  (`Sources::join`, `Fetch::publish`) used by the reactor and the inline
+  path; (5) `decline` keeps the `Io`; (6) `cas_core::eventfd::duplicate` is
+  the one descriptor duplication, transport notifies are `OwnedFd`; (8)
+  `receive(wait)` with pending inline reads blocks on the frontend eventfd
+  (the reactor already signals it after every mailbox send); (9) the FLUSH
+  table overflow counts `fast.flush_overflow` and logs once.
+- `c2b30ad` (7) image keys through `cas_core::id::hex`.
+- `29da053` two-host runner settings `peer_race_us` / `fast_settled_reads`
+  (needed for the "both flags" multi-host arm; unit test).
+- `1389b8a` ring origin: `peer.origin_monotonic_ns` and
+  `fleet.shipping.origin_monotonic_ns` are the `CLOCK_MONOTONIC` reading taken
+  with the ring origin, so a ring time `ns` is the host instant
+  `origin_monotonic_ns + ns` (documented in `peer-fetch.md` and `fleet.md`;
+  tests: reads stamped after a known instant convert to later instants
+  bounded by now; the shipping ring shares the origin). Ring entries are
+  unchanged.
+- `7295c9c` fast path: inline completions signal the frontend completion
+  eventfd (found by the multi-host runs below).
+
+#### Outcomes on `57acfcd`
+
+- fmt, strict Clippy: clean. `just check`: **599 Rust tests passed, 0
+  failed, 30 ignored**, 14 Python tests.
+- Peer suite (`peer` filter, 32 selected): off **32**, fast **32**, race
+  **32**, both **32** passed (2 ignored entry points each); fleet: **20/1
+  ignored** in all four arms; `local::host::tests::fast` 5/5 (off, race);
+  importer 2/2; `peer` filter loops: 9/10 off (see below), 5/5 race.
+- Release loopback, three runs per arm (same method as above; this VM):
+
+| Arm | Receipt→send p50 | p99 | Verified→completion p50 | p99 | Total p50 | Total p99 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Flags off | 21.8–27.3 | 37.9–65.1 | 31.1–36.3 | 49.7–78.6 | 96.3–119.8 | 146.5–208.6 |
+| `--fast-settled-reads` | 8.1–12.4 | 20.2–26.6 | 13.7–19.0 | 28.5–37.9 | 55.3–74.1 | 93.4–109.6 |
+| Race 100 µs + local, fast off | 22.7–32.0 | 37.5–47.9 | 29.2–39.1 | 53.5–54.0 | 93.0–124.6 | 139.7–161.0 |
+| Race 100 µs + local + fast | 8.7–14.8 | 16.8–31.7 | 16.6–22.4 | 31.0–43.0 | 72.5–93.1 | 103.5–123.0 |
+
+  Every run 700 verified, 0 errors, `Σ images.verified_bytes = 4096 ×
+  verified`; race arms 11–18 starts per 700 reads (5–13 local wins), one
+  discard per start, `race_dropped` 0; `peer.origin_monotonic_ns` present.
+  Delayed server (1 ms reply, 100 µs budget, release, standalone):
+  **700/700 local wins** with and without the fast flag, `race_discarded`
+  700, wasted 2,884,000 bytes, 0 errors; total median 479.8 µs (fast off) /
+  406.6 µs (fast on).
+
+#### Multi-host N=2 and N=4
+
+The two-host runner ran on this VM with every member local (as the N=4 run
+of the 2026-11-09 entry did on one of its VMs): members on separate 16 GiB
+XFS loop mounts `/mnt/fleet0..3`, GET/bulk ports 17483–17490 on 127.0.0.1,
+daemons pinned to vCPUs 0–3 and guests to 4–7, nested KVM guests, settings
+as the 2026-11-09 run (128 MiB image, 1 MiB data, 4 MiB/s shipping, 5 s
+windows, QD 1/4, one repeat); N=2 all six cases, N=4 the five
+(`raw-rsync` is two-node). The dev shell's `mkfs.xfs` 6.19 wrote feature
+bits (`0xc0`) kernel 6.1 rejects; Ubuntu's xfsprogs 6.6 with
+`-m rmapbt=0,inobtcount=0 -i nrext64=0` mounted. `cas-two-host` gained
+`settings.peer_race_us` / `fast_settled_reads` (`29da053`) so the "both
+flags" arm passes `--peer-race-us 100 --fast-settled-reads` to every fleet
+host.
+
+**First attempt (tree `48f36e5`):** flags off, N=2 and N=4 both passed
+`flows-k1`, `flows-k2`, `reads-memory` and failed in `reads-storage`
+(N=2: the contention writer's fio SSH call exceeded its 260 s timeout; N=4:
+`r0-contention-writer` fio exit 1); **both flags on, N=2 and N=4 failed the
+very first guest boot** (`flows-k1` seed: "experiment readiness deadline").
+Attribution with `flows-k1` alone: `fast_settled_reads` only → the same
+boot stall; `peer_race_us` only → pass. Cause (`7295c9c`): a vhost-user
+backend learns of completions only through its completion eventfd (the
+reactor writes it after every mailbox send, a GET reply writes it from the
+transport); a read the fast path completed inline (a hole or cache hit on a
+settled image, which is what a booting guest reads) was queued without any
+signal, so it waited for an unrelated wake. The native harness and the
+loopback tests poll `receive()` and never saw it; this is the first time a
+real guest booted on a `--fast-settled-reads` host. Regression test:
+an inline hole read makes the Local's completion eventfd readable before
+`receive()` is called.
+
+**Second attempt (`ba649d9`):** flags off N=2 passed all six cases; both
+flags still stalled the first boot. With gdb attached to the stalled host
+(`results/integration-1113/gdb-*.txt`): `vring_worker` blocked in
+`state::Gate::lock` called from `fast::Context::enqueue`, the main thread
+blocked in `HostGate::failure` behind it, reactor and transport idle. The
+vhost-user backend holds the image completion gate (host failure mutex plus
+image state) across admission and publication, and the fast path, running on
+that thread, locked the same gate to check for a failure and to record one:
+a self-deadlock on the first settled read of a booting guest; the service
+loop then blocked behind it (telemetry stopped after seven seconds) and the
+guest hung in its disk probe. The native harness never holds the gate around
+`enqueue`. Fix (`c571079`): `Gate::is_failed` (an atomic mirror written when
+a guard drops) and `Gate::fail_pending` / `HostGate::fail_pending` (applied
+by the next `lock()` / `failure()`); the fast path uses only these, and
+`receive(wait)` bounds its eventfd wait as a safety net because the
+backend's epoll handler drains the same descriptor. Regression: an inline
+read with the gate held is served; a failure recorded under the gate
+declines the next inline read without locking.
+
+**Third attempt (`97575b8`, after both fast-path fixes): every suite
+passed.** N=2 flags off: `flows-k1`, `flows-k2`, `reads-memory`,
+`reads-storage`, `raw-rsync`, `independent-stores` (6/6, 10:49–10:56 UTC);
+N=2 both flags (`--peer-race-us 100 --fast-settled-reads` on every fleet
+host): 6/6 (10:56–11:03); N=4 flags off: `flows-k1`, `flows-k2`,
+`reads-memory`, `reads-storage`, `independent-stores` (5/5, 11:03–11:08);
+N=4 both flags: 5/5 (11:08–11:14); the fast-only `flows-k1` attribution run
+passed as well. All members on one 8-vCPU VM (placement and protocol across
+one kernel, not host isolation, as the 2026-11-09 N=4 run); the earlier
+`reads-storage` writer timeouts of the first attempt did not recur and are
+recorded as unexplained one-offs of that attempt. Controller and host
+outputs are in the evidence archive (`mh/<run>/`).
+
+Evidence: `results/integration-1113/{skiploop,lockloop,lockloop2,loop3,campaign2,campaign3,multihost}.log`,
+`evidence/evidence-2.tgz` (every VM log, loopback JSON, controller and host
+outputs of the multi-host runs) with its SHA-256 in `evidence/export-2.log`;
+`multihost/*.json` are the configurations. VM ledger `resources.json`
+(`vm-0b06f9f7927c4a8093127b61daa71248` created, granted, deleted).
+
+## 2026-11-13 — Measurement flags: attach window, metadata budget, per-image reads, shipping window
+
+Branch `feat/measure-flags` from `main` (`35add83`, code identical to the
+measured revision `ebbe157`). Four commits, each with tests and documentation:
+`7d7e2db` `--attach-timeout-secs`, `f0bbc1d` `--metadata-bytes`, `bc8aeb7`
+per-image remote-read attribution, `efa269d` shipping durability window.
+**Tested revision: `efa269d`**, clean checkout on the VM. The read path
+(`local/reactor/read.rs`) is untouched; the sibling `feat/raced-read` branch
+owns it. No flag changes a default: without flags the host keeps the 60 s
+attach window and the 128 MiB metadata budget, and the new report fields are
+additive (`peer.images`, `fleet.shipping`). Nothing was pushed or merged.
+
+### Host and commands
+
+No build or test ran on Spark (editing, Git bundles and provider calls only).
+Freestyle x86_64 VM `cas-build-flags` (`vm-e9edd5c6254c486c9d8f7aea18911e79`,
+snapshot `freestyle/ubuntu-lg`, Ubuntu 24.04.5, Linux 6.1.102, 8 vCPU, 16 GiB,
+64 GiB disk), created for this task with its own identity grant and deleted
+after export. Nix 2.35.6 (upstream multi-user installer, flakes enabled). The
+branch was shipped as a git bundle; `ulimit -n 65536`,
+`CARGO_TARGET_DIR=/root/target`, `CARGO_BUILD_JOBS=8`.
+
+```sh
+nix develop -c just check
+nix develop -c cargo test -p cas-daemon --locked --lib -- \
+  local::host::tests::recovery::service local::host::tests::peer \
+  local::host::tests::fleet peer::tests
+CAS_FLEET_EVIDENCE=/root/evidence nix develop -c cargo test -p cas-daemon \
+  --locked --lib -- shipping_window_ring
+```
+
+### Outcomes on `efa269d`
+
+- `just check`: **pass** — formatting, strict Clippy, **577 Rust tests passed,
+  0 failed, 30 ignored** (572/30 on the frozen revision; the five new tests
+  are listed below), 13 Python tests, `git diff --check`.
+- Peer/fleet suites (`local::host::tests::peer`, `local::host::tests::fleet`
+  including the two- and four-process fixtures, `peer::tests`): 27 passed,
+  3 ignored subprocess entry points; `two_daemon_loopback` and
+  `descriptor_limit` subprocess runs passed.
+- New tests, all passing:
+  - `tests::measurement_flags_keep_their_frozen_defaults_and_reject_zero`
+    (`cas-host` CLI): defaults 60 s / 134,217,728 bytes; `0` rejected.
+  - `recovery::frontend::cold_attachment_window_expires_with_the_configured_timeout_when_no_guest_connects`:
+    a 200 ms window with no frontend fails through the existing
+    `recovery deadline expired` path (`connection_ok: false`), the other image
+    stays attachable.
+  - `recovery::service::metadata_budget_decides_whether_a_large_rebuilt_index_can_be_served`:
+    a 4,096-chunk catalog root fails `host_service::serve` under a 256 KiB
+    budget with the existing `chunk index metadata budget exhausted` error,
+    no file changes, `startup_error` in `host.json`; the same root opens under
+    the default budget, its index allocation exceeds 256 KiB, and chunks
+    0/2048/4095 read back correctly.
+  - `peer::per_image_remote_read_attribution_sums_to_the_host_counters`:
+    two images on one host, 5 and 3 remote reads plus one failure after the
+    owner stops; per-image counts sum to the host counters.
+  - `fleet::process::shipping_window_ring_records_a_delayed_owner_acknowledgement`:
+    two processes, owner holding each PUT 300 ms (test-only
+    `CAS_FLEET_DELAY=put-before`).
+
+Retained ring from that test (`shipping-window.json`): two batches (63 and 1
+chunks, 260,100 and 4,164 PUT body bytes), both `queued_ns = 406,784,488`,
+windows 332 ms and 634 ms (the second PUT waits behind the first's delay),
+`window_ns_sum = 967,001,619`, `rescan_batches = 0`.
+
+### Failures and retries during development
+
+1. `--metadata-bytes` first used `value_parser!(usize).range(1..)`, which clap
+   does not provide; the flag is parsed as `u64` and converted. A test compared
+   `usize` chunks with `u64`. Fixed before any test ran.
+2. The per-image test expected `chunks = 3` for image 3, but the read path
+   records the failed GET's chunk with zero milestones (`recent[].chunks`
+   convention), so the first run reported `chunks = 4`,
+   `verified_bytes = 16,384`. `verified_bytes` now counts only chunks whose
+   `verified_ns` is nonzero (3 × 4,096); `chunks` keeps the ring convention.
+   This is the only runtime assertion that failed; documented in
+   `peer-fetch.md`.
+3. `just check` failed once on `cargo fmt` (two layout diffs); applied, then
+   passed in full.
+
+### Design notes and limits
+
+- The attach window still starts with the recovery scan (one deadline created
+  beside it), so the default is byte-for-byte the previous behaviour. Retained
+  reconnection and the recovery scan keep the fixed `RECOVERY_TIMEOUT`.
+- Only `resources.metadata` follows `--metadata-bytes`; the compaction budget,
+  cache, staging and `Shared::new` reference backends keep their constants.
+- No root with a real >128 MiB index was built: that needs more than about
+  1.5 million distinct chunks (6 GiB or more of compacted data). The test
+  demonstrates the mechanism at a 256 KiB budget against a 4,096-chunk root.
+  Opening a 16 GiB image under `--metadata-bytes 402653184` remains to be
+  observed on the study hosts.
+- `fleet.shipping` adds a key beside the flow counters; `runner.py` reads
+  flows by name and is unaffected (Python tests pass). The owner's PUT reply
+  means its `Store::insert` and sync completed, not fleet-class FLUSH.
+- Rescan-originated batches (startup inventory, full queue, retry after a
+  failed pass) carry `queued_ns = 0` and are excluded from the window sums.
+
+Ignored evidence in the research repository under `results/measure-flags/`:
+`test1.log`, `test2.log`, `test3.log`, `test4.log`, `check-full.log`,
+`check-full2.log`, `totals.log`, `shipping-window.json`, the VM ledger
+`resources.json` and the control scripts.
+
+### Review follow-up (same day)
+
+Code review found nine issues; fixed in three grouped commits on the branch,
+**tested revision `39214ec`** (`82944e7` attach window and metadata cap,
+`d0c8ed1` per-image verified bytes, `39214ec` shipper queue and clock), on a
+fresh Freestyle VM `cas-build-flags` (`vm-e3e10c29fcfe488b9b2633981b01a95a`,
+same shape and procedure as above; `/tmp` on ext4), deleted after export.
+
+- Attach window: it now starts when recovery completes in both cold modes
+  (before, ordinary cold mode armed it before recovery). Help text and docs
+  say so. New test `attach_window_starts_after_recovery_completes` uses a
+  test-only `recovery_delay` (400 ms) with a 300 ms window: the service fails
+  after at least 700 ms through the unchanged `recovery deadline expired`
+  path with no `startup_error`, where the old sequencing failed at attach.
+- `--metadata-bytes` is capped at physical memory (`physical_memory_bytes`,
+  sysconf); a value above it is `InvalidInput` before any output exists.
+  Sizing text corrected: 16 GiB at 4 KiB is 4,194,304 chunks, 168–336 MB.
+- Per-image `verified_bytes` is credited once at transport verification to
+  the image whose read issued the GET (each image holds a `Router::for_image`
+  view of the shared connections; the request slot carries the image index).
+  Coalesced waiters count as reads and chunks, not bytes, so the bytes equal
+  `4096 × counters.verified` even when reads coalesce. New test
+  `coalesced_remote_reads_credit_verified_bytes_to_the_issuing_image_once`
+  holds a mock peer's reply until the second image has joined the first's
+  fetch (`fetches.counters.joined`): one GET, one verified chunk, bytes only
+  on the issuer. The slot limit is checked once in `make_image`;
+  `Metrics::bind` is infallible.
+- Shipper: the queue holds `(hash, Option<queued_ns>)` pairs, rescans carry
+  `None` (`null` in the report), batches copy up to 63 hashes into a fixed
+  array for the unchanged `ship()`, and times come from the peer metrics
+  clock shared with `peer.recent` (the report's `clock` field says so). The
+  two-process test waits on the sender's `fleet.ship.put_acked_chunks`.
+
+Outcomes: `nix develop -c just check` **pass** — **579 Rust tests passed,
+0 failed, 30 ignored**, 13 Python tests, strict Clippy, fmt, whitespace.
+Targeted suites (`recovery::service`, `peer`, `fleet` incl. subprocess
+fixtures, `peer::tests`): 32 passed, 5 ignored entry points. Retained ring
+(`shipping-window-review.json`): two batches, windows 337 ms and 640 ms
+against the 300 ms owner delay, `window_ns_sum = 977,932,642`,
+`rescan_batches = 0`.
+
+Failures and retries: a shadowed `config` binding and a missing SAFETY
+comment (`clippy::undocumented_unsafe_blocks`) failed the first compile; one
+`cargo fmt` hunk failed the first full check. All fixed and squashed into
+their commits. A probe with `TMPDIR=/dev/shm` fails every host test in the
+shared fixture at `Store::create_sized` (O_DIRECT on tmpfs), before any test
+body, so the new cold-serve test is not ignored: it runs wherever its
+siblings run. The XFS-ignored `failed_cold_image_protocol_leaves_the_other_socket_usable`
+passed on ext4; `cold_host_supervises_both...` still needs XFS
+(`Snapshot::create`). Evidence: `review1.log`, `review2.log`,
+`review-check.log`, `review-check2.log`, `probe-cold.log`.
+
+## 2026-11-13 — Importer review fixes (`feat/offline-import`)
+
+Follow-up to the entry below on the same branch. **Tested revision:
+`1e4efee104f0ce4a04e2c41adbf6413e90be667d`**, clean; the intermediate commit
+`596084e` was format- and Clippy-checked on its own. This record is a later
+documentation-only commit. Nothing was pushed or merged. Same host, checkout,
+target directory and limits as below (`cas-build`, `/root/cas-import`, ext4
+root, `ulimit -n 65536`); Spark edited only.
+
+Changes under review: platform-free `cas_core::import` defaults so `casctl`
+builds off Linux; `cas_core::id` (`parse`, `hex`) shared by `cas-host`,
+`cas-fleet` and `casctl`; `cas_core::layout` holds the store/image creation
+recipe used by both `cas-host init` and the importer; `Store::exists`
+replaces the hard-coded geometry marker; a new root must be an existing empty
+directory, its segment size must satisfy the host's default staging limits
+including the 60% rollover rule, and the compaction interval is bounded by
+worst-case preallocated WAL bytes before any output; the catalog is created
+before the geometry marker; interrupted `images/<id>` output is renamed to an
+unreferenced image name (fleet-importer pattern) so retries proceed and
+tickets stay observed; the trailing settle runs only with staged bytes and
+emits its `Settled` point; input identity rechecks device, inode, mtime and
+ctime; progress prints by last GiB. The default path's WAL/compaction logic
+is unchanged.
+
+Outcomes at `1e4efee`: `just check` rc=0 (1m19s); `tests/import.rs` and
+`tests/import_crash.rs` passed for both arms with the same chunk counts as
+below (2,697/4,192 and 694/1,079; crash cuts 272/1,497 and 75/412 retained
+chunks), now also refusing a missing root, 192 MiB segments, a 256 MiB
+interval and a non-empty geometry-less directory without writing output, and
+retrying after a cut without manual cleanup (two image directories remain,
+ticket high-water increases). The 1 GiB benchmark re-ran at `d926e77`, whose
+`crates/cas/core/src` tree is identical to `1e4efee` (only a test assertion
+differs): random 4 KiB 56.0 MiB/s (262,144 chunks), half 101.5 (129,664),
+dedup 87.2 (0); 16 KiB 91.1 (65,536), 131.9 (32,768), 137.7 (0); every
+receipt kept the earlier digests, chunk counts, encoded bytes, index bytes
+(25,694,192 / 6,426,608), manifest bytes and D == E == P, with
+`settle_passes` 16 instead of 17 as intended.
+
+Failures and retries: the first review run failed because the tests still
+expected an implicitly created root; the second because the interval check
+ran after root creation (fixed by validating before output); the first
+intermediate commit failed `cargo fmt --check` on an import ordering and was
+recreated; a refusal test asserted `NotFound` where the importer now returns
+its own message. Evidence: `results/offline-import/check-final-review.log`
+(final check and tests), `check-bench-final.log` (intermediate check,
+`d926e77` check attempt, receipts), and `/root/check-final3.log`,
+`/root/import-bench` on `cas-build`.
+
+## 2026-11-13 — Review fixes for raced fetch and inline settled reads
+
+Code review of `feat/raced-read` (`f5e693b`) reported 13 findings. They are
+fixed on the same branch in five commits grouped by kind, each re-verified on a
+fresh Freestyle VM `vm-109d634404a646c5b80ac443c8d797fd` (`cas-build-readpath`,
+`freestyle/ubuntu-lg`, 8 vCPU, 16 GiB, Determinate Nix, `nix develop` Rust
+1.98.1, `ulimit -n 65536`), then deleted. Edited on Spark; nothing was built or
+measured there. Commands as in the 2026-11-12 entry.
+
+| Commit | Findings | Change |
+| --- | --- | --- |
+| `594f308` peer | 1, 2, 5-test | The armed race lives on the primary slot (`PendingRace` with the challenger's transport handle). It starts at the budget (racer), at once for budget 0, or immediately when the primary fails, from the transport's completion path under the pool lock. A challenger that already finished when attached re-signals the reader's notify. |
+| `1fd362e` local | 3, 4, 6 | FLUSH barrier tracked by sent request ids; a FLUSH rejected before it was sent cannot cancel one in flight. Inline reads decline while the completion gate holds a failure. Holes are zeroed per block; no pre-fill. |
+| `9e87915` local | 5 | `local/chunk.rs` owns the per-block resolution and the cache-fill rules; the reactor read and the inline read both use it. Inline remote chunks join the shared fetch registry (leader fetches and publishes; waiter is woken through the frontend eventfd via `Registry::lookup_with`); a held entry is never declined. |
+| `7a48c4b` peer | 7, 8, 9, 10 | `peer/worker.rs` stop/join protocol for the GET client, racer and local source. The local source blocks on a scheduler-bound grant eventfd. `race_dropped` counter and early return while stopping. One budget representation. |
+| `87a6f49` local, peer | 11, 12 | `Io` built once; inline path takes and returns it. Per-Server test reply delay carried by `Resources` (cfg(test)) replaces the process-global static. |
+
+### Outcomes
+
+Per commit, standalone on the VM (strict Clippy; `cargo test -p cas-daemon
+--lib peer` and `... fast`, `RUST_TEST_THREADS=4`), on the content of each
+commit before the last two test-only assertion changes were folded in (the
+code is identical): `594f308` Clippy clean, 26 peer tests passed, 1 fast test;
+`1fd362e` clean, 26 peer, 2 fast; `9e87915` clean, 27 peer (the registry
+coalescing test joins here), 3 fast; `7a48c4b` clean, 27 peer, 3 fast;
+`87a6f49` clean, 27 peer, 3 fast. Final tree (`92d0019`, same code): `just
+check` passed (fmt, strict Clippy, 583 Rust tests passed, 30 ignored, Python
+tests, diff check); fleet process suite passed with `CAS_PEER_RACE_US=50`,
+with `CAS_FAST_SETTLED_READS=1` and with both (19 passed, 1 ignored entry
+point, each); peer suite passed with no flags, fast, race and both (27 each);
+three release loopback runs per arm and both delayed-server runs passed. After
+the final test-only folds (`87a6f49`): strict Clippy clean, peer suite 27/27 in
+all four arms, fast tests 3/3, release delayed-server test passed. New
+coverage: primary failure before the budget (refused connection and EOF after
+the request) completes from the local copy and stays closed without one; the
+two-process fail phase asserts the post-loss read completes locally; a held
+FLUSH keeps declining the bypass while a rejected FLUSH completes; a failed
+gate declines; two inline reads of one chunk issue one GET through the
+registry (`shared_waits` 1, `fetches.joined` 1).
+
+Three test assertions were timing-dependent under the parallel debug suite and
+were changed to counter checks with hang guards: the delayed-peer wall-clock
+bounds (40 ms for 8 reads; 700 ms for 700 reads) and an immediate
+`race_discarded == 1` after a local win (the losing reply's discard lands when
+its transport finishes). Each failed once and passed in every other run; the
+counters they now rely on were asserted in the same tests all along.
+
+### Loopback re-measurement with the shared resolution
+
+Same harness and method as the 2026-11-12 entry (release, QD1, 4 KiB, 64
+chunks, 100 warmup + 600 measured, three runs per arm, nearest-rank quantiles
+from the ring, microseconds). Different VM instance from the previous entry;
+compare arms within this table, not across entries.
+
+| Arm | Receipt→send p50 | Receipt→send p99 | Verified→completion p50 | Verified→completion p99 | Total p50 | Total p99 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Flags off | 25.9–29.3 | 42.7–73.6 | 32.3–40.8 | 49.7–96.9 | 93.4–118.3 | 137.5–284.3 |
+| `--fast-settled-reads` | 7.9–12.2 | 17.9–26.0 | 14.8–19.6 | 34.6–43.4 | 80.0–81.7 | 134.1–155.6 |
+| Race 100 µs + local, fast off | 22.3–29.8 | 36.5–58.1 | 31.6–41.5 | 56.0–70.6 | 101.6–126.8 | 138.0–197.3 |
+| Race 100 µs + local + fast | 8.0–8.8 | 14.8–19.9 | 14.2–21.2 | 30.3–36.9 | 70.9–86.7 | 113.5–132.1 |
+
+Measured on tree `92d0019`, equal to the final commits except a test-only
+assertion change. The shared resolution did not change the shape of the
+result: the fast path still removes both reactor wakes (receipt→send ≈8–12 µs,
+verified→completion ≈15–20 µs) and the total median falls from roughly
+93–118 µs to 80–82 µs (both flags 71–87 µs); the off arm's 284 µs p99 is one
+run's tail on this VM. Fast-arm counters per run: `remote_reads` 698,
+`declined_io` 2 (the two manifest page loads), `shared_waits` 0 at QD1,
+`declined_unsettled` 0. The race arm started 11–64 races per 700 reads (3–11
+local wins), every start had one discard, `race_dropped` 0. Delayed server
+(1 ms reply, 100 µs budget): 700/700 local wins with and without the fast
+flag, `race_discarded` 700, `race_wasted_wire_bytes` 2,884,000,
+`race_dropped` 0, total median 462.0 µs (fast off) / 417.4 µs (fast on): the
+local source still costs ≈240–280 µs before its load starts (budget plus racer
+and worker hops, now a blocking grant wait instead of 20 µs sleeps) and
+≈130–180 µs for the scheduled load.
+
+### Findings I read differently
+
+- Finding 3: the `paused` path cannot reject a FLUSH while one is in flight,
+  because `Local::pause` is a barrier that waits for the reactor to drain.
+  The rejected-before-sent completions that can coexist with an in-flight FLUSH
+  come from `send` or `seal` failures, which the id-tracked barrier now covers;
+  the test forces the reject through the `paused` flag because that is the only
+  deterministic way to produce one.
+- Finding 8: the GET service (`peer/server.rs`) also polls `take()` with
+  100 µs sleeps; it does not block on a signal. The local race source now
+  binds a grant eventfd to its scheduler port and blocks on it; the server's
+  loop is unchanged and remains a separate cleanup.
+- Finding 2 changes the force-remote experiment's failure semantics with
+  `--peer-race-local`: a read after peer loss now completes locally whenever a
+  verified local plan exists, instead of failing closed. The documented
+  behaviour and the two-process fail phase assert that deterministically.
+
+### Failures, retries and fixes during this round
+
+- The first split of the correctness commits was wrong (a soft reset kept
+  every change staged, so the peer commit absorbed the local changes); the
+  commits were rebuilt by file set and the final tree checked to be identical.
+- Clippy under `cfg(test)`: `too_many_arguments` on the GET server once the
+  per-Server delay was a parameter (folded into `ServiceOptions`); a missing
+  `SAFETY` comment; an unused parameter in non-test builds; two borrow errors
+  in the reactor refactor; an unused import; a dead accessor.
+- Barrier test: the control permit must be taken before setting `paused`.
+- Coalescing test: an undelayed loopback owner could answer before the
+  second read joined; the owner is now a by-hash mock answering after 20 ms.
+- `force_remote_race_local_wins...` bounded eight reads at 40 ms of wall time
+  and failed once under the parallel suite (143 ms, before its counter checks
+  ran); the bound is now a hang guard and the counters carry the assertion.
+- A per-commit verification run was started on a mid-rebase tree and
+  discarded; the rebase conflict was resolved and the run repeated.
+- The fresh VM's first SSH attempt used the previous identity's token; the
+  helper now uses the identity granted on the VM.
+
+Evidence: `results/readpath/review/` (per-arm `reader-*.json`, delayed-server
+JSON, logs summarized here), `ledger.json` (both VM ids, identities, deletion).
+No CI, push, merge or deployment occurred.
+
+## 2026-11-13 — Working-set replay, boot split and first useful IO
+
+Branch `feat/burst-harness`. **Tested revision
+`838c4a20e9fc17bd7bc65b476b2853d5f3f2bea1`**, clean on the test checkout;
+this record is a later commit on the branch. Harness-only: `experiments/
+two-host/{runner,agent,test_runner}.py`, the example configs, `nix/fleet/
+fixture.nix` and `docs/two-host-experiments.md` changed; nothing under
+`crates/`, so the daemon is still the `ebbe157` build. Nothing pushed or
+merged.
+
+Spark handled edits, bundles and evidence; all builds and runs used the
+persistent Freestyle VM `cas-build` (`vm-7ecd8e364c624bcb8654fa4dbd92767e`,
+x86_64, 8 vCPU, 16 GiB, nested KVM) in the existing clone `/root/cas-burst`,
+fetched from a bundle. No VM was created, resized or deleted.
+
+### Commands (cas-build, `/root/cas-burst`; driver `/root/burst/ws-driver.sh`)
+
+```sh
+nix build .#two-host --out-link /root/burst/ws/result --cores 6
+nix fmt -- --ci
+nix develop -c uv run --no-project python -m unittest discover -s experiments/two-host
+# Native KVM loopback: both members on one VM, fresh 12 GiB loop-backed XFS
+# files at /mnt/fleet-a and /mnt/fleet-b, daemons on vCPUs 0-1 / 2-3, guests 4-7.
+/root/burst/ws/result/bin/cas-two-host --config /root/burst/ws/native-ws-001-config.json \
+  --output /root/burst/ws/native-ws-001/controller      # cases resume-elsewhere,burst-images
+```
+
+Settings: 128 MiB image, 1 MiB data, one-vCPU 512 MiB guests, `resume` =
+2 MiB setup, k=1, settled, working set `[dd data 0–256 KiB direct | sha256sum,
+dd data 1 MiB–1.25 MiB direct | sha256sum, sha256sum data]`; `burst` = 2
+images × (4 MiB base + 1 MiB unique), k=1, no force-remote, owner cache 0,
+working set `[dd unique 0–256 KiB, dd unique 512–768 KiB, sha256sum base]`.
+Spark ran the same unit tests (`uv run --no-project python -m unittest
+discover -s experiments/two-host`).
+
+### Outcomes
+
+- Unit tests: **34 pass** on Spark and on cas-build (9 new: working-set
+  parsing/inheritance/overrides and rejection, ring-origin bracketing, first
+  remote read with eviction censoring, interval conversion, replay summary,
+  agent replay ordering and stdout retention, agent calibration rows, and
+  the `checked()` timeout path). `nix build .#two-host` and
+  `nix fmt -- --ci`: pass. `just check` was not rerun (Rust unchanged since
+  2026-11-12).
+- **`native-ws-001`: both cases passed** (`success: true`, schema 3, 106 s).
+- `resume-elsewhere` (B's clock, anchor = handoff completion seen on B;
+  handoff bracket 250 ms): launch delay 6.7 ms, **boot 18.38 s** (launch →
+  ready), SSH banner 18.69 s, first command 20.31 s, marker 20.74 s;
+  **first useful IO 7.04 s** after the handoff (bounds 7.00–7.07 s; the
+  first remote fetch lands during the ext4 mount, well before `ready`);
+  **time to working set 21.22 s**, of which the cold replay was 0.33 s
+  (commands 97 / 96 / 136 ms) fetching 313 GETs / 1,289,560 GET bytes on B;
+  warm replay 0.27 s (97 / 93 / 75 ms) with 68 GETs, since the two direct
+  reads bypass the guest page cache and B retains no fetched chunk — only
+  the whole-file checksum became a page-cache hit. Ring calibration: 19 of 32
+  direct reads were remote; origin bracket 68 ms wide. Downtime 21.93 s =
+  0.57 s stop + 0.50 s handoff + 20.87 s boot/marker/continue (now ending at
+  the durable epoch increment); final checksum afterwards 117 ms with 0 GETs
+  (page cache). Boot→continue issued 54 GETs; boot→final verify 435.
+- `burst-images` N=2 (anchor = first launch; launches 0.6 ms apart): boot
+  20.41 / 20.56 s, SSH 20.50 / 20.64 s, marker 22.72 / 22.71 s; first useful
+  IO 8.44 s (8.41–8.47 s); 107 GETs by the last marker (4.1 % of used
+  blocks); **time to working set 23.20 / 23.20 s** with concurrent cold
+  replays of 0.45 s each (115 / 107 / 226 ms and 105 / 109 / 236 ms) fetching
+  1,060 GETs / 4,367,200 bytes in aggregate; warm replays 0.29 / 0.28 s with
+  128 GETs. 1,541 GETs (58.5 % of used blocks) by the end of verification,
+  which now includes the replay. Calibration: 12 of 32 reads remote, bracket
+  62 ms.
+
+Nested-KVM, loop-file, single-repetition development checks on one shared
+VM: they validate the harness, schema and interval arithmetic, not boot,
+latency or placement claims. The TCG fixture was not used (the arms need KVM;
+its configuration carries the same working sets for `--cases` runs).
+
+### Failures and retries
+
+- **Attempt 1 (03:21 UTC) failed after 22 s**: `agent.shell(timeout=)`
+  collided with `checked()`'s fixed `subprocess.run` timeout, so the first
+  guest shell RPC (`write_payload`) raised `TypeError`. The unit tests had
+  patched `shell` and missed it. Fixed in `838c4a2` with a test over the real
+  subprocess path; the attempt is retained as `native-ws-attempt-1.tgz`
+  (not a result). The rerun at 06:21 UTC needed no retry.
+
+### Evidence
+
+Retained under ignored `results/burst-harness/evidence/` with `SHA256SUMS`,
+digests matching `/root/burst/archive` on cas-build: `native-ws-001.tgz`
+(revision, driver/build/fmt/unittest logs and statuses, config, controller
+`results.json`, `config.json`, RPC logs, both hosts' daemon/guest logs,
+`qemu.json`, per-command `working-set-*.out` files), `native-ws-001-results.json`,
+`native-ws-attempt-1.tgz`. Loop images were unmounted; `/root/burst/ws`
+remains on the persistent VM.
+
+## 2026-11-13 — Campaign follow-ups: N-guest native runner, chroot working set, nvme-tcp floor, repeats
+
+Branch `feat/cloudlab-campaign`. **Tested revisions `d954ff7`** (native
+runner, two-host chroot form, r0.sh nvme-tcp, campaign changes; rehearsal
+003), **`4cae14c`** (the chroot wrapper's `command -v chroot` fix and the
+driver's native-ZFS storage selection) **and `c0f7df4`** (the replay result
+records the working-set spec; the passing chroot run and the final dry
+run), all clean on the VM checkout; this record is a later commit. Changes
+in `crates/harnesses/src/native.rs` and `native/runtime.rs` (harness only,
+no daemon code), `experiments/native/workload.sh`, `experiments/two-host/
+{runner,agent,test_runner}.py`, `experiments/cloudlab/` and docs. Nothing
+pushed or merged. Same hosts as the entry above: Spark for edits, bundles,
+Python unit tests and `cargo check`; every build, Rust test and run on the
+persistent Freestyle VM `cas-build` (loop-backed XFS, nested KVM). No VM
+created or deleted; the loop images were unmounted afterwards.
+
+### Commands (cas-build, `/root/campaign/driver3.sh`, `rerun-chroot2.sh`)
+
+```sh
+bash $SRC/experiments/cloudlab/setup.sh --bundle campaign4.bundle --revision $REV --source $SRC \
+  --skip-disk --skip-irq --skip-nix --skip-smt --cores 6 --out out/node-inventory-setup-3.json
+nix develop -c cargo test --locked -p cas-harness native
+nix develop -c uv run --no-project python -m unittest discover -s experiments/two-host   # 36
+nix develop -c uv run --no-project python -m unittest discover -s experiments/cloudlab   # 28
+taskset -c 0-7 $SRC/result-native/bin/cas-native-run --backend raw --guests 2 --device $LOOPA \
+  --storage /mnt/fleet-a/native-2g-baseline --output native-2g-baseline \
+  --script $SRC/experiments/native/workload.sh --script-arg baseline --script-arg 5 --script-arg 64 --allow-loop-device
+# the same with --script-arg pressure
+$SRC/result-two-host/bin/cas-two-host --config ws-chroot-001-config.json --output ws-chroot-001/controller
+bash $SRC/experiments/cloudlab/r0.sh --nvme-tcp-check
+python3 campaign.py dry-run --nodes nodes-dry3.json --plan plans/dev-loopback.json
+python3 campaign.py run --nodes nodes-r03.json --plan plan-r0.json --export /root/campaign/export   # r0_nvme_tcp false
+python3 campaign.py repeats --nodes nodes-r03.json --out out/dev-r0-003/day4-repeats.json
+```
+
+### Outcomes
+
+- `cargo test -p cas-harness native`: **5 pass** (guest bound 1..16, raw-only
+  ZFS, pool-membership parsing, the two existing refusals). Python: 36 and
+  28 pass on the VM and on Spark. `nix build .#native` and `.#two-host` at
+  both revisions.
+- `cas-native-run --backend raw --guests 2`, `baseline 5 64` and `pressure 5
+  64` on the loop-backed XFS: both `outcome.json` `success: true` (111 s and
+  102 s). Per-guest fio JSON under `guest-1/`, `guest-2/`; `aggregate-<label>
+  .json` per label. Baseline `read-q1`: 2 guests, 16,560 IOPS summed, per-
+  guest clat p50/p99/p99.9 max 80/175/289 µs; `write-q1` 12,912 IOPS;
+  `flush` 3,343 IOPS; errors 0. Pressure: `reader-alone` 1 reader 8,636
+  IOPS p99 167 µs; `mixed-8m-reader` 8,739 IOPS p99 159 µs; `mixed-0m-reader`
+  (uncapped writer) 8,043 IOPS p99 220 µs. `identity.json` records
+  `guests: 2`, `storage_fstype: xfs`, `native_media: false`. Development
+  numbers on a shared VM's virtual disk.
+- `ws-chroot-001` (`c0f7df4`, two-host `resume-elsewhere` on the loopback
+  layout, 128 MiB image, 2 MiB setup): **`success: true`** (58 s). The
+  resume `setup_script` built a synthetic root at `/mnt/cas/root` in the
+  source guest (the NixOS guest's bash plus the `/nix/store` libraries that
+  `LD_TRACE_LOADED_OBJECTS` lists); after migration B replayed three
+  bash-builtin commands as `env -i GREETING=... PATH=/bin "$CHROOT"
+  /mnt/cas/root /bin/bash -lc 'cd /work && ...'`. Retained stdout:
+  `hello-from-chroot /work` (the recorded env and cwd inside the chroot),
+  `bin/ etc/ nix/ tmp/ work/` and `5.3.9(1)-release` (the chroot's own
+  bash). Cold pass 443 ms with 646 destination GETs (the chroot's bash and
+  libraries fetched from A), warm pass 262 ms with 0 GETs; time to working
+  set 20.95 s of which boot 18.21 s; downtime 21.58 s. `results.json`
+  `working_set` records `chroot`, `guest_cwd` (`/work`), `env` and the
+  exact per-command script. Development evidence (nested KVM, loop files).
+- `r0.sh --nvme-tcp-check` on cas-build: modules `nvmet`, `nvmet-tcp`,
+  `nvme-tcp`, `nvme-fabrics` missing, `nvme` CLI missing, configfs missing,
+  root ok; exit 1. The Freestyle kernel has no module tree, so the nvme-tcp
+  phase could not run there; on Spark (NixOS) the same check finds the four
+  modules and reports only `nvme-cli` and `root` missing. The phase is
+  therefore shipped with its self-check only; its configfs sequence follows
+  `docs/review/transport.md` and has not been executed.
+- `campaign.py dry-run` (`c0f7df4`, `dev-loopback.json`, nodes file with
+  the placeholder `expected_revision`, `r0_nvme_tcp` default): **3 runnable,
+  9 blocked of 12**, exit 2, nothing launched. New blocks since the previous
+  entry: `r0 floor` ("nvme-tcp prerequisites missing: module-nvmet=missing;
+  ...") and `native-zfs g1` ("node 0 has no zfs_storage_mount/zfs_device
+  for the ZFS arm"); the other seven as before (runner without the flag
+  settings, guest-cpu budget). The loopback layout bypasses the SMT and
+  revision-pin rules, which are unit-tested.
+- Campaign `dev-r0-003` (`r0_nvme_tcp: false`): R0 unit done (99 s), export
+  and end inventories as before. `campaign.py repeats`: "0 unit(s) to
+  repeat; keep d1 r0 floor spread=0.0 measured=1/1", plan written with an
+  empty day list.
+- `setup.sh` at `d954ff7` with `--skip-smt` (the persistent VM's grub is not
+  ours to change; the step's runtime path was not exercised): all other
+  steps as before; inventory `skipped` now lists `smt`.
+
+### Failures and retries
+
+- Rehearsal 003's first launch ran the previous revision's `setup.sh`
+  (the driver lacked the bundle checkout before `setup.sh`), which rejected
+  `--skip-smt` (usage, exit 2); relaunched with a bootstrap step.
+- `ws-chroot-001` attempt 1: the runner rejected the config ("burst regions
+  must fit the image"): the 128 MiB test image needs an explicit small burst
+  block even for a resume-only case. Attempt 2 (`d954ff7`): the setup script
+  built the chroot (bash plus its `/nix/store` libraries) but the replay
+  failed with `env: 'chroot': No such file or directory`: `env -i` resolves
+  its program in the *new* environment (`PATH=/bin`), where the NixOS guest
+  has no `chroot`. Fixed in `4cae14c` (`CHROOT=$(command -v chroot)` on the
+  guest, then `env -i ... "$CHROOT"`), with a unit test that runs the wrapper
+  through `sh -eu`. Attempt 3 (`4cae14c`): all three commands ran correctly
+  in the chroot (retained stdout) but the runner crashed after the warm pass
+  with `NameError: name 'commands' is not defined` in `replay_working_set`'s
+  return value, which the unit tests had not covered. Fixed in `c0f7df4`
+  with a test that drives `replay_working_set` against fake agents.
+  Attempts 2 and 3 are retained as `ws-chroot-001-attempt-{2,3}`.
+- The bridge's exec channel times out when a command backgrounds a process
+  inside `( ... &)`; the processes still start. Launches now use `setsid
+  nohup` and are confirmed by a second command.
+
+### Evidence
+
+`results/cloudlab-campaign/evidence/campaign-rehearsal-003.tgz` with
+`SHA256SUMS` (driver and step logs, `out/dev-dry-003`, `out/dev-r0-003` with
+`day4-repeats.json`, the setup inventory, `native-2g-baseline`,
+`native-2g-pressure`, `ws-chroot-001` and its attempt 2, the configs), plus
+`driver3.sh`, `rerun-chroot.sh`, `rerun-chroot2.sh` and the nodes files.
+
+### Conclusions and limits
+
+The native runner boots N guests with their own disks and jobs and writes
+per-guest and aggregate results (N=2 exercised; 16 is a bound, not a tested
+load); the ZFS acceptance for the raw backend is unit-tested only, no ZFS
+pool exists on the VM. The two-host chroot working set replays a recorded cwd and environment
+inside the data disk's root, shown with a synthetic bash-only root; a real
+Stage A root image has not been replayed.
+The nvme-tcp floor row is unexecuted code with a self-check. The repeats
+generator ran on one unit; its p99 rules per case are unit-tested on
+synthetic results. Everything is development evidence on one shared VM.
+
+## 2026-11-13 — CloudLab campaign driver rehearsal on cas-build
+
+Branch `feat/cloudlab-campaign` from `feat/burst-harness` (`5a69820`).
+**Tested revisions `5633fb9` (rehearsal 001) and `4e0e65e` (rehearsal 002)**,
+both clean on the VM checkout; this record and two small fixes (`r0.sh`
+fdatasync sample count, `inventory.py` NIC summary; the exact files were
+verified standalone on the VM, see below) are a later commit. Only
+`experiments/cloudlab/` and `docs/` changed; nothing under `crates/`, so
+the daemon is still the `ebbe157` build (`cas-host`
+`cc1c4ae4…`, `cas-fleet` `8ccdb986…`). Nothing pushed or merged.
+
+Spark handled edits, git bundles, unit tests and evidence; every build and
+run used the persistent Freestyle VM `cas-build`
+(`vm-7ecd8e364c624bcb8654fa4dbd92767e`, x86_64, 8 vCPU, 16 GiB, Linux
+6.1.102, nested KVM) through the sandbox-corpus `control.py` bridge (scoped
+SSH; files over SFTP). A new clone `/root/cas-campaign` was made from the
+bundle. No VM was created, resized or deleted.
+
+### Commands
+
+```sh
+# Spark
+uv run --no-project python -m unittest discover -s experiments/cloudlab      # 22 pass
+# cas-build, /root/campaign/driver.sh then driver2.sh (loopback layout: both
+# members on the VM, loop-backed XFS at /mnt/fleet-a and /mnt/fleet-b, daemons
+# 0-1 / 2-3, guests 4-7, nodes-*.json with "loopback": true)
+bash $SRC/experiments/cloudlab/setup.sh --bundle campaign.bundle --revision $REV \
+  --source /root/cas-campaign --skip-disk --skip-irq --skip-nix --cores 6 --out out/node-inventory-setup.json
+python3 $SRC/experiments/cloudlab/campaign.py dry-run --nodes nodes-dry.json --plan $SRC/experiments/cloudlab/plans/dev-loopback.json
+python3 $SRC/experiments/cloudlab/campaign.py start   --nodes nodes-r0.json --plan plan-r0.json --export /root/campaign/export
+python3 $SRC/experiments/cloudlab/campaign.py status  --nodes nodes-r0.json
+python3 $SRC/experiments/cloudlab/campaign.py run     --nodes nodes-r0.json --plan plan-r0.json --export /root/campaign/export [--redo]
+```
+
+### Outcomes
+
+- Unit tests: **22 pass** on Spark (plan loader shapes/rejections/rotation,
+  arm validation of every checked-in config against its own pinning sets,
+  `check_pinning` rules, placeholders, the race-budget rule, bundle working
+  set, unit states, `decide`, the driver's skip/refuse/redo path through
+  `Campaign.step`, wrapper parsing, runner-support detection, node
+  validation, inventory NIC parsing).
+- `setup.sh` without disk work (`--skip-disk --skip-irq --skip-nix`): all
+  steps exit 0 in 43 s (bootstrap clone, `checkout` at the pinned SHA,
+  `nix build .#two-host` and `.#native` from cache, `limits`, `inventory`);
+  `build.json` records both wrappers' build-info paths and binary hashes;
+  `node-inventory.json` lists `skipped: ["disk", "build", "irq"]` for the
+  inventory-only snapshots. 69 hardware records, 22 recorded as unavailable
+  on the VM (no `nvme`, `dmidecode`, ZFS, cpufreq).
+- `campaign.py dry-run` with `plans/dev-loopback.json`: **4 runnable, 8
+  blocked of 12 units**, exit 2, nothing launched. Blocked for the intended
+  reasons: `fast`, `raced`, `resume` units because the built runner at this
+  revision does not know `settings.fast_settled_reads` ("the arm would be
+  mislabelled"); `fast reads-storage-g8`, `native-cas g4` and `burst
+  burst-images` because 8/8/16 guest cpus exceed the loopback set of 4;
+  `native-zfs g1` because `cas-native-run` requires XFS. Manifest bound to
+  revision and binary hashes, identical on both members.
+- Campaign `dev-r0-002` (revision `4e0e65e`): `start` detached the worker
+  via `systemd-run --unit cas-campaign-dev-r0-002` with PATH/HOME handed
+  over; the R0 unit ran end to end (**done, 97.2 s**), `SHA256SUMS` written
+  per unit and campaign, rsync export to `/root/campaign/export/dev-r0-002/`,
+  start and end inventories for both members. A second `run` kept the unit
+  ("kept from an earlier run", nothing launched); `run --redo` moved it to
+  `d1-r0-floor-r1.attempt-1` and reran it (done, 98.6 s). `status` prints
+  the one-screen table at every stage.
+- R0 on the loopback layout (development numbers: loop-file XFS over the
+  VM's virtual disk, both members on the same host, Python ping-pong over
+  127.0.0.1→127.0.0.2): 4 KiB QD1 direct random read p50 26.8 µs, p99
+  82–92 µs, ~31 k IOPS per member; 4 KiB QD1 write p50 32–35 µs; fdatasync
+  p50 129.5 µs, p99 485 µs (from the standalone check of the fixed `r0.sh`,
+  5 s run); ping-pong RTT p50 44–48 µs, p99 71 µs, 605 k round trips in 30 s,
+  tool labelled `python-tcp-pingpong`.
+
+### Failures and retries
+
+- First upload through the bridge's Freestyle `write` API hung for 15
+  minutes with nothing created on the VM; stopped and replaced by SFTP over
+  the same scoped transport (helper kept with the evidence).
+- Campaign `dev-r0-001` (revision `5633fb9`): the `systemd-run` worker had
+  no Nix profile in its environment, so `r0.sh --check` found no fio and
+  the unit was **blocked** in the detached run; the foreground resume pass
+  on the same campaign then ran it successfully (done, 95.6 s). Fixed in
+  `4e0e65e` (`--setenv` PATH/HOME, Nix profile lookup without `~`) and
+  re-proven by `dev-r0-002`.
+- fio 3.41 reports `sync.total_ios = 0` for `--fdatasync=1` jobs and counts
+  samples in `sync.lat_ns.N`, so the first R0 summaries had an empty
+  `fdatasync` block (the raw `json+` files hold the distribution). Fixed in
+  `r0.sh` (`sha256 1528fba4d1fc…`), verified standalone on the VM from
+  `/root/campaign/r0-fix/` (26,988 samples). The inventory NIC summary
+  matched `ethtool-c-*` records as interfaces; fixed in `inventory.py`
+  (`sha256 14e507a1a081…`) and verified against the recorded inventory records.
+- `systemctl status` after the run reports the unit as not found: `--collect`
+  removes it on exit; it is visible while running.
+
+### Evidence
+
+Retained under ignored `results/cloudlab-campaign/evidence/` with
+`SHA256SUMS`, digests matching the VM: `campaign-rehearsal-001.tgz`
+(driver log, step logs/statuses, `out/` with both campaigns' directories,
+inventories, manifests, status, dry-run report, R0 unit, export tree),
+`campaign-rehearsal-002.tgz` (the same for revision `4e0e65e` plus the
+resume/redo passes and `attempt-1`), `campaign-rehearsal-002-r0fix.tgz`
+(the fixed scripts and their standalone outputs). Loop images were
+unmounted; `/root/campaign` and `/root/cas-campaign` remain on the VM.
+
+### Conclusions and limits
+
+The driver's plan loading, validation, pinning checks, manifest binding,
+detached execution, resume/refuse/redo, per-unit export with hashes and
+status display work on a loopback development layout. No guest was
+launched: the two-host and native arms were validated by the dry run only,
+and at this revision every flagged arm is correctly blocked until the
+integration branch's runner is the pinned build. R0 numbers are development
+evidence (virtual disk, loopback, Python loop), not a testbed floor. Disk
+formatting, IRQ pinning and the Nix install steps were not exercised.
+
+## 2026-11-12 — Offline raw-image importer (`casctl import`)
+
+Branch `feat/offline-import` from `main` (`ebbe157`). **Tested revision:
+`0086071dc047a215a2f3af1760eeeeb3e0ec11ea`**, clean on the test checkout. This
+record is a later documentation-only commit. Nothing was pushed or merged.
+These are Freestyle development checks on an ext4 root filesystem, not CI,
+paper, native-device or host-serving results. The daemon and on-disk format
+are unchanged; `cas-core` gains `import` and a `sha2` dependency (lockfile
+updated), `casctl` gains the `import` verb.
+
+### Hosts and commands
+
+Spark edited sources and read evidence only. All builds, checks, tests and
+imports ran as root on the retained Freestyle VM `cas-build`
+(`vm-7ecd8e364c624bcb8654fa4dbd92767e`; Linux 6.1.102, 8 vCPU, 16 GiB,
+`/dev/vda` ext4 root, rustc 1.98.1) in a separate checkout `/root/cas-import`
+with `CARGO_TARGET_DIR=/root/cas-import/target`, `ulimit -n 65536`,
+`CARGO_BUILD_JOBS=8`, while another branch used `/root/cas` on the same VM.
+Storage tests used the ext4 root for 4 KiB-aligned `O_DIRECT`, as allowed by
+`docs/testbed.md`.
+
+```sh
+nix develop -c cargo fmt --all            # formatting diff applied before the final commit
+nix develop -c just check                 # rc=0, 1m45s wall at 0086071
+nix develop -c cargo test -p cas-core --locked --test import --test import_crash -- --nocapture
+nix develop -c cargo build --release --locked -p cas-cli
+casctl import --root root-ARM --store 0101…01 --image 0a…0a --from random.raw --chunk-bytes ARM
+casctl import --root root-ARM --store 0101…01 --image 0b…0b --from half.raw
+casctl import --root root-ARM --store 0101…01 --image 0c…0c --from random.raw
+cargo run --release --locked -p cas-core --example chunk-arm -- inspect root-ARM
+```
+
+### Outcomes
+
+- `just check` at `0086071`: formatting, Clippy (`-D warnings`), every
+  workspace test (including the existing chunk crash cuts), the two-host
+  Python unit tests and `git diff --check` passed.
+- `tests/import.rs` (both arms): two 12 MiB + 4 KiB synthetic images sharing
+  their first half, 2 MiB segments and a 2 MiB compaction interval. Unique
+  chunks appended equalled the independently computed nonzero-chunk union
+  (4 KiB: 2,697 for A, 4,192 for A∪B; 16 KiB: 694 and 1,079, including the
+  zero-padded tail unit); ZERO bytes equalled the all-zero units; catalog
+  listed both images with the right sizes; a cold reopen through
+  `Tickets`/`Store::inspect_recorded`/`Manifest::inspect`/`Log::inspect_shared`
+  and `read_plan`/`read_with` returned bytes whose SHA-256 matched the inputs
+  and the receipts. Re-importing the same ID, a foreign store ID, an unaligned
+  input and the other chunk arm were refused without creating directories.
+- `tests/import_crash.rs` (both arms): a child process exited at the
+  `Settled` (after the first 2 MiB pass), `Durable` (D == E == P before
+  catalog publication) and `Published` points. After each cut the store and
+  catalog inspected and recovered; the catalog listed the image only after
+  `Published`; interrupted imports kept their `images/<id>` directory, a
+  retry was refused until it was removed (behaviour changed by the 2026-11-13
+  entry), then deduplicated against the retained chunks (4 KiB: 272 of 1,497
+  after `Settled`), and every arm/cut read back exactly.
+- 1 GiB release-build imports at `0086071` (receipts in the evidence log),
+  single process on the VM's ext4 root, 64 MiB segments and interval:
+
+| Input | Arm | Unique chunks appended | Elapsed | MiB/s |
+|---|---|---|---|---|
+| random 1 GiB, new root | 4 KiB | 262,144 | 18.7 s | 54.9 |
+| half zero (512 MiB random, 4 MiB alternation, every 97th block zeroed) | 4 KiB | 129,664 | 10.8 s | 94.9 |
+| random 1 GiB again (full dedup) | 4 KiB | 0 | 11.4 s | 89.9 |
+| random 1 GiB, new root | 16 KiB | 65,536 | 11.1 s | 92.3 |
+| half zero | 16 KiB | 32,768 | 7.7 s | 133.7 |
+| random 1 GiB again (full dedup) | 16 KiB | 0 | 8.2 s | 125.3 |
+
+  Every receipt reported D == E == P equal to its mutation count, the
+  expected SHA-256 (`a66ca740…` random, `8464a681…` half), 17 settle passes,
+  16 (or 7–8) removed WAL segments and the WAL punched back to one retained
+  segment. The 4 KiB root ended with 391,808 chunks, 1,636,405,248 encoded
+  bytes and a 25,694,192-byte rebuilt index (65.6 bytes per chunk); the
+  16 KiB root with 98,304 chunks, 1,623,298,048 encoded bytes and 6,426,608
+  index bytes. `chunk-arm inspect` on both roots reproduced the receipts'
+  chunk counts and index memory exactly. Manifest output was 50.5 MB per
+  1 GiB random image at 4 KiB and 24.7 MB at 16 KiB (one COW transaction per
+  1 MiB batch). The first run of the same benchmark at WIP `1a668d0` (same
+  staging logic before the refactor) gave 51–159 MiB/s with identical chunk
+  counts and digests.
+
+### Failures and retries
+
+A borrow of a temporary in `tests/import.rs`, an odd-block half-image
+assertion that printed 12 MiB vectors, and Clippy's `manual_is_multiple_of`
+on a test predicate each failed one build and were fixed; the first complete
+`just check` then passed on the fmt-applied tree and again on the committed
+revision. The 1 GiB benchmark ran twice (WIP and final revision); the
+offline inspect step was rerun from the checkout after a wrong working
+directory. No VM was created or deleted.
+
+### Evidence and limits
+
+Ignored `results/offline-import/` holds the check logs
+(`check-final-0086071.log`, `check2-refactored.log`, `check1-bench.log`),
+first test runs, both benchmark logs with full receipts
+(`bench-1gib-final-0086071.log`, `bench-1gib-receipts.txt`); the same files
+and the roots remain under `/root/import-bench` and `/root/check*.log` on
+`cas-build`. The importer is single-threaded and shares the host compactor's
+per-batch chunk syncs and per-transaction manifest syncs; no `--direct`
+store path was added. Throughput is one run per case on a shared VM disk
+with the page cache warm from input generation. A 10–16 GiB image at 4 KiB
+would need roughly 170–270 MB of rebuilt index at the measured 65.6 bytes
+per chunk, above `cas-host`'s fixed 128 MiB metadata budget; serving such a
+root is not established here.
+
+## 2026-11-12 — Raced fetch and frontend-inline settled reads
+
+Branch `feat/raced-read` from `ebbe157`: `d6f7d4b` (peer: race a settled GET
+against a second owner or the local copy) and `c225e73` (local: frontend-inline
+settled reads behind `--fast-settled-reads`), both committed with their tests;
+neither pushed nor merged. Edited on Spark; every build, test and measurement
+ran on a dedicated Freestyle VM `vm-38331efffa414b098f8136cacf1e903c`
+(`cas-build-readpath`, snapshot `freestyle/ubuntu-lg`, 8 vCPU, 16 GiB, x86_64,
+Ubuntu, Determinate Nix 3.24.2 / nix 2.35.3, `nix develop` toolchain Rust
+1.98.1, `ulimit -n 65536`, `CARGO_TARGET_DIR=/root/target`). No other agent
+used the VM; it was deleted after this record was written (see below). Commands
+from the checkout root, inside `nix develop -c env CARGO_BUILD_JOBS=8 ...`:
+
+```sh
+just check                                   # RUST_TEST_THREADS=4
+CAS_PEER_EVIDENCE=... cargo test --release -p cas-daemon --lib --locked \
+  local::host::tests::peer::two_daemon_loopback_verifies -- --nocapture
+CAS_PEER_RACE_US=100 CAS_PEER_RACE_LOCAL=1 ...   # race arm, reader child
+CAS_FAST_SETTLED_READS=1 ...                     # fast arm, both children
+cargo test -p cas-daemon --lib --locked peer     # with and without the envs
+cargo test -p cas-daemon --lib --locked fleet    # CAS_PEER_RACE_US=50, fast, both
+```
+
+### Outcomes
+
+Baseline `ebbe157` (clean tree): `just check` passed (fmt, strict Clippy, all
+workspace tests, Python tests, diff check); three release loopback runs passed.
+Feature 1 at `2e8bccf` (content of `d6f7d4b` minus the two late fixes below):
+`just check` passed (580 Rust tests passed, 30 ignored, incl. 25 peer-filter
+tests), fleet process suite with `CAS_PEER_RACE_US=50` passed (19 passed, 1
+ignored entry point), three flag-off loopback runs passed. Work tree `28b374a`
+(content of `c225e73` except the `attach`-after-failure fix, a test settle step
+and a test variable rename): strict Clippy clean; `just check` passed (580 passed, 30 ignored); model
+test passed; peer suite passed with `CAS_FAST_SETTLED_READS=1`, with both flags
+and with neither (25 passed each); fleet suite passed with the fast flag and with
+both flags (19 passed each); three loopback runs passed for each of off, fast and
+both; the delayed-server race test passed with and without the fast flag.
+Final tree `3833175` (equal to `c225e73` except a variable rename in the
+loopback test that chooses which report the evidence file holds): the first
+commit standalone (`a572253`, equal to `d6f7d4b` minus that rename) was strict
+Clippy clean with 25 peer-filter tests passed; the final tree was strict Clippy
+clean, `just check` passed (580 passed, 30 ignored), the peer suite passed with
+both flags (25), three race-arm and three both-arm loopback runs passed, and the
+delayed-server race test passed with and without the fast flag. The rebuilt
+commits `d6f7d4b`/`c225e73` were then re-verified (Clippy, peer suite without
+and with both flags, one race-arm loopback); see the final line of this entry.
+
+Release loopback, QD1, 4 KiB, 64 chunks, 100 warmup + 600 measured reads,
+reader cache fills off, microseconds, nearest-rank quantiles from the ring
+records of each run, ranges over three runs per arm. Development evidence on a
+shared VM, not a paper result; no CPU pinning or IRQ control.
+
+| Arm | Receipt→send p50 | Receipt→send p99 | Verified→completion p50 | Verified→completion p99 | Total p50 | Total p99 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Baseline `ebbe157` | 21.6–30.1 | 40.8–52.3 | 30.2–36.0 | 49.2–61.2 | 102.5–117.3 | 147.4–181.1 |
+| Final code, flags off | 25.5–28.6 | 36.9–58.0 | 31.4–40.9 | 49.1–62.9 | 97.7–121.8 | 130.5–200.9 |
+| `--fast-settled-reads` | 6.4–13.5 | 13.4–22.0 | 17.2–22.6 | 26.0–37.8 | 67.4–87.0 | 95.6–122.2 |
+| Race 100 µs + local, fast off | 25.1–27.3 | 41.5–254.2 | 33.6–41.2 | 51.8–70.5 | 94.0–120.2 | 139.6–410.0 |
+| Race 100 µs + local + fast | 6.6–7.2 | 12.2–16.2 | 14.1–16.0 | 26.5–32.3 | 59.1–75.8 | 88.4–117.0 |
+
+The fast-only and race-only rows come from different trees (`28b374a` and
+`3833175`); the both-flags row is from `3833175` (an earlier both-flags set on
+`28b374a` measured 56.9–76.0 / 82.3–114.1). The race arm's 410 µs p99 is real:
+in that run eight of the 600 measured reads were won by the local copy and each
+such win costs ≈400 µs through the thread-based local source, so with an
+undelayed peer the race can lengthen the tail rather than shorten it. The
+race-arm runs started 21–28 races per 705 reads (9–17 local wins, 4–12 first
+owner wins, one discard each) and the post-loss read failed closed in two of
+three runs and completed locally in the third, as the test allows.
+
+Where the time went: on this VM the daemon's own legs are thread handoffs.
+Receipt→send contains the frontend→reactor eventfd wake and one reactor loop
+(≈25 µs median); verified→completion contains the reply→reactor wake through
+io_uring's registered eventfd plus the reactor→frontend wake (≈35 µs median);
+send→first byte (≈40–50 µs) is B's service path and loopback TCP. The fast path
+removes both reactor wakes: receipt→send falls to 6–13 µs (the GET is sent on
+the frontend thread) and verified→completion to 17–23 µs (one wake, reply
+worker→frontend; the frontend's own copy, cache-fill check and completion are a
+few microseconds). Total median improved from roughly 100–120 µs to 67–87 µs;
+p99 from 130–200 µs to 96–122 µs. The race alone, with B undelayed, starts for
+only the slowest few percent of GETs (6–20 of 700 per run; the 100 µs budget
+exceeds the ~45 µs median reply) and does not move the quantiles on its own.
+
+Delayed-server race (B sleeps 1 ms per GET reply, A races the local copy after
+100 µs): all 700 measured reads were won by the local copy with and without the
+fast flag, every late reply was verified then discarded (`race_discarded` 700,
+`race_wasted_wire_bytes` 2,884,000 = 700 × 4,120), `errors` 0, `failed_reads` 0.
+Total median 417–469 µs (fast off) / 377–436 µs (fast on): the local source is a
+blocking worker reached through the racer thread and the IO scheduler, so a
+local win costs ≈240–270 µs before its read starts (100 µs budget plus two
+thread hops) and ≈135–160 µs for the scheduled O_DIRECT load. This is the
+experiment arm's overhead, not the reactor's io_uring local path.
+
+Race counters from `force_remote_race_local_wins_against_a_delayed_peer...`
+(in-process, B delays 5 ms, budget 0): 8 reads, `races_started` 8,
+`race_won_local` 8, `race_won_first` 0, `race_discarded` 8, `verified` 8,
+`race_wasted_wire_bytes` 32,960; all records `race_winner` 3, `race_budget_us`
+0. Corrupting peer with local copy: `errors` 1, `race_won_local` 1, read
+succeeds, gate healthy. Both sources corrupt (local payload overwritten on
+disk): read fails with IO error, gate failed, `failed_reads` 1, cache empty.
+Router-level mocks: second owner wins against a 40 ms first owner (discarded
+1, wasted 4,120), a corrupt first reply is masked only by a verified second
+(`errors` 1), both corrupt fails (`errors` 2), a 5 ms budget starts no race for
+a prompt primary and one for a late primary (`race_budget_us` 5,000).
+
+Fast-path counters (loopback, fast arm): `remote_reads` 698 of 700 per run plus
+`declined_io` 2: the first lookup of each manifest page needs a page load and
+is declined to the reactor by design (condition 5), `declined_unsettled` 0.
+The model test asserts declines for a staged write (`declined_unsettled`), a
+pending FLUSH (`declined_flush`), an unsealed overlapping batch, and that the
+first settled read of store-resident chunks is declined (`declined_io`) while
+the repeated reads are inline.
+
+### Failures, retries and fixes
+
+- Race-arm loopback (`2e8bccf`): my test invariant `discarded + won_first ==
+  started` was wrong; every started race has exactly one discard whichever
+  side wins. Fixed in the test (`a572253`).
+- Race-arm loopback: the pipeline phase counted `verified` before late loser
+  replies arrived (702 of 704), and wins can trail starts when the primary
+  completes between the challenger's issue and attach; the test now settles
+  discards before counting and asserts `wins <= started`, `discarded ==
+  started`.
+- Race-arm fail phase: after B stops, a refused connection fails the primary
+  within the 100 µs budget, so no challenger starts and the read fails closed;
+  the test accepts either outcome and checks `failed_reads` accordingly. A
+  challenger that was issued but found the primary already failed was dropped
+  and the read failed closed although the local copy would have verified;
+  `attach` now keeps the challenger for a failed primary (`a572253`), which the
+  final race-arm runs below exercised.
+- Fast path (`66c44d8` work tree): the reactor published the manifest view only
+  on its first loop, so reads enqueued before it were declined (first model
+  read; 698 of 700 in loopback) — `Local::start` now publishes it. A challenger
+  signalled only the primary slot's eventfd, which the frontend never polls, so
+  frontend-issued GETs noticed a local win only when the delayed primary
+  arrived (49 ms for 8 reads; 2 local wins of 700) — challengers now signal the
+  primary's external notify when present.
+- Model test: expected inline service for settled chunks that still require a
+  store read; condition 5 declines those and only the repeated (cached) read is
+  inline. Test corrected.
+- Clippy: unused import and `large_enum_variant` on the decline outcome
+  (expected like `backend::admission::Admission`); a borrow in the model test.
+- `cargo fmt` diffs were applied locally before each ship.
+
+Retained raw evidence (ignored, local only; the VM was deleted):
+`results/readpath/{baseline,f1-off,f2,final}/reader-*.json` (for `final`
+race/both runs the file holds the post-loss report because of the rename bug
+above; the ring records with ids 100–699 are the measured reads), delayed-server
+`reader`/`late` JSON, `summarize.py` (nearest-rank quantiles from the ring),
+`ledger.json` (VM/identity ids and events), `final/just-check.log`,
+`final/f1-peer.log`, `final/peer-both.log`. VM-side logs under
+`/root/results/{baseline,f1,f2,final}` (just-check, fleet, loopback logs and
+`revision.txt`) were not exported before deletion except as summarized here.
+No CI, push, merge, deployment, CloudLab or guest/QEMU measurement occurred;
+loopback timestamps exclude guest scheduling.
+
+### Open for a human
+
+- The local race source is a thread + IO-scheduler demand port (same as GET
+  service), not the reactor's io_uring path; its ≈400 µs local win is the
+  arm's cost. Moving it onto io_uring would need a second in-kernel owner per
+  read.
+- The fast path's settled test is image-wide (`published == admitted` and
+  `D == P`), not per range; a write-active image falls back to the reactor
+  until compaction catches up. A per-region staged bitmap would widen it but
+  adds a cas-core invariant.
+- Inline GETs bypass the shared fetch registry (duplicate concurrent GETs for
+  one hash are possible, never incorrect).
+- With `--peer-race-local`, a read can complete from the local copy after peer
+  loss instead of failing closed; that changes the force-remote experiment's
+  failure semantics and is documented in `docs/peer-fetch.md`.
+- `--peer-inline-us` spinning now also happens on the frontend thread for fast
+  reads (bounded, same budget); unmeasured here.
+
+Final verification of the rebuilt commits on the same VM: `d6f7d4b` alone was
+strict Clippy clean with 25 peer-filter tests passed; `c225e73` was strict
+Clippy clean, passed the peer suite without flags and with both flags (25 each)
+and one race-arm release loopback whose `reader.json` holds the measure report
+(700 GETs, 0 errors). The VM `vm-38331efffa414b098f8136cacf1e903c` was then
+deleted through the provider API (`results/readpath/ledger.json` records the
+deletion); no other VM was created, touched or deleted.
+
+## 2026-11-12 — Burst harness: multi-guest reads, burst-images and resume-elsewhere
+
+Branch `feat/burst-harness` from `main` (`ebbe157`, the frozen measured
+revision). **Tested revision `7a3c5d267a51648363f94fd0cd93aaccc4e566c6`**, clean
+on the test checkout; the fixture-configuration correction, documentation and
+this record are later commits on the branch. Harness-only work: no file under
+`crates/cas/daemon` or `crates/cas/core` changed, so the `cas` package and its
+executable hashes are those of `ebbe157`. Nothing was pushed or merged.
+
+Spark handled edits, Git bundles, provider calls and evidence processing only.
+All builds, checks and runs used the persistent Freestyle VM `cas-build`
+(`vm-7ecd8e364c624bcb8654fa4dbd92767e`, x86_64, 8 vCPU, 16 GiB, Ubuntu, nested
+KVM) in a fresh clone `/root/cas-burst` fetched from a bundle. No VM was created,
+resized or deleted.
+
+### Commands (cas-build, `/root/cas-burst`, Nix profile sourced, `ulimit -n 65536`)
+
+```sh
+nix build .#two-host-fixture .#two-host --out-link /root/burst/result --cores 6
+nix fmt -- --ci
+nix develop -c env CARGO_TARGET_DIR=/root/cas/target CARGO_BUILD_JOBS=6 \
+  RUST_TEST_THREADS=2 just check
+/root/burst/result/bin/cas-two-host-fixture --output /root/burst/fixture-new-001 \
+  --cases reads-memory,reads-storage,burst-images,resume-elsewhere \
+  --set 'guests_per_host=[2]'                         # TCG attempt, stopped
+# Native KVM loopback: both members on one VM, loop-backed XFS files mounted at
+# /mnt/fleet-a and /mnt/fleet-b, daemons pinned to vCPUs 0-1 / 2-3, guests 4-7.
+/root/burst/result-1/bin/cas-two-host --config /root/burst/native-new-001-config.json \
+  --output /root/burst/native-new-001/controller
+/root/burst/result-1/bin/cas-two-host \
+  --config /root/burst/native-regression-001-config.json \
+  --output /root/burst/native-regression-001/controller
+```
+
+Settings for both native runs: 128 MiB image, 1 MiB seeded data, 5-second read
+windows, one repetition, QD 1/4, 4 MiB/s requested shipping rate, 50 µs inline
+polling. `native-new-001`: `guests_per_host=[2]`, one-vCPU 512 MiB guests,
+`burst` = 4 images × (4 MiB shared base + 1 MiB unique), k=1, no force-remote,
+owner cache 0, no page-cache drop; `resume` = 2 MiB setup, k=1, settled.
+`native-regression-001`: defaults (`guests_per_host=[1]`, pinned two-vCPU
+1 GiB guests) for `flows-k1,flows-k2,reads-memory,reads-storage,raw-rsync,
+independent-stores`. The exact configurations are in the archives.
+
+### Outcomes
+
+- `nix build` of both launchers and `nix fmt -- --ci`: pass. `just check`:
+  pass — formatting, strict Clippy, 572 Rust tests passed with 30 fixture
+  ignores, **25 Python tests** (12 new: settings normalization and rejection,
+  case-plan expansion, overrides, image IDs, guest sizing, fio aggregation,
+  burst summary, peer-counter deltas, burst launch ordering, seeded payloads,
+  block statistics), whitespace clean. The corrected `fixture.nix` was
+  format-checked and built separately afterwards (both exit 0).
+- **`native-new-001`: all four cases passed** (`success: true`, 294 s):
+  `reads-memory-g2`, `reads-storage-g2`, `burst-images`, `resume-elsewhere`.
+- **`native-regression-001`: all six legacy cases passed** (415 s) with the
+  historical one-guest schema; their guests ran the pinned QEMU command line
+  (no sizing override, `qemu.json` sizing 2 vCPU / 1024 MiB).
+
+Two-guest arms (aggregate over both readers; per-guest p50 in brackets; all
+reads CRC32C-verified, quiet labels required zero opposite-source service):
+
+| Arm, cohort | Aggregate IOPS | p50 (ms) | p99 (ms) | Owner counters |
+| --- | ---: | ---: | ---: | --- |
+| memory, random QD1 | 6,608 | 0.200 [0.198, 0.202] | 2.900 | 33,043 memory, 0 store |
+| memory, sequential QD4 | 9,339 | 0.506 | 4.227 | 46,691 memory |
+| memory, contention | 5,465 | 0.247 | 3.064 | 27,324 memory, overlap verified |
+| storage, random QD1 | 6,666 | 0.276 [0.276, 0.276] | 0.528 | 0 memory, 33,330 store |
+| storage, sequential QD4 | 11,212 | 0.659 | 1.794 | 56,052 store |
+| storage, contention | 5,058 | 0.334 | 0.979 | 25,292 store, overlap verified |
+
+Aggregate percentiles come from merged json+ bins (bucket lower bounds); the
+per-guest fio JSON retains exact values. The contention cohort ran one 2 MiB/s
+shipping writer per source guest.
+
+`burst-images` (4 images, k=1, B cold with empty cache): per-image store chunk
+deltas after settle were 1,302 then 274, 274, 274 (the shared base deduplicated;
+each later image added only its unique region and metadata). Provisioning all
+four manifests took 0.803 s and 1,331,714 provision-flow bytes; B's cold restart
+recovered in 0.321 s; the four QEMU launches spread over 5.9 ms. Per guest:
+launch→ready 30.5–32.0 s, launch→first SSH command 33.2–34.4 s, launch→marker
+34.1–35.2 s (nested KVM, one vCPU each, four booting at once), 362 of 1,318 used
+blocks read by the marker (0.275 each). B issued 219 GETs by the last marker
+(4.2 % of the 5,272 used blocks over all images, 902,280 GET wire bytes
+received, peak 3 outstanding) and 2,736 by the end of full verification (51.9 %,
+consistent with k=1 placing about half of each image on A; 11,272,320 bytes,
+peak 4). A served all GETs from its store; HAS 0; no errors; 149 ring records.
+Guest-observed reads exceed GETs because zero/hole blocks and B-owned chunks
+are served locally; the attribution caveat is recorded in the case.
+
+`resume-elsewhere` (2 MiB setup, k=1, settled, B cold): downtime 20.772 s =
+0.716 s shutdown + 0.295 s handoff (0.239 s cold recovery, 0.042 s daemon
+migration) + 19.761 s boot/verify/continue; launch→first command 19.221 s,
+launch→marker 19.532 s. Bytes per phase: manifest 131,072, staging tail 20,664
+(migration flow 172,388 wire bytes), missing chunks fetched while booting and
+verifying 298 GETs / 1,227,760 GET bytes plus 12,922 ship bytes, explicit sync
+afterwards 233 bytes. The destination verified the seeded digest and advanced
+epoch 0→1. Legacy controls in the regression run: `flows-k1`/`flows-k2`
+downtime 19.180 / 19.733 s with provision flow 122,803 / 122,668 bytes;
+`raw-rsync` downtime 20.187 s, 134,250,639 bytes per full copy.
+
+These are single-repetition, nested-KVM, loop-file development checks on one
+shared VM: they validate the harness and schema, not latency, boot time or
+placement claims. `zfs-incremental` was not run (no ZFS on the native host; its
+code path is unchanged).
+
+### Failures and retries
+
+- **TCG fixture attempt `fixture-new-001` stopped by the operator.** With the
+  initial fixture configuration (six-vCPU outer VM, one-vCPU 512 MiB TCG
+  guests) the two concurrently booting sources reached their virtio-blk driver
+  about 165 s after launch, but the daemon attaches each image with a fixed
+  60-second recovery window (`RECOVERY_TIMEOUT`, attachment to first queue
+  activation), so both image services ended with `recovery deadline expired`
+  and the guests hung on `set virtio-blk status ... failed`. This is a frozen
+  daemon property, not a harness or sizing defect; the retained attempt
+  (`fixture-new-001-attempt.tgz`, scratch disks excluded) is not a result. The
+  fixture configuration was restored to its four-vCPU, pinned-guest form and
+  the multi-guest/burst/resume arms were removed from its TCG default list;
+  they remain requestable with `--cases` and need KVM. The second fixture
+  invocation (legacy regression) was not started.
+- The replacement native loopback runs required no retry. One operator-side
+  polling command matched its own shell and exited 143 without effect on the
+  run.
+
+### Evidence
+
+Retained under ignored `results/burst-harness/evidence/` with `SHA256SUMS`,
+digests verified against the copies left in `/root/burst/archive` on
+`cas-build`: `checks.tgz` (build, format, `just check` logs and statuses,
+driver scripts, revision), `native-new-001.tgz` and
+`native-regression-001.tgz` (controller `results.json`, `config.json`, RPC
+logs, both hosts' daemon/guest/fio logs, command lines and `qemu.json`),
+`fixture-new-001-attempt.tgz`. The branch bundle `burst-harness.bundle`
+(SHA256 `7cf68f26…2a1a`) and `results.json` copies sit beside them. Loop
+images were unmounted and deleted after archiving; `/root/burst` remains on
+the persistent VM.
+
 ## 2026-11-09 — Integration of C5, peer fetch and 16 KiB chunks
 
 Branch `integration/2026-11-09` from `main` (`9c60e72`), merged in order:

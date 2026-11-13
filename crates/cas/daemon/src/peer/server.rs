@@ -18,6 +18,14 @@ use std::{
 };
 
 pub(crate) const CONNECTIONS: usize = 4;
+/// Service shape: worker count, plus the test-only injected reply delay for
+/// this Server instance (never a process-global).
+#[derive(Clone, Copy)]
+pub struct Options {
+    pub connections: usize,
+    #[cfg(test)]
+    pub reply_delay: Duration,
+}
 pub struct Server {
     address: SocketAddr,
     stop: Arc<AtomicBool>,
@@ -31,8 +39,9 @@ impl Server {
         budget: &Arc<Budget>,
         metrics: BudgetArc<Metrics>,
         scheduler: (BudgetArc<cas_core::scheduler::Scheduler>, usize),
-        connections: usize,
+        options: Options,
     ) -> io::Result<Self> {
+        let connections = options.connections;
         let listener = TcpListener::bind(address)?;
         listener.set_nonblocking(true)?;
         let mut server = Self {
@@ -73,11 +82,11 @@ impl Server {
                                             serve(
                                                 &mut socket,
                                                 &stop,
-                                                &reader,
-                                                &cache,
+                                                (&reader, &cache),
                                                 &metrics,
                                                 (page.as_mut_slice(), payload.as_mut_slice()),
                                                 &scheduling,
+                                                options,
                                             )
                                         })();
                                         if result.is_err() {
@@ -172,12 +181,13 @@ fn write(
 fn serve(
     socket: &mut TcpStream,
     stop: &AtomicBool,
-    reader: &Reader,
-    cache: &Cache,
+    store: (&Reader, &Cache),
     metrics: &Metrics,
     scratch: (&mut [u8], &mut [u8]),
     scheduling: &cas_core::scheduler::Port,
+    #[cfg_attr(not(test), allow(unused_variables))] options: Options,
 ) -> io::Result<()> {
+    let (reader, cache) = store;
     let (page, payload) = scratch;
     let mut request = [0; FRAME];
     let mut response = [0; FRAME];
@@ -283,6 +293,11 @@ fn serve(
             }
         }
         reply.encode(&mut response);
+        // Test-only injected service delay for this Server instance.
+        #[cfg(test)]
+        if h.op == GET && !options.reply_delay.is_zero() {
+            thread::sleep(options.reply_delay);
+        }
         write(socket, &response[..reply.bytes], stop, deadline)?;
     }
 }

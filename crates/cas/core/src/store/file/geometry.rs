@@ -16,10 +16,18 @@ pub(super) fn create(
     bytes[16..32].copy_from_slice(&config.store);
     put64(bytes, 32, config.segment_bytes);
     put32(bytes, 4092, checksum(bytes, 4092));
-    let file = direct::open(&tickets.root().join(NAME), true)?;
-    direct::write_bytes(&file, page.as_slice(), 0)?;
-    direct::sync_all(&file)?;
+    direct::create_immutable(&tickets.root().join(NAME), |file| {
+        direct::write_bytes(file, page.as_slice(), 0)
+    })?;
     direct::sync_all(tickets.root_file())
+}
+/// Whether this root already carries a durable geometry record.
+pub(super) fn exists(tickets: &Tickets) -> io::Result<bool> {
+    match tickets.root().join(NAME).symlink_metadata() {
+        Ok(metadata) => Ok(metadata.is_file()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 pub(super) fn read(
     tickets: &Tickets,
@@ -34,8 +42,12 @@ pub(super) fn read(
     Ok(size)
 }
 
+/// Readers share the marker: every WAL open and store inspection reads it,
+/// concurrently across threads and processes, and the record never changes
+/// after `create`. An exclusive lock here made concurrent readers fail with
+/// `WouldBlock`.
 pub(super) fn config(tickets: &Tickets, metadata: Arc<Budget>) -> io::Result<(Config, ChunkSize)> {
-    let file = direct::open(&tickets.root().join(NAME), false)?;
+    let file = direct::open_readonly(&tickets.root().join(NAME))?;
     require(
         file.metadata()?.len() == BLOCK_SIZE as u64,
         "store format length",
@@ -57,4 +69,65 @@ pub(super) fn config(tickets: &Tickets, metadata: Arc<Budget>) -> io::Result<(Co
     };
     config.validate()?;
     Ok((config, ChunkSize::from_bytes(u32_at(bytes, 12) as usize)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn concurrent_geometry_readers_do_not_exclude_each_other() {
+        let directory = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let metadata = Budget::new(crate::budget::Amount {
+            bytes: 1 << 20,
+            requests: 0,
+        });
+        let tickets = Tickets::open(directory.path(), Arc::clone(&metadata)).unwrap();
+        let config = Config {
+            store: [7; 16],
+            segment_bytes: 64 << 20,
+        };
+        create(
+            &tickets,
+            config,
+            ChunkSize::from_bytes(BLOCK_SIZE).unwrap(),
+            Arc::clone(&metadata),
+        )
+        .unwrap();
+        // A reader holding the marker open must not block another reader:
+        // the daemon reads it from several threads (WAL opens, inspection).
+        // A record is published whole: during creation only the temporary
+        // name exists, and the creator's descriptor (which a forked child can
+        // hold past the close) is shared-locked once the name is published.
+        let other = directory.path().join("other-marker");
+        let zeros =
+            AlignedBuffer::try_new_in(BLOCK_SIZE, BudgetAllocator::new(Arc::clone(&metadata)))
+                .unwrap();
+        direct::create_immutable(&other, |file| {
+            assert!(!other.exists(), "published before the write completed");
+            assert_eq!(
+                direct::open_readonly(&other.with_file_name("other-marker.tmp"))
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::WouldBlock,
+                "the temporary record is exclusively locked while written"
+            );
+            direct::write_bytes(file, zeros.as_slice(), 0)
+        })
+        .unwrap();
+        assert!(direct::open_readonly(&other).is_ok());
+        let held = direct::open_readonly(&tickets.root().join(NAME)).unwrap();
+        let (recorded, size) = self::config(&tickets, Arc::clone(&metadata)).unwrap();
+        assert_eq!(recorded.store, config.store);
+        assert_eq!(recorded.segment_bytes, config.segment_bytes);
+        assert_eq!(size.bytes(), BLOCK_SIZE);
+        // An exclusive writer is still excluded while readers hold it.
+        assert_eq!(
+            direct::open(&tickets.root().join(NAME), false)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(held);
+    }
 }

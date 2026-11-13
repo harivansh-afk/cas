@@ -11,11 +11,22 @@ use std::{
 };
 
 const RETAIN: usize = 1024;
+/// Race outcome codes recorded in the ring: no race, first owner, second owner, local copy.
+pub const WINNER_NONE: u8 = 0;
+pub const WINNER_FIRST: u8 = 1;
+pub const WINNER_SECOND: u8 = 2;
+pub const WINNER_LOCAL: u8 = 3;
 #[derive(Default, Clone, Copy, Debug, serde::Serialize)]
 pub struct Phases {
     pub send_ns: u64,
     pub first_byte_ns: u64,
     pub verified_ns: u64,
+    /// The winning source and budget travel with the completing transport's
+    /// milestones; the record exposes them at its top level.
+    #[serde(skip)]
+    pub race_budget_us: u32,
+    #[serde(skip)]
+    pub race_winner: u8,
 }
 #[derive(Default, Clone, Copy, Debug, serde::Serialize)]
 pub struct Record {
@@ -25,6 +36,9 @@ pub struct Record {
     pub completed_ns: u64,
     pub chunks: u64,
     pub success: bool,
+    /// Last raced chunk of this read: budget in microseconds and WINNER_* code.
+    pub race_budget_us: u32,
+    pub race_winner: u8,
 }
 #[derive(Default, Clone, Copy, serde::Serialize)]
 pub struct Counters {
@@ -42,33 +56,118 @@ pub struct Counters {
     pub has: u64,
     pub completed_reads: u64,
     pub failed_reads: u64,
+    pub races_started: u64,
+    pub race_won_first: u64,
+    pub race_won_second: u64,
+    pub race_won_local: u64,
+    pub race_discarded: u64,
+    pub race_wasted_wire_bytes: u64,
+    /// Armed races never started: racer table full or stopping, or the
+    /// challenger's slot pool exhausted.
+    pub race_dropped: u64,
+}
+/// GETs issued without an image slot (harness clients, HAS probes).
+pub(crate) const UNATTRIBUTED: usize = usize::MAX;
+/// Race-independent per-image remote-read attribution. Cumulative; restarts
+/// with the host. `completed_reads`, `failed_reads` and `chunks` count the
+/// image's reads and the remote chunks they resolved, including chunks a
+/// coalesced waiter inherited from another read's GET; `verified_bytes` is
+/// credited once, at transport verification, to the image that issued the GET.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ImageCounters {
+    pub completed_reads: u64,
+    pub failed_reads: u64,
+    pub chunks: u64,
+    pub verified_bytes: u64,
+}
+#[derive(Default, Clone, Copy)]
+struct ImageSlot {
+    image: Option<[u8; 16]>,
+    counters: ImageCounters,
 }
 struct State {
     counters: Counters,
     recent: Vec<Record, BudgetAllocator>,
     cursor: usize,
+    images: Vec<ImageSlot, BudgetAllocator>,
 }
 pub struct Metrics {
     wire_sent: AtomicU64,
     wire_received: AtomicU64,
     origin: Instant,
+    /// `CLOCK_MONOTONIC` read together with `origin`: a ring timestamp `ns`
+    /// is the host instant `origin_monotonic_ns + ns` (same clock as
+    /// `clock_gettime(CLOCK_MONOTONIC)` in any process on this host).
+    origin_monotonic_ns: u64,
     state: Mutex<State>,
 }
+
+/// The host's `CLOCK_MONOTONIC` in nanoseconds, the clock `Instant` uses on
+/// Linux, so harnesses can place ring timestamps without a calibration bracket.
+pub fn monotonic_now_ns() -> u64 {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: clock_gettime writes one initialized timespec through a valid pointer.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) };
+    assert_eq!(rc, 0, "CLOCK_MONOTONIC is always readable");
+    time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64
+}
+
 impl Metrics {
-    pub fn new(budget: &Arc<Budget>) -> io::Result<BudgetArc<Self>> {
+    /// `slots` preallocates one per-image attribution slot per host image slot.
+    pub fn new(budget: &Arc<Budget>, slots: usize) -> io::Result<BudgetArc<Self>> {
+        let mut images = crate::local::reserved_vec(slots, budget)?;
+        images.resize(slots, ImageSlot::default());
         BudgetArc::try_new(
             Self {
                 wire_sent: AtomicU64::new(0),
                 wire_received: AtomicU64::new(0),
+                // Read back to back: the raw clock first, then the Instant the
+                // ring measures from, so `origin_monotonic_ns + ns` is never
+                // later than the real instant by more than the two reads' gap.
+                origin_monotonic_ns: monotonic_now_ns(),
                 origin: Instant::now(),
                 state: Mutex::new(State {
                     counters: Counters::default(),
                     recent: crate::local::reserved_vec(RETAIN, budget)?,
                     cursor: 0,
+                    images,
                 }),
             },
             budget,
         )
+    }
+    /// Name the image served from a preallocated slot; the host checks the
+    /// slot limit once before creating the image.
+    pub fn bind(&self, slot: usize, image: [u8; 16]) {
+        let mut state = self.state.lock().expect("peer metrics poisoned");
+        state.images[slot].image = Some(image);
+    }
+    /// One GET finished in the transport: host counters, and the verified
+    /// payload credited to the issuing image (not to coalesced waiters).
+    pub(crate) fn transport_finished(&self, image: usize, verified: bool) {
+        let mut state = self.state.lock().expect("peer metrics poisoned");
+        state.counters.verified += u64::from(verified);
+        state.counters.errors += u64::from(!verified);
+        if verified && let Some(slot) = state.images.get_mut(image) {
+            slot.counters.verified_bytes += cas_core::BLOCK_SIZE as u64;
+        }
+    }
+    pub fn image(&self, image: [u8; 16]) -> ImageCounters {
+        let state = self.state.lock().expect("peer metrics poisoned");
+        state
+            .images
+            .iter()
+            .filter(|slot| slot.image == Some(image))
+            .fold(ImageCounters::default(), |sum, slot| {
+                sum.plus(slot.counters)
+            })
+    }
+    /// The `CLOCK_MONOTONIC` value of the ring origin.
+    pub fn origin_monotonic_ns(&self) -> u64 {
+        self.origin_monotonic_ns
     }
     pub fn at(&self, time: Instant) -> u64 {
         time.saturating_duration_since(self.origin)
@@ -83,10 +182,29 @@ impl Metrics {
     }
     pub fn report(&self) -> serde_json::Value {
         let state = self.state.lock().expect("peer metrics poisoned");
-        serde_json::json!({"counters": state.counters, "recent": &*state.recent,
+        // Keyed by image ID; a returning migration reuses the ID in a new
+        // slot, so equal IDs are summed here rather than on the IO path.
+        let mut totals = std::collections::BTreeMap::<[u8; 16], ImageCounters>::new();
+        for slot in state.images.iter() {
+            if let Some(image) = slot.image {
+                let total = totals.entry(image).or_default();
+                *total = total.plus(slot.counters);
+            }
+        }
+        let images: serde_json::Map<String, serde_json::Value> = totals
+            .into_iter()
+            .map(|(image, counters)| {
+                (
+                    cas_core::id::hex(image),
+                    serde_json::to_value(counters).expect("image counters"),
+                )
+            })
+            .collect();
+        serde_json::json!({"counters": state.counters, "recent": &*state.recent, "images": images,
             "get_wire":{"sent":self.wire_sent.load(Ordering::Relaxed),"received":self.wire_received.load(Ordering::Relaxed)},
             "retention": RETAIN, "next_slot": state.cursor,
-            "clock": "nanoseconds since peer runtime start; monotonic, host local"})
+            "origin_monotonic_ns": self.origin_monotonic_ns,
+            "clock": "nanoseconds since peer runtime start; monotonic, host local; host instant = origin_monotonic_ns + ns"})
     }
     pub(crate) fn wire(&self, sending: bool, bytes: usize) {
         let count = if sending {
@@ -96,10 +214,18 @@ impl Metrics {
         };
         count.fetch_add(bytes as u64, Ordering::Relaxed);
     }
-    fn complete(&self, record: Record) {
+    fn complete(&self, record: Record, slot: usize) {
         let mut state = self.state.lock().expect("peer metrics poisoned");
         state.counters.completed_reads += 1;
         state.counters.failed_reads += u64::from(!record.success);
+        if let Some(image) = state.images.get_mut(slot) {
+            image.counters = image.counters.plus(ImageCounters {
+                completed_reads: 1,
+                failed_reads: u64::from(!record.success),
+                chunks: record.chunks,
+                verified_bytes: 0,
+            });
+        }
         let cursor = state.cursor;
         if state.recent.len() < RETAIN {
             state.recent.push(record);
@@ -110,16 +236,39 @@ impl Metrics {
     }
 }
 
-pub(crate) struct Trace {
+impl ImageCounters {
+    fn plus(self, other: Self) -> Self {
+        Self {
+            completed_reads: self.completed_reads + other.completed_reads,
+            failed_reads: self.failed_reads + other.failed_reads,
+            chunks: self.chunks + other.chunks,
+            verified_bytes: self.verified_bytes + other.verified_bytes,
+        }
+    }
+}
+
+/// The shared host metrics seen from one image slot; cloning is pointer-sized.
+#[derive(Clone)]
+pub struct ImageMetrics {
     metrics: BudgetArc<Metrics>,
+    slot: usize,
+}
+impl ImageMetrics {
+    pub(crate) fn new(metrics: BudgetArc<Metrics>, slot: usize) -> Self {
+        Self { metrics, slot }
+    }
+}
+
+pub(crate) struct Trace {
+    metrics: ImageMetrics,
     record: Record,
 }
 impl Trace {
-    pub fn new(metrics: BudgetArc<Metrics>, id: u64, received: Instant) -> Self {
+    pub fn new(metrics: ImageMetrics, id: u64, received: Instant) -> Self {
         Self {
             record: Record {
                 id,
-                received_ns: metrics.at(received),
+                received_ns: metrics.metrics.at(received),
                 ..Record::default()
             },
             metrics,
@@ -132,13 +281,19 @@ impl Trace {
         } else {
             self.record.phases.verified_ns = phases.verified_ns;
         }
+        if phases.race_winner != WINNER_NONE {
+            self.record.race_winner = phases.race_winner;
+            self.record.race_budget_us = phases.race_budget_us;
+        }
         self.record.chunks += 1;
     }
     pub fn finish(&mut self, success: bool) {
         if self.record.chunks != 0 && self.record.completed_ns == 0 {
-            self.record.completed_ns = self.metrics.now();
+            self.record.completed_ns = self.metrics.metrics.now();
             self.record.success = success;
-            self.metrics.complete(self.record);
+            self.metrics
+                .metrics
+                .complete(self.record, self.metrics.slot);
         }
     }
 }

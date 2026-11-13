@@ -25,6 +25,53 @@ pub(crate) fn truncate(file: &File, length: u64) -> io::Result<()> {
     file.set_len(length)
 }
 
+/// Read-only direct IO on an immutable record (the store geometry marker):
+/// a shared lock, so concurrent readers in one or several processes do not
+/// exclude each other, while the exclusive lock `open` takes to create or
+/// rewrite a file still excludes them.
+pub(crate) fn open_readonly(path: &Path) -> io::Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECT | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::other("storage IO requires a regular file"));
+    }
+    file.try_lock_shared().map_err(io::Error::from)?;
+    Ok(file)
+}
+
+/// Create an immutable record (the store geometry marker). `write` fills a
+/// temporary name under the exclusive lock, so no reader can see a partial
+/// record; the lock is then downgraded to shared before the rename publishes
+/// it, so a descriptor inherited by a forked child for the fork-to-exec
+/// window can never block the shared-locked readers that follow. Readers
+/// open the final name only: before the rename it does not exist.
+pub(crate) fn create_immutable(
+    path: &Path,
+    write: impl FnOnce(&File) -> io::Result<()>,
+) -> io::Result<()> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::other("immutable record needs a file name"))?;
+    let mut temporary = name.to_owned();
+    temporary.push(".tmp");
+    let temporary = path.with_file_name(temporary);
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .custom_flags(libc::O_DIRECT | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&temporary)?;
+    file.try_lock().map_err(io::Error::from)?;
+    write(&file)?;
+    sync_all(&file)?;
+    // flock converts in place: readers of the published name share from here.
+    file.try_lock_shared().map_err(io::Error::from)?;
+    std::fs::rename(&temporary, path)?;
+    Ok(())
+}
+
 pub(crate) fn open(path: &Path, create: bool) -> io::Result<File> {
     let file = OpenOptions::new()
         .read(true)

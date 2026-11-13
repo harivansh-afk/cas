@@ -12,6 +12,9 @@ use std::{
 
 const GIB: u64 = 1024 * 1024 * 1024;
 const STORE: &str = "01010101010101010101010101010101";
+/// The guest limit the campaign driver reads from `crates/harnesses/native-limits.json`
+/// (inside the crate, so the packaged build sees it); a unit test keeps the two equal.
+pub const MAX_GUESTS: u8 = 16;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
@@ -35,10 +38,12 @@ pub struct Args {
     /// New evidence directory, on a different filesystem from storage.
     #[arg(long)]
     output: PathBuf,
-    /// New storage directory under an already-mounted XFS filesystem.
+    /// New storage directory under an already-mounted XFS filesystem (CAS and
+    /// daemon backends) or an XFS or ZFS filesystem (raw backend).
     #[arg(long)]
     storage: PathBuf,
-    /// Block device backing that mount; identity is checked before writing files.
+    /// Block device backing that mount: the mount's own device for XFS, a vdev
+    /// of the dataset's pool for ZFS; identity is checked before writing files.
     #[arg(long)]
     device: PathBuf,
     /// Explicitly label a loop-device run as development, never native-media evidence.
@@ -54,7 +59,8 @@ pub struct Args {
     script_args: Vec<String>,
     #[arg(long, value_enum)]
     backend: Backend,
-    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=2))]
+    /// Concurrent guests, each with its own data disk and fio job.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=MAX_GUESTS as i64))]
     guests: u8,
     #[arg(long, default_value_t = 4 * GIB)]
     image_bytes: u64,
@@ -83,6 +89,63 @@ fn image(index: u8) -> String {
     format!("{:032x}", u128::from(index) + 2)
 }
 
+/// Filesystem types a backend may store on. CAS needs XFS (reflink, hole
+/// punching, aligned O_DIRECT); the raw image control may also sit on a ZFS
+/// dataset so the ZFS arms share this runner.
+fn allowed_filesystems(backend: Backend) -> &'static [&'static str] {
+    match backend {
+        Backend::Raw => &["xfs", "zfs"],
+        Backend::Daemon | Backend::Cas => &["xfs"],
+    }
+}
+
+/// Whether `path` names a partition of `device` by the kernel's rule: a digit
+/// suffix, with a `p` separator only when the device name itself ends in a
+/// digit (`/dev/sda1`, `/dev/nvme0n1p2`), or udev's `-partN`. `/dev/sdap` is
+/// another disk, not a partition of `/dev/sda`.
+fn is_partition_of(path: &str, device: &str) -> bool {
+    let Some(rest) = path.strip_prefix(device) else {
+        return false;
+    };
+    let digits = if let Some(digits) = rest.strip_prefix("-part") {
+        Some(digits)
+    } else if device.ends_with(|c: char| c.is_ascii_digit()) {
+        rest.strip_prefix('p')
+    } else {
+        Some(rest)
+    };
+    digits.is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Whether `zpool list -v -H -P <pool>` lists `device` (or a partition on it) as a vdev.
+fn pool_has_device(listing: &str, device: &Path) -> bool {
+    let device = device.to_string_lossy();
+    listing.lines().skip(1).any(|line| {
+        line.split('\t')
+            .map(str::trim)
+            .filter(|field| field.starts_with('/'))
+            .any(|path| {
+                let path = fs::canonicalize(path)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| path.to_string());
+                path == device || is_partition_of(&path, &device)
+            })
+    })
+}
+
+fn zfs_pool(parent: &Path) -> io::Result<String> {
+    let source = std::process::Command::new("findmnt")
+        .args(["-n", "-o", "SOURCE", "-T"])
+        .arg(parent)
+        .output()?;
+    let dataset = String::from_utf8_lossy(&source.stdout).trim().to_string();
+    evidence::require(
+        source.status.success() && !dataset.is_empty(),
+        "storage dataset unknown",
+    )?;
+    Ok(dataset.split('/').next().unwrap_or(&dataset).to_string())
+}
+
 fn validate(args: &Args) -> io::Result<PathBuf> {
     for path in [&args.output, &args.storage] {
         qemu::valid_path(path)?;
@@ -106,10 +169,36 @@ fn validate(args: &Args) -> io::Result<PathBuf> {
         metadata.file_type().is_block_device(),
         "--device must identify a block device",
     )?;
+    let fs_type = std::process::Command::new("findmnt")
+        .args(["-n", "-o", "FSTYPE", "-T"])
+        .arg(&parent)
+        .output()?;
+    let fs_type = String::from_utf8_lossy(&fs_type.stdout).trim().to_string();
     evidence::require(
-        parent.metadata()?.dev() == metadata.rdev(),
-        "storage filesystem does not match --device",
+        allowed_filesystems(args.backend).contains(&fs_type.as_str()),
+        &format!(
+            "{} storage needs an existing {} mount, found {fs_type:?}",
+            args.backend.name(),
+            allowed_filesystems(args.backend).join(" or ")
+        ),
     )?;
+    if fs_type == "zfs" {
+        let pool = zfs_pool(&parent)?;
+        let listing = std::process::Command::new("zpool")
+            .args(["list", "-v", "-H", "-P"])
+            .arg(&pool)
+            .output()?;
+        evidence::require(
+            listing.status.success()
+                && pool_has_device(&String::from_utf8_lossy(&listing.stdout), &device),
+            "--device is not a vdev of the storage dataset's pool",
+        )?;
+    } else {
+        evidence::require(
+            parent.metadata()?.dev() == metadata.rdev(),
+            "storage filesystem does not match --device",
+        )?;
+    }
     let sysfs = PathBuf::from(format!(
         "/sys/dev/block/{}:{}",
         libc::major(metadata.rdev()),
@@ -119,19 +208,19 @@ fn validate(args: &Args) -> io::Result<PathBuf> {
         args.allow_loop_device || !sysfs.join("loop").exists(),
         "loop devices require --allow-loop-device and are development evidence",
     )?;
-    let fs_type = std::process::Command::new("findmnt")
-        .args(["-n", "-o", "FSTYPE", "-T"])
-        .arg(&parent)
-        .output()?;
-    evidence::require(
-        fs_type.status.success() && fs_type.stdout.trim_ascii() == b"xfs",
-        "native storage needs an existing XFS mount",
-    )?;
     fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open("/dev/kvm")?;
     Ok(device)
+}
+
+fn storage_fstype(storage: &Path) -> io::Result<String> {
+    let output = std::process::Command::new("findmnt")
+        .args(["-n", "-o", "FSTYPE", "-T"])
+        .arg(storage)
+        .output()?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 pub fn run(mut args: Args) -> io::Result<()> {
@@ -166,6 +255,7 @@ pub fn run(mut args: Args) -> io::Result<()> {
             "host_kernel":host::identity()?.kernel, "device":device,
             "workload_blake3":blake3::hash(&fs::read(&args.script)?).to_hex().to_string(),
             "paper_gates":[], "native_media":!args.allow_loop_device,
+            "storage_fstype":storage_fstype(&args.storage)?, "guests":args.guests,
             "geometry":"storage on host; direct KVM guests; no outer VM"
         }),
     )?;
@@ -227,10 +317,81 @@ mod tests {
         );
     }
     #[test]
+    fn guest_counts_are_bounded() {
+        assert_eq!(args(&["--guests", "16"]).guests, 16);
+        let cli = Cli::try_parse_from([
+            "native",
+            "--output",
+            "o",
+            "--storage",
+            "s",
+            "--device",
+            "d",
+            "--build-info",
+            "b",
+            "--script",
+            "w",
+            "--backend",
+            "raw",
+            "--guests",
+            "17",
+        ]);
+        assert!(cli.is_err());
+    }
+    #[test]
+    fn only_the_raw_backend_accepts_zfs() {
+        assert_eq!(allowed_filesystems(Backend::Raw), &["xfs", "zfs"]);
+        assert_eq!(allowed_filesystems(Backend::Cas), &["xfs"]);
+        assert_eq!(allowed_filesystems(Backend::Daemon), &["xfs"]);
+    }
+    #[test]
+    fn pool_membership_matches_whole_disks_and_their_partitions() {
+        let listing = "tank\t1.6T\t1M\t1.6T\t-\t-\t0%\t0%\t1.00x\tONLINE\t-\n\t/dev/nvme1n1p1\t1.6T\t1M\t1.6T\t-\t-\t0%\t0.00%\t-\tONLINE\n";
+        assert!(pool_has_device(listing, Path::new("/dev/nvme1n1")));
+        assert!(pool_has_device(listing, Path::new("/dev/nvme1n1p1")));
+        assert!(!pool_has_device(listing, Path::new("/dev/nvme0n1")));
+        assert!(!pool_has_device(
+            "tank\tONLINE\n",
+            Path::new("/dev/nvme1n1")
+        ));
+    }
+    #[test]
     fn malformed_geometry_and_qemu_paths_are_refused_before_device_access() {
         let mut args = args(&["--image-bytes", "4097"]);
         assert!(validate(&args).unwrap_err().to_string().contains("aligned"));
         args.output = "bad,path".into();
         assert!(validate(&args).unwrap_err().to_string().contains("commas"));
+    }
+
+    #[test]
+    fn partition_naming_follows_the_kernel_rule() {
+        assert!(is_partition_of("/dev/sda1", "/dev/sda"));
+        assert!(is_partition_of("/dev/sda12", "/dev/sda"));
+        assert!(!is_partition_of("/dev/sdap", "/dev/sda"));
+        assert!(!is_partition_of("/dev/sdap1", "/dev/sda"));
+        assert!(is_partition_of("/dev/nvme0n1p2", "/dev/nvme0n1"));
+        assert!(!is_partition_of("/dev/nvme0n12", "/dev/nvme0n1"));
+        assert!(!is_partition_of("/dev/nvme0n1", "/dev/nvme0n1"));
+        assert!(is_partition_of(
+            "/dev/disk/by-id/nvme-X-part3",
+            "/dev/disk/by-id/nvme-X"
+        ));
+        assert!(!is_partition_of(
+            "/dev/disk/by-id/nvme-X-part",
+            "/dev/disk/by-id/nvme-X"
+        ));
+        let listing = "pool\t-\n\t/dev/sdap\t-\n\t/dev/sda1\t-\n";
+        assert!(pool_has_device(listing, Path::new("/dev/sda")));
+        assert!(!pool_has_device(
+            "pool\t-\n\t/dev/sdap\t-\n",
+            Path::new("/dev/sda")
+        ));
+    }
+
+    #[test]
+    fn guest_limit_matches_the_shared_limits_file() {
+        let limits: serde_json::Value =
+            serde_json::from_str(include_str!("../native-limits.json")).unwrap();
+        assert_eq!(limits["max_guests"], u64::from(MAX_GUESTS));
     }
 }

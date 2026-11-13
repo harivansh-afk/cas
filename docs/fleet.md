@@ -181,6 +181,25 @@ relays LIVE sets through its coordinator, so its counters include that traffic.
 Take before/after snapshots and keep background `ship` separate from explicit
 `sync`; background repair may already have removed differences before a sync.
 
+`fleet.shipping` reports the durability window of local-first writes. For each
+acknowledged PUT the shipper records `queued_ns` (when the batch's first hash
+was queued after compaction publication), `acked_ns` (when the owner's durable
+acknowledgement arrived), `chunks`, `bytes` (PUT body bytes) and `owner`
+(member ID). The ring keeps the last 1,024 batches (`retention`, `next_slot`);
+`batches`, `chunks` and `bytes` are cumulative, and `window_batches` with
+`window_ns_sum` cover the batches whose queue time is known, so the ring gives
+the distribution and the sums its mean. Batches assembled from an inventory
+rescan (startup, a full queue, retry after a failed pass) have a null
+`queued_ns` and count in `rescan_batches` instead. A batch whose owner already
+held every chunk sends no PUT and is not recorded. Nanoseconds are read from
+the peer metrics clock, the same monotonic host-local clock as `peer.recent`,
+and `fleet.shipping.origin_monotonic_ns` is that clock's origin on
+`CLOCK_MONOTONIC` (equal to `peer.origin_monotonic_ns`), so a ring time `ns`
+is the host instant `origin_monotonic_ns + ns`; never compare them across
+hosts. The
+acknowledgement means the owner's `Store::insert` and store synchronization
+completed, not fleet-class FLUSH.
+
 The migration reply includes manifest/tail byte counts and additive monotonic
 microsecond intervals: freeze (admission drain/FLUSH), prepare (tail encoding,
 manifest hashing and owner readiness), fence (source fence and destination

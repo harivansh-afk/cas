@@ -37,6 +37,9 @@ pub struct Resources {
     pub compaction: Arc<Budget>,
     pools: pools::HostPools,
     fault: Option<Mutex<Option<fault::Pause>>>,
+    /// Test-only: this host's GET service delays every reply by this much.
+    #[cfg(test)]
+    pub peer_reply_delay_us: u64,
 }
 
 impl Default for Resources {
@@ -49,6 +52,8 @@ impl Default for Resources {
             compaction: metadata_budget(),
             pools: pools::HostPools::new(),
             fault: None,
+            #[cfg(test)]
+            peer_reply_delay_us: 0,
         }
     }
 }
@@ -69,6 +74,10 @@ impl Resources {
     }
 
     pub const DEFAULT_CACHE_BYTES: usize = 256 * MAX_REQUEST_BYTES;
+    /// Host metadata budget: indexes, manifests, queues and bounded rings. A
+    /// rebuilt chunk index needs roughly 40–80 bytes per 4 KiB chunk, so roots
+    /// beyond about 1.7–3.4 million chunks need `--metadata-bytes` above this.
+    pub const DEFAULT_METADATA_BYTES: usize = 128 * MAX_REQUEST_BYTES;
 
     pub fn read_memory(&self) -> Arc<Budget> {
         Arc::clone(&self.pools.read)
@@ -287,16 +296,30 @@ impl Host {
         let peer_metrics = (resources.peer.peer_listen.is_some()
             || resources.peer.peer_address.is_some()
             || !resources.peer.peer_get_member.is_empty())
-        .then(|| crate::peer::metrics::Metrics::new(&metadata))
+        .then(|| crate::peer::metrics::Metrics::new(&metadata, slots))
         .transpose()?;
+        // Demand ports: images, GET service connections, then one local race source.
+        let service_ports = if resources.peer.peer_listen.is_some() {
+            peer_connections
+        } else {
+            0
+        };
+        let race_local = resources.peer.peer_race_local && resources.peer.peer_race_us.is_some();
+        let io_scheduler = cas_core::scheduler::Scheduler::new(
+            slots + service_ports + usize::from(race_local),
+            &metadata,
+        )?;
+        let reader = store.reader()?;
         let peer = if resources.peer.peer_address.is_some()
             || !resources.peer.peer_get_member.is_empty()
         {
+            let local = race_local.then(|| (io_scheduler.clone(), slots + service_ports));
             Some(BudgetArc::try_new(
                 crate::peer::Router::new(
                     &resources.peer,
                     &metadata,
                     peer_metrics.as_ref().expect("peer metrics").clone(),
+                    local,
                 )?,
                 &metadata,
             )?)
@@ -311,17 +334,9 @@ impl Host {
                 peer_metrics,
                 admission,
                 fair,
-                io_scheduler: cas_core::scheduler::Scheduler::new(
-                    slots
-                        + if resources.peer.peer_listen.is_some() {
-                            peer_connections
-                        } else {
-                            0
-                        },
-                    &metadata,
-                )?,
+                io_scheduler,
                 gate,
-                reader: store.reader()?,
+                reader,
                 cache: cas_core::cache::Cache::new_sized(
                     resources.cache_bytes,
                     store.chunk_size(),
@@ -395,7 +410,11 @@ impl Host {
                     &metadata,
                     shared.peer_metrics.as_ref().expect("peer metrics").clone(),
                     (shared.io_scheduler.clone(), slots),
-                    peer_connections,
+                    crate::peer::ServiceOptions {
+                        connections: peer_connections,
+                        #[cfg(test)]
+                        reply_delay: Duration::from_micros(shared.resources.peer_reply_delay_us),
+                    },
                 )
             })
             .transpose()?;
@@ -581,7 +600,7 @@ impl Host {
         serde_json::json!({ "failure": self.shared.gate.failure(), "store": self.store_status(),
             "admission": self.shared.admission.status(),
             "peer": self.shared.peer_metrics.as_ref().map(|metrics| metrics.report()),
-            "fleet": self.shared.fleet.as_ref().map(|fleet| fleet.metrics.report()),
+            "fleet": self.shared.fleet.as_ref().map(|fleet| fleet.report()),
             "cache": self.shared.cache.status(), "metadata_cache": self.shared.pages.status(),
             "fetches": self.shared.fetches.status(), "admission_scheduler":self.shared.fair.report(), "io_scheduler":self.shared.io_scheduler.status(),
             "collection": *self.shared.collection.lock().expect("collection status poisoned"),
@@ -697,6 +716,8 @@ pub(super) struct Port {
     rotation: Option<append::RotationKind>,
     rotation_retry: Instant,
     window: BudgetArc<window::Window>,
+    /// This image's view of the shared GET router, allocated at creation.
+    peer: Option<BudgetArc<crate::peer::Router>>,
 }
 
 impl Port {
@@ -713,6 +734,9 @@ impl Port {
     pub fn fail_shared(&self, error: &io::Error) {
         self.shared.gate.fail(error.to_string());
     }
+    pub(super) fn host_gate(&self) -> BudgetArc<state::HostGate> {
+        self.shared.gate.clone()
+    }
 
     pub(super) fn fair(&self) -> fair::Port {
         fair::Port {
@@ -726,13 +750,16 @@ impl Port {
     }
 
     pub fn peer(&self) -> Option<BudgetArc<crate::peer::Router>> {
-        self.shared.peer.clone()
+        self.peer.clone()
     }
     pub fn peer_config(&self) -> &crate::peer::Config {
         &self.shared.resources.peer
     }
-    pub fn peer_metrics(&self) -> Option<BudgetArc<crate::peer::metrics::Metrics>> {
-        self.shared.peer_metrics.clone()
+    pub fn peer_metrics(&self) -> Option<crate::peer::metrics::ImageMetrics> {
+        self.shared
+            .peer_metrics
+            .clone()
+            .map(|metrics| crate::peer::metrics::ImageMetrics::new(metrics, self.index))
     }
     pub fn reader(&self) -> Reader {
         self.shared.reader.clone()
@@ -1104,7 +1131,19 @@ fn make_image(
     let wake = EventFd::new(EFD_CLOEXEC | EFD_NONBLOCK)?;
     let (output, events) = mailbox::bounded(1, &shared.resources.metadata)?;
     let (reply, replies) = mailbox::bounded(1, &shared.resources.metadata)?;
+    // One host-level slot check covers every per-slot table below.
+    if index >= shared.compaction.len() {
+        return Err(io::Error::other("fleet host image slot limit exceeded"));
+    }
     let image = manifest.current().image;
+    if let Some(metrics) = &shared.peer_metrics {
+        metrics.bind(index, image);
+    }
+    let peer = shared
+        .peer
+        .as_ref()
+        .map(|router| BudgetArc::try_new(router.for_image(index), &shared.resources.metadata))
+        .transpose()?;
     let endpoint = worker::Endpoint {
         retired: false,
         fleet: shared.fleet.clone(),
@@ -1143,6 +1182,7 @@ fn make_image(
             rotation: None,
             rotation_retry: Instant::now(),
             window,
+            peer,
         },
     };
     Ok((attachment, endpoint))
