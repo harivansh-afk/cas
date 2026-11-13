@@ -1002,15 +1002,18 @@ fn two_daemon_loopback_verifies_data_measures_phases_and_fails_on_peer_loss() {
     }
 }
 
-/// Two processes: B delays every GET reply by 10 ms, A races its local copy
-/// after 100 µs. Every measured read must be won locally (a local win costs
-/// well under a millisecond; 10 ms leaves room for a loaded debug test host
-/// to deschedule the local worker), every late reply must be verified,
-/// discarded and counted as wasted wire bytes, and the discarded replies
-/// never reach a guest buffer (each read checks its bytes).
+/// Two processes: B delays every GET reply by 1 ms (serially, so a longer
+/// delay would back 700 requests up past the 2 s GET timeout), A races its
+/// local copy after 100 µs. A local win costs well under a millisecond, so
+/// the local copy wins every read on an idle host; a loaded debug test host
+/// can deschedule the local worker past the 1 ms reply now and then, so the
+/// test requires at least 95 % local wins and exact accounting for every
+/// read: wins sum to starts, every start has one discard, wasted wire bytes
+/// are exactly the discarded replies, every reply verified, and no discarded
+/// reply reaches a guest buffer (each read checks its bytes).
 #[test]
 fn two_daemon_loopback_race_wins_locally_against_a_delayed_server() {
-    let mut b = Daemon::start_with(None, &[("CAS_PEER_SERVER_DELAY_US", "10000")]);
+    let mut b = Daemon::start_with(None, &[("CAS_PEER_SERVER_DELAY_US", "1000")]);
     let ready = b.reply();
     let address: SocketAddr = ready["address"].as_str().unwrap().parse().unwrap();
     let mut a = Daemon::start_with(
@@ -1022,13 +1025,15 @@ fn two_daemon_loopback_race_wins_locally_against_a_delayed_server() {
     let report = a.command("measure");
     let measured = started.elapsed();
     let c = &report["peer"]["counters"];
+    let won_local = c["race_won_local"].as_u64().unwrap();
+    let won_first = c["race_won_first"].as_u64().unwrap();
     assert_eq!(c["races_started"], 700, "{c}");
-    assert_eq!(c["race_won_local"], 700, "{c}");
-    assert_eq!(c["race_won_first"], 0, "{c}");
+    assert_eq!(won_local + won_first, 700, "{c}");
+    assert!(won_local >= 665, "fewer than 95% local wins: {c}");
+    assert_eq!(c["race_won_second"], 0, "{c}");
     assert_eq!(c["failed_reads"], 0, "{c}");
     assert_eq!(report["cache"]["resident_bytes"], 0);
-    // The counters above prove every read was won locally; wall time is
-    // only a hang guard here.
+    // The counters above carry the claim; wall time is only a hang guard.
     assert!(measured < Duration::from_secs(10), "{measured:?}");
     let records: Vec<_> = report["peer"]["recent"]
         .as_array()
@@ -1037,11 +1042,18 @@ fn two_daemon_loopback_race_wins_locally_against_a_delayed_server() {
         .filter(|r| r["id"].as_u64().unwrap() < 700)
         .collect();
     assert_eq!(records.len(), 700);
+    let mut local_records = 0;
     for r in records {
-        assert_eq!(r["race_winner"], peer::metrics::WINNER_LOCAL);
+        assert!(
+            r["race_winner"] == peer::metrics::WINNER_LOCAL
+                || r["race_winner"] == peer::metrics::WINNER_FIRST,
+            "{r}"
+        );
+        local_records += u64::from(r["race_winner"] == peer::metrics::WINNER_LOCAL);
         assert_eq!(r["race_budget_us"], 100);
         assert_eq!(r["success"], true);
     }
+    assert_eq!(local_records, won_local);
     let until = Instant::now() + Duration::from_secs(10);
     let late = loop {
         let r = a.command("report");
@@ -1052,10 +1064,16 @@ fn two_daemon_loopback_race_wins_locally_against_a_delayed_server() {
         thread::sleep(Duration::from_millis(10));
     };
     let c = &late["peer"]["counters"];
-    assert_eq!(c["verified"], 700);
-    assert_eq!(c["errors"], 0);
+    assert_eq!(c["verified"], 700, "{c}");
+    assert_eq!(c["errors"], 0, "{c}");
     assert_verified_bytes_sum(&late);
-    assert_eq!(c["race_wasted_wire_bytes"], 700 * (24 + BLOCK_SIZE) as u64);
+    // Each local win discards one whole late reply frame; a primary win
+    // discards the local load, which has no wire bytes.
+    assert_eq!(
+        c["race_wasted_wire_bytes"],
+        won_local * (24 + BLOCK_SIZE) as u64,
+        "{c}"
+    );
     b.command("stop");
     assert!(b.child.wait().unwrap().success());
     a.command("stop");

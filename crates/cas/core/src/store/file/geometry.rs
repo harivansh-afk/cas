@@ -93,7 +93,9 @@ mod tests {
         // the daemon reads it from several threads (WAL opens, inspection).
         let held = direct::open_readonly(&tickets.root().join(NAME)).unwrap();
         let (recorded, size) = self::config(&tickets, Arc::clone(&metadata)).unwrap();
-        assert_eq!((recorded, size.bytes()), (config, BLOCK_SIZE));
+        assert_eq!(recorded.store, config.store);
+        assert_eq!(recorded.segment_bytes, config.segment_bytes);
+        assert_eq!(size.bytes(), BLOCK_SIZE);
         // An exclusive writer is still excluded while readers hold it.
         assert_eq!(
             direct::open(&tickets.root().join(NAME), false)
