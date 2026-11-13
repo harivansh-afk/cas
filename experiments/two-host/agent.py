@@ -218,6 +218,17 @@ def qemu_record(pid, acceleration, sizing=None):
     raise RuntimeError("could not identify the running QEMU process")
 
 
+def working_set_script(command, chroot=None, cwd=None, env=None):
+    """The guest-side script for one working-set command: from /mnt/cas, or
+    inside a chroot with a login bash, the recorded cwd and only the recorded
+    environment (`env -i`)."""
+    if chroot is None:
+        return "cd /mnt/cas\n" + command
+    inner = command if cwd is None else f"cd {shlex.quote(cwd)} && {command}"
+    argv = ["env", "-i", *(f"{k}={v}" for k, v in sorted((env or {}).items())), "chroot", chroot, "/bin/bash", "-lc", inner]
+    return shlex.join(argv)
+
+
 class Agent:
     def __init__(self, build):
         self.build = build
@@ -646,13 +657,15 @@ class Agent:
             timeout=timeout,
         )
 
-    def run_commands(self, guests, commands, label, timeout=1800):
+    def run_commands(self, guests, commands, label, timeout=1800, chroot=None, cwd=None, env=None):
         """Replay a recorded command list in every guest at once.
 
         Each guest runs its list in order from the data disk; a failing command
         fails the case. Completion times are this host's monotonic clock, the
         same clock as the guest launch milestones. Stdout is retained per
-        command under the guest's directory, not in the RPC reply.
+        command under the guest's directory, not in the RPC reply. With
+        `chroot`, every command runs as `chroot PATH /bin/bash -lc` inside the
+        data disk's root with the given cwd and exactly the given environment.
         """
         if not guests or not commands:
             raise ValueError("working set needs guests and commands")
@@ -663,14 +676,16 @@ class Agent:
             rows = []
             for index, command in enumerate(commands):
                 output = self.case / guest / f"working-set-{label}-{index}.out"
+                script = working_set_script(command, chroot, cwd, env)
                 started = time.monotonic_ns()
-                text = self.shell(guest, "cd /mnt/cas\n" + command, timeout)
+                text = self.shell(guest, script, timeout)
                 completed = time.monotonic_ns()
                 output.write_text(text)
                 rows.append(
                     {
                         "index": index,
                         "command": command,
+                        "script": script,
                         "started_ns": started,
                         "completed_ns": completed,
                         "elapsed_ns": completed - started,

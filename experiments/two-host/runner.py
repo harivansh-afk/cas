@@ -110,17 +110,41 @@ def sizing(value):
     return {"cores": cores, "memory_mib": memory}
 
 
+WORKING_SET_KEYS = {"commands", "chroot", "cwd", "env"}
+
+
 def working_set(value):
-    """A JSON list of guest shell command strings, replayed in order."""
-    if not isinstance(value, list) or any(
-        not isinstance(c, str) or not c.strip() or "\0" in c for c in value
+    """Guest shell commands replayed in order, as a JSON list of strings or
+    an object `{"commands": [...], "chroot": PATH|null, "cwd": PATH|null,
+    "env": {NAME: VALUE}}`. With `chroot`, each command runs as
+    `chroot PATH /bin/bash -lc 'cd CWD && COMMAND'` under exactly the given
+    environment (a recorded trajectory's cwd and env); without it, from
+    /mnt/cas with `sh -eu`. Normalised to the object form."""
+    if isinstance(value, list):
+        value = {"commands": value}
+    if not isinstance(value, dict) or not set(value) <= WORKING_SET_KEYS:
+        raise TypeError(f"working_set must be a command list or an object with {sorted(WORKING_SET_KEYS)}")
+    commands = value.get("commands", [])
+    if not isinstance(commands, list) or any(
+        not isinstance(c, str) or not c.strip() or "\0" in c for c in commands
     ):
-        raise TypeError("working_set must be a list of non-empty shell command strings")
-    if len(value) > MAX_WORKING_SET_COMMANDS:
+        raise TypeError("working_set commands must be non-empty shell command strings")
+    if len(commands) > MAX_WORKING_SET_COMMANDS:
         raise ValueError(
             f"working_set holds at most {MAX_WORKING_SET_COMMANDS} commands"
         )
-    return list(value)
+    chroot, cwd, env = value.get("chroot"), value.get("cwd"), value.get("env") or {}
+    for name, path in (("chroot", chroot), ("cwd", cwd)):
+        if path is not None and (not isinstance(path, str) or not path.startswith("/") or "\0" in path or "'" in path):
+            raise ValueError(f"working_set {name} must be an absolute path without quotes")
+    if cwd is not None and chroot is None:
+        raise ValueError("working_set cwd needs a chroot")
+    if not isinstance(env, dict) or any(
+        not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k) or not isinstance(v, str) or "\0" in v
+        for k, v in env.items()
+    ):
+        raise TypeError("working_set env must map identifiers to strings")
+    return {"commands": list(commands), "chroot": chroot, "cwd": cwd, "env": dict(env)}
 
 
 def normalize_settings(config):
@@ -736,19 +760,20 @@ class Experiment:
             sample_ring=sample_ring,
         )
 
-    def replay_working_set(self, node, guests, commands, anchors):
+    def replay_working_set(self, node, guests, spec, anchors):
         """Replay the recorded commands cold, then again warm as a control.
 
         Remote-read counters bracket each whole pass on every member, so the
         cold pass's destination GET delta is the working set actually fetched.
         """
-        if not commands:
+        if not spec["commands"]:
             return None
         passes = {}
         for label in ("cold", "warm"):
             before = self.report()
             replay = self.agents[node].call(
-                "run_commands", guests=guests, commands=commands, label=label
+                "run_commands", guests=guests, commands=spec["commands"], label=label,
+                chroot=spec["chroot"], cwd=spec["cwd"], env=spec["env"],
             )
             after = self.report()
             peers = [peer_counters(x, y) for x, y in zip(before, after, strict=True)]

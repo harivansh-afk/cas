@@ -98,10 +98,11 @@ def main():
         "build": load_json(records / "build.json"),
         "ulimit": load_json(records / "ulimit.json"),
         "irq": load_json(records / "irq.json"),
+        "smt": load_json(records / "smt.json"),
         "steps": steps,
         "setup_log_sha256": hashlib.sha256((records / "setup.log").read_bytes()).hexdigest() if (records / "setup.log").exists() else None,
     }
-    inventory["skipped"] = [name for name, value in (("disk", inventory["disk"]), ("build", inventory["build"]), ("irq", inventory["irq"])) if value is None]
+    inventory["skipped"] = [name for name, value in (("disk", inventory["disk"]), ("build", inventory["build"]), ("irq", inventory["irq"]), ("smt", inventory["smt"])) if value is None]
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(inventory, indent=1, sort_keys=True) + "\n")

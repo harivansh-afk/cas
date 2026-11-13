@@ -5,6 +5,7 @@ the arm configs under experiments/cloudlab/arms. See docs/cloudlab-campaign.md.
     campaign.py start   --nodes N.json --plan P.json [--export DEST] [--redo]
     campaign.py run     ... [--dry-run]     # foreground worker (start detaches it)
     campaign.py status  --nodes N.json
+    campaign.py repeats --nodes N.json --out day4-repeats.json [--threshold 0.15]
 """
 
 import argparse
@@ -54,6 +55,7 @@ class Campaign:
         self.nodes_config = json.loads(self.nodes_path.read_text())
         self.nodes = lib.validate_nodes(self.nodes_config)
         self.loopback = lib.loopback(self.nodes_config)
+        self.pinned_revision = lib.pinned_revision(self.nodes_config) if args.command != "status" else None
         self.name = self.nodes_config["campaign"]
         self.dir = Path(self.nodes[0]["output_root"]) / self.name
         self.units_dir = self.dir / "units"
@@ -192,6 +194,10 @@ class Campaign:
         for name, identity in identities.items():
             if identity["revision"] != first["revision"] or identity["binaries"] != first["binaries"]:
                 raise RuntimeError(f"node {name} differs from the first node in revision or binaries")
+            if self.pinned_revision and identity["revision"] != self.pinned_revision:
+                raise RuntimeError(f"node {name} is at {identity['revision']}, campaign pins {self.pinned_revision}")
+            if identity["dirty"]:
+                raise RuntimeError(f"node {name} has uncommitted changes: {identity['dirty'][:200]}")
         fresh = {
             "campaign": self.name,
             "revision": first["revision"],
@@ -204,6 +210,7 @@ class Campaign:
             "nodes_config_sha256": sha256_file(self.nodes_path),
             "driver": {p.name: sha256_file(p) for p in (HERE / "campaign.py", HERE / "campaignlib.py", HERE / "setup.sh", HERE / "r0.sh", HERE / "pingpong.py")},
             "loopback": self.loopback,
+            "pinned_revision": self.pinned_revision,
             "evidence_label": "development" if self.loopback else "native",
         }
         if self.manifest_path.exists():
@@ -256,7 +263,7 @@ class Campaign:
                 raise Blocked("WORKING_SET_FROM_BUNDLE needs nodes config bundle_actions")
             fills["working_set"] = lib.working_set_from_bundle(bundle)
             write_json(self.manifest_path, self.manifest_data)
-        return fills["working_set"]["commands"]
+        return {k: fills["working_set"][k] for k in ("commands", "cwd", "env")}
 
     def fills(self, arm, allow_pending=False):
         needed = set(lib.unresolved(arm.get("config", {})))
@@ -294,6 +301,9 @@ class Campaign:
             if sets is None:
                 problems.append(f"{node['name']}: arm has no pinning for node type {node['node_type']!r}")
                 continue
+            smt = lib.smt_problem(inventories[node["name"]], self.loopback)
+            if smt:
+                problems.append(f"{node['name']}: {smt}")
             ncpu = inventories[node["name"]]["hardware"]["logical_cpus"]
             problems += [f"{node['name']}: {p}" for p in lib.check_pinning(sets, index, ncpu, cores, guests)]
             if arm["runner"] != "two-host":
@@ -349,7 +359,15 @@ class Campaign:
             out = self.shell(node, ["bash", self.script(node, "r0.sh"), "--check", "--source", node["source"]], check=False)
             if "fio:" not in out:
                 problems.append(f"{node['name']}: r0.sh --check found no fio")
+            if self.r0_nvme_tcp(arm):
+                out = self.shell(node, ["bash", self.script(node, "r0.sh"), "--nvme-tcp-check"], check=False)
+                missing = [line for line in out.splitlines() if "=missing" in line]
+                if missing:
+                    problems.append(f"{node['name']}: nvme-tcp prerequisites missing: {'; '.join(missing)}")
         return problems
+
+    def r0_nvme_tcp(self, arm):
+        return bool(arm.get("nvme_tcp")) and self.nodes_config.get("r0_nvme_tcp", True)
 
     # ------------------------------------------------------------ units
 
@@ -412,7 +430,7 @@ class Campaign:
         sets = arm["pinning"]
         peer = f"{b['address']}:{R0_PORT}"
         label = self.manifest_data["evidence_label"]
-        common = ["--seconds", str(arm.get("seconds", 30)), "--label", label]
+        common = ["--seconds", str(arm.get("seconds", 30)), "--label", label, *(["--nvme-tcp"] if self.r0_nvme_tcp(arm) else [])]
         b_out = f"{b['output_root']}/{self.name}/units/{uid}/node-{b['name']}"
         b_cmd = ["bash", self.script(b, "r0.sh"), "--mount", b["storage_mount"], "--output", b_out, "--source", b["source"], "--cpus", lib.pin_for(sets[b["node_type"]], "controller", 1), "--role", "server", "--peer", peer, *common]
         a_cmd = ["bash", self.script(a, "r0.sh"), "--mount", a["storage_mount"], "--output", str(unit_dir / f"node-{a['name']}"), "--source", a["source"], "--cpus", lib.pin_for(sets[a["node_type"]], "controller", 0), "--role", "client", "--peer", peer, *common]
@@ -525,6 +543,21 @@ class Campaign:
         self.export(uid)
         self.set_status(current=None)
 
+    def repeats(self, out, threshold):
+        """Read every finished unit's p99 and write a day-four plan for the
+        (arm, case) groups whose spread across repetitions exceeds the threshold."""
+        records = []
+        for unit_dir in sorted(self.units_dir.glob("d*-r*")):
+            if ".attempt-" in unit_dir.name or lib.unit_state(unit_dir) != "done":
+                continue
+            record = json.loads((unit_dir / "unit.json").read_text())
+            p99, reason = lib.unit_p99(unit_dir, record["runner"], record["case"])
+            records.append({"day": record["day"], "arm": record["arm"], "case": record["case"], "rep": record["repetition"], "p99": p99, "reason": reason, "unit": unit_dir.name})
+        plan, report = lib.plan_repeats(records, threshold)
+        plan["source"] = {"campaign": self.name, "threshold": threshold, "generated": now(), "units": report}
+        write_json(out, plan)
+        return plan
+
     def guard(self):
         pid = self.status.get("pid")
         if pid and pid != os.getpid() and Path(f"/proc/{pid}").exists() and self.status.get("phase") not in (None, "finished", "dry-run-finished"):
@@ -561,13 +594,15 @@ class Campaign:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=["start", "run", "status", "dry-run"])
+    parser.add_argument("command", choices=["start", "run", "status", "dry-run", "repeats"])
     parser.add_argument("--nodes", required=True, help="campaign nodes config (see cloudlab.example.json)")
     parser.add_argument("--plan", help="day plan JSON")
     parser.add_argument("--arms", default=str(lib.ARMS_DIR))
     parser.add_argument("--export", help="rsync destination for evidence; overrides the nodes config")
     parser.add_argument("--redo", action="store_true", help="rerun units whose outputs exist (old outputs are kept as .attempt-N)")
     parser.add_argument("--dry-run", action="store_true", help="validate configs, pinning, binaries and inputs; launch nothing")
+    parser.add_argument("--out", help="repeats: where to write the day-four plan")
+    parser.add_argument("--threshold", type=float, default=0.15, help="repeats: p99 spread (max-min)/median above which a unit repeats")
     args = parser.parse_args()
     if args.command == "dry-run":
         args.command, args.dry_run = "run", True
@@ -582,6 +617,15 @@ def main():
         return 0
     if args.command == "start":
         campaign.start()
+        return 0
+    if args.command == "repeats":
+        if not args.out:
+            parser.error("--out is required")
+        plan = campaign.repeats(args.out, args.threshold)
+        units = plan["days"][0]["units"] if plan["days"] else []
+        print(f"{len(units)} unit(s) to repeat; plan written to {args.out}")
+        for entry in plan["source"]["units"]:
+            print(f"  {'repeat' if entry['repeat'] else 'keep  '} d{entry['day']} {entry['arm']} {entry['case']} spread={entry['spread']} measured={entry['measured']}/{entry['finished']} {entry.get('reason') or ''}")
         return 0
     return 0 if campaign.run() else 2
 

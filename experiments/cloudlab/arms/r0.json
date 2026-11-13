@@ -1,24 +1,24 @@
 {
  "arm": "r0",
  "runner": "r0",
- "description": "Testbed floor: fio 4 KiB QD1 direct random read and 4 KiB QD1 write+fdatasync on each node's experiment XFS, and a TCP ping-pong A->B on the experiment link.",
+ "description": "Testbed floor: fio 4 KiB QD1 direct random read and 4 KiB QD1 write+fdatasync on each node's experiment XFS, and a TCP ping-pong A->B on the experiment link. With nvme_tcp, B also exports a file-backed nvmet namespace on its XFS over the experiment link and A reads it through kernel nvme-tcp (disable per campaign with nodes config r0_nvme_tcp false).",
  "seconds": 30,
  "pinning": {
   "r6615": {
-   "logical_cpus": 64,
-   "irq": "0-1",
-   "daemon": "2-5",
-   "controller": "6-7",
-   "guests": "8-23",
-   "note": "cpus 24-31 and SMT siblings 32-63 left idle; irq/daemon/guest sets on distinct physical cores 0-23"
-  },
-  "c6525-25g": {
    "logical_cpus": 32,
    "irq": "0-1",
    "daemon": "2-5",
    "controller": "6-7",
    "guests": "8-23",
-   "note": "with SMT on, 16-23 are siblings of 0-7; disable SMT or shrink the guest list if the inventory shows 16 logical cpus"
+   "note": "SMT off (setup.sh nosmt): 32 physical cores; irq, daemon and guest sets on distinct cores, 24-31 idle"
+  },
+  "c6525-25g": {
+   "logical_cpus": 16,
+   "irq": "0-1",
+   "daemon": "2-5",
+   "controller": "6-7",
+   "guests": "8-15",
+   "note": "SMT off (setup.sh nosmt): 16 physical cores; eight guest cores, so the g16 units and the 16-image burst are not in this node type's plan"
   },
   "loopback-8": {
    "logical_cpus": 8,
@@ -34,5 +34,6 @@
  },
  "cases": [
   "floor"
- ]
+ ],
+ "nvme_tcp": true
 }

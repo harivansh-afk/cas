@@ -253,8 +253,10 @@ pub(super) fn run(args: &Args, build: &Build, vm: &Path, device: &Path) -> io::R
         process::check_interrupt()?;
         require_alive(&mut daemons)?;
         require_alive(&mut guests)?;
+        // Sixteen guests boot concurrently on shared cores; allow them time
+        // without touching the daemon's own attach window.
         evidence::require(
-            started.elapsed() < Duration::from_secs(120),
+            started.elapsed() < Duration::from_secs(120 + 30 * u64::from(args.guests)),
             "guest readiness timed out",
         )?;
         sampler.tick()?;

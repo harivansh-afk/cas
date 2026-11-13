@@ -21,6 +21,7 @@ from agent import (
     parse_block_stat,
     sizing_args,
     ssh_ready,
+    working_set_script,
 )
 from runner import (
     DEFAULT_CASES,
@@ -550,24 +551,53 @@ class WorkingSetTests(unittest.TestCase):
 
     def test_working_set_defaults_empty_and_is_inherited_per_case(self):
         settings = normalize_settings(config())
-        self.assertEqual(settings["working_set"], [])
-        self.assertEqual(settings["burst"]["working_set"], [])
-        self.assertEqual(settings["resume"]["working_set"], [])
-        commands = ["sha256sum /mnt/cas/data", "wc -c < unique"]
+        empty = {"commands": [], "chroot": None, "cwd": None, "env": {}}
+        self.assertEqual(settings["working_set"], empty)
+        self.assertEqual(settings["burst"]["working_set"], empty)
+        self.assertEqual(settings["resume"]["working_set"], empty)
+        commands = ["dd if=/mnt/cas/data bs=4096 count=1 | sha256sum", "sha256sum /mnt/cas/data"]
+        spec = {**empty, "commands": commands}
         shared = normalize_settings(config(working_set=commands))
-        self.assertEqual(shared["burst"]["working_set"], commands)
-        self.assertEqual(shared["resume"]["working_set"], commands)
+        self.assertEqual(shared["burst"]["working_set"], spec)
+        self.assertEqual(shared["resume"]["working_set"], spec)
         own = normalize_settings(
             config(working_set=commands, resume={"working_set": ["true"]})
         )
-        self.assertEqual(own["resume"]["working_set"], ["true"])
-        self.assertEqual(own["burst"]["working_set"], commands)
+        self.assertEqual(own["resume"]["working_set"], {**empty, "commands": ["true"]})
+        self.assertEqual(own["burst"]["working_set"], spec)
         cleared = normalize_settings(
             config(working_set=commands, burst={"working_set": []})
         )
-        self.assertEqual(cleared["burst"]["working_set"], [])
+        self.assertEqual(cleared["burst"]["working_set"], empty)
         cfg = apply_overrides(config(), ['working_set=["ls -l"]'])
-        self.assertEqual(normalize_settings(cfg)["resume"]["working_set"], ["ls -l"])
+        self.assertEqual(normalize_settings(cfg)["resume"]["working_set"]["commands"], ["ls -l"])
+
+    def test_working_set_chroot_form(self):
+        spec = {"commands": ["pwd"], "chroot": "/mnt/cas/root", "cwd": "/testbed", "env": {"HOME": "/root", "PATH": "/bin"}}
+        settings = normalize_settings(config(working_set=spec))
+        self.assertEqual(settings["working_set"], spec)
+        self.assertEqual(settings["burst"]["working_set"], spec)
+        inherited = normalize_settings(config(working_set=spec, resume={"working_set": {"commands": ["ls"]}}))
+        self.assertEqual(inherited["resume"]["working_set"], {"commands": ["ls"], "chroot": None, "cwd": None, "env": {}})
+        for bad in (
+            {"commands": ["pwd"], "cwd": "/testbed"},
+            {"commands": ["pwd"], "chroot": "relative"},
+            {"commands": ["pwd"], "chroot": "/a'b"},
+            {"commands": ["pwd"], "chroot": "/r", "env": {"1BAD": "x"}},
+            {"commands": ["pwd"], "chroot": "/r", "env": {"OK": 1}},
+            {"commands": ["pwd"], "unknown": 1},
+        ):
+            with self.subTest(bad=bad), self.assertRaises((ValueError, TypeError)):
+                normalize_settings(config(working_set=bad))
+
+    def test_working_set_script_wraps_chroot_commands(self):
+        self.assertEqual(working_set_script("ls"), "cd /mnt/cas\nls")
+        script = working_set_script("echo $HOME > out", "/mnt/cas/root", "/testbed", {"PATH": "/bin", "HOME": "/root"})
+        self.assertEqual(
+            script,
+            "env -i HOME=/root PATH=/bin chroot /mnt/cas/root /bin/bash -lc 'cd /testbed && echo $HOME > out'",
+        )
+        self.assertEqual(working_set_script("ls", "/r"), "env -i chroot /r /bin/bash -lc ls")
 
     def test_working_set_rejects_non_command_lists(self):
         for bad in (

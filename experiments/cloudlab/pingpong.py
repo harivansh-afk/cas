@@ -75,6 +75,37 @@ def client(host, port, seconds, warmup=1000):
     }
 
 
+def gate(host, port, timeout=900):
+    """Two-connection handshake for r0.sh's nvme-tcp phase: the first client
+    connection gets `ready`, the second must say `done`; then the gate exits."""
+    with socket.create_server((host, port)) as server:
+        server.settimeout(timeout)
+        conn, _ = server.accept()
+        with conn:
+            conn.sendall(b"ready\n")
+        conn, _ = server.accept()
+        with conn:
+            conn.settimeout(timeout)
+            if conn.recv(16).strip() != b"done":
+                raise SystemExit("gate: expected done")
+
+
+def knock(host, port, message, retry=300):
+    deadline = time.monotonic() + retry
+    while True:
+        try:
+            with socket.create_connection((host, port), timeout=10) as sock:
+                if message:
+                    sock.sendall(message + b"\n")
+                    return b""
+                sock.settimeout(900)
+                return sock.recv(16)
+        except OSError:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(1)
+
+
 def main():
     role, target = sys.argv[1], address(sys.argv[2])
     seconds = int(sys.argv[sys.argv.index("--seconds") + 1]) if "--seconds" in sys.argv else 30
@@ -82,6 +113,13 @@ def main():
         serve(*target)
     elif role == "client":
         print(json.dumps(client(*target, seconds), indent=1))
+    elif role == "gate":
+        gate(*target)
+    elif role == "wait":
+        if knock(*target, b"").strip() != b"ready":
+            raise SystemExit("wait: gate did not say ready")
+    elif role == "done":
+        knock(*target, b"done")
     else:
         raise SystemExit(__doc__)
 

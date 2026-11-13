@@ -25,6 +25,36 @@ finish_phase() {
   cat "$CAS_DEVICE_STAT" > "$CAS_OUTPUT/$1.after.diskstat"
   date -u +%s.%N > "$CAS_OUTPUT/$1.end"
 }
+# Run one fio job on every guest at once; per-guest JSON stays under guest-N/.
+fio_all() {
+  local label=$1 pids=() i
+  shift
+  for ((i=1; i<=CAS_GUESTS; i++)); do
+    fio_job "vm$i" "$label" "$@" &
+    pids+=($!)
+  done
+  local rc=0
+  for pid in "${pids[@]}"; do wait "$pid" || rc=1; done
+  aggregate "$label"
+  return $rc
+}
+# Per-label aggregate over the guests: summed IOPS and bandwidth, the spread of
+# each guest's own clat percentiles. The json+ histograms stay per guest.
+aggregate() {
+  local label=$1 files=() i
+  for ((i=1; i<=CAS_GUESTS; i++)); do files+=("$CAS_OUTPUT/guest-$i/$label.json"); done
+  jq -s --arg label "$label" '
+    def stat(f): {min: (map(f) | min), max: (map(f) | max), mean: ((map(f) | add) / length)};
+    [.[] | .jobs[0]] as $jobs
+    | {label: $label, guests: ($jobs | length),
+       read: {iops: ([$jobs[].read.iops] | add), bw_bytes: ([$jobs[].read.bw_bytes] | add),
+              clat_ns_percentile: ($jobs | map(.read.clat_ns.percentile // {}) | if all(. == {}) then null else
+                 {"50": stat(.["50.000000"]), "99": stat(.["99.000000"]), "99.9": stat(.["99.900000"])} end)},
+       write: {iops: ([$jobs[].write.iops] | add), bw_bytes: ([$jobs[].write.bw_bytes] | add),
+              clat_ns_percentile: ($jobs | map(.write.clat_ns.percentile // {}) | if all(. == {}) then null else
+                 {"50": stat(.["50.000000"]), "99": stat(.["99.000000"]), "99.9": stat(.["99.900000"])} end)},
+       errors: ([$jobs[].error] | add)}' "${files[@]}" > "$CAS_OUTPUT/aggregate-$label.json"
+}
 fio_job() {
   local vm=$1 label=$2
   shift 2
@@ -80,29 +110,30 @@ finish_phase prepare
 settle prepare-drain
 
 if [[ $mode == baseline ]]; then
-  # Each new runner invocation is one replicate. Rotate arm order outside this script.
+  # Each new runner invocation is one replicate. Rotate arm order outside this
+  # script. Every guest runs each job at once; N=1 is the historical pilot.
   for depth in 1 32; do
     label="read-q$depth"
     phase "$label"
-    fio_job vm1 "$label" --ioengine=io_uring --rw=randread --bs=4k --iodepth="$depth" \
+    fio_all "$label" --ioengine=io_uring --rw=randread --bs=4k --iodepth="$depth" \
       --time_based=1 --runtime="$seconds" --ramp_time=5
     finish_phase "$label"
   done
   phase sequential-read
-  fio_job vm1 sequential-read --ioengine=io_uring --rw=read --bs=128k --iodepth=32 \
+  fio_all sequential-read --ioengine=io_uring --rw=read --bs=128k --iodepth=32 \
     --time_based=1 --runtime="$seconds" --ramp_time=5
   finish_phase sequential-read
   for depth in 1 32; do
     label="write-q$depth"
     phase "$label"
-    fio_job vm1 "$label" --ioengine=io_uring --rw=randwrite --bs=4k --iodepth="$depth" \
+    fio_all "$label" --ioengine=io_uring --rw=randwrite --bs=4k --iodepth="$depth" \
       --time_based=1 --runtime="$seconds" --ramp_time=5 --end_fsync=1 \
       --verify=crc32c --verify_interval=4096 --do_verify=0
     finish_phase "$label"
     settle "$label-drain"
   done
   phase flush
-  fio_job vm1 flush --ioengine=psync --rw=randwrite --bs=4k --iodepth=1 --fdatasync=1 \
+  fio_all flush --ioengine=psync --rw=randwrite --bs=4k --iodepth=1 --fdatasync=1 \
     --time_based=1 --runtime="$seconds" --ramp_time=5 --end_fsync=1 \
     --verify=crc32c --verify_interval=4096 --do_verify=0
   finish_phase flush
@@ -119,26 +150,39 @@ elif [[ $mode == accounting ]]; then
   guest vm1 cat /sys/block/vda/stat > "$CAS_OUTPUT/accounting.guest-after.diskstat"
   finish_phase accounting
 elif [[ $mode == pressure ]]; then
-  [[ $CAS_GUESTS == 2 ]]
+  # The last guest writes; every other guest reads. N=2 is the historical pilot.
+  [[ $CAS_GUESTS -ge 2 ]]
+  readers=$((CAS_GUESTS - 1))
+  writer_vm="vm$CAS_GUESTS"
   phase reader-alone
-  fio_job vm1 reader-alone --ioengine=io_uring --rw=randread --bs=4k --iodepth=1 \
-    --time_based=1 --runtime="$seconds" --ramp_time=5
+  pids=()
+  for ((i=1; i<=readers; i++)); do
+    fio_job "vm$i" reader-alone --ioengine=io_uring --rw=randread --bs=4k --iodepth=1 \
+      --time_based=1 --runtime="$seconds" --ramp_time=5 &
+    pids+=($!)
+  done
+  for pid in "${pids[@]}"; do wait "$pid"; done
+  CAS_GUESTS=$readers aggregate reader-alone
   finish_phase reader-alone
   for rate in 8 32 128 0; do
     label="mixed-${rate}m"
     rate_args=()
     if (( rate > 0 )); then rate_args+=(--rate="${rate}m"); fi
     phase "$label"
-    fio_job vm2 "$label-writer" --ioengine=io_uring --rw=randwrite --bs=4k --iodepth=32 \
+    fio_job "$writer_vm" "$label-writer" --ioengine=io_uring --rw=randwrite --bs=4k --iodepth=32 \
       --time_based=1 --runtime="$((seconds + 5))" --end_fsync=1 \
       --verify=crc32c --verify_interval=4096 --do_verify=0 "${rate_args[@]}" &
     writer=$!
     sleep 2
-    fio_job vm1 "$label-reader" --ioengine=io_uring --rw=randread --bs=4k --iodepth=1 \
-      --time_based=1 --runtime="$seconds" &
-    reader=$!
+    pids=()
+    for ((i=1; i<=readers; i++)); do
+      fio_job "vm$i" "$label-reader" --ioengine=io_uring --rw=randread --bs=4k --iodepth=1 \
+        --time_based=1 --runtime="$seconds" &
+      pids+=($!)
+    done
     wait "$writer"
-    wait "$reader"
+    for pid in "${pids[@]}"; do wait "$pid"; done
+    CAS_GUESTS=$readers aggregate "$label-reader"
     finish_phase "$label"
     settle "$label-drain"
   done

@@ -12,7 +12,7 @@ usage() {
 usage: setup.sh [--inventory-only] [--out FILE]
                 [--device /dev/disk/by-id/X --mount DIR] [--skip-disk]
                 [--bundle FILE --revision SHA --source DIR] [--skip-build] [--skip-nix]
-                [--nic IFACE --irq-cpus SET] [--skip-irq]
+                [--nic IFACE --irq-cpus SET] [--skip-irq] [--skip-smt]
                 [--user NAME] [--records DIR] [--nix-installer FILE] [--cores N]
 
   --inventory-only  record hardware/settings and write the inventory; change nothing
@@ -29,7 +29,7 @@ EOF
 
 DEVICE= MOUNT=/mnt/cas-exp BUNDLE= REVISION= SOURCE= NIC= IRQ_CPUS= OUT=node-inventory.json
 USER_NAME=${SUDO_USER:-$(id -un)} RECORDS= INSTALLER= CORES=4
-INVENTORY_ONLY=0 SKIP_DISK=0 SKIP_BUILD=0 SKIP_NIX=0 SKIP_IRQ=0
+INVENTORY_ONLY=0 SKIP_DISK=0 SKIP_BUILD=0 SKIP_NIX=0 SKIP_IRQ=0 SKIP_SMT=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --inventory-only) INVENTORY_ONLY=1 ;;
@@ -44,6 +44,7 @@ while [[ $# -gt 0 ]]; do
     --nic) NIC=$2; shift ;;
     --irq-cpus) IRQ_CPUS=$2; shift ;;
     --skip-irq) SKIP_IRQ=1 ;;
+    --skip-smt) SKIP_SMT=1 ;;
     --user) USER_NAME=$2; shift ;;
     --records) RECORDS=$2; shift ;;
     --out) OUT=$2; shift ;;
@@ -121,6 +122,8 @@ hardware() {
   record cpufreq bash -c 'for c in /sys/devices/system/cpu/cpu[0-9]*; do printf "%s %s %s %s\n" "$(basename $c)" "$(cat $c/cpufreq/scaling_governor 2>/dev/null)" "$(cat $c/cpufreq/scaling_min_freq 2>/dev/null)" "$(cat $c/cpufreq/scaling_max_freq 2>/dev/null)"; done'
   record cpuidle bash -c 'for s in /sys/devices/system/cpu/cpu0/cpuidle/state*; do printf "%s %s latency=%s disable=%s\n" "$(basename $s)" "$(cat $s/name)" "$(cat $s/latency)" "$(cat $s/disable)"; done; echo "driver=$(cat /sys/devices/system/cpu/cpuidle/current_driver 2>/dev/null)"; echo "intel_idle.max_cstate=$(cat /sys/module/intel_idle/parameters/max_cstate 2>/dev/null)"; echo "processor.max_cstate=$(cat /sys/module/processor/parameters/max_cstate 2>/dev/null)"'
   record smt cat /sys/devices/system/cpu/smt/control
+  record smt-active cat /sys/devices/system/cpu/smt/active
+  record grub-cas bash -c 'cat /etc/default/grub.d/99-cas-nosmt.cfg 2>/dev/null; grep -h CMDLINE /etc/default/grub 2>/dev/null'
   record thp cat /sys/kernel/mm/transparent_hugepage/enabled
   record ulimit bash -c 'ulimit -n; ulimit -Hn'
   record limits-d bash -c 'cat /etc/security/limits.d/*.conf 2>/dev/null'
@@ -300,6 +303,24 @@ irqs() {
   printf '{"nic":"%s","cpus":"%s","irqs":"%s","before":"%s","after":"%s"}\n' "$NIC" "$IRQ_CPUS" "$(echo $irqs | tr ' ' ',')" "$before" "$after" > "$RECORDS/irq.json"
 }
 
+# ---------------------------------------------------------------- 6b. SMT off: the pinning sets are physical cores
+smt_off() {
+  local control=/sys/devices/system/cpu/smt/control before after grub=/etc/default/grub.d/99-cas-nosmt.cfg persisted=none
+  before=$(cat $control 2>/dev/null || echo unavailable)
+  if [[ $before == on ]]; then echo off | as_root tee $control >/dev/null; fi
+  after=$(cat $control 2>/dev/null || echo unavailable)
+  case "$after" in off|forceoff|notsupported|notimplemented) ;; *) echo "SMT still $after"; return 1 ;; esac
+  if [[ -d /etc/default/grub.d ]] && command -v update-grub >/dev/null; then
+    if ! grep -qs nosmt /proc/cmdline && ! [[ -f $grub ]]; then
+      printf 'GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX nosmt"\n' | as_root tee $grub >/dev/null
+      as_root update-grub >/dev/null 2>&1 && persisted=$grub || persisted="update-grub failed"
+    else
+      persisted="already (cmdline or $grub)"
+    fi
+  fi
+  printf '{"before":"%s","after":"%s","cmdline_nosmt":%s,"persisted":"%s","online_cpus":%s}\n' "$before" "$after" "$(grep -qs nosmt /proc/cmdline && echo true || echo false)" "$persisted" "$(nproc)" > "$RECORDS/smt.json"
+}
+
 # ---------------------------------------------------------------- 7. inventory
 inventory() {
   record interrupts-final cat /proc/interrupts
@@ -317,6 +338,7 @@ if [[ $INVENTORY_ONLY == 0 ]]; then
   if [[ $SKIP_DISK == 1 ]]; then log "disk skipped"; else step disk disk; fi
   step limits limits
   if [[ $SKIP_IRQ == 1 ]]; then log "irq skipped"; else step irq irqs; fi
+  if [[ $SKIP_SMT == 1 ]]; then log "smt skipped"; else step smt smt_off; fi
 fi
 step inventory inventory
 log "setup.sh done"

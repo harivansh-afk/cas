@@ -1,0 +1,115 @@
+{
+ "description": "c6525-25g pair (16 physical cores, SMT off; eight guest cores): the r6615 plan without the g16 units, with burst-8 in place of burst, and without raced burst-images (the raced arm's burst block is sixteen images).",
+ "days": [
+  {
+   "day": 1,
+   "units": [
+    [
+     "r0",
+     "floor",
+     1
+    ],
+    [
+     "frozen",
+     "reads-memory",
+     5
+    ],
+    [
+     "frozen",
+     "reads-storage",
+     5
+    ],
+    [
+     "fast",
+     "reads-memory",
+     5
+    ],
+    [
+     "fast",
+     "reads-storage",
+     5
+    ],
+    [
+     "native-raw",
+     "g1",
+     5
+    ],
+    [
+     "native-cas",
+     "g1",
+     5
+    ],
+    [
+     "native-zfs",
+     "g1",
+     5
+    ]
+   ]
+  },
+  {
+   "day": 2,
+   "units": [
+    [
+     "fast",
+     "reads-storage-g4",
+     5
+    ],
+    [
+     "fast",
+     "reads-storage-g8",
+     5
+    ],
+    [
+     "raced",
+     "reads-storage",
+     5
+    ],
+    [
+     "warm-owner",
+     "reads-memory",
+     5
+    ],
+    [
+     "native-raw",
+     "g4",
+     5
+    ],
+    [
+     "native-cas",
+     "g4",
+     5
+    ]
+   ]
+  },
+  {
+   "day": 3,
+   "units": [
+    [
+     "burst-8",
+     "burst-images",
+     5
+    ],
+    [
+     "resume",
+     "resume-elsewhere",
+     5
+    ],
+    [
+     "frozen",
+     "raw-rsync",
+     5
+    ],
+    [
+     "frozen",
+     "zfs-incremental",
+     5
+    ],
+    [
+     "frozen",
+     "flows-k1",
+     3
+    ]
+   ]
+  }
+ ]
+}

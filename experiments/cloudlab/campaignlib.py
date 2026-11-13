@@ -73,19 +73,22 @@ def format_cpuset(cpus):
 def load_plan(value):
     """A plan is `{"days": [{"day": 1, "units": [...]}, ...]}` or a bare list
     of units (one day). A unit is `[arm, case, repetitions]` or an object with
-    those keys. Days are numbered 1.. in order; repetitions 1..20."""
+    those keys. Day numbers increase (a repeats plan starts at day 4);
+    repetitions 1..20."""
     if isinstance(value, (str, Path)):
         value = json.loads(Path(value).read_text())
     days = value.get("days") if isinstance(value, dict) else [{"units": value}]
     if not isinstance(days, list) or not days:
         raise ValueError("plan needs a non-empty list of days")
     plan = []
+    previous = 0
     for index, day in enumerate(days, start=1):
         if not isinstance(day, dict) or not isinstance(day.get("units"), list):
             raise ValueError(f"day {index} needs a units list")
-        number = int(day.get("day", index))
-        if number != index:
-            raise ValueError(f"days must be numbered in order; got {number} at {index}")
+        number = int(day.get("day", previous + 1))
+        if number <= previous:
+            raise ValueError(f"days must be numbered in increasing order; got {number} after {previous}")
+        previous = number
         units = [parse_unit(unit) for unit in day["units"]]
         if not units:
             raise ValueError(f"day {number} has no units")
@@ -323,11 +326,20 @@ def guest_cores(arm, case):
 
 def substitute(value, fills):
     """Replace placeholder strings anywhere in a JSON value; a placeholder
-    that stands alone is replaced by the fill (which may be a list)."""
+    that stands alone is replaced by the fill (which may be a list or an
+    object). An object with a `bundle` key whose fill is an object is merged:
+    the bundle's commands, cwd and env, overridden by the object's own keys
+    (so an arm can add `chroot` to a bundle's working set)."""
     if isinstance(value, str) and value in fills:
         return fills[value]
     if isinstance(value, dict):
-        return {k: substitute(v, fills) for k, v in value.items()}
+        result = {k: substitute(v, fills) for k, v in value.items() if k != "bundle"}
+        if "bundle" in value:
+            bundle = substitute(value["bundle"], fills)
+            if isinstance(bundle, dict):
+                return {**{k: bundle[k] for k in ("commands", "cwd", "env") if k in bundle}, **result}
+            result["bundle"] = bundle
+        return result
     if isinstance(value, list):
         return [substitute(v, fills) for v in value]
     return value
@@ -344,24 +356,37 @@ def unresolved(value):
 
 
 def working_set_from_bundle(actions_path, count=WORKING_SET_COMMANDS):
-    """The first `count` recorded bash actions of a corpus bundle, verbatim.
-    The bundle's actions.json is a list of {"command": ...} rows."""
+    """The first `count` recorded bash actions of a corpus bundle, verbatim,
+    with the recorded cwd and environment. `actions.json` is the swe
+    bundle's object (`cwd`, `env`, `interpreter`, `timeout`, `steps` of
+    `{"command": ...}`); a bare list of such rows is accepted without cwd
+    or env."""
     path = Path(actions_path)
     data = path.read_bytes()
     actions = json.loads(data)
-    if not isinstance(actions, list) or not actions:
-        raise ValueError(f"{path}: actions.json must be a non-empty list")
+    if isinstance(actions, list):
+        actions = {"steps": actions}
+    if not isinstance(actions, dict) or not isinstance(actions.get("steps"), list) or not actions["steps"]:
+        raise ValueError(f"{path}: actions.json needs a non-empty steps list")
     commands = []
-    for row in actions[:count]:
+    for row in actions["steps"][:count]:
         command = row.get("command") if isinstance(row, dict) else None
         if not isinstance(command, str) or not command.strip():
             raise ValueError(f"{path}: action without a command string")
         commands.append(command)
+    cwd, env = actions.get("cwd"), actions.get("env") or {}
+    if cwd is not None and not (isinstance(cwd, str) and cwd.startswith("/")):
+        raise ValueError(f"{path}: recorded cwd must be an absolute path")
+    if not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
+        raise ValueError(f"{path}: recorded env must map names to strings")
     return {
         "commands": commands,
+        "cwd": cwd,
+        "env": env,
+        "interpreter": actions.get("interpreter"),
         "source": str(path),
         "sha256": hashlib.sha256(data).hexdigest(),
-        "total_actions": len(actions),
+        "total_actions": len(actions["steps"]),
     }
 
 
@@ -462,6 +487,32 @@ def two_host_config(arm, nodes, campaign, unit, case, fills):
     return {"settings": settings, "nodes": members, "cases": [case]}
 
 
+REVISION_PLACEHOLDER = "INTEGRATION_REVISION_PLACEHOLDER"
+SMT_OFF = ("off", "forceoff", "notsupported", "notimplemented")
+
+
+def pinned_revision(nodes_config):
+    """The revision a native campaign is bound to. Loopback development
+    layouts may leave it out; a real campaign must replace the placeholder
+    with the integration branch's measured commit before `run`."""
+    value = nodes_config.get("expected_revision")
+    if loopback(nodes_config) and value in (None, REVISION_PLACEHOLDER):
+        return None
+    if value is None or value == REVISION_PLACEHOLDER:
+        raise ValueError("expected_revision is the placeholder; pin the integration branch's measured revision")
+    if not re.fullmatch(r"[0-9a-f]{40}", value):
+        raise ValueError("expected_revision must be a full 40-hex commit")
+    return value
+
+
+def smt_problem(inventory, loopback_layout):
+    """Pinning assumes physical cores only: a native node must report SMT off."""
+    state = (inventory.get("hardware") or {}).get("smt")
+    if loopback_layout or state in SMT_OFF:
+        return None
+    return f"SMT is {state!r}; setup.sh disables it (nosmt) and the pinning sets assume physical cores"
+
+
 def validate_nodes(nodes_config):
     """The campaign's node description: two or more members, the first local."""
     if not isinstance(nodes_config, dict):
@@ -512,3 +563,73 @@ def status_lines(status, width=100):
         note = entry.get("error") or entry.get("note") or ""
         lines.append(f"  {entry['state']:8} {unit:44} {entry.get('seconds', ''):>7} {note}"[:width])
     return lines
+
+
+# ---------------------------------------------------------------- day-four repeats
+
+
+def unit_p99(unit_dir, runner, case):
+    """One p99-class number per finished unit, in nanoseconds, or None with a
+    reason. reads cases: the quiet random QD1 cohort's clat p99; burst: the
+    slowest guest's cold time to working set; resume: time to working set
+    (downtime if no working set ran); r0: node 0's 4 KiB read clat p99;
+    native: the read-q1 aggregate's largest per-guest p99."""
+    unit_dir = Path(unit_dir)
+    try:
+        if runner == "two-host":
+            results = json.loads((unit_dir / "controller" / "results.json").read_text())
+            data = results["cases"][case]
+            if case.startswith("reads-"):
+                values = [c["fio"]["read"]["clat_ns"]["percentile"]["99.000000"] for c in data["cohorts"] if c["load"] == "quiet" and c["name"].endswith("-random-qd1")]
+                return (max(values), None) if values else (None, "no quiet random QD1 cohort")
+            if case == "burst-images":
+                ttw = data["intervals"]["time_to_working_set_ns"]
+                values = [v for v in (ttw.values() if isinstance(ttw, dict) else [ttw]) if isinstance(v, (int, float))]
+                return (max(values), None) if values else (None, "no time_to_working_set_ns")
+            if case == "resume-elsewhere":
+                value = data.get("intervals", {}).get("time_to_working_set_ns")
+                if isinstance(value, (int, float)):
+                    return value, None
+                return data["migration"]["downtime_ns"], "downtime_ns (no working set)"
+            return None, f"no p99 rule for case {case}"
+        if runner == "r0":
+            r0 = json.loads((unit_dir / "r0.json").read_text())
+            node = next(iter(r0["nodes"].values()))
+            return node["read_4k_qd1"]["read"]["clat_ns"]["percentile"]["99.000000"], None
+        if runner == "native":
+            aggregate = json.loads((unit_dir / "native" / "aggregate-read-q1.json").read_text())
+            return aggregate["read"]["clat_ns_percentile"]["99"]["max"], None
+    except (OSError, ValueError, KeyError, TypeError, StopIteration) as error:
+        return None, f"{type(error).__name__}: {error}"
+    return None, f"no p99 rule for runner {runner}"
+
+
+def spread(values):
+    """(max - min) / median; 0 for fewer than two values."""
+    if len(values) < 2:
+        return 0.0
+    return (max(values) - min(values)) / statistics.median(values)
+
+
+def plan_repeats(records, threshold=0.15):
+    """Day-four units: every (arm, case) whose p99 spread across its finished
+    repetitions exceeds `threshold` is scheduled again with the same number
+    of repetitions. `records` rows: {day, arm, case, rep, p99, reason}.
+    Returns (plan, report)."""
+    groups = {}
+    for row in records:
+        groups.setdefault((row["day"], row["arm"], row["case"]), []).append(row)
+    units, report = [], []
+    for (day, arm, case), rows in sorted(groups.items()):
+        values = [r["p99"] for r in rows if r.get("p99") is not None]
+        entry = {"day": day, "arm": arm, "case": case, "finished": len(rows), "measured": len(values), "p99_ns": values}
+        if not values:
+            entry.update(spread=None, repeat=False, reason="; ".join(sorted({r.get("reason") or "no p99" for r in rows})))
+        else:
+            value = spread(values)
+            entry.update(spread=round(value, 4), repeat=value > threshold)
+            if value > threshold:
+                units.append([arm, case, max(r["rep"] for r in rows)])
+        report.append(entry)
+    plan = {"description": f"Repeats of units whose p99 spread across repetitions exceeded {threshold:.0%}; generated by campaign.py repeats.", "days": [{"day": 4, "units": units}]} if units else {"description": f"No unit exceeded {threshold:.0%} p99 spread.", "days": []}
+    return plan, report

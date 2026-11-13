@@ -56,6 +56,7 @@ class Plan(unittest.TestCase):
         self.assertEqual(plan[0].units[1], lib.Unit("fast", "reads-memory", 2))
         days = lib.load_plan({"days": [{"day": 1, "units": [["r0", "floor", 1]]}, {"units": [["fast", "x", 3]]}]})
         self.assertEqual([d.day for d in days], [1, 2])
+        self.assertEqual([d.day for d in lib.load_plan({"days": [{"day": 4, "units": [["a", "b", 1]]}]})], [4])
 
     def test_rejections(self):
         for bad in (
@@ -66,7 +67,7 @@ class Plan(unittest.TestCase):
             [["frozen", "reads-memory", 21]],
             [["frozen", "reads-memory", True]],
             [["frozen", "reads-memory", 1], ["frozen", "reads-memory", 2]],
-            {"days": [{"day": 2, "units": [["a", "b", 1]]}]},
+            {"days": [{"day": 2, "units": [["a", "b", 1]]}, {"day": 2, "units": [["c", "d", 1]]}]},
             {"days": [{"day": 1, "units": []}]},
         ):
             with self.assertRaises(ValueError, msg=repr(bad)):
@@ -90,7 +91,7 @@ class Plan(unittest.TestCase):
 class Arms(unittest.TestCase):
     def test_checked_in_arms_load(self):
         arms = lib.load_arms()
-        for name in ("frozen", "fast", "raced", "warm-owner", "burst", "resume", "native-raw", "native-zfs", "native-cas", "r0"):
+        for name in ("frozen", "fast", "raced", "warm-owner", "burst", "burst-8", "resume", "native-raw", "native-zfs", "native-cas", "r0"):
             self.assertIn(name, arms)
         for name, a in arms.items():
             self.assertEqual(set(a["pinning"]) >= {"r6615", "c6525-25g"}, True, name)
@@ -164,10 +165,11 @@ class Pinning(unittest.TestCase):
                     if a["runner"] == "native" and guests > lib.NATIVE_MAX_GUESTS:
                         continue
                     problems = lib.check_pinning(sets, 0, sets["logical_cpus"], lib.guest_cores(a, case), guests)
-                    if node_type.startswith("loopback") and guests > 4:
-                        self.assertTrue(problems, f"{name} {node_type} {case} should not fit 8 vCPUs")
-                    else:
+                    fits = guests * lib.guest_cores(a, case) <= len(lib.parse_cpuset(sets["guests"]))
+                    if fits:
                         self.assertEqual(problems, [], f"{name} {node_type} {case}")
+                    else:
+                        self.assertTrue(problems, f"{name} {node_type} {case} should not fit")
 
 
 class Placeholders(unittest.TestCase):
@@ -181,17 +183,33 @@ class Placeholders(unittest.TestCase):
     def test_working_set_from_bundle(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "actions.json"
-            path.write_text(json.dumps([{"command": f"echo {i}", "recorded_returncode": 0} for i in range(12)]))
+            steps = [{"command": f"echo {i}", "recorded_returncode": 0} for i in range(12)]
+            path.write_text(json.dumps({"cwd": "/testbed", "env": {"PAGER": "cat"}, "interpreter": ["bash", "-c"], "timeout": 60, "steps": steps}))
             ws = lib.working_set_from_bundle(path)
             self.assertEqual(ws["commands"], [f"echo {i}" for i in range(10)])
-            self.assertEqual(ws["total_actions"], 12)
+            self.assertEqual((ws["cwd"], ws["env"], ws["total_actions"]), ("/testbed", {"PAGER": "cat"}, 12))
             self.assertEqual(len(ws["sha256"]), 64)
-            path.write_text(json.dumps([{"command": ""}]))
-            with self.assertRaises(ValueError):
-                lib.working_set_from_bundle(path)
-            path.write_text("[]")
-            with self.assertRaises(ValueError):
-                lib.working_set_from_bundle(path)
+            path.write_text(json.dumps(steps[:3]))
+            bare = lib.working_set_from_bundle(path)
+            self.assertEqual((bare["commands"], bare["cwd"], bare["env"]), (["echo 0", "echo 1", "echo 2"], None, {}))
+            for bad in ([{"command": ""}], "[]", json.dumps({"steps": [], "cwd": "/x"}), json.dumps({"steps": steps, "cwd": "relative"}), json.dumps({"steps": steps, "env": {"A": 1}})):
+                path.write_text(bad if isinstance(bad, str) else json.dumps(bad))
+                with self.assertRaises(ValueError, msg=bad):
+                    lib.working_set_from_bundle(path)
+
+    def test_bundle_merge_adds_chroot(self):
+        fill = {"commands": ["ls"], "cwd": "/testbed", "env": {"A": "1"}}
+        value = {"burst": {"working_set": {"chroot": "/mnt/cas", "bundle": "WORKING_SET_FROM_BUNDLE"}}}
+        self.assertEqual(lib.unresolved(value), ["WORKING_SET_FROM_BUNDLE"])
+        merged = lib.substitute(value, {"WORKING_SET_FROM_BUNDLE": fill})
+        self.assertEqual(merged["burst"]["working_set"], {"commands": ["ls"], "cwd": "/testbed", "env": {"A": "1"}, "chroot": "/mnt/cas"})
+        self.assertEqual(lib.unresolved(merged), [])
+        arms = lib.load_arms()
+        for name in ("burst", "burst-8", "resume"):
+            block = "resume" if name == "resume" else "burst"
+            ws = lib.substitute(arms[name]["config"]["settings"][block]["working_set"], {"WORKING_SET_FROM_BUNDLE": fill})
+            self.assertEqual(ws["chroot"], "/mnt/cas", name)
+            self.assertEqual(ws["cwd"], "/testbed", name)
 
     def test_race_budget(self):
         us, p50s = lib.race_budget_us(results([70_000, 90_000, 80_000]))
@@ -243,7 +261,7 @@ class Resume(unittest.TestCase):
             }
             (root / "nodes.json").write_text(json.dumps(nodes))
             (root / "plan.json").write_text(json.dumps([["fast", "reads-memory", 2], ["frozen", "reads-memory", 1]]))
-            args = argparse.Namespace(nodes=str(root / "nodes.json"), plan=str(root / "plan.json"), arms=str(lib.ARMS_DIR), export=None, redo=False, dry_run=False)
+            args = argparse.Namespace(command="run", nodes=str(root / "nodes.json"), plan=str(root / "plan.json"), arms=str(lib.ARMS_DIR), export=None, redo=False, dry_run=False)
             c = campaign.Campaign(args)
             c.dir.mkdir(parents=True)
             c.units_dir.mkdir()
@@ -297,6 +315,85 @@ class Inventory(unittest.TestCase):
         nic = derived["nics"]["enp65s0f0np0"]
         self.assertEqual((nic["speed"], nic["link"], nic["mtu"], nic["driver"], nic["firmware"]), ("100000Mb/s", "yes", "9000", "mlx5_core", "22.36.1010"))
         self.assertEqual(derived["governors"], ["performance"])
+
+
+class Repeats(unittest.TestCase):
+    def test_spread_and_plan(self):
+        self.assertEqual(lib.spread([100]), 0.0)
+        self.assertAlmostEqual(lib.spread([100, 120, 110]), 20 / 110)
+        records = [
+            {"day": 1, "arm": "frozen", "case": "reads-memory", "rep": r, "p99": v, "reason": None}
+            for r, v in enumerate([100_000, 101_000, 99_000, 100_500, 100_200], start=1)
+        ] + [
+            {"day": 2, "arm": "fast", "case": "reads-storage-g4", "rep": r, "p99": v, "reason": None}
+            for r, v in enumerate([100_000, 130_000, 105_000], start=1)
+        ] + [{"day": 1, "arm": "native-raw", "case": "g1", "rep": 1, "p99": None, "reason": "no aggregate"}]
+        plan, report = lib.plan_repeats(records, 0.15)
+        self.assertEqual(plan["days"], [{"day": 4, "units": [["fast", "reads-storage-g4", 3]]}])
+        by_case = {(e["arm"], e["case"]): e for e in report}
+        self.assertFalse(by_case[("frozen", "reads-memory")]["repeat"])
+        self.assertTrue(by_case[("fast", "reads-storage-g4")]["repeat"])
+        self.assertEqual(by_case[("native-raw", "g1")]["reason"], "no aggregate")
+        empty, _ = lib.plan_repeats(records[:5], 0.15)
+        self.assertEqual(empty["days"], [])
+        self.assertEqual(lib.validate_plan(lib.load_plan(plan), lib.load_arms()), [])
+
+    def test_unit_p99_rules(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            unit = Path(tmp)
+            (unit / "controller").mkdir()
+            (unit / "controller" / "results.json").write_text(json.dumps(results([70_000, 90_000])))
+            self.assertEqual(lib.unit_p99(unit, "two-host", "reads-memory"), (None, "KeyError: '99.000000'"))
+            data = results([70_000])
+            data["cases"]["reads-memory"]["cohorts"] = [c for c in data["cases"]["reads-memory"]["cohorts"] if not c["name"].endswith("-random-qd1")]
+            (unit / "controller" / "results.json").write_text(json.dumps(data))
+            self.assertEqual(lib.unit_p99(unit, "two-host", "reads-memory"), (None, "no quiet random QD1 cohort"))
+            data = results([70_000])
+            data["cases"]["reads-memory"]["cohorts"][0]["fio"]["read"]["clat_ns"]["percentile"]["99.000000"] = 250_000
+            (unit / "controller" / "results.json").write_text(json.dumps(data))
+            self.assertEqual(lib.unit_p99(unit, "two-host", "reads-memory"), (250_000, None))
+            data["cases"]["burst-images"] = {"intervals": {"time_to_working_set_ns": {"g0": 5, "g1": 9}}}
+            data["cases"]["resume-elsewhere"] = {"intervals": {"time_to_working_set_ns": None}, "migration": {"downtime_ns": 42}}
+            (unit / "controller" / "results.json").write_text(json.dumps(data))
+            self.assertEqual(lib.unit_p99(unit, "two-host", "burst-images"), (9, None))
+            self.assertEqual(lib.unit_p99(unit, "two-host", "resume-elsewhere"), (42, "downtime_ns (no working set)"))
+            (unit / "r0.json").write_text(json.dumps({"nodes": {"a": {"read_4k_qd1": {"read": {"clat_ns": {"percentile": {"99.000000": 81_000}}}}}}}))
+            self.assertEqual(lib.unit_p99(unit, "r0", "floor"), (81_000, None))
+            (unit / "native").mkdir()
+            (unit / "native" / "aggregate-read-q1.json").write_text(json.dumps({"read": {"clat_ns_percentile": {"99": {"max": 123}}}}))
+            self.assertEqual(lib.unit_p99(unit, "native", "g1"), (123, None))
+            self.assertEqual(lib.unit_p99(unit, "native", "g4")[0], 123)
+            self.assertIsNone(lib.unit_p99(unit / "missing", "r0", "floor")[0])
+
+
+class NodeRules(unittest.TestCase):
+    def test_pinned_revision(self):
+        sha = "a" * 40
+        self.assertEqual(lib.pinned_revision({"expected_revision": sha}), sha)
+        self.assertIsNone(lib.pinned_revision({"loopback": True}))
+        self.assertIsNone(lib.pinned_revision({"loopback": True, "expected_revision": lib.REVISION_PLACEHOLDER}))
+        for bad in ({}, {"expected_revision": lib.REVISION_PLACEHOLDER}, {"expected_revision": "abc"}):
+            with self.assertRaises(ValueError):
+                lib.pinned_revision(bad)
+
+    def test_smt_rule(self):
+        self.assertIsNone(lib.smt_problem({"hardware": {"smt": "off"}}, False))
+        self.assertIsNone(lib.smt_problem({"hardware": {"smt": "notsupported"}}, False))
+        self.assertIsNone(lib.smt_problem({"hardware": {"smt": "on"}}, True))
+        self.assertIn("SMT is 'on'", lib.smt_problem({"hardware": {"smt": "on"}}, False))
+        self.assertIn("None", lib.smt_problem({"hardware": {}}, False))
+
+    def test_c6525_plan_has_no_sixteen_guest_units(self):
+        arms = lib.load_arms()
+        plan = lib.load_plan(HERE / "plans" / "three-days-c6525.json")
+        self.assertEqual(lib.validate_plan(plan, arms), [])
+        for day in plan:
+            for unit in day.units:
+                guests = lib.case_guests(arms[unit.arm], unit.case)
+                sets = arms[unit.arm]["pinning"]["c6525-25g"]
+                if arms[unit.arm]["runner"] == "native" and guests > lib.NATIVE_MAX_GUESTS:
+                    continue
+                self.assertEqual(lib.check_pinning(sets, 0, 16, lib.guest_cores(arms[unit.arm], unit.case), guests), [], f"{unit}")
 
 
 class Build(unittest.TestCase):
