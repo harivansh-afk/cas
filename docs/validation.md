@@ -90,6 +90,71 @@ Evidence: `results/integration-1113/chain-merge.log` and
 `evidence/evidence-3.tgz` (logs, setup and dry-run outputs) with its SHA-256
 in `evidence/export-3.log`; VM ledger `resources.json`.
 
+### Follow-up (same day): final review, eight findings
+
+On the same branch after `d18ceb6`; **tested revision `cf17a830eb290e2bc14dace2e5db95504f0920e3`**,
+clean on a fresh Freestyle VM `cas-build-integration`
+(`vm-874eb58710564562a171842f1f154584`, same shape and procedure), deleted after export.
+
+- `f931ffb` (4, 6, 8-registry): the geometry marker is written to a
+  temporary name under the exclusive lock, the lock downgraded to shared,
+  then renamed into place — a reader can no longer see a zero-length
+  marker, and an inherited descriptor still cannot block readers (unit test
+  observes both); `eventfd::duplicate` borrows the owner (`&impl AsRawFd`);
+  `Registry::lookup_with` takes a wake factory called only on the waiter
+  branch before any state change.
+- `b24231c` (3, 8): a failed inline read orphans the leaders it holds
+  instead of dropping them (which failed bystander waiters with
+  `Interrupted`, escalated to the host gate by a reactor waiter in its
+  shared-IO state); orphans fetch and publish for their waiters, a leader
+  whose GET slot was exhausted retries on every poll, the cell is allocated
+  before the lookup so no error path holds a leader, and the frontend wake
+  is duplicated only for a waiter or an issued GET. Counters
+  `orphaned_leaders` / `orphans_failed`; `docs/storage-design.md`. Test
+  `local_exhaustion_after_a_held_leader_orphans_it_for_its_waiters`: a
+  reactor waiter on an inline leader plus GET-pool exhaustion; only the
+  inline read fails, the waiter is served, host gate and registry failures
+  stay at zero.
+- `0fad4fd` (2, 7): `is_partition_of` follows the kernel's naming rule
+  (`/dev/sda1` matches, `/dev/sdap` does not; unit tests); the native guest
+  limit lives in `crates/harnesses/native-limits.json` (inside the crate so the
+  packaged build includes it), read by the campaign
+  driver and asserted equal to `native::MAX_GUESTS` by a harness unit test,
+  so the 4/8/16-guest native cases are no longer blocked by a stale 2.
+- `2d261bc` (1): `start` forwards `--revision` (and every other run-time
+  input) to the detached worker; unit test.
+- `cf17a83` (5): `casctl import --root` help says what the importer does: an
+  existing empty directory is initialized, an existing root reused, a
+  missing directory refused (as `docs/casctl.md` says).
+
+#### Outcomes on `cf17a83`
+
+- fmt and strict Clippy clean; `just check`: **605 Rust tests passed, 0
+  failed, 30 ignored**, 39 Python tests (two-host); `cargo test -p
+  cas-harness`: **62 passed**; campaign unit tests **29 passed**; two-host
+  unit tests **39 passed**.
+- Peer suite in the four arms (off, fast, race+local, both): **32 passed**
+  each; fleet suite: **20 passed, 1 ignored** each; `local::host::tests::fast`
+  6/6 (off, both); five further `peer`-filter runs 5/5 (debug, parallel;
+  the loop-XFS images were mounted only for the dry-run, after the suites).
+- `setup.sh` (bootstrap, checkout at the tested revision, `nix build
+  .#two-host` and `.#native` with the `cas` package's release tests, limits,
+  inventory): exit 0. `campaign.py dry-run` with `plans/dev-loopback.json`
+  on the two-member loopback layout: **5 runnable, 7 blocked of 12, exit 2,
+  nothing launched**, manifest bound to this revision; `native-cas g4` is
+  blocked only by the loopback cpu set and the nodes file's missing native
+  runner path (the stale "boots at most 2 guests" reason is gone), the
+  rest as in the entry above.
+- Failures and retries during this round, all mine and all before any
+  retained run: a `poll` double borrow (compile), the new test's mock joined
+  a thread blocked in `accept` (hang) and off-by-one in its expected GET
+  count, a geometry unit test writing an unaligned buffer through O_DIRECT,
+  two rustfmt hunks, and `include_str!` of a file outside the crate that the
+  Nix package's source filter does not copy (moved into the crate).
+- Evidence: `results/integration-1113/chain-review{,2,3}.log`,
+  `chain-final{,2,3}.log`, `evidence/evidence-4.tgz` with its SHA-256 in
+  `evidence/export-4.log`; VM ledger `resources.json`.
+
 ## 2026-11-13 — Integration of measurement flags, offline import and raced reads
 
 Branch `integration/2026-11-13` from `main` (`35add83`), merged in order with
