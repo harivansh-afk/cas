@@ -20,6 +20,7 @@ fn config(root: &Path, transport: &Path, mode: Mode) -> ServiceConfig {
         mode,
         pause: None,
         attach_timeout: crate::deadline::RECOVERY_TIMEOUT,
+        recovery_delay: Duration::ZERO,
         endpoints: (2..4)
             .map(|image| Endpoint {
                 image: [image; 16],
@@ -194,6 +195,41 @@ fn failed_cold_image_protocol_leaves_the_other_socket_usable() {
     assert!(report(transport.path(), "host.json")["host"]["failure"].is_null());
 }
 
+#[test]
+fn attach_window_starts_after_recovery_completes() {
+    let root = tempfile::tempdir().unwrap();
+    let transport = tempfile::tempdir_in("/dev/shm").unwrap();
+    let resources = Arc::new(Resources::default());
+    setup(root.path(), &resources, SnapshotFixture::Absent);
+    let mut config = config(root.path(), transport.path(), Mode::Cold);
+    // Recovery outlasts the attach window. A window armed before recovery
+    // would already have expired at attach time and fail startup; the window
+    // starts after recovery, so both sockets wait for guests that never come.
+    config.recovery_delay = Duration::from_millis(400);
+    config.attach_timeout = Duration::from_millis(300);
+    let started = Instant::now();
+    let error = host_service::serve(config).unwrap_err();
+    let elapsed = started.elapsed();
+    assert!(
+        error.to_string().contains("recovery deadline expired"),
+        "{error}"
+    );
+    assert!(elapsed >= Duration::from_millis(700), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+    let host = report(transport.path(), "host.json");
+    assert!(host["startup_error"].is_null(), "{host}");
+    assert_eq!(host["services_ok"], false);
+    for image in 2..4 {
+        assert_eq!(
+            report(
+                transport.path(),
+                &format!("{}.json", format!("{image:02x}").repeat(16))
+            )["connection_ok"],
+            false
+        );
+    }
+}
+
 /// A catalog root whose rebuilt chunk index is the dominant metadata cost:
 /// 4,096 distinct chunks need a 8,192-bucket table (about 330 KiB), and the
 /// allocator charges the old table while the replacement grows.
@@ -278,6 +314,12 @@ fn metadata_budget_decides_whether_a_large_rebuilt_index_can_be_served() {
         report(transport.path(), "host.json")["startup_error"],
         error.to_string()
     );
+    // A budget no host could honour is rejected before any output exists.
+    let mut capped = self::config(root.path(), transport.path(), Mode::Cold);
+    capped.metadata_bytes = host_service::physical_memory_bytes().unwrap() + 1;
+    let error = host_service::serve(capped).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("physical memory"), "{error}");
     // The same root opens and serves every chunk under a sufficient budget.
     let resources = Arc::new(Resources {
         metadata: crate::local::metadata_budget_sized(Resources::DEFAULT_METADATA_BYTES),

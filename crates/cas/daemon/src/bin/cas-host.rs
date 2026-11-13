@@ -35,7 +35,7 @@ struct Serve {
     /// Clean chunk-cache bytes; zero disables payload caching, bounded by the host cap.
     #[arg(long, default_value_t = cas_daemon::Resources::DEFAULT_CACHE_BYTES)]
     cache_bytes: usize,
-    /// Host metadata budget in bytes (indexes, manifests, queues); the rebuilt chunk index must fit.
+    /// Host metadata budget in bytes (indexes, manifests, queues); at most physical memory.
     #[arg(long, default_value_t = cas_daemon::Resources::DEFAULT_METADATA_BYTES as u64, value_parser = clap::value_parser!(u64).range(1..))]
     metadata_bytes: u64,
     /// Sample every 500 ms; fail the run if telemetry exceeds 64 MiB or 4,096 samples.
@@ -53,7 +53,7 @@ struct Serve {
     pause_after: std::num::NonZeroU64,
     #[arg(long, requires = "pause_compaction")]
     pause_wait_for_arm: bool,
-    /// Seconds a cold guest has to connect and enable its queues before the attachment fails.
+    /// Seconds a cold guest has, counted from the end of recovery, to connect and enable its queues.
     #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..))]
     attach_timeout_secs: u64,
 }
