@@ -155,6 +155,159 @@ passed on ext4; `cold_host_supervises_both...` still needs XFS
 (`Snapshot::create`). Evidence: `review1.log`, `review2.log`,
 `review-check.log`, `review-check2.log`, `probe-cold.log`.
 
+## 2026-11-13 — Importer review fixes (`feat/offline-import`)
+
+Follow-up to the entry below on the same branch. **Tested revision:
+`1e4efee104f0ce4a04e2c41adbf6413e90be667d`**, clean; the intermediate commit
+`596084e` was format- and Clippy-checked on its own. This record is a later
+documentation-only commit. Nothing was pushed or merged. Same host, checkout,
+target directory and limits as below (`cas-build`, `/root/cas-import`, ext4
+root, `ulimit -n 65536`); Spark edited only.
+
+Changes under review: platform-free `cas_core::import` defaults so `casctl`
+builds off Linux; `cas_core::id` (`parse`, `hex`) shared by `cas-host`,
+`cas-fleet` and `casctl`; `cas_core::layout` holds the store/image creation
+recipe used by both `cas-host init` and the importer; `Store::exists`
+replaces the hard-coded geometry marker; a new root must be an existing empty
+directory, its segment size must satisfy the host's default staging limits
+including the 60% rollover rule, and the compaction interval is bounded by
+worst-case preallocated WAL bytes before any output; the catalog is created
+before the geometry marker; interrupted `images/<id>` output is renamed to an
+unreferenced image name (fleet-importer pattern) so retries proceed and
+tickets stay observed; the trailing settle runs only with staged bytes and
+emits its `Settled` point; input identity rechecks device, inode, mtime and
+ctime; progress prints by last GiB. The default path's WAL/compaction logic
+is unchanged.
+
+Outcomes at `1e4efee`: `just check` rc=0 (1m19s); `tests/import.rs` and
+`tests/import_crash.rs` passed for both arms with the same chunk counts as
+below (2,697/4,192 and 694/1,079; crash cuts 272/1,497 and 75/412 retained
+chunks), now also refusing a missing root, 192 MiB segments, a 256 MiB
+interval and a non-empty geometry-less directory without writing output, and
+retrying after a cut without manual cleanup (two image directories remain,
+ticket high-water increases). The 1 GiB benchmark re-ran at `d926e77`, whose
+`crates/cas/core/src` tree is identical to `1e4efee` (only a test assertion
+differs): random 4 KiB 56.0 MiB/s (262,144 chunks), half 101.5 (129,664),
+dedup 87.2 (0); 16 KiB 91.1 (65,536), 131.9 (32,768), 137.7 (0); every
+receipt kept the earlier digests, chunk counts, encoded bytes, index bytes
+(25,694,192 / 6,426,608), manifest bytes and D == E == P, with
+`settle_passes` 16 instead of 17 as intended.
+
+Failures and retries: the first review run failed because the tests still
+expected an implicitly created root; the second because the interval check
+ran after root creation (fixed by validating before output); the first
+intermediate commit failed `cargo fmt --check` on an import ordering and was
+recreated; a refusal test asserted `NotFound` where the importer now returns
+its own message. Evidence: `results/offline-import/check-final-review.log`
+(final check and tests), `check-bench-final.log` (intermediate check,
+`d926e77` check attempt, receipts), and `/root/check-final3.log`,
+`/root/import-bench` on `cas-build`.
+
+## 2026-11-12 — Offline raw-image importer (`casctl import`)
+
+Branch `feat/offline-import` from `main` (`ebbe157`). **Tested revision:
+`0086071dc047a215a2f3af1760eeeeb3e0ec11ea`**, clean on the test checkout. This
+record is a later documentation-only commit. Nothing was pushed or merged.
+These are Freestyle development checks on an ext4 root filesystem, not CI,
+paper, native-device or host-serving results. The daemon and on-disk format
+are unchanged; `cas-core` gains `import` and a `sha2` dependency (lockfile
+updated), `casctl` gains the `import` verb.
+
+### Hosts and commands
+
+Spark edited sources and read evidence only. All builds, checks, tests and
+imports ran as root on the retained Freestyle VM `cas-build`
+(`vm-7ecd8e364c624bcb8654fa4dbd92767e`; Linux 6.1.102, 8 vCPU, 16 GiB,
+`/dev/vda` ext4 root, rustc 1.98.1) in a separate checkout `/root/cas-import`
+with `CARGO_TARGET_DIR=/root/cas-import/target`, `ulimit -n 65536`,
+`CARGO_BUILD_JOBS=8`, while another branch used `/root/cas` on the same VM.
+Storage tests used the ext4 root for 4 KiB-aligned `O_DIRECT`, as allowed by
+`docs/testbed.md`.
+
+```sh
+nix develop -c cargo fmt --all            # formatting diff applied before the final commit
+nix develop -c just check                 # rc=0, 1m45s wall at 0086071
+nix develop -c cargo test -p cas-core --locked --test import --test import_crash -- --nocapture
+nix develop -c cargo build --release --locked -p cas-cli
+casctl import --root root-ARM --store 0101…01 --image 0a…0a --from random.raw --chunk-bytes ARM
+casctl import --root root-ARM --store 0101…01 --image 0b…0b --from half.raw
+casctl import --root root-ARM --store 0101…01 --image 0c…0c --from random.raw
+cargo run --release --locked -p cas-core --example chunk-arm -- inspect root-ARM
+```
+
+### Outcomes
+
+- `just check` at `0086071`: formatting, Clippy (`-D warnings`), every
+  workspace test (including the existing chunk crash cuts), the two-host
+  Python unit tests and `git diff --check` passed.
+- `tests/import.rs` (both arms): two 12 MiB + 4 KiB synthetic images sharing
+  their first half, 2 MiB segments and a 2 MiB compaction interval. Unique
+  chunks appended equalled the independently computed nonzero-chunk union
+  (4 KiB: 2,697 for A, 4,192 for A∪B; 16 KiB: 694 and 1,079, including the
+  zero-padded tail unit); ZERO bytes equalled the all-zero units; catalog
+  listed both images with the right sizes; a cold reopen through
+  `Tickets`/`Store::inspect_recorded`/`Manifest::inspect`/`Log::inspect_shared`
+  and `read_plan`/`read_with` returned bytes whose SHA-256 matched the inputs
+  and the receipts. Re-importing the same ID, a foreign store ID, an unaligned
+  input and the other chunk arm were refused without creating directories.
+- `tests/import_crash.rs` (both arms): a child process exited at the
+  `Settled` (after the first 2 MiB pass), `Durable` (D == E == P before
+  catalog publication) and `Published` points. After each cut the store and
+  catalog inspected and recovered; the catalog listed the image only after
+  `Published`; interrupted imports kept their `images/<id>` directory, a
+  retry was refused until it was removed (behaviour changed by the 2026-11-13
+  entry), then deduplicated against the retained chunks (4 KiB: 272 of 1,497
+  after `Settled`), and every arm/cut read back exactly.
+- 1 GiB release-build imports at `0086071` (receipts in the evidence log),
+  single process on the VM's ext4 root, 64 MiB segments and interval:
+
+| Input | Arm | Unique chunks appended | Elapsed | MiB/s |
+|---|---|---|---|---|
+| random 1 GiB, new root | 4 KiB | 262,144 | 18.7 s | 54.9 |
+| half zero (512 MiB random, 4 MiB alternation, every 97th block zeroed) | 4 KiB | 129,664 | 10.8 s | 94.9 |
+| random 1 GiB again (full dedup) | 4 KiB | 0 | 11.4 s | 89.9 |
+| random 1 GiB, new root | 16 KiB | 65,536 | 11.1 s | 92.3 |
+| half zero | 16 KiB | 32,768 | 7.7 s | 133.7 |
+| random 1 GiB again (full dedup) | 16 KiB | 0 | 8.2 s | 125.3 |
+
+  Every receipt reported D == E == P equal to its mutation count, the
+  expected SHA-256 (`a66ca740…` random, `8464a681…` half), 17 settle passes,
+  16 (or 7–8) removed WAL segments and the WAL punched back to one retained
+  segment. The 4 KiB root ended with 391,808 chunks, 1,636,405,248 encoded
+  bytes and a 25,694,192-byte rebuilt index (65.6 bytes per chunk); the
+  16 KiB root with 98,304 chunks, 1,623,298,048 encoded bytes and 6,426,608
+  index bytes. `chunk-arm inspect` on both roots reproduced the receipts'
+  chunk counts and index memory exactly. Manifest output was 50.5 MB per
+  1 GiB random image at 4 KiB and 24.7 MB at 16 KiB (one COW transaction per
+  1 MiB batch). The first run of the same benchmark at WIP `1a668d0` (same
+  staging logic before the refactor) gave 51–159 MiB/s with identical chunk
+  counts and digests.
+
+### Failures and retries
+
+A borrow of a temporary in `tests/import.rs`, an odd-block half-image
+assertion that printed 12 MiB vectors, and Clippy's `manual_is_multiple_of`
+on a test predicate each failed one build and were fixed; the first complete
+`just check` then passed on the fmt-applied tree and again on the committed
+revision. The 1 GiB benchmark ran twice (WIP and final revision); the
+offline inspect step was rerun from the checkout after a wrong working
+directory. No VM was created or deleted.
+
+### Evidence and limits
+
+Ignored `results/offline-import/` holds the check logs
+(`check-final-0086071.log`, `check2-refactored.log`, `check1-bench.log`),
+first test runs, both benchmark logs with full receipts
+(`bench-1gib-final-0086071.log`, `bench-1gib-receipts.txt`); the same files
+and the roots remain under `/root/import-bench` and `/root/check*.log` on
+`cas-build`. The importer is single-threaded and shares the host compactor's
+per-batch chunk syncs and per-transaction manifest syncs; no `--direct`
+store path was added. Throughput is one run per case on a shared VM disk
+with the page cache warm from input generation. A 10–16 GiB image at 4 KiB
+would need roughly 170–270 MB of rebuilt index at the measured 65.6 bytes
+per chunk, above `cas-host`'s fixed 128 MiB metadata budget; serving such a
+root is not established here.
+
 ## 2026-11-09 — Integration of C5, peer fetch and 16 KiB chunks
 
 Branch `integration/2026-11-09` from `main` (`9c60e72`), merged in order:

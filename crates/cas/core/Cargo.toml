@@ -13,6 +13,7 @@ arrayvec.workspace = true
 blake3.workspace = true
 hashbrown.workspace = true
 serde.workspace = true
+sha2.workspace = true
 crc32fast.workspace = true
 libc.workspace = true
 thiserror.workspace = true

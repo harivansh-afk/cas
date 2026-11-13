@@ -2,15 +2,13 @@
 use super::{Resources, capacity, reserved_vec};
 use crate::deadline::{Deadline, RECOVERY_TIMEOUT};
 use cas_core::{
-    BLOCK_SIZE,
-    append::{self, Log},
+    BLOCK_SIZE, append,
     catalog::{self, Entry, Initial, Kind},
-    manifest::file::{Identity, Manifest},
     segments::Tickets,
     space::{self, Governor, Observation},
-    store::file::{self, Store},
+    store::file,
 };
-use std::{fs, fs::File, io, path::PathBuf, sync::Arc};
+use std::{fs, io, path::PathBuf, sync::Arc};
 
 #[derive(Clone, Copy)]
 pub struct Image {
@@ -137,35 +135,19 @@ fn initialize_sized(
     let permit = physical.foreground(output)?;
     let (store, catalog) = permit.run(|| {
         deadline.check()?;
-        let store = Store::create_sized(
+        let store = cas_core::layout::create_store(
             Arc::clone(&tickets),
             config.store,
             chunk_size,
             Arc::clone(&resources.metadata),
             resources.read_memory(),
         )?;
-        fs::create_dir(config.root.join("images"))?;
-        fs::create_dir(config.root.join("snapshots"))?;
-        File::open(&config.root)?.sync_all()?;
         for entry in initial.contents().entries() {
             deadline.check()?;
             let Kind::Image { image_bytes } = entry.kind else {
                 unreachable!("initial images only")
             };
-            let directory = super::recovery::path(&config.root, entry);
-            fs::create_dir(&directory)?;
-            File::open(config.root.join("images"))?.sync_all()?;
-            let manifest = Manifest::create_sized(
-                &directory,
-                Identity {
-                    store: config.store.store,
-                    image: entry.id,
-                    image_bytes,
-                },
-                chunk_size,
-                Arc::clone(&resources.metadata),
-            )?;
-            let log = Log::create_shared(
+            images.push(cas_core::layout::create_image(
                 Arc::clone(&tickets),
                 append_config(
                     &config.store,
@@ -174,12 +156,10 @@ fn initialize_sized(
                         bytes: image_bytes,
                     },
                 ),
+                chunk_size,
                 config.append,
                 Arc::clone(&resources.metadata),
-                manifest.view()?,
-            )
-            .map_err(io::Error::other)?;
-            images.push((log, manifest));
+            )?);
         }
         deadline.check()?;
         let catalog = initial.publish(Arc::clone(&tickets))?;

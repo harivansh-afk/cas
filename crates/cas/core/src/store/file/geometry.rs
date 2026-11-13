@@ -21,6 +21,14 @@ pub(super) fn create(
     direct::sync_all(&file)?;
     direct::sync_all(tickets.root_file())
 }
+/// Whether this root already carries a durable geometry record.
+pub(super) fn exists(tickets: &Tickets) -> io::Result<bool> {
+    match tickets.root().join(NAME).symlink_metadata() {
+        Ok(metadata) => Ok(metadata.is_file()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
 pub(super) fn read(
     tickets: &Tickets,
     config: Config,

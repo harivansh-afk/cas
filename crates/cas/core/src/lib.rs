@@ -14,6 +14,7 @@ pub mod census;
 pub mod chunk;
 pub mod chunk_index;
 mod encoding;
+pub mod id;
 pub mod io_metrics;
 pub mod manifest;
 pub mod space;
@@ -29,6 +30,9 @@ mod direct;
 mod directory;
 #[cfg(target_os = "linux")]
 mod eventfd;
+pub mod import;
+#[cfg(target_os = "linux")]
+pub mod layout;
 #[cfg(target_os = "linux")]
 pub mod scheduler;
 #[cfg(target_os = "linux")]
