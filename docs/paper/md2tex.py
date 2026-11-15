@@ -5,7 +5,7 @@ def inline(s):
     s = s.replace('\\', r'\textbackslash{}')
     s = re.sub(r'([%&_#$])', r'\\\1', s)
     s = re.sub(r'`([^`]+)`', r'\\texttt{\1}', s)
-    s = re.sub(r'\[@([^\]]+)\]', lambda m: r'\cite{' + ','.join(k.strip().lstrip('@') for k in m.group(1).split(';')) + '}', s)
+    s = re.sub(r'\[@([^\]]+)\]', lambda m: r'\cite{' + ','.join(k.strip().lstrip('@') for k in re.split(r'[;,]', m.group(1))) + '}', s)
     s = re.sub(r'\[TBD[:.]? ?([^\[\]]*(?:\[[^\]]*\][^\[\]]*)*)\]', r'\\TBD{\1}', s)
     s = re.sub(r'\[pilot\]', r'\\pilot{}', s)
     s = re.sub(r'\[check(?:: ([^\]]*))?\]', lambda m: r'\chk{' + (m.group(1) or '') + '}', s)
