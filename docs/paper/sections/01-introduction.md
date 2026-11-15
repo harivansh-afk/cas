@@ -1,58 +1,69 @@
 # 1 Introduction
 
-AI agents do their work inside VMs. A *task* is one unit of agent work: a
-reinforcement-learning (RL) episode, a coding-agent session or a CI job. A
-*VM* is a Linux virtual machine with its own virtual disk; each runs one
-task. Each VM starts from an *image* holding the task's repository, toolchain and
-dependencies. One operator reports more than 130 TB of images active in a
-single week [@dsec].
+Each task an AI agent runs gets its own environment image. In 2024, SWE-Gym
+shipped one image per task, 2,438 images and 6 TB in total [@swe-gym]. Moonshot
+reports creating tens of thousands of VMs within seconds, each with a unique
+set of images [@kimi-k3]. In one week of early 2026, DeepSeek's platform held
+more than 130 TB of environment images, and its microVMs alone used two base
+images and 53,590 task-specific disks [@dsec]. Moving these images is costly.
+Each of DeepSeek's VMs reads only 4.2% to 13.3% of its image, and loading whole
+images before start made a burst of VMs take 1.71 times as long [@dsec].
+Alibaba reports that when environments time out, resetting them takes 78% of
+rollout time, with image downloads saturating the network [@rollart].
 
-These images are rarely reused. The same operator measures *image fanout*, the
-number of VMs that use one image within one job, at a median of one for microVM
-images and three for container images [@dsec]. A host-local image cache
-therefore seldom hits, and the operator places VMs by load alone. A
-second operator states that it does not place VMs by image, because
-packing them concentrated failures on few hosts [@sandman].
+Operators respond in two ways. Some decide where a VM runs by what the host
+already holds. Cloudflare favors hosts that have the VM's image or snapshot
+[@cloudflare-sandboxes]. Prime Intellect schedules VMs where their environment
+is already present [@prime-sandboxes]. Kubernetes scores nodes by the images
+they hold [@k8s-imagelocality]. Others place by load and fetch what is missing.
+DeepSeek samples a few hosts and picks the least loaded [@dsec]. Sandman
+spreads VMs across hosts, and reports that concentrating them on hosts with
+the image cached caused failures to accumulate [@sandman].
 
-An image is a coarse unit of identity. Two tasks on one repository install the
-same packages into different images. Neither disk descends from the other, so
-snapshots and clones cannot share the result. The blocks may still be equal.
-Published measurements of VM images work at the level of layers or files
-[@epoch-swebench; @logicstar; @dsec]; we know of none at the level of blocks
-written by independent VMs.
+Both responses treat the image as the unit. Placing by image helps only when
+the same image is used again, and DeepSeek measures that a microVM image is
+typically used by one VM within a job [@dsec]. Placing by load gives up on
+reuse at the host.
 
-This paper asks three questions.
+Sharing below the image has been reported only for files. DeepSeek builds
+container environments from shared layers and serves the files accessed by 70%
+of its container tasks from one 30 TB deduplicated set [@dsec]. A VM's disk is
+different. It is a block device holding a file system, written to as the task
+runs, and DeepSeek stores each microVM workspace as its own disk image
+[@dsec]. For such disks we found no report of how many blocks two different
+VMs have in common.
 
-1. **Block fanout.** How much of what a task writes already exists on the disk
-   of a VM with which it shares no lineage? (§4)
-2. **Placement.** How many of those duplicate chunks are on the same host,
-   under placement policies from load-based to affinity? (§5)
-3. **Cost.** What does it cost to share them: with deduplication on each host,
-   or with one content-addressed store across the fleet? (§7, §8)
+This paper measures that. A *task* is one unit of agent work run in one VM,
+which may be an RL episode, a coding-agent session or a CI job. We ask three
+questions.
 
-We answer them on the captured disks of [TBD: N] VMs and on
-[TBD: 2 or 4] bare-metal hosts.
+1. **Block fanout.** How much of what a task writes, and of what it reads
+   before its first command, is identical to blocks on the disk of a VM it was
+   not copied from? (§4)
+2. **Placement.** How many of those duplicate blocks are already on the host,
+   under placement by load, by image and by repository? (§5)
+3. **Cost.** What does it cost to share them, with deduplication on each host
+   or with one content-addressed store across all hosts? (§7, §8)
 
-**Findings.**
+A content-addressed store names each block by its fingerprint. A host can then
+recognise blocks it already holds under another image and fetch only the rest.
+Fetching on demand is established practice [@lambda, @dsec]. What we measure is
+how much the recognition adds to it.
 
-- [TBD: block fanout. Pilot, 25 disks: 10.2 of 15.1 GB (68%) of coding-task
-  bytes and 3.0 of 12.8 GB (24%) of CI bytes duplicate an earlier task.] [pilot]
-- [TBD: placement. Pilot: 12.1 of 13.2 GB of duplicates are same-host under
-  repository affinity; 2.3 of 13.2 GB under random placement on 16 simulated
-  hosts.] [pilot]
-- [TBD: cost on one host against ZFS deduplication.]
-- [TBD: cost across hosts and the crossover.]
+We answer the questions on the captured disks of [TBD: N] VMs from three
+workloads and on [TBD: 2 or 4] bare-metal hosts.
+
+**Findings.** [TBD: one sentence per question, written when the data exists.]
 
 **Contributions.**
 
-- A corpus of VM disks from three agent workloads, captured at block
-  level with file attribution, and released.
-- The first block-fanout measurement of these workloads that we are aware of.
-  [check: wording after the related-work pass]
-- The same-host and other-host split of duplicate chunks across placement
-  policies, with the load imbalance each policy causes.
+- A released corpus of VM disks from three agent workloads, captured at block
+  level with file attribution.
+- A measurement of block fanout across VMs that share no snapshot.
+- The split of duplicate blocks between the same host and other hosts under
+  each placement policy, with the load imbalance each causes.
 - A matched comparison of per-host ZFS deduplication and a fleet-wide
-  content-addressed block store, and the conditions under which each wins.
+  content-addressed store.
 
 The content-addressed store is the system under test. Its mechanism is not new
 (§9) and we do not claim it.

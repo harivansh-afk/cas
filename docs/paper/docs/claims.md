@@ -22,6 +22,7 @@ row is offline analysis of captured disks. Status is as of 15 November 2026.
 | Deleted data not counted | Free blocks zeroed from the allocation map | none | none | Done in capture; re-check against code |
 | Result independent of chunking | Same analysis at 4 KiB, 16 KiB and CDC | none | none | Pilot only |
 | Result independent of arrival order | Analysis repeated under shuffled orders | none | none | Not done |
+| Read side: blocks read before the first command | Which blocks each VM reads at start. The corpus has no read traces. | Start each real image in the store and count local hits and fetches | none | Not recorded; measurable only once real disks run on the nodes, or by adding read tracing to capture |
 | Analysis matches a real store | Stored bytes after ingesting the corpus equal the predicted unique bytes | Import all disks; read stored bytes | Write all disks to one pool with deduplication; read allocated bytes | Not done |
 
 ## C2. The duplicates are mostly package data, and simpler schemes leave D% of them
