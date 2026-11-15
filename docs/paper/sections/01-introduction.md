@@ -5,37 +5,35 @@ shipped one image per task, 2,438 images and 6 TB in total [@swe-gym]. Moonshot
 reports creating tens of thousands of VMs within seconds, each with a unique
 set of images [@kimi-k3]. In one week of early 2026, DeepSeek's platform held
 more than 130 TB of environment images, and its microVMs alone used two base
-images and 53,590 task-specific disks [@dsec]. Moving these images is costly.
-Each of DeepSeek's VMs reads only 4.2% to 13.3% of its image, and loading whole
-images before start made a burst of VMs take 1.71 times as long [@dsec].
-Alibaba reports that when environments time out, resetting them takes 78% of
-rollout time, with image downloads saturating the network [@rollart].
+images and 53,590 task-specific disks [@dsec]. Each of DeepSeek's VMs reads
+only 4.2% to 13.3% of its image, and loading whole images before start made a
+burst of VMs take 1.71 times as long [@dsec]. Alibaba reports that when
+environments time out, resetting them takes 78% of rollout time, with image
+downloads saturating the network [@rollart].
 
-Operators respond in two ways. Some decide where a VM runs by what the host
-already holds. Cloudflare favors hosts that have the VM's image or snapshot
+Some operators decide where a VM runs by what the host already holds.
+Cloudflare favors hosts that have the VM's image or snapshot
 [@cloudflare-sandboxes]. Prime Intellect schedules VMs where their environment
 is already present [@prime-sandboxes]. Kubernetes scores nodes by the images
-they hold [@k8s-imagelocality]. Others place by load and fetch what is missing.
-DeepSeek samples a few hosts and picks the least loaded [@dsec]. Sandman
-spreads VMs across hosts, and reports that concentrating them on hosts with
-the image cached caused failures to accumulate [@sandman].
+they hold [@k8s-imagelocality]. Other operators place by load and fetch what is
+missing. DeepSeek samples a few hosts and picks the least loaded [@dsec].
+Sandman spreads VMs across hosts, and reports that concentrating them on hosts
+with the image cached caused failures to accumulate [@sandman].
 
-Both responses treat the image as the unit. Placing by image helps only when
-the same image is used again, and DeepSeek measures that a microVM image is
-typically used by one VM within a job [@dsec]. Placing by load gives up on
-reuse at the host.
+Under either policy, a host reuses disk data only when it already holds the
+exact image. Placing by image helps only when the same image is used again, and
+DeepSeek measures that a microVM image is typically used by one VM within a job
+[@dsec]. Placing by load gives up on reuse at the host.
 
 Sharing below the image has been reported only for files. DeepSeek builds
 container environments from shared layers and serves the files accessed by 70%
 of its container tasks from one 30 TB deduplicated set [@dsec]. A VM's disk is
-different. It is a block device holding a file system, written to as the task
-runs, and DeepSeek stores each microVM workspace as its own disk image
-[@dsec]. For such disks we found no report of how many blocks two different
-VMs have in common.
+a block device holding a file system, written to as the task runs, and DeepSeek
+stores each microVM workspace as its own disk image [@dsec]. For VM disks we
+found no report of how many blocks two different VMs have in common.
 
-A *task* is one unit of agent work run in one VM,
-which may be an RL episode, a coding-agent session or a CI job. We ask three
-questions.
+A *task* is one unit of agent work run in one VM, which may be an RL episode, a
+coding-agent session or a CI job. We ask three questions.
 
 1. **Block fanout.** How much of what a task writes, and of what it reads
    before its first command, is identical to blocks on the disk of a VM it was
@@ -66,5 +64,5 @@ workloads and on [TBD: 2 or 4] bare-metal hosts.
 - A matched comparison of per-host ZFS deduplication and a fleet-wide
   content-addressed store.
 
-The content-addressed store is the system under test. Its mechanism is not new
-(§9) and we do not claim it.
+The content-addressed store is the system under test, and we do not claim its
+mechanism, which is not new (§9).
