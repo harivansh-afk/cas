@@ -24,7 +24,7 @@ file on XFS with no sharing.
   that holds none of them: time to first command, bytes fetched, fraction of
   the image read.]
 - **Resuming on another host.** [TBD: time and bytes to resume a paused
-  sandbox elsewhere, against a full copy and an incremental `zfs send`. Where
+  VM elsewhere, against a full copy and an incremental `zfs send`. Where
   the two disks share lineage, incremental send moves fewer bytes; we report
   it.]
 - **Hedged requests.** [TBD: p99 with and without a hedged request, and the

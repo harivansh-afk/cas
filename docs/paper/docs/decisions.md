@@ -4,7 +4,7 @@ Dated, one line each. A decision stays until a later line replaces it.
 
 ## Direction
 
-- 2026-11-15. The paper is a measurement study. Question: sandbox images are
+- 2026-11-15. The paper is a measurement study. Question: VM images are
   almost never reused; are the blocks inside them? If so, what does sharing
   them cost with per-host deduplication against a fleet-wide content-addressed
   store?
@@ -20,7 +20,7 @@ Dated, one line each. A decision stays until a later line replaces it.
 
 Allowed if the data holds:
 
-1. Block fanout of content written by sandboxes that share no lineage, with
+1. Block fanout of content written by VMs that share no lineage, with
    method.
 2. The same-host and other-host split of duplicate chunks across placement
    policies, with the load imbalance of each.
@@ -35,7 +35,7 @@ Not allowed:
   Sindelar et al., SMIO.
 - "First to quantify the balance cost of affinity." Prior: Dong et al.,
   LRScheduler.
-- That operators place sandboxes by image. DSec and Sandman place by load.
+- That operators place VMs by image. DSec and Sandman place by load.
   Affinity is the hypothetical end of the range.
 - Fleet-scale results presented as measured. Placement beyond the physical
   hosts is simulated over captured disks and labelled so.
@@ -53,6 +53,9 @@ Not allowed:
 - 2026-11-15. A limit is stated next to the claim it limits.
 - 2026-11-15. Markers in section files: `[TBD: ...]` awaits data, `[pilot]`
   is a pilot value, `[check]` is an unverified statement or citation.
+
+- 2026-11-15. We do not use the word "sandbox". The unit is a VM: a Linux
+  virtual machine with its own virtual disk holding a file system.
 
 ## Evidence
 

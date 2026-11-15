@@ -1,36 +1,36 @@
 # 1 Introduction
 
-AI agents do their work inside sandboxes. A *task* is one unit of agent work: a
+AI agents do their work inside VMs. A *task* is one unit of agent work: a
 reinforcement-learning (RL) episode, a coding-agent session or a CI job. A
-*sandbox* is a virtual machine with a private disk that runs one task. Each
-sandbox starts from an *image* holding the task's repository, toolchain and
+*VM* is a Linux virtual machine with its own virtual disk; each runs one
+task. Each VM starts from an *image* holding the task's repository, toolchain and
 dependencies. One operator reports more than 130 TB of images active in a
 single week [@dsec].
 
 These images are rarely reused. The same operator measures *image fanout*, the
-number of sandboxes started from one image, at a median of one for microVM
+number of VMs that use one image within one job, at a median of one for microVM
 images and three for container images [@dsec]. A host-local image cache
-therefore seldom hits, and the operator places sandboxes by load alone. A
-second operator states that it does not place sandboxes by image, because
+therefore seldom hits, and the operator places VMs by load alone. A
+second operator states that it does not place VMs by image, because
 packing them concentrated failures on few hosts [@sandman].
 
 An image is a coarse unit of identity. Two tasks on one repository install the
 same packages into different images. Neither disk descends from the other, so
 snapshots and clones cannot share the result. The blocks may still be equal.
-Published measurements of sandbox images work at the level of layers or files
+Published measurements of VM images work at the level of layers or files
 [@epoch-swebench; @logicstar; @dsec]; we know of none at the level of blocks
-written by independent sandboxes.
+written by independent VMs.
 
 This paper asks three questions.
 
 1. **Block fanout.** How much of what a task writes already exists on the disk
-   of a sandbox with which it shares no lineage? (§4)
+   of a VM with which it shares no lineage? (§4)
 2. **Placement.** How many of those duplicate chunks are on the same host,
    under placement policies from load-based to affinity? (§5)
 3. **Cost.** What does it cost to share them: with deduplication on each host,
    or with one content-addressed store across the fleet? (§7, §8)
 
-We answer them on the captured disks of [TBD: N] sandboxes and on
+We answer them on the captured disks of [TBD: N] VMs and on
 [TBD: 2 or 4] bare-metal hosts.
 
 **Findings.**
@@ -45,7 +45,7 @@ We answer them on the captured disks of [TBD: N] sandboxes and on
 
 **Contributions.**
 
-- A corpus of sandbox disks from three agent workloads, captured at block
+- A corpus of VM disks from three agent workloads, captured at block
   level with file attribution, and released.
 - The first block-fanout measurement of these workloads that we are aware of.
   [check: wording after the related-work pass]

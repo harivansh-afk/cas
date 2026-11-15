@@ -1,6 +1,6 @@
 # 2 Background
 
-**Provisioning a sandbox disk.** A sandbox needs its image on the host before
+**Provisioning a VM disk.** A VM needs its image on the host before
 it can start. The host either copies the whole image or loads it on demand,
 fetching each part when it is first read [@slacker; @lambda]. A *cold start* is
 a start on a host that holds none of the image.
@@ -9,7 +9,7 @@ a start on a host that holds none of the image.
 moment. A *clone* is a writable image whose initial contents equal a snapshot
 [@openzfs-concepts]. Two disks *share lineage* if one is a clone of a snapshot
 of the other, or both are clones of a common snapshot. Snapshots, clones and
-image layers share only content that lineage records. Two sandboxes that
+image layers share only content that lineage records. Two VMs that
 install the same package independently share none.
 
 **Sharing by content.** *Deduplication* stores one copy of equal data. The
@@ -31,8 +31,8 @@ second write when deduplication is post-process, and for a network round trip
 when a host reads a chunk it does not hold.
 
 **Placement decides what a host can share.** With per-host deduplication, two
-equal chunks are shared only if their sandboxes run on the same host. Placing
+equal chunks are shared only if their VMs run on the same host. Placing
 similar virtual machines together to raise host-local sharing is an old idea,
 studied for memory pages [@memory-buddies; @sindelar] and for disk blocks
-[@smio]. It trades sharing against load balance [@dong]. Sandbox operators today
+[@smio]. It trades sharing against load balance [@dong]. VM operators today
 place by load (§1), which is the opposite end of that trade.
