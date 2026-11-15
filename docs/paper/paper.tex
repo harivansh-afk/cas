@@ -31,7 +31,7 @@ Both responses treat the image as the unit. Placing by image helps only when the
 
 Sharing below the image has been reported only for files. DeepSeek builds container environments from shared layers and serves the files accessed by 70\% of its container tasks from one 30 TB deduplicated set \cite{dsec}. A VM's disk is different. It is a block device holding a file system, written to as the task runs, and DeepSeek stores each microVM workspace as its own disk image \cite{dsec}. For such disks we found no report of how many blocks two different VMs have in common.
 
-This paper measures that. A \emph{task} is one unit of agent work run in one VM, which may be an RL episode, a coding-agent session or a CI job. We ask three questions.
+A \emph{task} is one unit of agent work run in one VM, which may be an RL episode, a coding-agent session or a CI job. We ask three questions.
 
 \begin{enumerate}
 \item \textbf{Block fanout.} How much of what a task writes, and of what it reads before its first command, is identical to blocks on the disk of a VM it was not copied from? (\S4)
@@ -42,7 +42,7 @@ This paper measures that. A \emph{task} is one unit of agent work run in one VM,
 
 \end{enumerate}
 
-A content-addressed store names each block by its fingerprint. A host can then recognise blocks it already holds under another image and fetch only the rest. Fetching on demand is established practice \cite{lambda,dsec}. What we measure is how much the recognition adds to it.
+A content-addressed store names each block by its fingerprint (hash). A host can then recognise blocks it already holds under another image via the image's manifest, the list of its block fingerprints, and fetch only the rest. Fetching on demand is established practice \cite{lambda,dsec}, and it is the baseline we measure against.
 
 We answer the questions on the captured disks of \TBD{N} VMs from three workloads and on \TBD{2 or 4} bare-metal hosts.
 

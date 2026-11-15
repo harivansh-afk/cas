@@ -33,7 +33,7 @@ runs, and DeepSeek stores each microVM workspace as its own disk image
 [@dsec]. For such disks we found no report of how many blocks two different
 VMs have in common.
 
-This paper measures that. A *task* is one unit of agent work run in one VM,
+A *task* is one unit of agent work run in one VM,
 which may be an RL episode, a coding-agent session or a CI job. We ask three
 questions.
 
@@ -45,10 +45,11 @@ questions.
 3. **Cost.** What does it cost to share them, with deduplication on each host
    or with one content-addressed store across all hosts? (§7, §8)
 
-A content-addressed store names each block by its fingerprint. A host can then
-recognise blocks it already holds under another image and fetch only the rest.
-Fetching on demand is established practice [@lambda, @dsec]. What we measure is
-how much the recognition adds to it.
+A content-addressed store names each block by its fingerprint (hash). A host
+can then recognise blocks it already holds under another image via the image's
+manifest, the list of its block fingerprints, and fetch only the rest. Fetching
+on demand is established practice [@lambda, @dsec], and it is the baseline we
+measure against.
 
 We answer the questions on the captured disks of [TBD: N] VMs from three
 workloads and on [TBD: 2 or 4] bare-metal hosts.
