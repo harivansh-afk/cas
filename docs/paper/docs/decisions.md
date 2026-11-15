@@ -51,6 +51,14 @@ Not allowed:
 - 2026-11-15. Numbers appear with their denominator. Distributions, not single
   medians.
 - 2026-11-15. A limit is stated next to the claim it limits.
+- 2026-11-15. Every sentence makes sense on first read. If it needs the
+  previous sentence to be parsed, rewrite it.
+- 2026-11-15. A sentence that can be removed without losing a fact is removed.
+- 2026-11-15. No sentence that only announces or points, such as "What we
+  measure is how much the recognition adds to it" or "This paper measures
+  that". State the fact or the baseline directly.
+- 2026-11-15. No pronoun or abstract noun ("it", "that", "the recognition")
+  standing in for something named in an earlier sentence. Name the thing.
 - 2026-11-15. No semicolons. Avoid colons that join two sentences; write two
   sentences.
 - 2026-11-15. Markers in section files: `[TBD: ...]` awaits data, `[pilot]`
