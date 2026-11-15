@@ -1,12 +1,10 @@
 # Abstract
 
-VMs that run an agentic coding tasks usually start from a prebuilt disk/os image.
-Operators report that a typical images are used only by a single VM. To reduce boot latency, they have stopped caching images per host and place VMs by load instead.
-We captured the disks of N VMs from RL environments, coding-agent sessions and CI jobs, and found that certain storage blocks are not unique per host.
-X% of the bytes an arbitrary task writes already exist on the disk of another arbitrary vm.
-Deduplication on each host can only share these bytes when both VMs boot on the same host.
-This onlyhappens Y% of the time given a load-based placement stratergy.
-A central content-addressed store shared by all hosts shares the remaining Z% of bytes.
-When measured against ZFS deduplication on a single host, the shares bytes are measured at A.
-Beyond H hosts, when placed by load, sharing is worth that cost. Below H, per-host deduplication is measured as economically viable.
-We release the captured corpus.
+AI agents, reinforcements learnings environments (RL) and continous integration pipelines (CI) often run independent tasks in isolated virtual machines (VMs), booting their own disk images.
+Published deployments keep tens of thousands of such images, terabytes to over a hundred terabytes in totality, many built on a handful of base images.
+Operators often treat images as the unit of sharing, placing VMs on hosts based on image locality, or based on host-load/capacity.
+We question in this paper how much these disks have in common below (what to put here?). 
+We captured the disks of [N] VMs from RL environments, coding-agent sessions and CI jobs, comparing them block by block.
+[X%] of the bytes a task writes are identical to bytes on the disk of a VM it was not copied from. 
+A host can deduplicate those bytes only if both VMs ran on it, which holds for [Y₁%] to [Y₂%] of them depending on placement. We measure the alternative, a content-addressed store shared by all hosts, against ZFS deduplication on the same machines. 
+[Result.] We release the corpus.
