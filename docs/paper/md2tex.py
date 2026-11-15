@@ -11,6 +11,8 @@ def inline(s):
     s = re.sub(r'\[check(?:: ([^\]]*))?\]', lambda m: r'\chk{' + (m.group(1) or '') + '}', s)
     s = re.sub(r'\*\*([^*]+)\*\*', r'\\textbf{\1}', s)
     s = re.sub(r'\*([^*]+)\*', r'\\emph{\1}', s)
+    for u, d in zip('₀₁₂₃₄₅₆₇₈₉', '0123456789'):
+        s = s.replace(u, r'\textsubscript{' + d + '}')
     s = s.replace('§', r'\S').replace('@@ITEM@@', r'\item')
     return s
 def convert(text, abstract=False):
