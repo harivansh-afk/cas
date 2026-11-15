@@ -51,6 +51,8 @@ Not allowed:
 - 2026-11-15. Numbers appear with their denominator. Distributions, not single
   medians.
 - 2026-11-15. A limit is stated next to the claim it limits.
+- 2026-11-15. No semicolons. Avoid colons that join two sentences; write two
+  sentences.
 - 2026-11-15. Markers in section files: `[TBD: ...]` awaits data, `[pilot]`
   is a pilot value, `[check]` is an unverified statement or citation.
 
