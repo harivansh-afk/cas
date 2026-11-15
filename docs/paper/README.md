@@ -1,12 +1,12 @@
 # Paper
 
 Working title: *Images Are Unique, Blocks Are Not: Sharing Disk State Across a
-Fleet of Agent Sandboxes*.
+Fleet of Agent VMs*.
 
 | Path | What it is |
 |---|---|
 | `sections/*.md` | The text, one file per section. Edit these. |
-| `paper.tex` | LaTeX transcribed from the sections. |
+| `paper.tex` | Generated from the sections by `md2tex.py`. Do not edit. |
 | `paper.pdf` | Built from `paper.tex` by `build.sh`. Rebuild after editing. |
 | `build.sh` | Builds the PDF with TeX Live from the repository's pinned nixpkgs. |
 | `refs.bib` | References, each marked opened or not opened. |

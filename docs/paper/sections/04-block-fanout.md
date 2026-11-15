@@ -1,7 +1,7 @@
 # 4 Block Fanout
 
-The *block fanout* of a chunk is the number of sandboxes whose disks contain
-it. A chunk a task writes is a *duplicate* if an earlier sandbox, sharing no
+The *block fanout* of a chunk is the number of VMs whose disks contain
+it. A chunk a task writes is a *duplicate* if an earlier VM, sharing no
 lineage with it, already contains the same chunk; otherwise it is *unique*.
 
 **How much is duplicated.** [TBD: fraction of written bytes that are

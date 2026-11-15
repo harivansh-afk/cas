@@ -34,16 +34,16 @@ Sources were opened and the usage checked on 15 November 2026 unless marked
 
 | Term | Meaning | Follows | Defined in |
 |---|---|---|---|
-| sandbox | One VM with a private disk that runs one task. | DSec; Sandman | Introduction |
-| task | One unit of agent work: an RL episode, a coding-agent session or a CI job. | **paper** | Introduction |
-| image | The disk a sandbox starts from. | DSec | Introduction |
-| host | One physical machine running sandboxes. | standard | Introduction |
+| VM | A Linux virtual machine with its own virtual disk holding a file system. Each runs one task. | standard | Introduction |
+| task | One unit of agent work run in one VM: an RL episode, a coding-agent session or a CI job. DSec uses "task" for a job that creates many VMs; we do not. | **paper** | Introduction |
+| image | The disk a VM starts from. | DSec | Introduction |
+| host | One physical machine running VMs. | standard | Introduction |
 | fleet | All hosts that can run a given task. | **paper** | Introduction |
-| cold start | Starting a sandbox on a host that holds none of its image. | Brooker et al. | Background |
-| image fanout | The number of sandboxes started from one image. | DSec `[check: exact definition]` | Introduction |
-| block fanout | The number of sandboxes whose disks contain a given chunk. | **paper**, by analogy with image fanout | Block fanout |
+| cold start | Starting a VM on a host that holds none of its image. | Brooker et al. | Background |
+| image fanout | The number of VMs that use one image within one job. | DSec, Figure 8 (checked) | Introduction |
+| block fanout | The number of VMs whose disks contain a given chunk. | **paper**, by analogy with image fanout | Block fanout |
 | lineage | Two disks share lineage if one is a clone of a snapshot of the other, or both are clones of a common snapshot. | **paper** | Background |
-| placement policy | The rule that chooses a host for a sandbox. | standard | Placement |
+| placement policy | The rule that chooses a host for a VM. | standard | Placement |
 | load-based placement | Placement that considers only host load. | DSec ("selects the least loaded") | Placement |
 | affinity placement | Placement that prefers hosts already holding similar content. | SMIO (ICS '13); Kubernetes ImageLocality | Placement |
 | same-host duplicate, other-host duplicate | A duplicate chunk whose earlier copy is on the same host, or only on other hosts. | **paper** | Placement |
@@ -53,6 +53,7 @@ Sources were opened and the usage checked on 15 November 2026 unless marked
 
 | Not this | Use | Why |
 |---|---|---|
+| sandbox | VM | "Sandbox" covers processes, containers and VMs and cannot be defined precisely. It appears only in the titles of cited work. |
 | census | deduplication analysis | repository coinage |
 | novel bytes | unique chunks | repository coinage |
 | raced read | hedged request | Dean and Barroso named it |

@@ -16,10 +16,10 @@ and claim none.
 **Placement and sharing.** Co-locating VMs to raise host-local sharing was
 studied for memory [@memory-buddies; @sindelar] and for disk blocks [@smio].
 Routing data among deduplicating nodes trades deduplication against skew
-[@dong]. We apply the same trade to sandbox disks and add the fleet-store
+[@dong]. We apply the same trade to VM disks and add the fleet-store
 alternative on the same axes.
 
-**Sandbox infrastructure.** DSec reports image fanout and places by load
+**VM infrastructure.** DSec reports image fanout and places by load
 [@dsec]; Sandman rejects placement by image [@sandman]. Reports on SWE-bench
 image sizes work at layer or file level [@epoch-swebench; @logicstar]. We add
 the block level and the placement analysis.

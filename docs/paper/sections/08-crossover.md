@@ -4,7 +4,7 @@ Sections 5 and 7 combine into one comparison. For each placement policy we
 compute, for per-host ZFS deduplication and for the fleet store:
 
 - bytes stored across the fleet;
-- bytes moved to start each sandbox;
+- bytes moved to start each VM;
 - time to first command;
 - memory spent on indexes;
 - load imbalance.

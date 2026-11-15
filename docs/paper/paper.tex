@@ -1,5 +1,5 @@
 % Transcribed from sections/*.md. The Markdown is the source of truth:
-% edit there, then update this file and run build.sh.
+% edit there, then run build.sh, which regenerates this file.
 \documentclass[10pt,twocolumn]{article}
 \usepackage[T1]{fontenc}
 \usepackage{lmodern}
@@ -10,30 +10,29 @@
 \newcommand{\pilot}{\textcolor{orange}{[pilot]}}
 \newcommand{\chk}[1]{\textcolor{blue}{[check: #1]}}
 
-\title{Images Are Unique, Blocks Are Not:\\Sharing Disk State Across a Fleet of Agent Sandboxes}
+\title{Images Are Unique, Blocks Are Not:\\Sharing Disk State Across a Fleet of Agent VMs}
 \author{Anonymous}
 \date{}
 
 \begin{document}
 \maketitle
 \begin{abstract}
-AI agents run each task in a sandbox with its own disk image. Operators report that these images are almost never reused, so host-local image caches miss and sandboxes are placed by load. We ask whether the blocks inside the images are reused even when the images are not. We capture the disks of \TBD{N} sandboxes from RL rollout environments, coding-agent sessions and CI jobs, and measure block fanout: how many sandboxes contain each chunk. \TBD{X\%} of the bytes a task writes already exist on the disk of a sandbox with which it shares no lineage. Whether those bytes are on the same host depends on placement: \TBD{Y\%} under affinity placement and \TBD{Z\%} under load-based placement. We then measure what it costs to share them, comparing ZFS deduplication on each host with a fleet-wide content-addressed block store on the same hardware. \TBD{one sentence stating where the two cross.} We release the corpus.
+VMs that run an agentic coding tasks usually start from a prebuilt disk/os image. Operators report that a typical images are used only by a single VM. To reduce boot latency, they have stopped caching images per host and place VMs by load instead. We captured the disks of N VMs from RL environments, coding-agent sessions and CI jobs, and found that certain storage blocks are not unique per host. X\% of the bytes an arbitrary task writes already exist on the disk of another arbitrary vm. Deduplication on each host can only share these bytes when both VMs boot on the same host. This onlyhappens Y\% of the time given a load-based placement stratergy. A central content-addressed store shared by all hosts shares the remaining Z\% of bytes. When measured against ZFS deduplication on a single host, the shares bytes are measured at A. Beyond H hosts, when placed by load, sharing is worth that cost. Below H, per-host deduplication is measured as economically viable. We release the captured corpus.
 \end{abstract}
-
 
 %% ---- sections/01-introduction.md ----
 \section{Introduction}
 
-AI agents do their work inside sandboxes. A \emph{task} is one unit of agent work: a reinforcement-learning (RL) episode, a coding-agent session or a CI job. A \emph{sandbox} is a virtual machine with a private disk that runs one task. Each sandbox starts from an \emph{image} holding the task's repository, toolchain and dependencies. One operator reports more than 130 TB of images active in a single week \cite{dsec}.
+AI agents do their work inside VMs. A \emph{task} is one unit of agent work: a reinforcement-learning (RL) episode, a coding-agent session or a CI job. A \emph{VM} is a Linux virtual machine with its own virtual disk; each runs one task. Each VM starts from an \emph{image} holding the task's repository, toolchain and dependencies. One operator reports more than 130 TB of images active in a single week \cite{dsec}.
 
-These images are rarely reused. The same operator measures \emph{image fanout}, the number of sandboxes started from one image, at a median of one for microVM images and three for container images \cite{dsec}. A host-local image cache therefore seldom hits, and the operator places sandboxes by load alone. A second operator states that it does not place sandboxes by image, because packing them concentrated failures on few hosts \cite{sandman}.
+These images are rarely reused. The same operator measures \emph{image fanout}, the number of VMs that use one image within one job, at a median of one for microVM images and three for container images \cite{dsec}. A host-local image cache therefore seldom hits, and the operator places VMs by load alone. A second operator states that it does not place VMs by image, because packing them concentrated failures on few hosts \cite{sandman}.
 
-An image is a coarse unit of identity. Two tasks on one repository install the same packages into different images. Neither disk descends from the other, so snapshots and clones cannot share the result. The blocks may still be equal. Published measurements of sandbox images work at the level of layers or files \cite{epoch-swebench,logicstar,dsec}; we know of none at the level of blocks written by independent sandboxes.
+An image is a coarse unit of identity. Two tasks on one repository install the same packages into different images. Neither disk descends from the other, so snapshots and clones cannot share the result. The blocks may still be equal. Published measurements of VM images work at the level of layers or files \cite{epoch-swebench,logicstar,dsec}; we know of none at the level of blocks written by independent VMs.
 
 This paper asks three questions.
 
 \begin{enumerate}
-\item \textbf{Block fanout.} How much of what a task writes already exists on the disk of a sandbox with which it shares no lineage? (\S4)
+\item \textbf{Block fanout.} How much of what a task writes already exists on the disk of a VM with which it shares no lineage? (\S4)
 
 \item \textbf{Placement.} How many of those duplicate chunks are on the same host, under placement policies from load-based to affinity? (\S5)
 
@@ -41,7 +40,7 @@ This paper asks three questions.
 
 \end{enumerate}
 
-We answer them on the captured disks of \TBD{N} sandboxes and on \TBD{2 or 4} bare-metal hosts.
+We answer them on the captured disks of \TBD{N} VMs and on \TBD{2 or 4} bare-metal hosts.
 
 \textbf{Findings.}
 
@@ -59,7 +58,7 @@ We answer them on the captured disks of \TBD{N} sandboxes and on \TBD{2 or 4} ba
 \textbf{Contributions.}
 
 \begin{itemize}
-\item A corpus of sandbox disks from three agent workloads, captured at block level with file attribution, and released.
+\item A corpus of VM disks from three agent workloads, captured at block level with file attribution, and released.
 
 \item The first block-fanout measurement of these workloads that we are aware of. \chk{wording after the related-work pass}
 
@@ -74,9 +73,9 @@ The content-addressed store is the system under test. Its mechanism is not new (
 %% ---- sections/02-background.md ----
 \section{Background}
 
-\textbf{Provisioning a sandbox disk.} A sandbox needs its image on the host before it can start. The host either copies the whole image or loads it on demand, fetching each part when it is first read \cite{slacker,lambda}. A \emph{cold start} is a start on a host that holds none of the image.
+\textbf{Provisioning a VM disk.} A VM needs its image on the host before it can start. The host either copies the whole image or loads it on demand, fetching each part when it is first read \cite{slacker,lambda}. A \emph{cold start} is a start on a host that holds none of the image.
 
-\textbf{Sharing by lineage.} A \emph{snapshot} is a read-only copy of an image at one moment. A \emph{clone} is a writable image whose initial contents equal a snapshot \cite{openzfs-concepts}. Two disks \emph{share lineage} if one is a clone of a snapshot of the other, or both are clones of a common snapshot. Snapshots, clones and image layers share only content that lineage records. Two sandboxes that install the same package independently share none.
+\textbf{Sharing by lineage.} A \emph{snapshot} is a read-only copy of an image at one moment. A \emph{clone} is a writable image whose initial contents equal a snapshot \cite{openzfs-concepts}. Two disks \emph{share lineage} if one is a clone of a snapshot of the other, or both are clones of a common snapshot. Snapshots, clones and image layers share only content that lineage records. Two VMs that install the same package independently share none.
 
 \textbf{Sharing by content.} \emph{Deduplication} stores one copy of equal data. The store splits data into \emph{chunks}, computes a \emph{fingerprint} (a collision-resistant hash) of each, and keeps one copy per fingerprint \cite{venti,lbfs}. A store whose chunks are addressed by fingerprint is \emph{content-addressed}. Deduplication finds equal content regardless of lineage.
 
@@ -84,29 +83,29 @@ The content-addressed store is the system under test. Its mechanism is not new (
 
 \textbf{Deduplication across a fleet.} A fleet-wide content-addressed store keeps one fingerprint namespace for all hosts. AWS Lambda stores container images this way and loads chunks on demand \cite{lambda}. Such a store pays for an index, for a second write when deduplication is post-process, and for a network round trip when a host reads a chunk it does not hold.
 
-\textbf{Placement decides what a host can share.} With per-host deduplication, two equal chunks are shared only if their sandboxes run on the same host. Placing similar virtual machines together to raise host-local sharing is an old idea, studied for memory pages \cite{memory-buddies,sindelar} and for disk blocks \cite{smio}. It trades sharing against load balance \cite{dong}. Sandbox operators today place by load (\S1), which is the opposite end of that trade.
+\textbf{Placement decides what a host can share.} With per-host deduplication, two equal chunks are shared only if their VMs run on the same host. Placing similar virtual machines together to raise host-local sharing is an old idea, studied for memory pages \cite{memory-buddies,sindelar} and for disk blocks \cite{smio}. It trades sharing against load balance \cite{dong}. VM operators today place by load (\S1), which is the opposite end of that trade.
 
 %% ---- sections/03-workloads.md ----
 \section{Workloads and Corpus}
 
-We study three workloads, chosen because each creates many sandboxes from related but distinct images.
+We study three workloads, chosen because each creates many VMs from related but distinct images.
 
-\textbf{RL rollout environments.} One sandbox per episode, started from a per-task image and discarded. We use SWE-bench Verified (500 tasks, 12 repositories) \cite{swebench-verified} and Terminal-Bench 2 \TBD{count} \chk{cite}. Creation arrives in bursts of many distinct images.
+\textbf{RL rollout environments.} One VM per episode, started from a per-task image and discarded. We use SWE-bench Verified (500 tasks, 12 repositories) \cite{swebench-verified} and Terminal-Bench 2 \TBD{count} \chk{cite}. Creation arrives in bursts of many distinct images.
 
 \textbf{Coding-agent sessions.} The same disk contents as an RL episode, but long-lived: the session idles, is suspended, and resumes, possibly on another host. We model this with the same tasks, paused after setup. \TBD{confirm workload definition}
 
-\textbf{CI jobs.} One sandbox per job, built from a runner image and a repository checkout. \TBD{N} jobs from \TBD{N} repositories across \TBD{languages}. We expect less duplication here and include it as a contrast.
+\textbf{CI jobs.} One VM per job, built from a runner image and a repository checkout. \TBD{N} jobs from \TBD{N} repositories across \TBD{languages}. We expect less duplication here and include it as a contrast.
 
 \textbf{Capture.} Each task runs in a VM with a 16 GiB ext4 disk. We capture the whole disk at fixed points: after setup and after the task for coding tasks, after the job for CI. Free blocks are zeroed using the file system's allocation map so that deleted data is not counted. \chk{against the capture code}
 
-\textbf{Counting.} We fingerprint each captured disk at 4 KiB and 16 KiB fixed-size chunks and with content-defined chunking. We count only non-zero chunks that are absent from the sandbox's base image, so that sharing by lineage is excluded by construction. A file manifest (path, size, extents) attributes each chunk to a category: dependency cache, installed dependencies, toolchain, build output, repository, system.
+\textbf{Counting.} We fingerprint each captured disk at 4 KiB and 16 KiB fixed-size chunks and with content-defined chunking. We count only non-zero chunks that are absent from the VM's base image, so that sharing by lineage is excluded by construction. A file manifest (path, size, extents) attributes each chunk to a category: dependency cache, installed dependencies, toolchain, build output, repository, system.
 
 \textbf{Corpus.} \TBD{table. Workload, tasks, disks, bytes written beyond the base. Pilot: 10 coding tasks, 15 CI jobs.} \pilot{} We release fingerprints, manifests and capture scripts. \TBD{what cannot be released}
 
 %% ---- sections/04-block-fanout.md ----
 \section{Block Fanout}
 
-The \emph{block fanout} of a chunk is the number of sandboxes whose disks contain it. A chunk a task writes is a \emph{duplicate} if an earlier sandbox, sharing no lineage with it, already contains the same chunk; otherwise it is \emph{unique}.
+The \emph{block fanout} of a chunk is the number of VMs whose disks contain it. A chunk a task writes is a \emph{duplicate} if an earlier VM, sharing no lineage with it, already contains the same chunk; otherwise it is \emph{unique}.
 
 \textbf{How much is duplicated.} \TBD{fraction of written bytes that are duplicates, per workload, as a distribution over tasks. Pilot: coding tasks 10.2 of 15.1 GB (68\%); CI 3.0 of 12.8 GB (24\%).} \pilot{}
 
@@ -127,14 +126,14 @@ The \emph{block fanout} of a chunk is the number of sandboxes whose disks contai
 
 A duplicate chunk helps a host only if the host can reach the earlier copy. A \emph{same-host duplicate} has an earlier copy on the same host. An \emph{other-host duplicate} has copies only on other hosts. Per-host deduplication shares the first kind; only a fleet-wide store shares the second.
 
-\textbf{Method.} We assign the captured sandboxes, in arrival order, to H hosts under a placement policy, and classify each duplicate chunk. Policies:
+\textbf{Method.} We assign the captured VMs, in arrival order, to H hosts under a placement policy, and classify each duplicate chunk. Policies:
 
 \begin{itemize}
 \item \emph{load-based}: the least-loaded host, as operators report doing \cite{dsec};
 
 \item \emph{random}: a uniformly random host;
 
-\item \emph{affinity}: a host that already ran a sandbox of the same repository;
+\item \emph{affinity}: a host that already ran a VM of the same repository;
 
 \item \TBD{one or two points between load-based and affinity}.
 
@@ -194,7 +193,7 @@ We run the same workload on three backends on the same NVMe device: the content-
 
 \item \textbf{Cold-start burst.} \TBD{N distinct images started at once on a host that holds none of them: time to first command, bytes fetched, fraction of the image read.}
 
-\item \textbf{Resuming on another host.} \TBD{time and bytes to resume a paused sandbox elsewhere, against a full copy and an incremental \texttt{zfs send}. Where the two disks share lineage, incremental send moves fewer bytes; we report it.}
+\item \textbf{Resuming on another host.} \TBD{time and bytes to resume a paused VM elsewhere, against a full copy and an incremental \texttt{zfs send}. Where the two disks share lineage, incremental send moves fewer bytes; we report it.}
 
 \item \textbf{Hedged requests.} \TBD{p99 with and without a hedged request, and the extra bytes sent. Keep only if the effect is clear.}
 
@@ -210,7 +209,7 @@ Sections 5 and 7 combine into one comparison. For each placement policy we compu
 \begin{itemize}
 \item bytes stored across the fleet;
 
-\item bytes moved to start each sandbox;
+\item bytes moved to start each VM;
 
 \item time to first command;
 
@@ -233,9 +232,9 @@ Sections 5 and 7 combine into one comparison. For each placement policy we compu
 
 \textbf{Moving VM state on demand.} Fetching a VM's disk on demand at another host, and skipping data the destination already holds, dates to \cite{sapuntzakis,isr,snowflock}. AWS Lambda loads container images on demand from a fleet-wide content-addressed store \cite{lambda}. We reuse these mechanisms and claim none.
 
-\textbf{Placement and sharing.} Co-locating VMs to raise host-local sharing was studied for memory \cite{memory-buddies,sindelar} and for disk blocks \cite{smio}. Routing data among deduplicating nodes trades deduplication against skew \cite{dong}. We apply the same trade to sandbox disks and add the fleet-store alternative on the same axes.
+\textbf{Placement and sharing.} Co-locating VMs to raise host-local sharing was studied for memory \cite{memory-buddies,sindelar} and for disk blocks \cite{smio}. Routing data among deduplicating nodes trades deduplication against skew \cite{dong}. We apply the same trade to VM disks and add the fleet-store alternative on the same axes.
 
-\textbf{Sandbox infrastructure.} DSec reports image fanout and places by load \cite{dsec}; Sandman rejects placement by image \cite{sandman}. Reports on SWE-bench image sizes work at layer or file level \cite{epoch-swebench,logicstar}. We add the block level and the placement analysis.
+\textbf{VM infrastructure.} DSec reports image fanout and places by load \cite{dsec}; Sandman rejects placement by image \cite{sandman}. Reports on SWE-bench image sizes work at layer or file level \cite{epoch-swebench,logicstar}. We add the block level and the placement analysis.
 
 \textbf{Comparing deduplicating stores.} DupHunter compares ZFS and Ceph deduplication on Docker registry layers, with unmatched block sizes \cite{duphunter}. We compare on VM disks at equal chunk size.
 
@@ -247,11 +246,11 @@ Sections 5 and 7 combine into one comparison. For each placement policy we compu
 \begin{itemize}
 \item \textbf{Fleet size.} Latency is measured on \TBD{2 or 4} hosts. Placement at larger fleets is simulated over captured disks.
 
-\item \textbf{Disk state only.} We do not capture or restore memory. Operators report that memory, not disk, bounds sandbox density.
+\item \textbf{Disk state only.} We do not capture or restore memory. Operators report that memory, not disk, bounds VM density.
 
 \item \textbf{Workloads.} RL environments are Python repositories from two benchmarks. Other languages and proprietary workloads may share less.
 
-\item \textbf{Arrival order.} A duplicate is defined against earlier sandboxes, so the result depends on the order tasks arrive. \TBD{sensitivity}
+\item \textbf{Arrival order.} A duplicate is defined against earlier VMs, so the result depends on the order tasks arrive. \TBD{sensitivity}
 
 \item \textbf{Network.} Kernel TCP only. RDMA would lower the cost of a remote read.
 

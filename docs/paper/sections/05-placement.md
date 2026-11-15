@@ -5,12 +5,12 @@ A duplicate chunk helps a host only if the host can reach the earlier copy. A
 duplicate* has copies only on other hosts. Per-host deduplication shares the
 first kind; only a fleet-wide store shares the second.
 
-**Method.** We assign the captured sandboxes, in arrival order, to H hosts
+**Method.** We assign the captured VMs, in arrival order, to H hosts
 under a placement policy, and classify each duplicate chunk. Policies:
 
 - *load-based*: the least-loaded host, as operators report doing [@dsec];
 - *random*: a uniformly random host;
-- *affinity*: a host that already ran a sandbox of the same repository;
+- *affinity*: a host that already ran a VM of the same repository;
 - [TBD: one or two points between load-based and affinity].
 
 For each policy we report the same-host and other-host shares of duplicate

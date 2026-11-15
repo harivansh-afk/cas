@@ -5,7 +5,7 @@ something that must be true first; "rests on" is what that row itself needs.
 The CAS and ZFS columns say what must be run on each system; "none" means the
 row is offline analysis of captured disks. Status is as of 15 November 2026.
 
-## C0. Sandbox images are almost never reused, and operators place by load
+## C0. VM images are almost never reused, and operators place by load
 
 | Need | Rests on | CAS | ZFS | Status |
 |---|---|---|---|---|
