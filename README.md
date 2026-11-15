@@ -48,9 +48,6 @@ The lab creates its own backing image rather than formatting a physical disk.
 - [Retained inflight metadata](docs/inflight-format.md)
 - [Builds and test fixtures](docs/testbed.md)
 - [Current work](TODO.md) and [validation](docs/validation.md)
-- [Playbook website](https://cas-playbook.vercel.app/) and [site source](playbook/README.md):
-  retained design pages and dated updates; proposals and historical measurements
-  are not current release guarantees
 
 ## Layout
 
@@ -63,7 +60,6 @@ The lab creates its own backing image rather than formatting a physical disk.
 | `crates/vendor/` | Patched upstream crates with their original licenses |
 | `nix/`, `templates/` | Reproducible packages, guests, and dedicated-host template |
 | `experiments/` | Dated public-image census fixtures and byte-level verification |
-| `playbook/` | Static site and PDF source |
 | `results/` | Ignored local test output |
 
 ## History
@@ -84,9 +80,7 @@ License version 3, not "version 3 or any later version". See [LICENSE](LICENSE)
 for the terms, including source-distribution obligations and the warranty disclaimer.
 
 Vendored dependencies retain their own licenses and notices under
-`crates/vendor/`; this grant does not relicense third-party material. The bundled
-Berkeley Mono font is not covered by the GPL grant; its separate redistribution
-terms have not been recorded here.
+`crates/vendor/`; this grant does not relicense third-party material.
 
 The [multi-host experiment runner](docs/two-host-experiments.md) boots QEMU guests,
 measures fenced disk handoff against full-image rsync and common-base incremental
