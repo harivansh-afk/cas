@@ -57,6 +57,23 @@ Not allowed:
 - 2026-11-15. We do not use the word "sandbox". The unit is a VM: a Linux
   virtual machine with its own virtual disk holding a file system.
 
+## Citations
+
+- 2026-11-15. Cite the latest version of every source: the latest arXiv
+  version, the published venue version where one exists, and for
+  documentation or source code the current version with the date read.
+- 2026-11-15. A claim about current practice cites a source from 2025 or
+  later. An older source is cited only for the origin of a term or technique,
+  or as a dated data point with its year in the sentence.
+- 2026-11-15. `refs.bib` records the version and the date each source was
+  read. When a newer version appears, every statement taken from the source is
+  re-checked against it. Example: the sentence "We did not place sandboxes by
+  image" is in Sandman v1 and absent from v2; v2 says the provider requests
+  soft topology spreading with maximum skew 2, and that concentrating requests
+  on nodes with the image cached accumulated address failures.
+- 2026-11-15. Papers, vendor blog posts and source code are different kinds of
+  evidence and are named as such in the text.
+
 ## Evidence
 
 - 2026-11-15. Predictions are frozen before the first node run.
