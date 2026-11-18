@@ -16,6 +16,13 @@ Dated, one line each. A decision stays until a later line replaces it.
 - 2026-11-15. Out of scope and stated: memory state, RDMA, fork fan-out for
   search, restore correctness.
 
+- 2026-11-18. The main question is at what scale a fleet content-addressed
+  store pays against a plain disk and per-host ZFS. The same corpus runs on all
+  three at 1, 2 and 4 hosts, under placement by load and by locality. Beyond 4
+  hosts is a model with measured inputs, labelled as such.
+- 2026-11-18. The corpus and the definition of a duplicate are fixed in
+  `corpus.md`. Disks captured before that date are a pilot.
+
 ## Claims
 
 Allowed if the data holds:
