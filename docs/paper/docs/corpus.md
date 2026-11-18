@@ -16,16 +16,24 @@ Seed for every draw: `20261118`.
 | Group | Source | Draw | Disks |
 |---|---|---|---|
 | Coding, Python | SWE-bench Verified | 10 tasks per repository | 101 |
-| Coding, other languages | Multi-SWE-bench | 10 tasks per language, 7 languages | 70 |
+| Coding, other languages | Multi-SWE-bench | 20 tasks per language, 7 languages | 140 |
 | Coding, unrelated by design | Terminal-Bench 2.0 | all tasks | 89 |
-| RL environments | SWE-Gym | 10 tasks per repository | 110 |
-| RL rollouts | 20 tasks drawn from the four groups above | 5 runs each, from different published agent trajectories where they exist, otherwise repeated replays | 100 |
+| RL environments, Python | SWE-Gym | 5 tasks per repository | 55 |
+| RL environments, other languages | Multi-SWE-RL | 10 tasks per language, 7 languages | 70 |
+| RL rollouts | 20 tasks drawn from the tasks above that have at least 5 published agent trajectories | 5 runs each, each replaying a different trajectory | 100 |
 | CI | Repositories drawn above | 5 repositories per language, the main Linux test job at the task's commit | 30 |
 
-Full size is 500 disks. The first pass halves every draw, about 250 disks, with
-the same seed, so the first pass is a subset of the full corpus.
+Full size is 585 disks: 156 Python, 210 in seven other languages, 89 mixed,
+100 rollouts and 30 CI. The first pass halves every draw with the same seed, so
+the first pass is a subset of the full corpus.
 
-A repository with fewer than 10 tasks contributes all of them.
+An RL environment is a task from a set built to train agents: a repository at a
+commit, a problem and tests that give a reward. An RL rollout is one attempt at
+a task. Environments measure sharing between different training tasks. Rollouts
+measure sharing between attempts at one task. The sources that supply rollout
+tasks are reported, since only some publish five trajectories per task.
+
+A repository or language with fewer tasks than its draw contributes all of them.
 
 ## Capture
 
@@ -77,4 +85,7 @@ Dockerfiles read removes a package cache.
 
 ## Changes
 
-None.
+- 2026-11-18, before any capture. Multi-SWE-bench raised from 10 to 20 per
+  language and RL environments split between SWE-Gym and Multi-SWE-RL. The
+  first version was 211 Python disks against 70 in other languages. Rollout
+  tasks now require five published trajectories.
