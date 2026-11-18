@@ -631,3 +631,32 @@ fn two_private_manifests_share_chunks_and_zeroing_one_preserves_the_other() {
     );
     assert_eq!(f.store.status().chunks, 1);
 }
+
+#[test]
+fn a_second_reclamation_pass_does_not_repeat_holes_it_already_punched() {
+    let mut f = Fixture::new();
+    write(f.log(), 0, 10);
+    write(f.log(), 1, 20);
+    f.log().flush().unwrap();
+    f.compact();
+    let first = f.reclaim(None);
+    assert!(first.punch_requested_bytes > 0);
+    let second = f.reclaim(None);
+    assert_eq!(second.punch_requested_bytes, 0);
+    write(f.log(), 2, 30);
+    f.log().flush().unwrap();
+    f.compact();
+    let third = f.reclaim(None);
+    assert_eq!(third.punch_requested_bytes, BLOCK_SIZE as u64);
+    f.fresh(3);
+    assert_eq!(
+        f.image(),
+        [
+            vec![10; BLOCK_SIZE],
+            vec![20; BLOCK_SIZE],
+            vec![30; BLOCK_SIZE],
+            vec![0; 5 * BLOCK_SIZE]
+        ]
+        .concat()
+    );
+}

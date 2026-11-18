@@ -152,9 +152,14 @@ impl Reclamation {
                 continue;
             }
             let before = segment.allocated_bytes()?;
-            let mut offset = BLOCK_SIZE as u64;
-            let mut batch = 1;
-            let mut sequence = segment.header.preceding_sequence;
+            let start = *segment
+                .reclaimed
+                .lock()
+                .map_err(|_| io::Error::other("reclamation cursor poisoned"))?;
+            let mut offset = start.offset;
+            let mut batch = start.batch;
+            let mut sequence = start.sequence;
+            let mut resume = Some(start);
             let mut punched = false;
             while offset < span.end {
                 if segment.header.number == self.current && sequence == durable {
@@ -195,6 +200,7 @@ impl Reclamation {
                             punched = true;
                         } else {
                             stats.pinned_batches += 1;
+                            resume = None;
                         }
                     }
                 }
@@ -202,9 +208,22 @@ impl Reclamation {
                 batch = batch
                     .checked_add(1)
                     .ok_or_else(|| io::Error::other("reclamation batch overflow"))?;
+                if let Some(resume) = resume.as_mut() {
+                    *resume = segment::Reclaimed {
+                        offset,
+                        batch,
+                        sequence,
+                    };
+                }
             }
             if punched {
                 direct::sync_data(&segment.file)?;
+            }
+            if let Some(resume) = resume {
+                *segment
+                    .reclaimed
+                    .lock()
+                    .map_err(|_| io::Error::other("reclamation cursor poisoned"))? = resume;
             }
             // The log and this span are the only segment owners. Also exclude
             // separately retained actual-file references before removing a name.

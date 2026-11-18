@@ -78,6 +78,13 @@ pub(super) fn create(
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Reclaimed {
+    pub offset: u64,
+    pub batch: u64,
+    pub sequence: u64,
+}
+
 #[derive(Debug)]
 pub(super) struct Segment {
     pub file: Arc<File>,
@@ -85,9 +92,18 @@ pub(super) struct Segment {
     pub alignment: direct::Alignment,
     pub pins: Pins,
     pub end: AtomicU64,
+    pub reclaimed: std::sync::Mutex<Reclaimed>,
 }
 
 impl Segment {
+    fn unreclaimed(header: &SegmentHeader) -> std::sync::Mutex<Reclaimed> {
+        std::sync::Mutex::new(Reclaimed {
+            offset: BLOCK_SIZE as u64,
+            batch: 1,
+            sequence: header.preceding_sequence,
+        })
+    }
+
     pub fn create(
         directory: &Directory,
         header: SegmentHeader,
@@ -102,6 +118,7 @@ impl Segment {
         directory.sync()?;
         Ok(Arc::new(Self {
             file: Arc::new(file),
+            reclaimed: Self::unreclaimed(&header),
             header,
             alignment,
             pins,
@@ -126,6 +143,7 @@ impl Segment {
         let end = AtomicU64::new(file.metadata()?.len());
         Ok(Arc::new(Self {
             file,
+            reclaimed: Self::unreclaimed(&header),
             header,
             alignment,
             pins,
