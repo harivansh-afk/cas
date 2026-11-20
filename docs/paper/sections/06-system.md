@@ -26,6 +26,27 @@ chunk it does not hold fetches it by fingerprint from a host that stores it and
 verifies the fingerprint before use. Provisioning or moving an image sends its
 manifest; chunks follow on demand.
 
+**Implementation scope.** The store is a minimal implementation built to
+measure bytes stored and bytes sent. The latency and downtime we report for the
+store are upper bounds on the cost of content addressing. Three choices set the
+slow numbers in §7.
+
+- *Remote reads.* A host opens [TBD: connections per host, after the
+  parallel-connection run] TCP connection to each other host, shared by every
+  VM on the host. The serving host answers each connection from one blocking
+  thread. One request carries one 4 KiB chunk. The store has no readahead and
+  no request for a range of chunks.
+- *Moving an image.* The whole manifest is sent and installed while the VM is
+  stopped. The store does not send the manifest before the stop, as pre-copy
+  migration does for memory [@precopy] [check]. The store does not send only
+  the manifest entries the destination lacks. The VM boots cold at the
+  destination, because memory state is not transferred [@postcopy] [check].
+- *Compaction and transfer.* Chunks are a fixed 4 KiB and are not compressed.
+  Import and compaction process one image at a time.
+
+We did not implement these techniques and we do not estimate what each would
+gain.
+
 **Limits.** FLUSH durability is local: data acknowledged but not yet replicated
 is lost with its host. Membership is static. Memory state is not handled.
 [TBD: implementation size, language, revision.]

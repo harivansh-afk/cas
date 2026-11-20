@@ -23,6 +23,13 @@ Dated, one line each. A decision stays until a later line replaces it.
 - 2026-11-18. The corpus and the definition of a duplicate are fixed in
   `corpus.md`. Disks captured before that date are a pilot.
 
+- 2026-11-20. The store is stated early to be a minimal implementation. §6
+  names each known technique the store omits. Every slow number in §7 carries
+  its diagnosed cause. We do not estimate the gain of a technique we did not
+  measure.
+- 2026-11-20. Real task time on the three systems is not measured. The one-host
+  cost table stands in for it.
+
 ## Claims
 
 Allowed if the data holds:

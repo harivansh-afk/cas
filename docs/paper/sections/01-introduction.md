@@ -65,4 +65,6 @@ workloads and on [TBD: 2 or 4] bare-metal hosts.
   content-addressed store.
 
 The content-addressed store is the system under test, and we do not claim its
-mechanism, which is not new (§9).
+mechanism, which is not new (§9). The store is a minimal implementation built
+to measure bytes stored and bytes sent. §6 lists the known techniques the store
+omits, and each slow number in §7 is reported with its cause.
