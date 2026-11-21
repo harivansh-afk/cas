@@ -31,9 +31,9 @@ measure bytes stored and bytes sent. The latency and downtime we report for the
 store are upper bounds on the cost of content addressing. Three choices set the
 slow numbers in §7.
 
-- *Remote reads.* A host opens [TBD: connections per host, after the
-  parallel-connection run] TCP connection to each other host, shared by every
-  VM on the host. The serving host answers each connection from one blocking
+- *Remote reads.* A host opens a configured number of TCP connections to each
+  other host, shared by every VM on the host. A chunk's fingerprint selects
+  the connection. The serving host answers each connection from one blocking
   thread. One request carries one 4 KiB chunk. The store has no readahead and
   no request for a range of chunks.
 - *Moving an image.* The whole manifest is sent and installed while the VM is
