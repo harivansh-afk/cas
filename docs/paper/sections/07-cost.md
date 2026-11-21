@@ -17,15 +17,31 @@ file on XFS with no sharing.
 
 ## 7.2 Across hosts
 
-- **A remote read.** Every read is a random 4 KiB read served from the other
-  host's disk, one outstanding read per VM, three runs of 30 s. With one
-  connection between the hosts, 1 VM completes 4,700 reads/s at a median of
-  194 µs. 4 VMs complete 6,900 reads/s in total at a median of 578 µs each.
-  8 VMs complete 6,700 reads/s in total at a median of 1,204 µs each.
-  Sequential reads reach about 50 MB/s at every VM count. The link between the
-  hosts is 100 Gbit/s, so 50 MB/s uses 0.4% of the link. The limit is the one
-  thread that answers the one connection (§6), not the network.
-  [TBD: the same test with 4 and 8 connections. Latency against a local read.]
+- **A remote read.** Every read is a 4 KiB read served from the other host's
+  disk. Each run lasts 30 s and is repeated one to three times. The link
+  between the hosts is 100 Gbit/s.
+
+  *One read.* One VM with one outstanding read completes 4,200 reads/s at a
+  median of 216 to 220 µs. The connection count does not change this number.
+  [TBD: the store's local read and the ZFS local read on the same hosts, from
+  §7.1.]
+
+  *Many VMs, one connection.* 4 VMs complete 6,500 reads/s in total at a
+  median of 618 µs each. 8 VMs complete 6,300 reads/s in total at a median of
+  1,270 µs each. Throughput does not grow with VMs because one thread on the
+  serving host answers the one connection (§6).
+
+  *Many VMs, several connections.* With 4 connections, 8 VMs complete 17,300
+  reads/s at a median of 420 µs. With 8 connections and 12 cores for the store
+  process, 8 VMs complete 22,500 reads/s at 322 µs. With 16 connections, 8 VMs
+  complete 24,600 reads/s at 305 µs. The gain from 8 to 16 connections is
+  under 10%.
+
+  *Sequential reads, 16 outstanding per VM.* 8 VMs read 39 MB/s in total with
+  1 connection and 122 MB/s with 4. With 8 or 16 connections 8 VMs read 54 to
+  65 MB/s, with a 99th percentile latency four times that of 4 connections. We
+  have not found the cause. 122 MB/s is 1% of the link.
+  [TBD: figure of reads/s against connection count at 8 VMs.]
 - **Cold-start burst.** [TBD: N distinct images started at once on a host
   that holds none of them: time to first command, bytes fetched, fraction of
   the image read.]
